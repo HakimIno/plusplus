@@ -1,0 +1,29 @@
+# Rust build output
+/target/
+**/*.rs.bk
+*.tmp
+
+# Local databases created during testing (keep examples/sample.sqlite for demos)
+examples/*.sqlite-wal
+examples/*.sqlite-shm
+*.db-journal
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE / editor
+.idea/
+*.swp
+*.swo
+*~
+.vscode/
+*.code-workspace
+
+# Environment / secrets
+.env
+.env.*
+
+# Debug symbols
+*.pdb

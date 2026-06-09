@@ -1,0 +1,72 @@
+# Workspace manifest for db-gui — a native Rust database GUI (TablePlus-in-Rust).
+# The data/analysis layers (`core`, `analysis`) are kept free of any GUI dependency
+# so they can be unit-tested without a window.
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/analysis",
+    "crates/ui",
+    "crates/app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.80"
+
+# Shared, version-pinned dependencies. Individual crates opt in via `*.workspace = true`.
+[workspace.dependencies]
+# --- internal crates ---
+# Imported as `dbcore` (not `core`) so it doesn't shadow Rust's std `core` crate in
+# dependents, which would break macro expansions that reference `::core::`.
+dbcore = { path = "crates/core", package = "db-gui-core" }
+analysis = { path = "crates/analysis", package = "db-gui-analysis" }
+ui = { path = "crates/ui", package = "db-gui-ui" }
+
+# --- GUI ---
+eframe = { version = "0.34", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui = "0.34"
+egui_extras = { version = "0.34", features = ["datepicker", "svg"] }
+egui_plot = "0.34"
+
+# --- async runtime ---
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+# --- database access ---
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "postgres",
+    "sqlite",
+    "macros",
+    "chrono",
+    "uuid",
+    "json",
+    "bigdecimal",
+] }
+
+# --- data analysis ---
+polars = { version = "0.54", default-features = false, features = ["lazy", "describe", "dtype-full"] }
+
+# --- supporting crates ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rfd = "0.17"
+arboard = "3"
+# keyring 4.x is a disruptive rewrite (CLI + keyring-core split); 3.6 is the mature
+# `Entry` library API. crypto-rust avoids a system OpenSSL dep on Linux.
+keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+thiserror = "2"
+anyhow = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+# Build dependencies (incl. the GUI/DB stack) optimized even in dev builds so the
+# grid stays smooth while iterating. Our own crates stay at dev opt-level for fast builds.
+[profile.dev.package."*"]
+opt-level = 2

@@ -1,0 +1,3 @@
+# Pin to stable. sqlx 0.9 and the egui stack require a recent rustc (>= 1.94).
+[toolchain]
+channel = "stable"

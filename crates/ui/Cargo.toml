@@ -1,0 +1,23 @@
+[package]
+name = "db-gui-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "egui views, widgets and application state for db-gui."
+
+[lib]
+name = "ui"
+path = "src/lib.rs"
+
+[dev-dependencies]
+async-trait.workspace = true
+
+[dependencies]
+dbcore.workspace = true
+eframe.workspace = true
+egui.workspace = true
+egui_extras.workspace = true
+tokio.workspace = true
+rfd.workspace = true
+arboard.workspace = true

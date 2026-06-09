@@ -1,0 +1,16 @@
+[package]
+name = "db-gui-analysis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Polars-based analysis of result sets: descriptive stats, group-by, aggregation."
+
+[lib]
+name = "analysis"
+path = "src/lib.rs"
+
+[dependencies]
+dbcore.workspace = true
+# polars is wired up in Phase 2; kept out of the build for now to keep Phase 1 fast.
+# polars.workspace = true

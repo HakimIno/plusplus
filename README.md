@@ -102,4 +102,3 @@ Versions are pinned in the root `Cargo.toml`. (`polars` and `egui_plot` arrive i
 
 Phase 3 then brings multiple query tabs, persisted query history, CSV/JSON export, in-cell
 editing with previewed `UPDATE`s (opt-in commit), and grid keyboard navigation + copy.
-# plusplus
