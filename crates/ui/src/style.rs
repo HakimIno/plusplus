@@ -154,11 +154,16 @@ pub fn apply(ctx: &egui::Context) {
     // These are diagnostics, not real bugs (the headless probes verify no actual id
     // clashes) and they never compile into release. Turning them off makes debug builds
     // look like release.
-    let dbg = &mut style.debug;
-    dbg.warn_if_rect_changes_id = false;
-    dbg.show_unaligned = false;
-    dbg.show_expand_width = false;
-    dbg.show_expand_height = false;
+    // `Style::debug` only exists under `cfg(debug_assertions)`; gating keeps release builds,
+    // where these overlays are already compiled out, from referencing a missing field.
+    #[cfg(debug_assertions)]
+    {
+        let dbg = &mut style.debug;
+        dbg.warn_if_rect_changes_id = false;
+        dbg.show_unaligned = false;
+        dbg.show_expand_width = false;
+        dbg.show_expand_height = false;
+    }
 
     ctx.set_global_style(style);
 }
