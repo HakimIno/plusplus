@@ -21,8 +21,6 @@ impl DbGuiApp {
             .exact_size(bar_height)
             .show_inside(root, |ui| {
                 let bar_rect = ui.max_rect();
-                // Single chrome layer behind widgets: drag + double-click zoom.
-                title_bar::chrome_behind(ui, bar_rect, chrome_inset);
                 let cols = title_bar::columns(bar_rect, chrome_inset);
                 let connected = self.active().is_some();
                 let has_result = self.result.is_some();
@@ -33,7 +31,7 @@ impl DbGuiApp {
                         ui.available_size(),
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
-                            ui.add_space(chrome_inset.max(4.0));
+                            ui.add_space(chrome_inset.max(6.0));
                             if super::widgets::toolbar_icon_button(
                                 ui,
                                 icons::plus(),

@@ -21,14 +21,17 @@ fn main() -> eframe::Result<()> {
         .with_min_inner_size([800.0, 500.0])
         .with_title("plusplus");
 
-    // Unified title bar: draw our toolbar behind the native traffic lights (macOS).
+    // Native macOS traffic lights/titlebar, with egui drawing into the titlebar space.
+    // Note: eframe cannot put egui controls above AppKit hit-testing; this is best-effort.
     #[cfg(target_os = "macos")]
     {
         viewport = viewport
+            .with_decorations(true)
             .with_fullsize_content_view(true)
-            .with_titlebar_shown(false)
             .with_title_shown(false)
-            .with_titlebar_buttons_shown(true);
+            .with_titlebar_shown(false)
+            .with_titlebar_buttons_shown(true)
+            .with_movable_by_background(false);
     }
 
     let native_options = eframe::NativeOptions {

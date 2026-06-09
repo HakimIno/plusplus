@@ -1,46 +1,47 @@
 //! Custom unified title bar helpers (TablePlus-style).
 //!
-//! On macOS we extend content behind the native title bar via
-//! [`egui::ViewportBuilder::with_fullsize_content_view`] and reserve space for the traffic
-//! lights using [`eframe::WindowChromeMetrics`].
+//! Helpers for the compact toolbar drawn into the native macOS titlebar space.
 
 use egui::{self, CornerRadius, Margin, Rect, Stroke, Ui, UiBuilder};
 
 use crate::style::palette;
 
-/// Fallback inset when macOS chrome metrics are unavailable (e.g. headless tests).
 #[cfg(target_os = "macos")]
-const MAC_CHROME_FALLBACK: f32 = 78.0;
+const MAC_TRAFFIC_LIGHTS_INSET: f32 = 78.0;
 
 /// Width reserved for the right-hand tool cluster.
 const RIGHT_TOOLS_WIDTH: f32 = 132.0;
 /// Width of the left-hand icon cluster (excluding traffic-light inset).
 const LEFT_TOOLS_WIDTH: f32 = 108.0;
 
-/// Left inset to clear the macOS traffic lights, in egui points.
+/// Left inset to clear native macOS traffic lights when drawing into the titlebar space.
 pub fn traffic_lights_inset(ctx: &egui::Context, frame: Option<&eframe::Frame>) -> f32 {
     #[cfg(target_os = "macos")]
     {
-        use raw_window_handle::HasWindowHandle as _;
-
-        if let Some(eframe) = frame {
-            if let Some(window) = eframe.winit_window() {
-                if let Ok(handle) = window.window_handle() {
-                    if let Some(metrics) =
-                        eframe::WindowChromeMetrics::from_window_handle(&handle.as_raw())
-                    {
-                        return metrics.traffic_lights_size.x / ctx.zoom_factor();
-                    }
-                }
-            }
-        }
-        return MAC_CHROME_FALLBACK / ctx.zoom_factor();
+        let _ = frame;
+        return MAC_TRAFFIC_LIGHTS_INSET / ctx.zoom_factor();
     }
 
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (ctx, frame);
         0.0
+    }
+}
+
+fn toggle_zoom(ui: &Ui) {
+    let maximized = ui
+        .ctx()
+        .input(|i| i.viewport().maximized.unwrap_or(false));
+    ui.ctx()
+        .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+}
+
+fn handle_chrome_response(ui: &Ui, resp: &egui::Response) {
+    if resp.double_clicked() {
+        toggle_zoom(ui);
+    } else if resp.drag_started() {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
     }
 }
 
@@ -84,32 +85,7 @@ pub fn columns(bar: Rect, chrome_inset: f32) -> BarColumns {
     }
 }
 
-/// One background interact for the title bar — drag to move, double-click to zoom.
-///
-/// Drawn *before* toolbar widgets so buttons stay clickable; empty chrome picks this up.
-pub fn chrome_behind(ui: &mut Ui, bar: Rect, chrome_inset: f32) {
-    let zone = Rect::from_min_max(
-        egui::pos2(bar.left() + chrome_inset, bar.top()),
-        bar.max,
-    );
-    let resp = ui.interact(
-        zone,
-        ui.id().with("title_chrome"),
-        egui::Sense::click_and_drag(),
-    );
-    if resp.drag_started() {
-        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-    }
-    if resp.double_clicked() {
-        let maximized = ui
-            .ctx()
-            .input(|i| i.viewport().maximized.unwrap_or(false));
-        ui.ctx()
-            .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-    }
-}
-
-/// Connection path bar — full width of the centre column, left-aligned text.
+/// Connection path bar — full width, left-aligned. Drag/double-click only here (not on icons).
 pub fn breadcrumb(ui: &mut Ui, text: &str) -> egui::Response {
     let pill_w = ui.available_width().max(80.0);
     let font = egui::FontId::proportional(10.0);
@@ -130,6 +106,15 @@ pub fn breadcrumb(ui: &mut Ui, text: &str) -> egui::Response {
         )
         .on_hover_text(text);
     });
+
+    // Window chrome only on the path bar — keeps toolbar icon clicks from moving the window.
+    let chrome = ui.interact(
+        inner.response.rect,
+        inner.response.id.with("path_chrome"),
+        egui::Sense::click_and_drag(),
+    );
+    handle_chrome_response(ui, &chrome);
+
     inner.response
 }
 
