@@ -70,6 +70,8 @@ enum Action {
     DeleteConnection(usize),
     SaveConnection,
     CancelDialog,
+    OpenSettings,
+    CloseSettings,
     BrowseSqlitePath,
     RunQuery,
     /// Open a table's rows from the sidebar. `source` makes the result editable.
@@ -108,6 +110,7 @@ pub struct DbGuiApp {
 
     // --- transient UI state ---
     editor: Option<ConnEditor>,
+    settings_open: bool,
     schema_filter: String,
     /// TablePlus-style result filter bar (column / operator / value conditions).
     filter: FilterState,
@@ -180,6 +183,7 @@ impl DbGuiApp {
             selected_row: None,
             edits: Edits::default(),
             editor: None,
+            settings_open: false,
             schema_filter: String::new(),
             filter: FilterState::default(),
             status_msg: "Ready".to_string(),
@@ -658,6 +662,8 @@ impl DbGuiApp {
             }
             Action::SaveConnection => self.save_connection(),
             Action::CancelDialog => self.editor = None,
+            Action::OpenSettings => self.settings_open = true,
+            Action::CloseSettings => self.settings_open = false,
             Action::BrowseSqlitePath => {
                 if let Some(path) = rfd::FileDialog::new().pick_file() {
                     if let Some(ed) = &mut self.editor {
@@ -751,6 +757,7 @@ impl DbGuiApp {
         self.filter_bar(ui_root);
         self.central_panel(ui_root, &mut actions);
         self.connection_dialog(&ctx, &mut actions);
+        self.settings_dialog(&ctx, &mut actions);
 
         for action in actions {
             self.apply_action(action);

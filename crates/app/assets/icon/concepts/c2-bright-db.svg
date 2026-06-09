@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="tile2" x1="120" y1="60" x2="900" y2="980" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8aa2ff"/>
+      <stop offset="0.55" stop-color="#5b78ff"/>
+      <stop offset="1" stop-color="#2a347e"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.18"/>
+      <stop offset="0.4" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="229" fill="url(#tile2)"/>
+  <rect x="0" y="0" width="1024" height="1024" rx="229" fill="url(#sheen)"/>
+  <g fill="none" stroke="#ffffff" stroke-width="34" stroke-linecap="round" stroke-linejoin="round">
+    <!-- top cap -->
+    <ellipse cx="512" cy="332" rx="190" ry="62"/>
+    <!-- sides -->
+    <path d="M322 332 V632"/>
+    <path d="M702 332 V632"/>
+    <!-- middle band -->
+    <path d="M322 482 C 350 540 674 540 702 482"/>
+    <!-- bottom -->
+    <path d="M322 632 C 350 690 674 690 702 632"/>
+  </g>
+  <!-- plus accent badge bottom-right -->
+  <circle cx="690" cy="690" r="92" fill="#ffffff"/>
+  <g fill="#3b6fff">
+    <rect x="652" y="678" width="76" height="24" rx="12"/>
+    <rect x="678" y="652" width="24" height="76" rx="12"/>
+  </g>
+</svg>

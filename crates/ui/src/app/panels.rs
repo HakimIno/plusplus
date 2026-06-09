@@ -83,7 +83,15 @@ impl DbGuiApp {
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
                             ui.add_space(6.0);
-                            self.theme_picker(ui);
+                            if super::widgets::toolbar_icon_button(
+                                ui,
+                                icons::settings(),
+                                "Settings",
+                            )
+                            .clicked()
+                            {
+                                actions.push(Action::OpenSettings);
+                            }
                             if super::widgets::layout_toggle(
                                 ui,
                                 self.show_details_panel,
@@ -118,26 +126,6 @@ impl DbGuiApp {
                     );
                 });
             });
-    }
-
-    /// Compact theme selector for the title bar.
-    fn theme_picker(&mut self, ui: &mut egui::Ui) {
-        let mut chosen = self.theme;
-        egui::ComboBox::from_id_salt("theme_picker")
-            .width(68.0)
-            .selected_text(
-                egui::RichText::new(self.theme.label())
-                    .size(10.0)
-                    .color(palette::TEXT_WEAK()),
-            )
-            .show_ui(ui, |ui| {
-                for id in ThemeId::ALL {
-                    ui.selectable_value(&mut chosen, id, id.label());
-                }
-            });
-        if chosen != self.theme {
-            self.set_theme(ui.ctx(), chosen);
-        }
     }
 
     /// Thin bar between the grid and the SQL console: row count / selection / errors.
@@ -621,14 +609,50 @@ impl DbGuiApp {
                 style::empty_state(ui, icons::table(), "No columns", &self.status_msg);
             }
             None => {
-                style::empty_state(
-                    ui,
-                    icons::play(),
-                    "No results yet",
-                    "Write a query below and press Run (Cmd/Ctrl+Enter)",
-                );
+                style::empty_illustration(ui, icons::empty_results());
             }
         });
+    }
+
+    pub(super) fn settings_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        if !self.settings_open {
+            return;
+        }
+
+        let mut open = true;
+        let mut close = false;
+        let mut chosen = self.theme;
+
+        egui::Window::new("Settings")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_min_width(260.0);
+                style::section_header(ui, "Appearance");
+                ui.label(egui::RichText::new("Theme").color(palette::TEXT_WEAK()));
+                ui.add_space(6.0);
+
+                for id in ThemeId::ALL {
+                    ui.radio_value(&mut chosen, id, id.label());
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if icons::button(ui, icons::close(), "Close", true).clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if chosen != self.theme {
+            self.set_theme(ctx, chosen);
+        }
+        if !open || close {
+            actions.push(Action::CloseSettings);
+        }
     }
 
     pub(super) fn connection_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {

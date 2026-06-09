@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="tile3" x1="0" y1="0" x2="0" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#17181f"/>
+      <stop offset="1" stop-color="#0a0a0c"/>
+    </linearGradient>
+    <radialGradient id="glow3" cx="470" cy="450" r="440" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6e8eff" stop-opacity="0.26"/>
+      <stop offset="1" stop-color="#6e8eff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ink3" x1="300" y1="300" x2="700" y2="700" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9fb2ff"/>
+      <stop offset="1" stop-color="#5e7fff"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="229" fill="url(#tile3)"/>
+  <rect x="0" y="0" width="1024" height="1024" rx="229" fill="url(#glow3)"/>
+  <rect x="1.5" y="1.5" width="1021" height="1021" rx="227.5" fill="none" stroke="#ffffff" stroke-opacity="0.06" stroke-width="3"/>
+  <g fill="none" stroke="url(#ink3)" stroke-width="36" stroke-linecap="round" stroke-linejoin="round">
+    <ellipse cx="480" cy="332" rx="180" ry="60"/>
+    <path d="M300 332 V612"/>
+    <path d="M660 332 V612"/>
+    <path d="M300 472 C 326 528 634 528 660 472"/>
+    <path d="M300 612 C 326 668 634 668 660 612"/>
+  </g>
+  <!-- plus badge bottom-right -->
+  <circle cx="704" cy="700" r="96" fill="#0a0a0c"/>
+  <circle cx="704" cy="700" r="80" fill="#6e8eff"/>
+  <g fill="#0a0a0c">
+    <rect x="664" y="688" width="80" height="24" rx="12"/>
+    <rect x="692" y="660" width="24" height="80" rx="12"/>
+  </g>
+</svg>

@@ -323,3 +323,12 @@ pub fn empty_state(ui: &mut egui::Ui, icon: egui::ImageSource<'static>, title: &
         ui.label(egui::RichText::new(hint).color(palette::TEXT_FAINT()));
     });
 }
+
+/// A centred decorative SVG placeholder without labels.
+pub fn empty_illustration(ui: &mut egui::Ui, image: egui::ImageSource<'static>) {
+    ui.add_space((ui.available_height() * 0.24).max(18.0));
+    ui.vertical_centered(|ui| {
+        let width = ui.available_width().min(320.0);
+        ui.add(egui::Image::new(image).fit_to_exact_size(egui::vec2(width, width * 210.0 / 320.0)));
+    });
+}

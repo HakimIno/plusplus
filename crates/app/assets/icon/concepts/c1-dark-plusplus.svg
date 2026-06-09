@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#17181f"/>
+      <stop offset="1" stop-color="#0a0a0c"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="512" cy="470" r="430" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6e8eff" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#6e8eff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ink" x1="300" y1="380" x2="724" y2="640" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9fb2ff"/>
+      <stop offset="1" stop-color="#5e7fff"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="229" fill="url(#tile)"/>
+  <rect x="0" y="0" width="1024" height="1024" rx="229" fill="url(#glow)"/>
+  <rect x="1.5" y="1.5" width="1021" height="1021" rx="227.5" fill="none" stroke="#ffffff" stroke-opacity="0.06" stroke-width="3"/>
+  <g fill="url(#ink)">
+    <!-- plus 1 -->
+    <rect x="300" y="484" width="200" height="56" rx="28"/>
+    <rect x="372" y="412" width="56" height="200" rx="28"/>
+    <!-- plus 2 -->
+    <rect x="524" y="484" width="200" height="56" rx="28"/>
+    <rect x="596" y="412" width="56" height="200" rx="28"/>
+  </g>
+</svg>

@@ -35,6 +35,8 @@ icon_fns! {
     warning    => "../assets/icons/warning.svg",
     close      => "../assets/icons/close.svg",
     save       => "../assets/icons/save.svg",
+    settings   => "../assets/icons/settings.svg",
+    empty_results => "../assets/empty-results.svg",
 }
 
 /// Build a themed image widget for an icon at the given size.
