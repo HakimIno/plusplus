@@ -1,0 +1,296 @@
+
+//! SQL Server backend, implemented on top of `tiberius` (a pure-Rust TDS driver).
+//!
+//! Unlike the other backends, this one can't ride on `sqlx`: sqlx dropped its MSSQL
+//! driver after 0.6. `tiberius` has no built-in connection pool either, so we wrap it in
+//! `bb8` to match the pooled, `Arc`-shareable shape the rest of the app expects.
+
+use std::collections::BTreeMap;
+use std::time::Instant;
+
+use async_trait::async_trait;
+use tiberius::{Column, ColumnData, FromSqlOwned, Row};
+
+use crate::database::{returns_rows, Database};
+use crate::error::{CoreError, Result};
+use crate::model::{
+    ColumnInfo, ColumnMeta, ConnectionConfig, DbKind, IndexInfo, QueryResult, QueryStats,
+    SchemaTree, TableInfo,
+};
+use crate::value::Value;
+
+type Pool = bb8::Pool<bb8_tiberius::ConnectionManager>;
+
+pub struct MsSqlDb {
+    pool: Pool,
+}
+
+impl MsSqlDb {
+    pub async fn connect(cfg: &ConnectionConfig, password: Option<String>) -> Result<Self> {
+        let mut config = tiberius::Config::new();
+        config.host(&cfg.host);
+        config.port(cfg.port);
+        if !cfg.database.trim().is_empty() {
+            config.database(&cfg.database);
+        }
+        config.authentication(tiberius::AuthMethod::sql_server(
+            &cfg.user,
+            password.as_deref().unwrap_or(""),
+        ));
+        // Dev-friendly default: accept the server's certificate without validating a CA.
+        // Production deployments that need strict TLS should gate this behind a config flag.
+        config.trust_cert();
+
+        let mgr = bb8_tiberius::ConnectionManager::build(config)
+            .map_err(|e| CoreError::Pool(e.to_string()))?;
+        let pool = bb8::Pool::builder()
+            .max_size(5)
+            .build(mgr)
+            .await
+            .map_err(|e| CoreError::Pool(e.to_string()))?;
+        Ok(Self { pool })
+    }
+
+    async fn fetch(&self, sql: &str) -> Result<Vec<Row>> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| CoreError::Pool(e.to_string()))?;
+        let stream = conn.simple_query(sql.to_string()).await?;
+        Ok(stream.into_first_result().await?)
+    }
+}
+
+#[async_trait]
+impl Database for MsSqlDb {
+    fn kind(&self) -> DbKind {
+        DbKind::SqlServer
+    }
+
+    async fn introspect(&self) -> Result<SchemaTree> {
+        let database_name = self
+            .fetch("SELECT DB_NAME()")
+            .await?
+            .first()
+            .map(|r| get_str(r, 0))
+            .unwrap_or_default();
+
+        // Tables and views, keyed by (schema, name) so two schemas can share a table name.
+        let mut tables: BTreeMap<(String, String), TableInfo> = BTreeMap::new();
+        for row in self
+            .fetch(
+                "SELECT TABLE_SCHEMA, TABLE_NAME \
+                 FROM INFORMATION_SCHEMA.TABLES \
+                 WHERE TABLE_TYPE IN ('BASE TABLE', 'VIEW') \
+                 ORDER BY TABLE_SCHEMA, TABLE_NAME",
+            )
+            .await?
+        {
+            let schema = get_str(&row, 0);
+            let name = get_str(&row, 1);
+            tables.insert(
+                (schema.clone(), name.clone()),
+                TableInfo {
+                    schema: Some(schema),
+                    name,
+                    columns: Vec::new(),
+                    indexes: Vec::new(),
+                },
+            );
+        }
+
+        // Primary-key columns, so we can flag them while loading columns below.
+        let mut pk: std::collections::HashSet<(String, String, String)> =
+            std::collections::HashSet::new();
+        for row in self
+            .fetch(
+                "SELECT kcu.TABLE_SCHEMA, kcu.TABLE_NAME, kcu.COLUMN_NAME \
+                 FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc \
+                 JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu \
+                   ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME \
+                  AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA \
+                 WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'",
+            )
+            .await?
+        {
+            pk.insert((get_str(&row, 0), get_str(&row, 1), get_str(&row, 2)));
+        }
+
+        for row in self
+            .fetch(
+                "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE \
+                 FROM INFORMATION_SCHEMA.COLUMNS \
+                 ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION",
+            )
+            .await?
+        {
+            let schema = get_str(&row, 0);
+            let table = get_str(&row, 1);
+            let column = get_str(&row, 2);
+            if let Some(info) = tables.get_mut(&(schema.clone(), table.clone())) {
+                let nullable = get_str(&row, 4).eq_ignore_ascii_case("YES");
+                let primary_key = pk.contains(&(schema, table, column.clone()));
+                info.columns.push(ColumnInfo {
+                    name: column,
+                    data_type: get_str(&row, 3),
+                    nullable,
+                    primary_key,
+                });
+            }
+        }
+
+        // Indexes live in the `sys` catalog views; INFORMATION_SCHEMA has no index metadata.
+        let mut grouped: BTreeMap<(String, String, String), (bool, Vec<String>)> = BTreeMap::new();
+        for row in self
+            .fetch(
+                "SELECT s.name, t.name, i.name, i.is_unique, c.name \
+                 FROM sys.indexes i \
+                 JOIN sys.tables t ON i.object_id = t.object_id \
+                 JOIN sys.schemas s ON t.schema_id = s.schema_id \
+                 JOIN sys.index_columns ic \
+                   ON i.object_id = ic.object_id AND i.index_id = ic.index_id \
+                 JOIN sys.columns c \
+                   ON ic.object_id = c.object_id AND ic.column_id = c.column_id \
+                 WHERE i.name IS NOT NULL \
+                 ORDER BY s.name, t.name, i.name, ic.key_ordinal",
+            )
+            .await?
+        {
+            let schema = get_str(&row, 0);
+            let table = get_str(&row, 1);
+            let index = get_str(&row, 2);
+            let unique = row.try_get::<bool, _>(3).ok().flatten().unwrap_or(false);
+            let column = get_str(&row, 4);
+            grouped
+                .entry((schema, table, index))
+                .or_insert_with(|| (unique, Vec::new()))
+                .1
+                .push(column);
+        }
+
+        for ((schema, table, name), (unique, columns)) in grouped {
+            if let Some(info) = tables.get_mut(&(schema, table)) {
+                info.indexes.push(IndexInfo {
+                    name,
+                    unique,
+                    columns,
+                });
+            }
+        }
+
+        Ok(SchemaTree {
+            database_name,
+            tables: tables.into_values().collect(),
+        })
+    }
+
+    async fn execute(&self, sql: &str) -> Result<QueryResult> {
+        let start = Instant::now();
+        let elapsed = |start: Instant| start.elapsed().as_secs_f64() * 1000.0;
+
+        if returns_rows(sql) {
+            let rows = self.fetch(sql).await?;
+            let columns = rows.first().map(column_meta).unwrap_or_default();
+            let data = rows
+                .into_iter()
+                .map(|row| row.into_iter().map(|c| decode(&c)).collect())
+                .collect();
+            Ok(QueryResult {
+                columns,
+                rows: data,
+                stats: QueryStats {
+                    elapsed_ms: elapsed(start),
+                    rows_affected: None,
+                },
+            })
+        } else {
+            // DML/DDL: `execute` reports rows affected (summed across statements).
+            let mut conn = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| CoreError::Pool(e.to_string()))?;
+            let res = conn.execute(sql.to_string(), &[]).await?;
+            Ok(QueryResult {
+                columns: Vec::new(),
+                rows: Vec::new(),
+                stats: QueryStats {
+                    elapsed_ms: elapsed(start),
+                    rows_affected: Some(res.total()),
+                },
+            })
+        }
+    }
+}
+
+/// Read a column as a string, treating decode failures and NULLs as the empty string.
+/// Used only for introspection queries whose columns are all `nvarchar`.
+fn get_str(row: &Row, idx: usize) -> String {
+    row.try_get::<&str, _>(idx)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn column_meta(row: &Row) -> Vec<ColumnMeta> {
+    row.columns()
+        .iter()
+        .map(|c: &Column| ColumnMeta {
+            name: c.name().to_string(),
+            type_name: format!("{:?}", c.column_type()),
+        })
+        .collect()
+}
+
+/// Decode one cell. By the time a [`Row`] reaches us, tiberius has already resolved each
+/// value to a concrete [`ColumnData`] variant (e.g. an `intn` arrives as `I32`), so we can
+/// match on the data rather than on the declared column type.
+fn decode(cell: &ColumnData<'static>) -> Value {
+    match cell {
+        ColumnData::U8(v) => v.map(|x| Value::Int(x as i64)).unwrap_or(Value::Null),
+        ColumnData::I16(v) => v.map(|x| Value::Int(x as i64)).unwrap_or(Value::Null),
+        ColumnData::I32(v) => v.map(|x| Value::Int(x as i64)).unwrap_or(Value::Null),
+        ColumnData::I64(v) => v.map(Value::Int).unwrap_or(Value::Null),
+        ColumnData::F32(v) => v.map(|x| Value::Float(x as f64)).unwrap_or(Value::Null),
+        ColumnData::F64(v) => v.map(Value::Float).unwrap_or(Value::Null),
+        ColumnData::Bit(v) => v.map(Value::Bool).unwrap_or(Value::Null),
+        ColumnData::String(v) => v
+            .as_ref()
+            .map(|s| Value::Text(s.to_string()))
+            .unwrap_or(Value::Null),
+        ColumnData::Guid(v) => v
+            .map(|g| Value::Text(g.to_string()))
+            .unwrap_or(Value::Null),
+        ColumnData::Numeric(v) => v
+            .map(|n| Value::Text(n.to_string()))
+            .unwrap_or(Value::Null),
+        ColumnData::Xml(v) => v
+            .as_ref()
+            .map(|x| Value::Text(x.to_string()))
+            .unwrap_or(Value::Null),
+        ColumnData::Binary(v) => v
+            .as_ref()
+            .map(|b| Value::Bytes(b.to_vec()))
+            .unwrap_or(Value::Null),
+        // Temporal types decode through tiberius' chrono `FromSqlOwned` impls.
+        ColumnData::Date(_) => temporal::<chrono::NaiveDate>(cell),
+        ColumnData::Time(_) => temporal::<chrono::NaiveTime>(cell),
+        ColumnData::DateTime(_) | ColumnData::SmallDateTime(_) | ColumnData::DateTime2(_) => {
+            temporal::<chrono::NaiveDateTime>(cell)
+        }
+        ColumnData::DateTimeOffset(_) => temporal::<chrono::DateTime<chrono::Utc>>(cell),
+    }
+}
+
+/// Decode a temporal cell into text via tiberius' chrono `FromSqlOwned` conversion.
+fn temporal<T>(cell: &ColumnData<'static>) -> Value
+where
+    T: FromSqlOwned + ToString,
+{
+    match T::from_sql_owned(cell.clone()) {
+        Ok(Some(v)) => Value::Text(v.to_string()),
+        _ => Value::Null,
+    }
+}

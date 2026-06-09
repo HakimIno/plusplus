@@ -11,6 +11,7 @@ pub enum DbKind {
     Postgres,
     MySql,
     MariaDb,
+    SqlServer,
     Sqlite,
 }
 
@@ -20,6 +21,7 @@ impl DbKind {
             DbKind::Postgres => "PostgreSQL",
             DbKind::MySql => "MySQL",
             DbKind::MariaDb => "MariaDB",
+            DbKind::SqlServer => "SQL Server",
             DbKind::Sqlite => "SQLite",
         }
     }
@@ -27,14 +29,27 @@ impl DbKind {
     /// Whether this backend authenticates with a server (host/port/user/password)
     /// versus a local file path.
     pub fn is_server(self) -> bool {
-        matches!(self, DbKind::Postgres | DbKind::MySql | DbKind::MariaDb)
+        matches!(
+            self,
+            DbKind::Postgres | DbKind::MySql | DbKind::MariaDb | DbKind::SqlServer
+        )
     }
 
     pub fn default_port(self) -> u16 {
         match self {
             DbKind::Postgres => 5432,
             DbKind::MySql | DbKind::MariaDb => 3306,
+            DbKind::SqlServer => 1433,
             DbKind::Sqlite => 0,
+        }
+    }
+
+    /// Build a "preview the first `limit` rows" query for `qualified_table` in this dialect.
+    /// SQL Server has no `LIMIT`; it caps rows with `TOP` instead.
+    pub fn preview_query(self, qualified_table: &str, limit: u32) -> String {
+        match self {
+            DbKind::SqlServer => format!("SELECT TOP {limit} * FROM {qualified_table};"),
+            _ => format!("SELECT * FROM {qualified_table} LIMIT {limit};"),
         }
     }
 }
@@ -81,7 +96,7 @@ impl ConnectionConfig {
     /// A short subtitle describing the target, shown in the connection list.
     pub fn target_summary(&self) -> String {
         match self.kind {
-            DbKind::Postgres | DbKind::MySql | DbKind::MariaDb => {
+            DbKind::Postgres | DbKind::MySql | DbKind::MariaDb | DbKind::SqlServer => {
                 format!(
                     "{}@{}:{}/{}",
                     self.user, self.host, self.port, self.database

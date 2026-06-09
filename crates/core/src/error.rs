@@ -10,6 +10,14 @@ pub enum CoreError {
     #[error("database error: {0}")]
     Sqlx(#[from] sqlx::Error),
 
+    /// The `tiberius` SQL Server (TDS) driver returned an error.
+    #[error("sql server error: {0}")]
+    Tiberius(#[from] tiberius::error::Error),
+
+    /// A connection pool failed to hand out a connection (timeout, manager error, ...).
+    #[error("connection pool error: {0}")]
+    Pool(String),
+
     /// Failed to read or write the on-disk JSON config of saved connections.
     #[error("config error: {0}")]
     Config(String),

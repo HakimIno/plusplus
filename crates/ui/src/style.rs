@@ -111,7 +111,7 @@ pub fn apply(ctx: &egui::Context) {
     style.text_styles = [
         (
             TextStyle::Heading,
-            FontId::new(15.0, FontFamily::Proportional),
+            FontId::new(15.0, FontFamily::Name(crate::HEADING_FAMILY.into())),
         ),
         (TextStyle::Body, FontId::new(12.5, FontFamily::Proportional)),
         (
@@ -276,6 +276,7 @@ pub fn section_header(ui: &mut egui::Ui, text: &str) {
 
 /// A small filled status dot (connected = green, idle = faint), vertically centred so it
 /// sits neatly inline before a label.
+#[allow(dead_code)]
 pub fn status_dot(ui: &mut egui::Ui, color: Color32) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
     if ui.is_rect_visible(rect) {

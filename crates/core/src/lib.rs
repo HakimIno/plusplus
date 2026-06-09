@@ -26,7 +26,7 @@ pub use model::{
 };
 pub use value::Value;
 
-use backends::{mysql::MySqlDb, postgres::PostgresDb, sqlite::SqliteDb};
+use backends::{mssql::MsSqlDb, mysql::MySqlDb, postgres::PostgresDb, sqlite::SqliteDb};
 
 /// Connect to the database described by `cfg`, returning a shareable handle.
 ///
@@ -40,6 +40,7 @@ pub async fn connect(
     match cfg.kind {
         DbKind::Postgres => Ok(Arc::new(PostgresDb::connect(cfg, password).await?)),
         DbKind::MySql | DbKind::MariaDb => Ok(Arc::new(MySqlDb::connect(cfg, password).await?)),
+        DbKind::SqlServer => Ok(Arc::new(MsSqlDb::connect(cfg, password).await?)),
         DbKind::Sqlite => {
             if cfg.sqlite_path.trim().is_empty() {
                 return Err(CoreError::InvalidConfig("SQLite path is empty".into()));
