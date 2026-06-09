@@ -255,6 +255,24 @@ pub fn text_input(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32) 
     )
 }
 
+/// Single-line label that truncates with "…" when it doesn't fit the panel width.
+/// Pass `tooltip` to show the full text on hover (defaults to `text`).
+pub fn truncated_label(
+    ui: &mut egui::Ui,
+    text: &str,
+    tooltip: Option<&str>,
+    weak: bool,
+    sense: egui::Sense,
+) -> egui::Response {
+    let label = if weak {
+        egui::Label::new(egui::RichText::new(text).color(palette::TEXT_WEAK()))
+    } else {
+        egui::Label::new(text)
+    };
+    ui.add(label.truncate().selectable(false).sense(sense))
+        .on_hover_text(tooltip.unwrap_or(text))
+}
+
 /// A muted, letter-spaced uppercase section label — the small caption that titles each
 /// panel (CONNECTIONS, SCHEMA, …). Adds a little breathing room above itself.
 pub fn section_header(ui: &mut egui::Ui, text: &str) {

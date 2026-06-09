@@ -308,6 +308,8 @@ impl DbGuiApp {
         egui::Panel::left("left_panel")
             .resizable(true)
             .default_size(280.0)
+            .min_size(200.0)
+            .max_size(360.0)
             .show_inside(root, |ui| {
                 ui.add_space(8.0);
                 style::section_header(ui, "Schema");
@@ -321,6 +323,8 @@ impl DbGuiApp {
                 egui::ScrollArea::vertical()
                     .id_salt("schema_scroll")
                     .show(ui, |ui| {
+                        // Keep tree content within the panel — long names must not widen it.
+                        ui.set_width(ui.available_width());
                         self.schema_tree(ui, actions);
                     });
             });
@@ -338,7 +342,13 @@ impl DbGuiApp {
 
         ui.horizontal(|ui| {
             icons::show(ui, icons::database(), icons::SIZE);
-            ui.strong(&active.schema.database_name);
+            style::truncated_label(
+                ui,
+                &active.schema.database_name,
+                None,
+                false,
+                egui::Sense::hover(),
+            );
         });
         ui.add_space(2.0);
 
@@ -357,11 +367,7 @@ impl DbGuiApp {
                 .show_header(ui, |ui| {
                     icons::show_weak(ui, icons::table(), 15.0);
                     ui.add_space(2.0);
-                    ui.add(
-                        egui::Label::new(table.name.as_str())
-                            .sense(egui::Sense::click())
-                            .selectable(false),
-                    )
+                    style::truncated_label(ui, &table.name, None, false, egui::Sense::click())
                 })
                 .body(|ui| {
                     for col in &table.columns {
@@ -373,9 +379,22 @@ impl DbGuiApp {
                             };
                             icons::show_weak(ui, glyph, 13.0);
                             ui.add_space(2.0);
-                            ui.label(col.name.as_str());
+                            style::truncated_label(
+                                ui,
+                                &col.name,
+                                None,
+                                false,
+                                egui::Sense::hover(),
+                            );
                             let nn = if col.nullable { "" } else { " · not null" };
-                            ui.weak(format!("{}{nn}", col.data_type));
+                            let meta = format!("{}{nn}", col.data_type);
+                            style::truncated_label(
+                                ui,
+                                &meta,
+                                Some(&meta),
+                                true,
+                                egui::Sense::hover(),
+                            );
                         });
                     }
                     if !table.indexes.is_empty() {
@@ -385,7 +404,15 @@ impl DbGuiApp {
                                 icons::show_weak(ui, icons::index(), 13.0);
                                 ui.add_space(2.0);
                                 let u = if idx.unique { "unique " } else { "" };
-                                ui.weak(format!("{u}{} ({})", idx.name, idx.columns.join(", ")));
+                                let detail =
+                                    format!("{u}{} ({})", idx.name, idx.columns.join(", "));
+                                style::truncated_label(
+                                    ui,
+                                    &detail,
+                                    Some(&detail),
+                                    true,
+                                    egui::Sense::hover(),
+                                );
                             });
                         }
                     }
