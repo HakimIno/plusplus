@@ -200,25 +200,36 @@ impl DbGuiApp {
                 style::section_header(ui, "Details");
                 ui.separator();
 
+                // Stacked fields (name above value) rather than a 2-column Grid: the value
+                // is a full-width wrapped label, so it reflows when the panel is resized.
+                // `auto_shrink([false, _])` keeps the inner ui at the panel width so wrapping
+                // tracks the resize instead of the content's natural width.
                 egui::ScrollArea::vertical()
                     .id_salt("details_scroll")
+                    .auto_shrink([false, true])
                     .show(ui, |ui| {
-                        egui::Grid::new("details_grid")
-                            .num_columns(2)
-                            .striped(true)
-                            .spacing([10.0, 6.0])
-                            .show(ui, |ui| {
-                                for (c, col) in res.columns.iter().enumerate() {
-                                    ui.weak(&col.name);
-                                    let value = &res.rows[row_idx][c];
-                                    if value.is_null() {
-                                        ui.weak("NULL");
-                                    } else {
-                                        ui.add(egui::Label::new(value.display()).wrap());
-                                    }
-                                    ui.end_row();
-                                }
+                        for (c, col) in res.columns.iter().enumerate() {
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                ui.strong(&col.name);
+                                ui.weak(
+                                    egui::RichText::new(&col.type_name)
+                                        .small()
+                                        .color(palette::TEXT_FAINT()),
+                                );
                             });
+                            let value = &res.rows[row_idx][c];
+                            if value.is_null() {
+                                ui.weak(egui::RichText::new("NULL").italics());
+                            } else {
+                                ui.add(
+                                    egui::Label::new(value.display())
+                                        .wrap()
+                                        .halign(egui::Align::LEFT),
+                                );
+                            }
+                            ui.separator();
+                        }
                     });
             });
     }
