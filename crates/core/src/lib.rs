@@ -26,16 +26,20 @@ pub use model::{
 };
 pub use value::Value;
 
-use backends::{postgres::PostgresDb, sqlite::SqliteDb};
+use backends::{mysql::MySqlDb, postgres::PostgresDb, sqlite::SqliteDb};
 
 /// Connect to the database described by `cfg`, returning a shareable handle.
 ///
 /// `password` is the secret fetched from the OS keychain by the caller (or `None` for
 /// passwordless / file-based connections). Adding a new backend means adding a match arm
 /// here and an implementation in [`backends`] — no UI changes required.
-pub async fn connect(cfg: &ConnectionConfig, password: Option<String>) -> Result<Arc<dyn Database>> {
+pub async fn connect(
+    cfg: &ConnectionConfig,
+    password: Option<String>,
+) -> Result<Arc<dyn Database>> {
     match cfg.kind {
         DbKind::Postgres => Ok(Arc::new(PostgresDb::connect(cfg, password).await?)),
+        DbKind::MySql | DbKind::MariaDb => Ok(Arc::new(MySqlDb::connect(cfg, password).await?)),
         DbKind::Sqlite => {
             if cfg.sqlite_path.trim().is_empty() {
                 return Err(CoreError::InvalidConfig("SQLite path is empty".into()));
@@ -94,11 +98,16 @@ mod tests {
         db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, score REAL, raw BLOB)")
             .await
             .unwrap();
-        db.execute("INSERT INTO t (name, score, raw) VALUES ('สวัสดี', 9.5, x'00ff'), (NULL, NULL, NULL)")
+        db.execute(
+            "INSERT INTO t (name, score, raw) VALUES ('สวัสดี', 9.5, x'00ff'), (NULL, NULL, NULL)",
+        )
+        .await
+        .unwrap();
+
+        let res = db
+            .execute("SELECT id, name, score, raw FROM t ORDER BY id")
             .await
             .unwrap();
-
-        let res = db.execute("SELECT id, name, score, raw FROM t ORDER BY id").await.unwrap();
         assert_eq!(res.column_count(), 4);
         assert_eq!(res.row_count(), 2);
 
@@ -174,6 +183,7 @@ mod tests {
         use database::returns_rows;
         assert!(returns_rows("SELECT 1"));
         assert!(returns_rows("  with x as (select 1) select * from x"));
+        assert!(returns_rows("DESCRIBE users"));
         assert!(returns_rows("PRAGMA table_info(t)"));
         assert!(!returns_rows("INSERT INTO t VALUES (1)"));
         assert!(!returns_rows("update t set a = 1"));

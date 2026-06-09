@@ -128,13 +128,14 @@ impl Database for PostgresDb {
         }
 
         // Indexes (parsed best-effort from pg_indexes definitions).
-        let idx_rows: Vec<(String, String, String, String)> = sqlx::query_as(AssertSqlSafe(format!(
-            "SELECT schemaname, tablename, indexname, indexdef FROM pg_indexes \
+        let idx_rows: Vec<(String, String, String, String)> =
+            sqlx::query_as(AssertSqlSafe(format!(
+                "SELECT schemaname, tablename, indexname, indexdef FROM pg_indexes \
              WHERE schemaname NOT IN {SYSTEM_SCHEMAS} \
              ORDER BY schemaname, tablename, indexname"
-        )))
-        .fetch_all(&self.pool)
-        .await?;
+            )))
+            .fetch_all(&self.pool)
+            .await?;
         for (schema, table, indexname, indexdef) in idx_rows {
             if let Some(info) = tables.get_mut(&(schema, table)) {
                 info.indexes.push(IndexInfo {
@@ -157,10 +158,7 @@ impl Database for PostgresDb {
             let rows = sqlx::query(AssertSqlSafe(sql.to_string()))
                 .fetch_all(&self.pool)
                 .await?;
-            let columns = rows
-                .first()
-                .map(column_meta)
-                .unwrap_or_default();
+            let columns = rows.first().map(column_meta).unwrap_or_default();
             let data = rows
                 .iter()
                 .map(|row| (0..columns.len()).map(|i| decode(row, i)).collect())
@@ -210,19 +208,38 @@ fn decode(row: &PgRow, idx: usize) -> Value {
     }
     let name = row.column(idx).type_info().name().to_ascii_uppercase();
     match name.as_str() {
-        "BOOL" => row.try_get::<bool, _>(idx).map(Value::Bool).unwrap_or(Value::Null),
-        "INT2" => row.try_get::<i16, _>(idx).map(|v| Value::Int(v as i64)).unwrap_or(Value::Null),
-        "INT4" => row.try_get::<i32, _>(idx).map(|v| Value::Int(v as i64)).unwrap_or(Value::Null),
-        "INT8" => row.try_get::<i64, _>(idx).map(Value::Int).unwrap_or(Value::Null),
-        "FLOAT4" => row.try_get::<f32, _>(idx).map(|v| Value::Float(v as f64)).unwrap_or(Value::Null),
-        "FLOAT8" => row.try_get::<f64, _>(idx).map(Value::Float).unwrap_or(Value::Null),
+        "BOOL" => row
+            .try_get::<bool, _>(idx)
+            .map(Value::Bool)
+            .unwrap_or(Value::Null),
+        "INT2" => row
+            .try_get::<i16, _>(idx)
+            .map(|v| Value::Int(v as i64))
+            .unwrap_or(Value::Null),
+        "INT4" => row
+            .try_get::<i32, _>(idx)
+            .map(|v| Value::Int(v as i64))
+            .unwrap_or(Value::Null),
+        "INT8" => row
+            .try_get::<i64, _>(idx)
+            .map(Value::Int)
+            .unwrap_or(Value::Null),
+        "FLOAT4" => row
+            .try_get::<f32, _>(idx)
+            .map(|v| Value::Float(v as f64))
+            .unwrap_or(Value::Null),
+        "FLOAT8" => row
+            .try_get::<f64, _>(idx)
+            .map(Value::Float)
+            .unwrap_or(Value::Null),
         "NUMERIC" => row
             .try_get::<sqlx::types::BigDecimal, _>(idx)
             .map(|v| Value::Text(v.to_string()))
             .unwrap_or(Value::Null),
-        "TEXT" | "VARCHAR" | "BPCHAR" | "CHAR" | "NAME" | "CITEXT" => {
-            row.try_get::<String, _>(idx).map(Value::Text).unwrap_or(Value::Null)
-        }
+        "TEXT" | "VARCHAR" | "BPCHAR" | "CHAR" | "NAME" | "CITEXT" => row
+            .try_get::<String, _>(idx)
+            .map(Value::Text)
+            .unwrap_or(Value::Null),
         "UUID" => row
             .try_get::<sqlx::types::Uuid, _>(idx)
             .map(|v| Value::Text(v.to_string()))
@@ -247,7 +264,10 @@ fn decode(row: &PgRow, idx: usize) -> Value {
             .try_get::<chrono::NaiveTime, _>(idx)
             .map(|v| Value::Text(v.to_string()))
             .unwrap_or(Value::Null),
-        "BYTEA" => row.try_get::<Vec<u8>, _>(idx).map(Value::Bytes).unwrap_or(Value::Null),
+        "BYTEA" => row
+            .try_get::<Vec<u8>, _>(idx)
+            .map(Value::Bytes)
+            .unwrap_or(Value::Null),
         _ => {
             // Unknown/extension type: try text, then bytes, else show the type name.
             row.try_get::<String, _>(idx)

@@ -257,7 +257,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut FilterState, columns: &[String]) -> Opt
     let mut remove_at: Option<usize> = None;
     let mut add_after: Option<usize> = None;
 
-    ui.add_space(6.0);
+    ui.add_space(4.0);
 
     let n = state.conditions.len();
     for (i, cond) in state.conditions.iter_mut().enumerate() {
@@ -327,7 +327,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut FilterState, columns: &[String]) -> Opt
                 }
             });
         });
-        ui.add_space(4.0);
+        ui.add_space(3.0);
     }
 
     // Toolbar: All/Any switch on the left, Clear / Apply on the right.
@@ -363,7 +363,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut FilterState, columns: &[String]) -> Opt
             }
         });
     });
-    ui.add_space(6.0);
+    ui.add_space(4.0);
 
     // Apply deferred structural edits.
     if let Some(i) = add_after {
@@ -407,20 +407,52 @@ mod tests {
     #[test]
     fn text_operators_are_case_insensitive() {
         let r = row(&[Value::Text("Hello World".into())]);
-        assert!(matches_row(&r, &[cond(0, FilterOp::Contains, "hello")], Conjunction::All));
-        assert!(matches_row(&r, &[cond(0, FilterOp::BeginsWith, "HELLO")], Conjunction::All));
-        assert!(matches_row(&r, &[cond(0, FilterOp::EndsWith, "world")], Conjunction::All));
-        assert!(!matches_row(&r, &[cond(0, FilterOp::Equals, "hello")], Conjunction::All));
-        assert!(matches_row(&r, &[cond(0, FilterOp::NotContains, "xyz")], Conjunction::All));
+        assert!(matches_row(
+            &r,
+            &[cond(0, FilterOp::Contains, "hello")],
+            Conjunction::All
+        ));
+        assert!(matches_row(
+            &r,
+            &[cond(0, FilterOp::BeginsWith, "HELLO")],
+            Conjunction::All
+        ));
+        assert!(matches_row(
+            &r,
+            &[cond(0, FilterOp::EndsWith, "world")],
+            Conjunction::All
+        ));
+        assert!(!matches_row(
+            &r,
+            &[cond(0, FilterOp::Equals, "hello")],
+            Conjunction::All
+        ));
+        assert!(matches_row(
+            &r,
+            &[cond(0, FilterOp::NotContains, "xyz")],
+            Conjunction::All
+        ));
     }
 
     #[test]
     fn numeric_ordering_uses_numbers_not_strings() {
         let r = row(&[Value::Int(9)]);
         // "9" > "100" lexicographically, but 9 < 100 numerically — we want numeric.
-        assert!(matches_row(&r, &[cond(0, FilterOp::Less, "100")], Conjunction::All));
-        assert!(!matches_row(&r, &[cond(0, FilterOp::Greater, "100")], Conjunction::All));
-        assert!(matches_row(&r, &[cond(0, FilterOp::GreaterEq, "9")], Conjunction::All));
+        assert!(matches_row(
+            &r,
+            &[cond(0, FilterOp::Less, "100")],
+            Conjunction::All
+        ));
+        assert!(!matches_row(
+            &r,
+            &[cond(0, FilterOp::Greater, "100")],
+            Conjunction::All
+        ));
+        assert!(matches_row(
+            &r,
+            &[cond(0, FilterOp::GreaterEq, "9")],
+            Conjunction::All
+        ));
     }
 
     #[test]
@@ -428,11 +460,27 @@ mod tests {
         let nul = row(&[Value::Null]);
         let empty = row(&[Value::Text(String::new())]);
         let filled = row(&[Value::Text("x".into())]);
-        assert!(matches_row(&nul, &[cond(0, FilterOp::IsNull, "")], Conjunction::All));
-        assert!(matches_row(&empty, &[cond(0, FilterOp::IsEmpty, "")], Conjunction::All));
-        assert!(matches_row(&filled, &[cond(0, FilterOp::IsNotEmpty, "")], Conjunction::All));
+        assert!(matches_row(
+            &nul,
+            &[cond(0, FilterOp::IsNull, "")],
+            Conjunction::All
+        ));
+        assert!(matches_row(
+            &empty,
+            &[cond(0, FilterOp::IsEmpty, "")],
+            Conjunction::All
+        ));
+        assert!(matches_row(
+            &filled,
+            &[cond(0, FilterOp::IsNotEmpty, "")],
+            Conjunction::All
+        ));
         // A value operator never matches NULL.
-        assert!(!matches_row(&nul, &[cond(0, FilterOp::Contains, "")], Conjunction::All));
+        assert!(!matches_row(
+            &nul,
+            &[cond(0, FilterOp::Contains, "")],
+            Conjunction::All
+        ));
     }
 
     #[test]

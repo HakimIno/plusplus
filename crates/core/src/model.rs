@@ -5,11 +5,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::value::Value;
 
-/// Which database backend a connection targets. New backends (MySQL, MSSQL) are added
-/// here and in [`crate::connect`] without touching the UI.
+/// Which database backend a connection targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DbKind {
     Postgres,
+    MySql,
+    MariaDb,
     Sqlite,
 }
 
@@ -17,6 +18,8 @@ impl DbKind {
     pub fn label(self) -> &'static str {
         match self {
             DbKind::Postgres => "PostgreSQL",
+            DbKind::MySql => "MySQL",
+            DbKind::MariaDb => "MariaDB",
             DbKind::Sqlite => "SQLite",
         }
     }
@@ -24,7 +27,15 @@ impl DbKind {
     /// Whether this backend authenticates with a server (host/port/user/password)
     /// versus a local file path.
     pub fn is_server(self) -> bool {
-        matches!(self, DbKind::Postgres)
+        matches!(self, DbKind::Postgres | DbKind::MySql | DbKind::MariaDb)
+    }
+
+    pub fn default_port(self) -> u16 {
+        match self {
+            DbKind::Postgres => 5432,
+            DbKind::MySql | DbKind::MariaDb => 3306,
+            DbKind::Sqlite => 0,
+        }
     }
 }
 
@@ -60,10 +71,7 @@ impl ConnectionConfig {
             name: format!("New {}", kind.label()),
             kind,
             host: "localhost".to_string(),
-            port: match kind {
-                DbKind::Postgres => 5432,
-                DbKind::Sqlite => 0,
-            },
+            port: kind.default_port(),
             user: String::new(),
             database: String::new(),
             sqlite_path: String::new(),
@@ -73,7 +81,12 @@ impl ConnectionConfig {
     /// A short subtitle describing the target, shown in the connection list.
     pub fn target_summary(&self) -> String {
         match self.kind {
-            DbKind::Postgres => format!("{}@{}:{}/{}", self.user, self.host, self.port, self.database),
+            DbKind::Postgres | DbKind::MySql | DbKind::MariaDb => {
+                format!(
+                    "{}@{}:{}/{}",
+                    self.user, self.host, self.port, self.database
+                )
+            }
             DbKind::Sqlite => self.sqlite_path.clone(),
         }
     }

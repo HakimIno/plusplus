@@ -42,7 +42,11 @@ pub fn highlight_sql(text: &str, font: FontId) -> LayoutJob {
             while i < n && chars[i] != '\n' {
                 i += 1;
             }
-            push(&mut job, &chars[start..i].iter().collect::<String>(), COMMENT);
+            push(
+                &mut job,
+                &chars[start..i].iter().collect::<String>(),
+                COMMENT,
+            );
             continue;
         }
 
@@ -54,7 +58,11 @@ pub fn highlight_sql(text: &str, font: FontId) -> LayoutJob {
                 i += 1;
             }
             i = (i + 2).min(n);
-            push(&mut job, &chars[start..i].iter().collect::<String>(), COMMENT);
+            push(
+                &mut job,
+                &chars[start..i].iter().collect::<String>(),
+                COMMENT,
+            );
             continue;
         }
 
@@ -73,7 +81,11 @@ pub fn highlight_sql(text: &str, font: FontId) -> LayoutJob {
                 }
                 i += 1;
             }
-            push(&mut job, &chars[start..i].iter().collect::<String>(), STRING);
+            push(
+                &mut job,
+                &chars[start..i].iter().collect::<String>(),
+                STRING,
+            );
             continue;
         }
 
@@ -95,7 +107,11 @@ pub fn highlight_sql(text: &str, font: FontId) -> LayoutJob {
             while i < n && (chars[i].is_ascii_digit() || chars[i] == '.') {
                 i += 1;
             }
-            push(&mut job, &chars[start..i].iter().collect::<String>(), NUMBER);
+            push(
+                &mut job,
+                &chars[start..i].iter().collect::<String>(),
+                NUMBER,
+            );
             continue;
         }
 
@@ -121,12 +137,88 @@ fn is_keyword(word: &str) -> bool {
 }
 
 const KEYWORDS: &[&str] = &[
-    "SELECT", "FROM", "WHERE", "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "CREATE",
-    "TABLE", "VIEW", "INDEX", "DROP", "ALTER", "ADD", "COLUMN", "JOIN", "INNER", "LEFT", "RIGHT",
-    "FULL", "OUTER", "CROSS", "ON", "USING", "GROUP", "BY", "ORDER", "HAVING", "LIMIT", "OFFSET",
-    "DISTINCT", "AS", "AND", "OR", "NOT", "NULL", "IS", "IN", "LIKE", "ILIKE", "BETWEEN", "EXISTS",
-    "UNION", "ALL", "CASE", "WHEN", "THEN", "ELSE", "END", "ASC", "DESC", "COUNT", "SUM", "AVG",
-    "MIN", "MAX", "PRIMARY", "KEY", "FOREIGN", "REFERENCES", "UNIQUE", "DEFAULT", "WITH", "PRAGMA",
-    "EXPLAIN", "BEGIN", "COMMIT", "ROLLBACK", "TRANSACTION", "INT", "INTEGER", "TEXT", "REAL",
-    "BLOB", "BOOLEAN", "VARCHAR", "TIMESTAMP", "DATE", "TRUE", "FALSE", "CAST", "COALESCE",
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "INSERT",
+    "INTO",
+    "VALUES",
+    "UPDATE",
+    "SET",
+    "DELETE",
+    "CREATE",
+    "TABLE",
+    "VIEW",
+    "INDEX",
+    "DROP",
+    "ALTER",
+    "ADD",
+    "COLUMN",
+    "JOIN",
+    "INNER",
+    "LEFT",
+    "RIGHT",
+    "FULL",
+    "OUTER",
+    "CROSS",
+    "ON",
+    "USING",
+    "GROUP",
+    "BY",
+    "ORDER",
+    "HAVING",
+    "LIMIT",
+    "OFFSET",
+    "DISTINCT",
+    "AS",
+    "AND",
+    "OR",
+    "NOT",
+    "NULL",
+    "IS",
+    "IN",
+    "LIKE",
+    "ILIKE",
+    "BETWEEN",
+    "EXISTS",
+    "UNION",
+    "ALL",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "ASC",
+    "DESC",
+    "COUNT",
+    "SUM",
+    "AVG",
+    "MIN",
+    "MAX",
+    "PRIMARY",
+    "KEY",
+    "FOREIGN",
+    "REFERENCES",
+    "UNIQUE",
+    "DEFAULT",
+    "WITH",
+    "PRAGMA",
+    "EXPLAIN",
+    "BEGIN",
+    "COMMIT",
+    "ROLLBACK",
+    "TRANSACTION",
+    "INT",
+    "INTEGER",
+    "TEXT",
+    "REAL",
+    "BLOB",
+    "BOOLEAN",
+    "VARCHAR",
+    "TIMESTAMP",
+    "DATE",
+    "TRUE",
+    "FALSE",
+    "CAST",
+    "COALESCE",
 ];

@@ -13,7 +13,7 @@ fallback everywhere, and all cell/column content is UTF-8 with no truncation.
 
 - Connection manager: add / edit / save / delete connections. Non-secret fields persist to a
   JSON config; **passwords are stored in the OS keychain, never in plaintext**.
-- Connect to **PostgreSQL** and **SQLite**.
+- Connect to **PostgreSQL**, **MySQL / MariaDB**, and **SQLite**.
 - Left panel schema browser: database → tables → columns (with PK / nullability / type) and
   indexes. Filter tables by name.
 - SQL editor with a **Run** button and **Cmd/Ctrl+Enter** shortcut.
@@ -41,9 +41,9 @@ plusplus/
 Key design points:
 
 - **`Database` trait** (`core::Database`) abstracts over backends: `kind`, `introspect`,
-  `execute`. Implemented for Postgres and SQLite. The rest of the app only ever holds an
-  `Arc<dyn Database>`, so adding MySQL/MSSQL later means one new module + one match arm in
-  `core::connect` — no UI changes.
+  `execute`. Implemented for PostgreSQL, MySQL / MariaDB, and SQLite. The rest of the app
+  only ever holds an `Arc<dyn Database>`, so new SQL backends are added as one backend
+  module plus one match arm in `core::connect`.
 - **Backend-agnostic rows**: every backend decodes its native types into a common
   `core::Value` enum (`Null`/`Bool`/`Int`/`Float`/`Text`/`Bytes`), so the UI and analysis
   layers never depend on a specific driver.
@@ -81,14 +81,14 @@ A small SQLite database with mixed Thai/English data lives at `examples/sample.s
    `SELECT city, COUNT(*) FROM customers GROUP BY city;`
 5. Click a column header to sort. Thai text renders in headers, cells, and the editor.
 
-### Connecting to PostgreSQL
+### Connecting to PostgreSQL, MySQL, or MariaDB
 
 Use the connection dialog (host / port / user / password / database). The password is saved
 to your OS keychain under the service `plusplus`.
 
 ## Tech stack
 
-GUI `eframe`/`egui` + `egui_extras` · async `tokio` · DB `sqlx` (postgres + sqlite) ·
+GUI `eframe`/`egui` + `egui_extras` · async `tokio` · DB `sqlx` (postgres + mysql + sqlite) ·
 secrets `keyring` · file dialogs `rfd` · clipboard `arboard` · errors `thiserror`/`anyhow`.
 Versions are pinned in the root `Cargo.toml`. (`polars` and `egui_plot` arrive in Phase 2.)
 

@@ -37,7 +37,12 @@ icon_fns! {
 }
 
 /// Build a themed image widget for an icon at the given size.
-fn image(ui: &egui::Ui, src: ImageSource<'static>, size: f32, tint: egui::Color32) -> egui::Image<'static> {
+fn image(
+    ui: &egui::Ui,
+    src: ImageSource<'static>,
+    size: f32,
+    tint: egui::Color32,
+) -> egui::Image<'static> {
     let _ = ui;
     egui::Image::new(src)
         .fit_to_exact_size(egui::vec2(size, size))
@@ -68,7 +73,12 @@ pub fn show_colored(
 }
 
 /// A text button with a leading icon.
-pub fn button(ui: &mut egui::Ui, src: ImageSource<'static>, text: &str, enabled: bool) -> egui::Response {
+pub fn button(
+    ui: &mut egui::Ui,
+    src: ImageSource<'static>,
+    text: &str,
+    enabled: bool,
+) -> egui::Response {
     let tint = ui.visuals().widgets.inactive.fg_stroke.color;
     let img = image(ui, src, SIZE, tint);
     ui.add_enabled(enabled, egui::Button::image_and_text(img, text))
@@ -85,7 +95,9 @@ pub fn primary_button(
     let img = image(ui, src, SIZE, palette::ON_ACCENT());
     let btn = egui::Button::image_and_text(
         img,
-        egui::RichText::new(text).color(palette::ON_ACCENT()).strong(),
+        egui::RichText::new(text)
+            .color(palette::ON_ACCENT())
+            .strong(),
     )
     .fill(palette::ACCENT())
     .stroke(egui::Stroke::new(1.0, palette::ACCENT_HOVER()));

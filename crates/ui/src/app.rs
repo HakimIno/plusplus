@@ -12,9 +12,9 @@ use dbcore::{ConnectionConfig, Database, DbKind, QueryResult, SchemaTree};
 
 use crate::filter::{self, FilterEvent, FilterState};
 use crate::grid::results_grid;
+use crate::icons;
 use crate::style::{self, palette};
 use crate::theme::ThemeId;
-use crate::icons;
 
 /// Messages sent from background tasks back to the UI thread.
 enum AppMessage {
@@ -55,10 +55,24 @@ struct ConnEditor {
     edit_index: Option<usize>,
 }
 
+fn compact_connection_label(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return "DB".to_string();
+    }
+    let mut label: String = trimmed.chars().take(7).collect();
+    if trimmed.chars().count() > 7 {
+        label.push('…');
+    }
+    label
+}
+
 /// Deferred UI actions. Collected from panel closures (which only borrow individual
 /// fields) and applied afterwards with full `&mut self`, sidestepping borrow conflicts.
 enum Action {
     Connect(usize),
+    SelectActive(usize),
+    CloseActive(usize),
     Disconnect,
     NewConnection,
     EditConnection(usize),
@@ -83,7 +97,8 @@ pub struct DbGuiApp {
 
     // --- connection state ---
     selected_conn: Option<usize>,
-    active: Option<ActiveConnection>,
+    active_connections: Vec<ActiveConnection>,
+    active_tab: Option<usize>,
 
     // --- editor / results ---
     sql: String,
@@ -154,7 +169,8 @@ impl DbGuiApp {
             rx,
             busy: Busy::Idle,
             selected_conn: None,
-            active: None,
+            active_connections: Vec::new(),
+            active_tab: None,
             sql: "SELECT 1;".to_string(),
             result: None,
             row_order: Vec::new(),
@@ -174,9 +190,57 @@ impl DbGuiApp {
         self.theme = id;
         crate::theme::set_current(id);
         crate::style::apply(ctx);
-        let settings = dbcore::config::Settings { theme: Some(id.key().to_string()) };
+        let settings = dbcore::config::Settings {
+            theme: Some(id.key().to_string()),
+        };
         if let Err(e) = dbcore::config::save_settings(&settings) {
             self.error = Some(format!("Could not save theme: {e}"));
+        }
+    }
+
+    fn active(&self) -> Option<&ActiveConnection> {
+        self.active_tab
+            .and_then(|idx| self.active_connections.get(idx))
+    }
+
+    fn set_active_tab(&mut self, idx: usize) {
+        if idx >= self.active_connections.len() {
+            return;
+        }
+        self.active_tab = Some(idx);
+        let conn_id = &self.active_connections[idx].config_id;
+        self.selected_conn = self.connections.iter().position(|cfg| &cfg.id == conn_id);
+        self.result = None;
+        self.row_order.clear();
+        self.sort = None;
+        self.selected_row = None;
+        self.status_msg = format!("Switched to {}", self.active_connections[idx].name);
+        self.error = None;
+    }
+
+    fn close_active_tab(&mut self, idx: usize) {
+        if idx >= self.active_connections.len() {
+            return;
+        }
+        self.active_connections.remove(idx);
+        self.result = None;
+        self.row_order.clear();
+        self.sort = None;
+        self.selected_row = None;
+
+        self.active_tab = match self.active_connections.len() {
+            0 => {
+                self.selected_conn = None;
+                None
+            }
+            len => Some(idx.min(len - 1)),
+        };
+        if let Some(active_idx) = self.active_tab {
+            let conn_id = &self.active_connections[active_idx].config_id;
+            self.selected_conn = self.connections.iter().position(|cfg| &cfg.id == conn_id);
+            self.status_msg = format!("Switched to {}", self.active_connections[active_idx].name);
+        } else {
+            self.status_msg = "Disconnected".to_string();
         }
     }
 
@@ -185,22 +249,36 @@ impl DbGuiApp {
     fn poll_messages(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                AppMessage::Connected { conn_id, name, result } => {
+                AppMessage::Connected {
+                    conn_id,
+                    name,
+                    result,
+                } => {
                     self.busy = Busy::Idle;
                     match result {
                         Ok((db, schema)) => {
                             let n = schema.tables.len();
-                            self.active = Some(ActiveConnection {
+                            let active = ActiveConnection {
                                 config_id: conn_id,
                                 name: name.clone(),
                                 db,
                                 schema,
-                            });
+                            };
+                            if let Some(idx) = self
+                                .active_connections
+                                .iter()
+                                .position(|conn| conn.config_id == active.config_id)
+                            {
+                                self.active_connections[idx] = active;
+                                self.active_tab = Some(idx);
+                            } else {
+                                self.active_connections.push(active);
+                                self.active_tab = Some(self.active_connections.len() - 1);
+                            }
                             self.status_msg = format!("Connected to {name} — {n} tables");
                             self.error = None;
                         }
                         Err(e) => {
-                            self.active = None;
                             self.error = Some(format!("Connection failed: {e}"));
                             self.status_msg = "Connection failed".to_string();
                         }
@@ -255,7 +333,11 @@ impl DbGuiApp {
             if col < result.column_count() {
                 order.sort_by(|&a, &b| {
                     let ord = result.rows[a][col].sort_cmp(&result.rows[b][col]);
-                    if ascending { ord } else { ord.reverse() }
+                    if ascending {
+                        ord
+                    } else {
+                        ord.reverse()
+                    }
                 });
             }
         }
@@ -299,7 +381,7 @@ impl DbGuiApp {
     }
 
     fn start_query(&mut self) {
-        let Some(active) = &self.active else {
+        let Some(active) = self.active() else {
             self.error = Some("Not connected.".to_string());
             return;
         };
@@ -337,10 +419,12 @@ impl DbGuiApp {
     fn apply_action(&mut self, action: Action) {
         match action {
             Action::Connect(i) => self.start_connect(i),
+            Action::SelectActive(i) => self.set_active_tab(i),
+            Action::CloseActive(i) => self.close_active_tab(i),
             Action::Disconnect => {
-                self.active = None;
-                self.result = None;
-                self.status_msg = "Disconnected".to_string();
+                if let Some(idx) = self.active_tab {
+                    self.close_active_tab(idx);
+                }
             }
             Action::NewConnection => {
                 self.editor = Some(ConnEditor {
@@ -373,6 +457,20 @@ impl DbGuiApp {
                     }
                     if self.selected_conn == Some(i) {
                         self.selected_conn = None;
+                    }
+                    let active_before = self.active().map(|active| active.config_id.clone());
+                    self.active_connections
+                        .retain(|conn| conn.config_id != cfg.id);
+                    if self.active_connections.is_empty() {
+                        self.active_tab = None;
+                    } else if let Some(tab) = self.active_tab {
+                        self.active_tab = Some(tab.min(self.active_connections.len() - 1));
+                    }
+                    if active_before.as_deref() == Some(cfg.id.as_str()) {
+                        self.result = None;
+                        self.row_order.clear();
+                        self.sort = None;
+                        self.selected_row = None;
                     }
                 }
             }
@@ -436,7 +534,8 @@ impl DbGuiApp {
             actions.push(Action::RunQuery);
         }
         // Cmd/Ctrl+F toggles the filter bar (when there's a result to filter); Esc hides it.
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) && self.result.is_some()
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F))
+            && self.result.is_some()
         {
             self.filter.visible = !self.filter.visible;
         }
@@ -448,6 +547,7 @@ impl DbGuiApp {
         self.top_bar(ui_root, &mut actions);
         self.query_console(ui_root, &mut actions);
         self.status_bar(ui_root);
+        self.connection_tabs(ui_root, &mut actions);
         self.left_panel(ui_root, &mut actions);
         self.right_panel(ui_root);
         // A top panel after left/right carves the strip directly above the grid.
@@ -471,10 +571,10 @@ impl DbGuiApp {
 impl DbGuiApp {
     fn top_bar(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
         egui::Panel::top("top_bar").show_inside(root, |ui| {
-            ui.add_space(7.0);
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.add_space(2.0);
-                let connected = self.active.is_some();
+                let connected = self.active().is_some();
                 let can_run = connected && self.busy == Busy::Idle;
                 if icons::primary_button(ui, icons::play(), "Run", can_run)
                     .on_hover_text("Run query  (Cmd/Ctrl+Enter)")
@@ -504,7 +604,7 @@ impl DbGuiApp {
                 ui.add_space(4.0);
 
                 // Breadcrumb: ● connection › database.
-                if let Some(active) = &self.active {
+                if let Some(active) = self.active() {
                     style::status_dot(ui, palette::SUCCESS());
                     ui.add_space(1.0);
                     ui.strong(&active.name);
@@ -513,7 +613,10 @@ impl DbGuiApp {
                 } else {
                     style::status_dot(ui, palette::TEXT_FAINT());
                     ui.add_space(1.0);
-                    ui.colored_label(palette::TEXT_WEAK(), "Not connected — pick a connection on the left");
+                    ui.colored_label(
+                        palette::TEXT_WEAK(),
+                        "Not connected — pick a connection on the left",
+                    );
                 }
 
                 // Theme picker + busy indicator, right-aligned.
@@ -535,7 +638,7 @@ impl DbGuiApp {
                     }
                 });
             });
-            ui.add_space(7.0);
+            ui.add_space(4.0);
         });
     }
 
@@ -598,7 +701,7 @@ impl DbGuiApp {
                 ui.horizontal(|ui| {
                     style::section_header(ui, "Query");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let can_run = self.active.is_some() && self.busy == Busy::Idle;
+                        let can_run = self.active().is_some() && self.busy == Busy::Idle;
                         if icons::primary_button(ui, icons::play(), "Run", can_run)
                             .on_hover_text("Cmd/Ctrl+Enter")
                             .clicked()
@@ -611,12 +714,11 @@ impl DbGuiApp {
 
                 // Syntax-highlighting layouter for the editor.
                 let font = egui::TextStyle::Monospace.resolve(ui.style());
-                let mut layouter =
-                    |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
-                        let mut job = crate::highlight::highlight_sql(buf.as_str(), font.clone());
-                        job.wrap.max_width = wrap_width;
-                        ui.ctx().fonts_mut(|f| f.layout_job(job))
-                    };
+                let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+                    let mut job = crate::highlight::highlight_sql(buf.as_str(), font.clone());
+                    job.wrap.max_width = wrap_width;
+                    ui.ctx().fonts_mut(|f| f.layout_job(job))
+                };
 
                 egui::ScrollArea::vertical()
                     .id_salt("sql_scroll")
@@ -675,14 +777,77 @@ impl DbGuiApp {
                                     if value.is_null() {
                                         ui.weak("NULL");
                                     } else {
-                                        ui.add(
-                                            egui::Label::new(value.display())
-                                                .wrap(),
-                                        );
+                                        ui.add(egui::Label::new(value.display()).wrap());
                                     }
                                     ui.end_row();
                                 }
                             });
+                    });
+            });
+    }
+
+    fn connection_tabs(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
+        egui::Panel::left("connection_tabs")
+            .resizable(false)
+            .exact_size(66.0)
+            .show_inside(root, |ui| {
+                ui.add_space(6.0);
+                ui.vertical_centered(|ui| {
+                    if icons::icon_button(ui, icons::plus(), "New connection").clicked() {
+                        actions.push(Action::NewConnection);
+                    }
+                });
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                egui::ScrollArea::vertical()
+                    .id_salt("active_connection_tabs")
+                    .show(ui, |ui| {
+                        for (idx, conn) in self.active_connections.iter().enumerate() {
+                            let selected = self.active_tab == Some(idx);
+                            let label = compact_connection_label(&conn.name);
+                            let fill = if selected {
+                                palette::SELECTION()
+                            } else {
+                                palette::SURFACE()
+                            };
+                            let stroke = if selected {
+                                egui::Stroke::new(1.0, palette::ACCENT())
+                            } else {
+                                egui::Stroke::new(1.0, palette::BORDER())
+                            };
+                            let text = egui::RichText::new(label).size(10.5).color(if selected {
+                                palette::TEXT()
+                            } else {
+                                palette::TEXT_WEAK()
+                            });
+                            let resp = ui
+                                .add_sized(
+                                    egui::vec2(56.0, 36.0),
+                                    egui::Button::new(text).fill(fill).stroke(stroke),
+                                )
+                                .on_hover_text(format!(
+                                    "{}\n{}",
+                                    conn.name, conn.schema.database_name
+                                ));
+                            if resp.clicked() {
+                                actions.push(Action::SelectActive(idx));
+                            }
+                            resp.context_menu(|ui| {
+                                if icons::button(ui, icons::close(), "Close tab", true).clicked() {
+                                    actions.push(Action::CloseActive(idx));
+                                    ui.close();
+                                }
+                            });
+                            ui.add_space(4.0);
+                        }
+
+                        if self.active_connections.is_empty() {
+                            ui.vertical_centered(|ui| {
+                                icons::show_weak(ui, icons::database(), 18.0);
+                            });
+                        }
                     });
             });
     }
@@ -708,10 +873,16 @@ impl DbGuiApp {
                     .show(ui, |ui| {
                         for (i, conn) in self.connections.iter().enumerate() {
                             let selected = self.selected_conn == Some(i);
-                            let is_active = self.active.is_some() && selected;
+                            let is_active = self
+                                .active()
+                                .is_some_and(|active| active.config_id == conn.id);
                             let resp = ui
                                 .horizontal(|ui| {
-                                    let dot = if is_active { palette::SUCCESS() } else { palette::TEXT_FAINT() };
+                                    let dot = if is_active {
+                                        palette::SUCCESS()
+                                    } else {
+                                        palette::TEXT_FAINT()
+                                    };
                                     style::status_dot(ui, dot);
                                     ui.add_space(2.0);
                                     ui.selectable_label(selected, &conn.name)
@@ -720,20 +891,23 @@ impl DbGuiApp {
                             if resp.clicked() {
                                 actions.push(Action::Connect(i));
                             }
-                            resp.on_hover_text(conn.target_summary()).context_menu(|ui| {
-                                if icons::button(ui, icons::connect(), "Connect", true).clicked() {
-                                    actions.push(Action::Connect(i));
-                                    ui.close();
-                                }
-                                if icons::button(ui, icons::edit(), "Edit…", true).clicked() {
-                                    actions.push(Action::EditConnection(i));
-                                    ui.close();
-                                }
-                                if icons::button(ui, icons::trash(), "Delete", true).clicked() {
-                                    actions.push(Action::DeleteConnection(i));
-                                    ui.close();
-                                }
-                            });
+                            resp.on_hover_text(conn.target_summary())
+                                .context_menu(|ui| {
+                                    if icons::button(ui, icons::connect(), "Connect", true)
+                                        .clicked()
+                                    {
+                                        actions.push(Action::Connect(i));
+                                        ui.close();
+                                    }
+                                    if icons::button(ui, icons::edit(), "Edit…", true).clicked() {
+                                        actions.push(Action::EditConnection(i));
+                                        ui.close();
+                                    }
+                                    if icons::button(ui, icons::trash(), "Delete", true).clicked() {
+                                        actions.push(Action::DeleteConnection(i));
+                                        ui.close();
+                                    }
+                                });
                         }
                         if self.connections.is_empty() {
                             ui.add_space(4.0);
@@ -762,9 +936,12 @@ impl DbGuiApp {
     }
 
     fn schema_tree(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        let Some(active) = &self.active else {
+        let Some(active) = self.active() else {
             ui.add_space(4.0);
-            ui.colored_label(palette::TEXT_FAINT(), "Connect to a database to browse its schema.");
+            ui.colored_label(
+                palette::TEXT_FAINT(),
+                "Connect to a database to browse its schema.",
+            );
             return;
         };
 
@@ -782,49 +959,49 @@ impl DbGuiApp {
             }
             let id = ui.make_persistent_id(("tbl", table.name.as_str()));
             let (_toggle, header, _body) =
-                egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
-                    .show_header(ui, |ui| {
-                        icons::show_weak(ui, icons::table(), 15.0);
-                        ui.add_space(2.0);
-                        ui.add(
-                            egui::Label::new(table.name.as_str())
-                                .sense(egui::Sense::click())
-                                .selectable(false),
-                        )
-                    })
-                    .body(|ui| {
-                        // Columns.
-                        for col in &table.columns {
+                egui::collapsing_header::CollapsingState::load_with_default_open(
+                    ui.ctx(),
+                    id,
+                    false,
+                )
+                .show_header(ui, |ui| {
+                    icons::show_weak(ui, icons::table(), 15.0);
+                    ui.add_space(2.0);
+                    ui.add(
+                        egui::Label::new(table.name.as_str())
+                            .sense(egui::Sense::click())
+                            .selectable(false),
+                    )
+                })
+                .body(|ui| {
+                    // Columns.
+                    for col in &table.columns {
+                        ui.horizontal(|ui| {
+                            let glyph = if col.primary_key {
+                                icons::key()
+                            } else {
+                                icons::column()
+                            };
+                            icons::show_weak(ui, glyph, 13.0);
+                            ui.add_space(2.0);
+                            ui.label(col.name.as_str());
+                            let nn = if col.nullable { "" } else { " · not null" };
+                            ui.weak(format!("{}{nn}", col.data_type));
+                        });
+                    }
+                    // Indexes.
+                    if !table.indexes.is_empty() {
+                        ui.add_space(3.0);
+                        for idx in &table.indexes {
                             ui.horizontal(|ui| {
-                                let glyph = if col.primary_key {
-                                    icons::key()
-                                } else {
-                                    icons::column()
-                                };
-                                icons::show_weak(ui, glyph, 13.0);
+                                icons::show_weak(ui, icons::index(), 13.0);
                                 ui.add_space(2.0);
-                                ui.label(col.name.as_str());
-                                let nn = if col.nullable { "" } else { " · not null" };
-                                ui.weak(format!("{}{nn}", col.data_type));
+                                let u = if idx.unique { "unique " } else { "" };
+                                ui.weak(format!("{u}{} ({})", idx.name, idx.columns.join(", ")));
                             });
                         }
-                        // Indexes.
-                        if !table.indexes.is_empty() {
-                            ui.add_space(3.0);
-                            for idx in &table.indexes {
-                                ui.horizontal(|ui| {
-                                    icons::show_weak(ui, icons::index(), 13.0);
-                                    ui.add_space(2.0);
-                                    let u = if idx.unique { "unique " } else { "" };
-                                    ui.weak(format!(
-                                        "{u}{} ({})",
-                                        idx.name,
-                                        idx.columns.join(", ")
-                                    ));
-                                });
-                            }
-                        }
-                    });
+                    }
+                });
 
             let resp = header.inner.on_hover_text("Click to preview rows");
             if resp.clicked() {
@@ -870,40 +1047,34 @@ impl DbGuiApp {
     }
 
     fn central_panel(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
-        egui::CentralPanel::default().show_inside(root, |ui| {
-            match &self.result {
-                Some(result) if result.column_count() > 0 => {
-                    let resp = results_grid(
-                        ui,
-                        result,
-                        &self.row_order,
-                        self.sort,
-                        self.selected_row,
-                    );
-                    if let Some(col) = resp.sort {
-                        actions.push(Action::SortBy(col));
-                    }
-                    if let Some(row) = resp.selected {
-                        self.selected_row = Some(row);
-                    }
+        egui::CentralPanel::default().show_inside(root, |ui| match &self.result {
+            Some(result) if result.column_count() > 0 => {
+                let resp = results_grid(ui, result, &self.row_order, self.sort, self.selected_row);
+                if let Some(col) = resp.sort {
+                    actions.push(Action::SortBy(col));
                 }
-                Some(_) => {
-                    style::empty_state(ui, icons::table(), "No columns", &self.status_msg);
+                if let Some(row) = resp.selected {
+                    self.selected_row = Some(row);
                 }
-                None => {
-                    style::empty_state(
-                        ui,
-                        icons::play(),
-                        "No results yet",
-                        "Write a query below and press Run (Cmd/Ctrl+Enter)",
-                    );
-                }
+            }
+            Some(_) => {
+                style::empty_state(ui, icons::table(), "No columns", &self.status_msg);
+            }
+            None => {
+                style::empty_state(
+                    ui,
+                    icons::play(),
+                    "No results yet",
+                    "Write a query below and press Run (Cmd/Ctrl+Enter)",
+                );
             }
         });
     }
 
     fn connection_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
-        let Some(editor) = &mut self.editor else { return };
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
         let title = if editor.is_new {
             "New Connection"
         } else {
@@ -928,6 +1099,7 @@ impl DbGuiApp {
                         ui.end_row();
 
                         ui.label("Type");
+                        let previous_kind = editor.config.kind;
                         egui::ComboBox::from_id_salt("kind")
                             .selected_text(editor.config.kind.label())
                             .show_ui(ui, |ui| {
@@ -938,10 +1110,23 @@ impl DbGuiApp {
                                 );
                                 ui.selectable_value(
                                     &mut editor.config.kind,
+                                    DbKind::MySql,
+                                    "MySQL",
+                                );
+                                ui.selectable_value(
+                                    &mut editor.config.kind,
+                                    DbKind::MariaDb,
+                                    "MariaDB",
+                                );
+                                ui.selectable_value(
+                                    &mut editor.config.kind,
                                     DbKind::Sqlite,
                                     "SQLite",
                                 );
                             });
+                        if editor.config.kind != previous_kind {
+                            editor.config.port = editor.config.kind.default_port();
+                        }
                         ui.end_row();
 
                         if editor.config.kind.is_server() {
@@ -966,7 +1151,7 @@ impl DbGuiApp {
                                 egui::TextEdit::singleline(&mut editor.password)
                                     .password(true)
                                     .vertical_align(egui::Align::Center)
-                                    .margin(egui::Margin::symmetric(8, 0)),
+                                    .margin(egui::Margin::symmetric(6, 0)),
                             );
                             ui.end_row();
 
@@ -1061,9 +1246,17 @@ mod tests {
             })
             .collect();
         let data = (0..rows)
-            .map(|r| (0..cols).map(|c| Value::Int((r * cols + c) as i64)).collect())
+            .map(|r| {
+                (0..cols)
+                    .map(|c| Value::Int((r * cols + c) as i64))
+                    .collect()
+            })
             .collect();
-        QueryResult { columns, rows: data, stats: QueryStats::default() }
+        QueryResult {
+            columns,
+            rows: data,
+            stats: QueryStats::default(),
+        }
     }
 
     fn collect_clash_text(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
@@ -1155,12 +1348,13 @@ mod tests {
         app.selected_row = Some(7); // render the Details panel
         app.filter.visible = true; // render the filter bar too
         let db: std::sync::Arc<dyn dbcore::Database> = std::sync::Arc::new(DummyDb);
-        app.active = Some(ActiveConnection {
+        app.active_connections.push(ActiveConnection {
             config_id: "test".into(),
             name: "test-conn".into(),
             db,
             schema: fake_schema(15, 5),
         });
+        app.active_tab = Some(0);
 
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
         let mut clashes: Vec<String> = Vec::new();

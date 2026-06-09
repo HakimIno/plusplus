@@ -37,7 +37,10 @@ pub fn load_connections() -> Result<Vec<ConnectionConfig>> {
     match std::fs::read(&path) {
         Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(CoreError::Config(format!("reading {}: {e}", path.display()))),
+        Err(e) => Err(CoreError::Config(format!(
+            "reading {}: {e}",
+            path.display()
+        ))),
     }
 }
 
@@ -76,7 +79,10 @@ pub fn save_settings(settings: &Settings) -> Result<()> {
 
 /// Serialise `value` to pretty JSON and write it to `path` atomically (temp file + rename),
 /// creating the config directory if needed.
-fn write_json_atomic<T: serde::Serialize + ?Sized>(path: &std::path::Path, value: &T) -> Result<()> {
+fn write_json_atomic<T: serde::Serialize + ?Sized>(
+    path: &std::path::Path,
+    value: &T,
+) -> Result<()> {
     let dir = config_dir()?;
     std::fs::create_dir_all(&dir)
         .map_err(|e| CoreError::Config(format!("creating {}: {e}", dir.display())))?;

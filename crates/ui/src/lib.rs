@@ -28,7 +28,11 @@ pub fn install_fonts(ctx: &egui::Context, thai_font: &[u8]) {
         std::sync::Arc::new(FontData::from_owned(thai_font.to_vec())),
     );
     for family in [FontFamily::Proportional, FontFamily::Monospace] {
-        fonts.families.entry(family).or_default().push("noto_thai".to_owned());
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("noto_thai".to_owned());
     }
     ctx.set_fonts(fonts);
 }

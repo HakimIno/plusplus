@@ -33,6 +33,14 @@ pub(crate) fn returns_rows(sql: &str) -> bool {
         .to_ascii_lowercase();
     matches!(
         first.as_str(),
-        "select" | "with" | "show" | "pragma" | "explain" | "values" | "table"
+        "select"
+            | "with"
+            | "show"
+            | "describe"
+            | "desc"
+            | "pragma"
+            | "explain"
+            | "values"
+            | "table"
     )
 }

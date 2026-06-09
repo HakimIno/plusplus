@@ -23,47 +23,83 @@ pub mod palette {
 
     // --- surfaces (darkest → lightest, for a dark theme) ---
     /// App / window background.
-    pub fn BASE() -> Color32 { current().base }
+    pub fn BASE() -> Color32 {
+        current().base
+    }
     /// Side and tool panels.
-    pub fn PANEL() -> Color32 { current().panel }
+    pub fn PANEL() -> Color32 {
+        current().panel
+    }
     /// Raised controls: buttons, inputs, list items.
-    pub fn SURFACE() -> Color32 { current().surface }
+    pub fn SURFACE() -> Color32 {
+        current().surface
+    }
     /// Hover state for raised controls.
-    pub fn SURFACE_HOVER() -> Color32 { current().surface_hover }
+    pub fn SURFACE_HOVER() -> Color32 {
+        current().surface_hover
+    }
     /// Code / text-edit background (the deepest well).
-    pub fn CODE_BG() -> Color32 { current().code_bg }
+    pub fn CODE_BG() -> Color32 {
+        current().code_bg
+    }
     /// Striped / alternate rows.
-    pub fn STRIPE() -> Color32 { current().stripe }
+    pub fn STRIPE() -> Color32 {
+        current().stripe
+    }
     /// Selected-row / selection fill (accent-tinted, opaque so it reads on any surface).
-    pub fn SELECTION() -> Color32 { current().selection }
+    pub fn SELECTION() -> Color32 {
+        current().selection
+    }
 
     // --- borders ---
-    pub fn BORDER() -> Color32 { current().border }
-    pub fn BORDER_STRONG() -> Color32 { current().border_strong }
+    pub fn BORDER() -> Color32 {
+        current().border
+    }
+    pub fn BORDER_STRONG() -> Color32 {
+        current().border_strong
+    }
 
     // --- text ---
-    pub fn TEXT() -> Color32 { current().text }
-    pub fn TEXT_WEAK() -> Color32 { current().text_weak }
-    pub fn TEXT_FAINT() -> Color32 { current().text_faint }
+    pub fn TEXT() -> Color32 {
+        current().text
+    }
+    pub fn TEXT_WEAK() -> Color32 {
+        current().text_weak
+    }
+    pub fn TEXT_FAINT() -> Color32 {
+        current().text_faint
+    }
 
     // --- accent ---
-    pub fn ACCENT() -> Color32 { current().accent }
-    pub fn ACCENT_HOVER() -> Color32 { current().accent_hover }
+    pub fn ACCENT() -> Color32 {
+        current().accent
+    }
+    pub fn ACCENT_HOVER() -> Color32 {
+        current().accent_hover
+    }
     /// Text/icon colour that sits on top of an accent fill.
-    pub fn ON_ACCENT() -> Color32 { current().on_accent }
+    pub fn ON_ACCENT() -> Color32 {
+        current().on_accent
+    }
 
     // --- semantic ---
-    pub fn SUCCESS() -> Color32 { current().success }
-    pub fn DANGER() -> Color32 { current().danger }
+    pub fn SUCCESS() -> Color32 {
+        current().success
+    }
+    pub fn DANGER() -> Color32 {
+        current().danger
+    }
     /// Part of the token set for completeness; reserved for non-fatal notices.
-    pub fn WARNING() -> Color32 { current().warning }
+    pub fn WARNING() -> Color32 {
+        current().warning
+    }
 }
 
 /// Shared height (in points) for form controls — text inputs, dropdowns, and buttons all
 /// line up to this so a row of them reads as one clean band. This is the single knob for the
 /// whole app's control sizing: change it here and every control follows. Buttons/combos pick
 /// it up via `spacing.interact_size.y` (set in [`apply`]); text fields via [`text_input`].
-pub const CONTROL_H: f32 = 30.0;
+pub const CONTROL_H: f32 = 24.0;
 
 /// Apply the plusplus look to a context.
 pub fn apply(ctx: &egui::Context) {
@@ -71,27 +107,40 @@ pub fn apply(ctx: &egui::Context) {
 
     let mut style = (*ctx.global_style()).clone();
 
-    // Roomier, more readable type scale.
+    // Compact, minimal type scale — small but still readable.
     style.text_styles = [
-        (TextStyle::Heading, FontId::new(18.0, FontFamily::Proportional)),
-        (TextStyle::Body, FontId::new(13.5, FontFamily::Proportional)),
-        (TextStyle::Button, FontId::new(13.5, FontFamily::Proportional)),
-        (TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace)),
-        (TextStyle::Small, FontId::new(11.0, FontFamily::Proportional)),
+        (
+            TextStyle::Heading,
+            FontId::new(15.0, FontFamily::Proportional),
+        ),
+        (TextStyle::Body, FontId::new(12.5, FontFamily::Proportional)),
+        (
+            TextStyle::Button,
+            FontId::new(12.5, FontFamily::Proportional),
+        ),
+        (
+            TextStyle::Monospace,
+            FontId::new(12.0, FontFamily::Monospace),
+        ),
+        (
+            TextStyle::Small,
+            FontId::new(10.5, FontFamily::Proportional),
+        ),
     ]
     .into();
 
-    // Spacing.
+    // Spacing — tight and even for a clean, dense look.
     let s = &mut style.spacing;
-    s.item_spacing = egui::vec2(8.0, 6.0);
-    s.button_padding = egui::vec2(10.0, 6.0);
-    s.menu_margin = Margin::same(6);
-    s.indent = 16.0;
+    s.item_spacing = egui::vec2(5.0, 4.0);
+    s.button_padding = egui::vec2(7.0, 2.0);
+    s.menu_margin = Margin::same(5);
+    s.indent = 14.0;
     // Buttons and combo boxes adopt the shared control height from here.
     s.interact_size.y = CONTROL_H;
-    s.window_margin = Margin::same(14);
-    s.scroll.bar_width = 9.0;
-    s.scroll.bar_inner_margin = 3.0;
+    s.combo_width = 0.0; // let combos size to their content/width hint, not a min
+    s.window_margin = Margin::same(12);
+    s.scroll.bar_width = 8.0;
+    s.scroll.bar_inner_margin = 2.0;
 
     // Silence egui's developer debug overlays, which are on by default in debug builds
     // (`cfg!(debug_assertions)`). Two of them fire on our virtualized results grid during
@@ -116,7 +165,11 @@ pub fn apply(ctx: &egui::Context) {
 
 fn visuals() -> egui::Visuals {
     let t = crate::theme::current();
-    let mut v = if t.is_dark { egui::Visuals::dark() } else { egui::Visuals::light() };
+    let mut v = if t.is_dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
 
     v.panel_fill = t.panel;
     v.window_fill = t.base;
@@ -147,7 +200,13 @@ fn visuals() -> egui::Visuals {
     v.menu_corner_radius = CornerRadius::same(8);
 
     let w = &mut v.widgets;
-    for state in [&mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open, &mut w.noninteractive] {
+    for state in [
+        &mut w.inactive,
+        &mut w.hovered,
+        &mut w.active,
+        &mut w.open,
+        &mut w.noninteractive,
+    ] {
         state.corner_radius = CornerRadius::same(6);
     }
 
@@ -186,21 +245,15 @@ fn visuals() -> egui::Visuals {
 /// they share one height ([`CONTROL_H`]), padding, and alignment — change the look here and
 /// it propagates everywhere. `width` is the exact outer width; pass `ui.available_width()` to
 /// fill the rest of a row.
-pub fn text_input(
-    ui: &mut egui::Ui,
-    text: &mut String,
-    hint: &str,
-    width: f32,
-) -> egui::Response {
+pub fn text_input(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32) -> egui::Response {
     ui.add_sized(
         egui::vec2(width, CONTROL_H),
         egui::TextEdit::singleline(text)
             .hint_text(hint)
             .vertical_align(egui::Align::Center)
-            .margin(Margin::symmetric(8, 0)),
+            .margin(Margin::symmetric(6, 0)),
     )
 }
-
 
 /// A muted, letter-spaced uppercase section label — the small caption that titles each
 /// panel (CONNECTIONS, SCHEMA, …). Adds a little breathing room above itself.
@@ -233,12 +286,7 @@ pub fn status_dot(ui: &mut egui::Ui, color: Color32) -> egui::Response {
 
 /// A centred empty-state placeholder: a large faint glyph, a title, and a hint line.
 /// Used wherever a panel has nothing to show yet (no results, no selection, …).
-pub fn empty_state(
-    ui: &mut egui::Ui,
-    icon: egui::ImageSource<'static>,
-    title: &str,
-    hint: &str,
-) {
+pub fn empty_state(ui: &mut egui::Ui, icon: egui::ImageSource<'static>, title: &str, hint: &str) {
     ui.add_space((ui.available_height() * 0.30).max(24.0));
     ui.vertical_centered(|ui| {
         ui.add(

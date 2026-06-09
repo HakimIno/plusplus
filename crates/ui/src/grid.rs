@@ -52,7 +52,12 @@ pub fn results_grid(
         .auto_shrink([false, false])
         .column(Column::exact(gutter_w)); // gutter (not resizable)
     for _ in 0..ncols {
-        builder = builder.column(Column::initial(160.0).at_least(40.0).clip(true).resizable(true));
+        builder = builder.column(
+            Column::initial(160.0)
+                .at_least(40.0)
+                .clip(true)
+                .resizable(true),
+        );
     }
 
     builder
@@ -68,7 +73,11 @@ pub fn results_grid(
                         _ => ("", false),
                     };
                     let mut text = egui::RichText::new(format!("{}{arrow}", col.name)).strong();
-                    text = text.color(if sorted { palette::ACCENT() } else { palette::TEXT() });
+                    text = text.color(if sorted {
+                        palette::ACCENT()
+                    } else {
+                        palette::TEXT()
+                    });
                     let label = egui::Label::new(text)
                         .sense(egui::Sense::click())
                         .selectable(false);
@@ -86,13 +95,10 @@ pub fn results_grid(
 
                 // Row-number gutter.
                 row.col(|ui| {
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            ui.add_space(4.0);
-                            ui.weak(egui::RichText::new(format!("{}", disp + 1)).monospace());
-                        },
-                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(4.0);
+                        ui.weak(egui::RichText::new(format!("{}", disp + 1)).monospace());
+                    });
                 });
 
                 for value in &result.rows[r] {
@@ -121,7 +127,11 @@ mod tests {
             })
             .collect();
         let data = (0..rows)
-            .map(|r| (0..cols).map(|c| Value::Int((r * cols + c) as i64)).collect())
+            .map(|r| {
+                (0..cols)
+                    .map(|c| Value::Int((r * cols + c) as i64))
+                    .collect()
+            })
             .collect();
         QueryResult {
             columns,

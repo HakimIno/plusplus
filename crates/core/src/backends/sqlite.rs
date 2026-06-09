@@ -133,12 +133,18 @@ impl SqliteDb {
             let name: String = r.try_get("name").unwrap_or_default();
             let unique = r.try_get::<i64, _>("unique").unwrap_or(0) == 1;
             let cols_q = format!("PRAGMA index_info({})", quote_ident(&name));
-            let col_rows = sqlx::query(AssertSqlSafe(cols_q)).fetch_all(&self.pool).await?;
+            let col_rows = sqlx::query(AssertSqlSafe(cols_q))
+                .fetch_all(&self.pool)
+                .await?;
             let columns = col_rows
                 .iter()
                 .filter_map(|c| c.try_get::<Option<String>, _>("name").ok().flatten())
                 .collect();
-            indexes.push(IndexInfo { name, unique, columns });
+            indexes.push(IndexInfo {
+                name,
+                unique,
+                columns,
+            });
         }
         Ok(indexes)
     }
