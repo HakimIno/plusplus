@@ -25,10 +25,17 @@ enum AppMessage {
         name: String,
         result: Result<(Arc<dyn Database>, SchemaTree), String>,
     },
-    /// A query finished.
-    Queried(Result<QueryResult, String>),
+    /// A query finished. `tab_id` routes the result back to the tab that started it, even
+    /// if the user has since switched tabs.
+    Queried {
+        tab_id: u64,
+        result: Result<QueryResult, String>,
+    },
     /// A batch of staged edits was saved (`Ok` carries the number of rows updated).
-    Committed(Result<usize, String>),
+    Committed {
+        tab_id: u64,
+        result: Result<usize, String>,
+    },
 }
 
 /// What the background runtime is currently doing (drives the spinner / disables buttons).
@@ -49,6 +56,139 @@ struct ActiveConnection {
     schema: SchemaTree,
 }
 
+/// One query tab: an independent SQL editor with its own result, view state, and the
+/// connection it runs against. Tabs are global (a single row above the editor) but each
+/// remembers its own `conn_id`, so switching tabs switches the active connection too.
+struct QueryTab {
+    /// Stable id, used to route async query/commit results back to the right tab.
+    id: u64,
+    /// The table name when this tab was opened from the schema sidebar; empty for a plain
+    /// query tab (which is then labelled by position — see `tab_label`).
+    title: String,
+    /// A transient "preview" tab (single-click on a table): shown in italics and reused for
+    /// the next previewed table. Becomes permanent when its SQL is edited or it's pinned.
+    preview: bool,
+    /// Saved-connection id this tab runs against (`None` ⇒ unbound).
+    conn_id: Option<String>,
+    sql: String,
+    result: Option<QueryResult>,
+    /// Indices into `result.rows` giving the current display order (filter + sort).
+    row_order: Vec<usize>,
+    sort: Option<(usize, bool)>,
+    /// Currently selected display row (drives the Details panel).
+    selected_row: Option<usize>,
+    /// Staged cell edits and the editable source of the current result.
+    edits: Edits,
+    /// TablePlus-style result filter bar (column / operator / value conditions).
+    filter: FilterState,
+}
+
+impl QueryTab {
+    fn new(id: u64, title: String) -> Self {
+        Self {
+            id,
+            title,
+            preview: false,
+            conn_id: None,
+            sql: String::new(),
+            result: None,
+            row_order: Vec::new(),
+            sort: None,
+            selected_row: None,
+            edits: Edits::default(),
+            filter: FilterState::default(),
+        }
+    }
+
+    /// Install a freshly returned result and rebuild the display order.
+    fn set_result(&mut self, res: QueryResult) {
+        self.sort = None;
+        self.selected_row = None;
+        // A fresh result may have a different column count; keep filter conditions but stop
+        // them indexing past the new columns, then rebuild the display order through the
+        // filter (so a still-open filter bar keeps applying).
+        self.filter.clamp_columns(res.column_count());
+        // Classify each column once so the cell editors can be type-aware.
+        self.edits.set_columns(&res.columns);
+        self.result = Some(res);
+        self.recompute_view();
+    }
+
+    /// Rebuild `row_order` from the current result by applying the filter, then the active
+    /// sort. The single place both filtering and sorting funnel through.
+    fn recompute_view(&mut self) {
+        let Some(result) = &self.result else {
+            self.row_order.clear();
+            return;
+        };
+        let mut order = filter::passing_rows(result, &self.filter);
+        if let Some((col, ascending)) = self.sort {
+            if col < result.column_count() {
+                order.sort_by(|&a, &b| {
+                    let ord = result.rows[a][col].sort_cmp(&result.rows[b][col]);
+                    if ascending {
+                        ord
+                    } else {
+                        ord.reverse()
+                    }
+                });
+            }
+        }
+        self.row_order = order;
+        // A row that filtered out can't stay selected.
+        if self.selected_row.is_some_and(|s| s >= self.row_order.len()) {
+            self.selected_row = None;
+        }
+    }
+
+    fn apply_sort(&mut self, col: usize) {
+        let Some(result) = &self.result else { return };
+        if col >= result.column_count() {
+            return;
+        }
+        // Toggle ascending/descending on repeated clicks of the same column.
+        let ascending = match self.sort {
+            Some((c, asc)) if c == col => !asc,
+            _ => true,
+        };
+        self.sort = Some((col, ascending));
+        self.recompute_view();
+    }
+
+    /// Commit the cell currently being typed into the staged set. Returns `false` if its
+    /// value is invalid (the editor stays open), so callers can refuse to proceed.
+    fn flush_active_edit(&mut self) -> bool {
+        let Some(active) = self.edits.active.as_ref() else {
+            return true;
+        };
+        let original = self
+            .result
+            .as_ref()
+            .and_then(|r| r.rows.get(active.row).and_then(|row| row.get(active.col)))
+            .cloned();
+        match original {
+            Some(original) => self.edits.commit_active(&original),
+            None => {
+                self.edits.cancel_active();
+                true
+            }
+        }
+    }
+}
+
+/// Human-readable status line for a completed result.
+fn result_status(res: &QueryResult) -> String {
+    match res.stats.rows_affected {
+        Some(n) => format!("OK — {n} row(s) affected in {:.1} ms", res.stats.elapsed_ms),
+        None => format!(
+            "{} row(s) × {} col(s) in {:.1} ms",
+            res.row_count(),
+            res.column_count(),
+            res.stats.elapsed_ms
+        ),
+    }
+}
+
 /// State for the add/edit-connection dialog.
 struct ConnEditor {
     config: ConnectionConfig,
@@ -61,10 +201,20 @@ struct ConnEditor {
 /// Deferred UI actions. Collected from panel closures (which only borrow individual
 /// fields) and applied afterwards with full `&mut self`, sidestepping borrow conflicts.
 enum Action {
+    /// Bind the active tab to a saved connection and (re)connect it.
     Connect(usize),
-    SelectActive(usize),
-    CloseActive(usize),
+    /// Bind the active tab to an already-live connection (no reconnect).
+    BindConnection(usize),
+    /// Drop the live connection bound to the active tab.
     Disconnect,
+    /// Drop a specific live connection (from its context menu).
+    DisconnectConn(usize),
+    /// Query-tab management.
+    NewTab,
+    SelectTab(usize),
+    CloseTab(usize),
+    /// Pin a preview tab as permanent (double-click on the tab).
+    PinTab(usize),
     NewConnection,
     EditConnection(usize),
     DeleteConnection(usize),
@@ -74,10 +224,12 @@ enum Action {
     CloseSettings,
     BrowseSqlitePath,
     RunQuery,
-    /// Open a table's rows from the sidebar. `source` makes the result editable.
+    /// Open a table's rows from the sidebar. `source` makes the result editable. `pin` opens
+    /// it as a permanent tab (double-click) rather than the reusable italic preview tab.
     OpenTable {
         sql: String,
         source: EditSource,
+        pin: bool,
     },
     SortBy(usize),
 }
@@ -93,27 +245,25 @@ pub struct DbGuiApp {
     busy: Busy,
 
     // --- connection state ---
-    selected_conn: Option<usize>,
+    /// Pool of live connections (one per connected config), shared across tabs.
     active_connections: Vec<ActiveConnection>,
-    active_tab: Option<usize>,
 
-    // --- editor / results ---
-    sql: String,
-    result: Option<QueryResult>,
-    /// Indices into `result.rows` giving the current display order (sorting).
-    row_order: Vec<usize>,
-    sort: Option<(usize, bool)>,
-    /// Currently selected display row (drives the Details panel).
-    selected_row: Option<usize>,
-    /// Staged cell edits and the editable source of the current result.
-    edits: Edits,
+    // --- query tabs ---
+    /// Open query tabs. Always non-empty.
+    tabs: Vec<QueryTab>,
+    active_query_tab: usize,
+    /// Monotonic id source for new tabs.
+    next_tab_id: u64,
+
+    // --- workspace persistence ---
+    /// Set when tabs/SQL/bindings change; flushed to disk on a throttle (see `draw`).
+    workspace_dirty: bool,
+    last_workspace_save: std::time::Instant,
 
     // --- transient UI state ---
     editor: Option<ConnEditor>,
     settings_open: bool,
     schema_filter: String,
-    /// TablePlus-style result filter bar (column / operator / value conditions).
-    filter: FilterState,
     status_msg: String,
     error: Option<String>,
 
@@ -130,7 +280,10 @@ pub struct DbGuiApp {
 impl DbGuiApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // Build state first: `construct` activates the saved theme, which `apply` then reads.
-        let app = Self::construct();
+        let mut app = Self::construct();
+        // Restore the saved workspace (open tabs + their SQL/connection binding). Kept out of
+        // `construct` so tests get a deterministic single-tab app independent of disk state.
+        app.restore_workspace();
 
         // Theme + SVG icon loader (Iconoir icons are embedded SVGs).
         crate::style::apply(&cc.egui_ctx);
@@ -167,25 +320,27 @@ impl DbGuiApp {
             .build()
             .expect("failed to build tokio runtime");
 
+        // Start with a single default query tab. The saved workspace (if any) is layered on
+        // top later by `restore_workspace`, called from `new` (not here, so tests are
+        // deterministic and don't read the user's config dir).
+        let mut default_tab = QueryTab::new(0, String::new());
+        default_tab.sql = "SELECT 1;".to_string();
+
         Self {
             connections,
             rt,
             tx,
             rx,
             busy: Busy::Idle,
-            selected_conn: None,
             active_connections: Vec::new(),
-            active_tab: None,
-            sql: "SELECT 1;".to_string(),
-            result: None,
-            row_order: Vec::new(),
-            sort: None,
-            selected_row: None,
-            edits: Edits::default(),
+            tabs: vec![default_tab],
+            active_query_tab: 0,
+            next_tab_id: 1,
+            workspace_dirty: false,
+            last_workspace_save: std::time::Instant::now(),
             editor: None,
             settings_open: false,
             schema_filter: String::new(),
-            filter: FilterState::default(),
             status_msg: "Ready".to_string(),
             error: None,
             show_connection_tabs: true,
@@ -195,11 +350,53 @@ impl DbGuiApp {
         }
     }
 
+    fn tab(&self) -> &QueryTab {
+        &self.tabs[self.active_query_tab]
+    }
+
+    fn tab_mut(&mut self) -> &mut QueryTab {
+        &mut self.tabs[self.active_query_tab]
+    }
+
+    /// Replace the tabs with the saved workspace, if one exists. We never auto-connect or
+    /// auto-run — tabs come back with their connection selected but idle.
+    fn restore_workspace(&mut self) {
+        let saved = dbcore::config::load_workspace();
+        let mut next_tab_id = 0u64;
+        let tabs: Vec<QueryTab> = saved
+            .tabs
+            .into_iter()
+            .map(|wt| {
+                let id = next_tab_id;
+                next_tab_id += 1;
+                let source = wt.source.map(|s| EditSource {
+                    schema: s.schema,
+                    table: s.table,
+                    pk_cols: s.pk_cols,
+                });
+                // The title is meaningful only for a table tab (the table name); untitled
+                // query tabs are labelled by position in the bar, so we don't bake a number in.
+                let title = source.as_ref().map(|s| s.table.clone()).unwrap_or_default();
+                let mut tab = QueryTab::new(id, title);
+                tab.sql = wt.sql;
+                tab.conn_id = wt.conn_id;
+                tab.edits.source = source;
+                tab
+            })
+            .collect();
+        if tabs.is_empty() {
+            return; // no saved workspace → keep the default tab from `construct`
+        }
+        self.active_query_tab = saved.active_tab.min(tabs.len() - 1);
+        self.next_tab_id = next_tab_id;
+        self.tabs = tabs;
+    }
+
     /// Path string for the unified title-bar breadcrumb.
     fn breadcrumb_text(&self) -> String {
         let Some(active) = self.active() else {
-            if let Some(idx) = self.selected_conn {
-                if let Some(cfg) = self.connections.get(idx) {
+            if let Some(id) = self.tab().conn_id.as_deref() {
+                if let Some(cfg) = self.connections.iter().find(|c| c.id == id) {
                     return format!("{} | {} — not connected", cfg.name, cfg.kind.label());
                 }
             }
@@ -213,7 +410,7 @@ impl DbGuiApp {
             active.schema.database_name,
         );
 
-        if let Some(source) = &self.edits.source {
+        if let Some(source) = &self.tab().edits.source {
             let table = match &source.schema {
                 Some(schema) => format!("{schema}.{}", source.table),
                 None => source.table.clone(),
@@ -237,50 +434,153 @@ impl DbGuiApp {
         }
     }
 
+    /// The live connection the active tab is bound to, if it's currently connected.
     fn active(&self) -> Option<&ActiveConnection> {
-        self.active_tab
-            .and_then(|idx| self.active_connections.get(idx))
+        let id = self.tab().conn_id.as_deref()?;
+        self.active_connections.iter().find(|c| c.config_id == id)
     }
 
-    fn set_active_tab(&mut self, idx: usize) {
-        if idx >= self.active_connections.len() {
-            return;
-        }
-        self.active_tab = Some(idx);
-        let conn_id = &self.active_connections[idx].config_id;
-        self.selected_conn = self.connections.iter().position(|cfg| &cfg.id == conn_id);
-        self.result = None;
-        self.row_order.clear();
-        self.sort = None;
-        self.selected_row = None;
-        self.status_msg = format!("Switched to {}", self.active_connections[idx].name);
+    // --- query-tab management ---------------------------------------------
+
+    fn new_tab(&mut self) {
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        // Untitled (labelled by position in the bar); inherit the current tab's connection so
+        // a new tab is ready to query the same db.
+        let mut tab = QueryTab::new(id, String::new());
+        tab.conn_id = self.tab().conn_id.clone();
+        self.tabs.push(tab);
+        self.active_query_tab = self.tabs.len() - 1;
+        self.status_msg = "New query tab".to_string();
         self.error = None;
+        self.workspace_dirty = true;
     }
 
-    fn close_active_tab(&mut self, idx: usize) {
-        if idx >= self.active_connections.len() {
+    /// Display label for the tab at `idx`: the table name for a table tab, otherwise its
+    /// position ("Query 1", "Query 2", …) — so numbers stay small and reuse on close.
+    fn tab_label(&self, idx: usize) -> String {
+        match self.tabs.get(idx) {
+            Some(tab) if !tab.title.trim().is_empty() => tab.title.clone(),
+            _ => format!("Query {}", idx + 1),
+        }
+    }
+
+    fn select_tab(&mut self, idx: usize) {
+        if idx >= self.tabs.len() {
             return;
         }
-        self.active_connections.remove(idx);
-        self.result = None;
-        self.row_order.clear();
-        self.sort = None;
-        self.selected_row = None;
-
-        self.active_tab = match self.active_connections.len() {
-            0 => {
-                self.selected_conn = None;
-                None
-            }
-            len => Some(idx.min(len - 1)),
+        self.active_query_tab = idx;
+        // Reflect the newly-shown tab's last result in the status line.
+        self.status_msg = match &self.tabs[idx].result {
+            Some(res) => result_status(res),
+            None => "Ready".to_string(),
         };
-        if let Some(active_idx) = self.active_tab {
-            let conn_id = &self.active_connections[active_idx].config_id;
-            self.selected_conn = self.connections.iter().position(|cfg| &cfg.id == conn_id);
-            self.status_msg = format!("Switched to {}", self.active_connections[active_idx].name);
-        } else {
-            self.status_msg = "Disconnected".to_string();
+        self.error = None;
+        self.workspace_dirty = true;
+    }
+
+    fn close_tab(&mut self, idx: usize) {
+        if idx >= self.tabs.len() {
+            return;
         }
+        if self.tabs.len() == 1 {
+            // Always keep at least one tab: reset the last one to a blank scratch tab,
+            // preserving its connection binding.
+            let id = self.next_tab_id;
+            self.next_tab_id += 1;
+            let conn_id = self.tabs[0].conn_id.clone();
+            self.tabs[0] = QueryTab::new(id, String::new());
+            self.tabs[0].conn_id = conn_id;
+            self.active_query_tab = 0;
+        } else {
+            self.tabs.remove(idx);
+            if self.active_query_tab > idx
+                || self.active_query_tab >= self.tabs.len()
+            {
+                self.active_query_tab = self.active_query_tab.saturating_sub(1);
+            }
+        }
+        self.error = None;
+        self.workspace_dirty = true;
+    }
+
+    /// Open a table (from the schema sidebar) as a named tab.
+    ///
+    /// - If the table is already open in a tab, just switch to it (no duplicate).
+    /// - Otherwise show it in the reusable italic *preview* tab (single-click): one preview
+    ///   slot is reused as you click through tables, so they don't pile up. A blank scratch
+    ///   tab is upgraded into that preview slot rather than spawning a new tab.
+    /// - `pin` (double-click) makes the tab permanent (non-italic) instead.
+    fn open_table(&mut self, sql: String, source: EditSource, pin: bool) {
+        let same = |s: &EditSource| s.table == source.table && s.schema == source.schema;
+        // Already open (loaded or in-flight)? Activate it, pinning if asked.
+        if let Some(idx) = self.tabs.iter().position(|t| {
+            t.edits
+                .source
+                .as_ref()
+                .or(t.edits.pending_source.as_ref())
+                .is_some_and(same)
+        }) {
+            if pin {
+                self.tabs[idx].preview = false;
+            }
+            self.select_tab(idx);
+            return;
+        }
+
+        // Pick the target tab: the existing preview slot, else a blank scratch active tab,
+        // else a brand-new tab.
+        let idx = if let Some(i) = self.tabs.iter().position(|t| t.preview) {
+            i
+        } else {
+            let cur = &self.tabs[self.active_query_tab];
+            if cur.edits.source.is_none() && cur.result.is_none() && cur.sql.trim().is_empty() {
+                self.active_query_tab
+            } else {
+                self.new_tab();
+                self.active_query_tab
+            }
+        };
+
+        // Rebuild the tab from scratch (clearing any previous preview's result/filter/edits),
+        // keeping its stable id and connection binding.
+        let id = self.tabs[idx].id;
+        let conn_id = self.tabs[idx].conn_id.clone();
+        let mut tab = QueryTab::new(id, source.table.clone());
+        tab.conn_id = conn_id;
+        tab.sql = sql;
+        tab.preview = !pin;
+        tab.edits.pending_source = Some(source);
+        self.tabs[idx] = tab;
+        self.active_query_tab = idx;
+        self.workspace_dirty = true;
+        self.start_query_for(idx);
+    }
+
+    /// Bind the active tab to a saved connection. Connects in the background when the
+    /// connection isn't live yet (or when `force`, e.g. an explicit "Connect").
+    fn bind_connection(&mut self, idx: usize, force: bool) {
+        let Some(cfg) = self.connections.get(idx) else {
+            return;
+        };
+        let id = cfg.id.clone();
+        let name = cfg.name.clone();
+        let live = self.active_connections.iter().any(|c| c.config_id == id);
+        self.tab_mut().conn_id = Some(id);
+        self.workspace_dirty = true;
+        if force || !live {
+            self.start_connect(idx);
+        } else {
+            self.status_msg = format!("Switched to {name}");
+            self.error = None;
+        }
+    }
+
+    /// Drop a live connection from the pool (tabs bound to it become "not connected").
+    fn disconnect_conn(&mut self, id: &str) {
+        self.active_connections.retain(|c| c.config_id != id);
+        self.status_msg = "Disconnected".to_string();
+        self.error = None;
     }
 
     // --- background work --------------------------------------------------
@@ -309,10 +609,8 @@ impl DbGuiApp {
                                 .position(|conn| conn.config_id == active.config_id)
                             {
                                 self.active_connections[idx] = active;
-                                self.active_tab = Some(idx);
                             } else {
                                 self.active_connections.push(active);
-                                self.active_tab = Some(self.active_connections.len() - 1);
                             }
                             self.status_msg = format!("Connected to {name} — {n} tables");
                             self.error = None;
@@ -323,36 +621,53 @@ impl DbGuiApp {
                         }
                     }
                 }
-                AppMessage::Queried(result) => {
+                AppMessage::Queried { tab_id, result } => {
                     self.busy = Busy::Idle;
+                    let is_active = self.tabs.get(self.active_query_tab).is_some_and(|t| t.id == tab_id);
+                    let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) else {
+                        continue;
+                    };
                     match result {
                         Ok(res) => {
                             // Promote the in-flight source and start from a clean edit slate.
-                            self.edits.source = self.edits.pending_source.take();
-                            self.edits.clear();
-                            self.set_result(res);
+                            tab.edits.source = tab.edits.pending_source.take();
+                            tab.edits.clear();
+                            let status = result_status(&res);
+                            tab.set_result(res);
+                            if is_active {
+                                self.status_msg = status;
+                                self.error = None;
+                            }
                         }
-                        Err(e) => {
+                        Err(e) if is_active => {
                             self.error = Some(format!("Query error: {e}"));
                             self.status_msg = "Query failed".to_string();
                         }
+                        Err(_) => {}
                     }
                 }
-                AppMessage::Committed(result) => {
+                AppMessage::Committed { tab_id, result } => {
                     self.busy = Busy::Idle;
+                    let is_active = self.tabs.get(self.active_query_tab).is_some_and(|t| t.id == tab_id);
                     match result {
                         Ok(n) => {
-                            self.status_msg = format!("Saved {n} change(s)");
-                            self.error = None;
+                            if is_active {
+                                self.status_msg = format!("Saved {n} change(s)");
+                                self.error = None;
+                            }
                             // Reload so the grid reflects exactly what the database now holds
                             // (triggers, defaults, type coercions). Keep the source editable.
-                            self.edits.pending_source = self.edits.source.clone();
-                            self.start_query();
+                            if let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) {
+                                self.tabs[idx].edits.pending_source =
+                                    self.tabs[idx].edits.source.clone();
+                                self.start_query_for(idx);
+                            }
                         }
-                        Err(e) => {
+                        Err(e) if is_active => {
                             self.error = Some(format!("Save failed: {e}"));
                             self.status_msg = "Save failed".to_string();
                         }
+                        Err(_) => {}
                     }
                 }
             }
@@ -360,62 +675,10 @@ impl DbGuiApp {
         }
     }
 
-    fn set_result(&mut self, res: QueryResult) {
-        self.sort = None;
-        self.selected_row = None;
-        // A fresh result may have a different column count; keep filter conditions but stop
-        // them indexing past the new columns, then rebuild the display order through the
-        // filter (so a still-open filter bar keeps applying).
-        self.filter.clamp_columns(res.column_count());
-        self.status_msg = match res.stats.rows_affected {
-            Some(n) => format!("OK — {n} row(s) affected in {:.1} ms", res.stats.elapsed_ms),
-            None => format!(
-                "{} row(s) × {} col(s) in {:.1} ms",
-                res.row_count(),
-                res.column_count(),
-                res.stats.elapsed_ms
-            ),
-        };
-        self.error = None;
-        // Classify each column once so the cell editors can be type-aware.
-        self.edits.set_columns(&res.columns);
-        self.result = Some(res);
-        self.recompute_view();
-    }
-
-    /// Rebuild `row_order` (the grid's display order) from the current result by applying the
-    /// filter, then the active sort. The single place both filtering and sorting funnel
-    /// through, so they always compose the same way.
-    fn recompute_view(&mut self) {
-        let Some(result) = &self.result else {
-            self.row_order.clear();
-            return;
-        };
-        let mut order = filter::passing_rows(result, &self.filter);
-        if let Some((col, ascending)) = self.sort {
-            if col < result.column_count() {
-                order.sort_by(|&a, &b| {
-                    let ord = result.rows[a][col].sort_cmp(&result.rows[b][col]);
-                    if ascending {
-                        ord
-                    } else {
-                        ord.reverse()
-                    }
-                });
-            }
-        }
-        self.row_order = order;
-        // A row that filtered out can't stay selected.
-        if self.selected_row.is_some_and(|s| s >= self.row_order.len()) {
-            self.selected_row = None;
-        }
-    }
-
     fn start_connect(&mut self, idx: usize) {
         let Some(cfg) = self.connections.get(idx).cloned() else {
             return;
         };
-        self.selected_conn = Some(idx);
         let password = if cfg.kind.is_server() {
             dbcore::secrets::get_password(&cfg.id).ok().flatten()
         } else {
@@ -443,65 +706,53 @@ impl DbGuiApp {
         });
     }
 
-    fn start_query(&mut self) {
-        let Some(active) = self.active() else {
-            self.error = Some("Not connected.".to_string());
-            return;
-        };
-        let sql = self.sql.trim().to_string();
+    /// Run the SQL of the tab at `idx` against its bound connection.
+    fn start_query_for(&mut self, idx: usize) {
+        let Some(tab) = self.tabs.get(idx) else { return };
+        let sql = tab.sql.trim().to_string();
         if sql.is_empty() {
             return;
         }
-        let db = active.db.clone();
+        let tab_id = tab.id;
+        let db = match tab
+            .conn_id
+            .as_deref()
+            .and_then(|id| self.active_connections.iter().find(|c| c.config_id == id))
+        {
+            Some(active) => active.db.clone(),
+            None => {
+                self.error = Some("Not connected.".to_string());
+                return;
+            }
+        };
         let tx = self.tx.clone();
         self.busy = Busy::Querying;
         self.error = None;
         self.status_msg = "Running query…".to_string();
         self.rt.spawn(async move {
             let result = db.execute(&sql).await.map_err(|e| e.to_string());
-            let _ = tx.send(AppMessage::Queried(result));
+            let _ = tx.send(AppMessage::Queried { tab_id, result });
         });
-    }
-
-    /// Commit the cell currently being typed into the staged set, so its value isn't lost
-    /// when focus moves or a save is triggered.
-    /// Stage the cell being typed into. Returns `false` if its value is invalid (the editor
-    /// stays open), so callers can refuse to proceed.
-    fn flush_active_edit(&mut self) -> bool {
-        let Some(active) = self.edits.active.as_ref() else {
-            return true;
-        };
-        let original = self
-            .result
-            .as_ref()
-            .and_then(|r| r.rows.get(active.row).and_then(|row| row.get(active.col)))
-            .cloned();
-        match original {
-            Some(original) => self.edits.commit_active(&original),
-            None => {
-                self.edits.cancel_active();
-                true
-            }
-        }
     }
 
     /// Turn all staged edits into `UPDATE` statements and run them on the background runtime.
     /// Each changed row becomes one statement keyed by the source table's primary key.
     fn commit_edits(&mut self) {
+        let idx = self.active_query_tab;
         // A cell still being edited with invalid (red) input blocks the whole save.
-        if !self.flush_active_edit() {
+        if !self.tabs[idx].flush_active_edit() {
             self.error = Some("Fix the highlighted cell before saving.".into());
             self.status_msg = "Invalid value — not saved".to_string();
             return;
         }
-        if !self.edits.has_pending() {
+        if !self.tabs[idx].edits.has_pending() {
             return;
         }
         // Defence in depth: every staged value must still match its column kind before we
         // build any SQL, so a malformed value can never reach the database.
-        for (_, colmap) in &self.edits.cells {
+        for colmap in self.tabs[idx].edits.cells.values() {
             for (&col, value) in colmap {
-                if !self.edits.col_kind(col).accepts(value) {
+                if !self.tabs[idx].edits.col_kind(col).accepts(value) {
                     self.error =
                         Some("Cannot save: a cell holds a value invalid for its type.".into());
                     self.status_msg = "Invalid value — not saved".to_string();
@@ -509,7 +760,7 @@ impl DbGuiApp {
                 }
             }
         }
-        let Some(source) = self.edits.source.clone() else {
+        let Some(source) = self.tabs[idx].edits.source.clone() else {
             return;
         };
         // Grab the dialect + a connection handle, then drop the `active()` borrow so we can
@@ -518,7 +769,10 @@ impl DbGuiApp {
             Some(active) => (active.db.kind(), active.db.clone()),
             None => return,
         };
-        let Some(result) = &self.result else { return };
+        let tab_id = self.tabs[idx].id;
+        let Some(result) = &self.tabs[idx].result else {
+            return;
+        };
 
         // Resolve each primary-key column to its position in the result set.
         let pk_idx: Option<Vec<(String, usize)>> = source
@@ -538,7 +792,7 @@ impl DbGuiApp {
         };
 
         let mut statements = Vec::new();
-        for (&row, colmap) in &self.edits.cells {
+        for (&row, colmap) in &self.tabs[idx].edits.cells {
             // Owned (name, value) pairs first, then borrow them for the builder.
             let sets: Vec<(String, dbcore::Value)> = colmap
                 .iter()
@@ -582,35 +836,37 @@ impl DbGuiApp {
                     break;
                 }
             }
-            let _ = tx.send(AppMessage::Committed(outcome));
+            let _ = tx.send(AppMessage::Committed {
+                tab_id,
+                result: outcome,
+            });
         });
-    }
-
-    fn apply_sort(&mut self, col: usize) {
-        let Some(result) = &self.result else { return };
-        if col >= result.column_count() {
-            return;
-        }
-        // Toggle ascending/descending on repeated clicks of the same column.
-        let ascending = match self.sort {
-            Some((c, asc)) if c == col => !asc,
-            _ => true,
-        };
-        self.sort = Some((col, ascending));
-        self.recompute_view();
     }
 
     // --- action dispatch --------------------------------------------------
 
     fn apply_action(&mut self, action: Action) {
         match action {
-            Action::Connect(i) => self.start_connect(i),
-            Action::SelectActive(i) => self.set_active_tab(i),
-            Action::CloseActive(i) => self.close_active_tab(i),
+            Action::Connect(i) => self.bind_connection(i, true),
+            Action::BindConnection(i) => self.bind_connection(i, false),
             Action::Disconnect => {
-                if let Some(idx) = self.active_tab {
-                    self.close_active_tab(idx);
+                if let Some(id) = self.tab().conn_id.clone() {
+                    self.disconnect_conn(&id);
                 }
+            }
+            Action::DisconnectConn(i) => {
+                if let Some(id) = self.connections.get(i).map(|c| c.id.clone()) {
+                    self.disconnect_conn(&id);
+                }
+            }
+            Action::NewTab => self.new_tab(),
+            Action::SelectTab(i) => self.select_tab(i),
+            Action::CloseTab(i) => self.close_tab(i),
+            Action::PinTab(i) => {
+                if let Some(tab) = self.tabs.get_mut(i) {
+                    tab.preview = false;
+                }
+                self.select_tab(i);
             }
             Action::NewConnection => {
                 self.editor = Some(ConnEditor {
@@ -641,23 +897,15 @@ impl DbGuiApp {
                     if let Err(e) = dbcore::config::save_connections(&self.connections) {
                         self.error = Some(e.to_string());
                     }
-                    if self.selected_conn == Some(i) {
-                        self.selected_conn = None;
-                    }
-                    let active_before = self.active().map(|active| active.config_id.clone());
                     self.active_connections
                         .retain(|conn| conn.config_id != cfg.id);
-                    if self.active_connections.is_empty() {
-                        self.active_tab = None;
-                    } else if let Some(tab) = self.active_tab {
-                        self.active_tab = Some(tab.min(self.active_connections.len() - 1));
+                    // Any tab bound to the deleted connection becomes unbound.
+                    for tab in &mut self.tabs {
+                        if tab.conn_id.as_deref() == Some(cfg.id.as_str()) {
+                            tab.conn_id = None;
+                        }
                     }
-                    if active_before.as_deref() == Some(cfg.id.as_str()) {
-                        self.result = None;
-                        self.row_order.clear();
-                        self.sort = None;
-                        self.selected_row = None;
-                    }
+                    self.workspace_dirty = true;
                 }
             }
             Action::SaveConnection => self.save_connection(),
@@ -672,16 +920,14 @@ impl DbGuiApp {
                 }
             }
             Action::RunQuery => {
-                // An ad-hoc query can't be mapped back to one table, so it isn't editable.
-                self.edits.pending_source = None;
-                self.start_query();
+                let idx = self.active_query_tab;
+                // Re-running keeps the table source so the result stays editable. Typing your
+                // own SQL clears the source (see `query_console`), making it an ad-hoc query.
+                self.tabs[idx].edits.pending_source = self.tabs[idx].edits.source.clone();
+                self.start_query_for(idx);
             }
-            Action::OpenTable { sql, source } => {
-                self.edits.pending_source = Some(source);
-                self.sql = sql;
-                self.start_query();
-            }
-            Action::SortBy(col) => self.apply_sort(col),
+            Action::OpenTable { sql, source, pin } => self.open_table(sql, source, pin),
+            Action::SortBy(col) => self.tab_mut().apply_sort(col),
         }
     }
 
@@ -702,6 +948,45 @@ impl DbGuiApp {
             self.error = Some(e.to_string());
         } else {
             self.status_msg = "Connection saved".to_string();
+        }
+    }
+
+    // --- workspace persistence --------------------------------------------
+
+    /// Snapshot the open tabs into the serialisable workspace (no result rows — only SQL,
+    /// the bound connection, and the table source needed to re-open editable).
+    fn snapshot_workspace(&self) -> dbcore::config::Workspace {
+        dbcore::config::Workspace {
+            active_tab: self.active_query_tab,
+            tabs: self
+                .tabs
+                .iter()
+                .map(|t| dbcore::config::WorkspaceTab {
+                    title: t.title.clone(),
+                    conn_id: t.conn_id.clone(),
+                    sql: t.sql.clone(),
+                    source: t.edits.source.as_ref().map(|s| dbcore::config::WorkspaceSource {
+                        schema: s.schema.clone(),
+                        table: s.table.clone(),
+                        pk_cols: s.pk_cols.clone(),
+                    }),
+                })
+                .collect(),
+        }
+    }
+
+    /// Flush the workspace to disk if it changed. Throttled so typing SQL doesn't write every
+    /// frame; pass `force` to flush immediately (e.g. on a structural change).
+    fn maybe_save_workspace(&mut self, force: bool) {
+        if !self.workspace_dirty {
+            return;
+        }
+        if !force && self.last_workspace_save.elapsed() < std::time::Duration::from_millis(1500) {
+            return;
+        }
+        if dbcore::config::save_workspace(&self.snapshot_workspace()).is_ok() {
+            self.workspace_dirty = false;
+            self.last_workspace_save = std::time::Instant::now();
         }
     }
 }
@@ -736,14 +1021,22 @@ impl DbGuiApp {
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
             self.commit_edits();
         }
+        // Cmd/Ctrl+T opens a new query tab; Cmd/Ctrl+W closes the active one.
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::T)) {
+            actions.push(Action::NewTab);
+        }
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::W)) {
+            actions.push(Action::CloseTab(self.active_query_tab));
+        }
         // Cmd/Ctrl+F toggles the filter bar (when there's a result to filter); Esc hides it.
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F))
-            && self.result.is_some()
+            && self.tab().result.is_some()
         {
-            self.filter.visible = !self.filter.visible;
+            let visible = self.tab().filter.visible;
+            self.tab_mut().filter.visible = !visible;
         }
-        if self.filter.visible && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.filter.visible = false;
+        if self.tab().filter.visible && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.tab_mut().filter.visible = false;
         }
 
         // Order matters: top/bottom/left/right carve space, central takes the rest. The
@@ -751,6 +1044,7 @@ impl DbGuiApp {
         // carved next so it sits directly below the grid, leaving its top resize handle
         // bordering the central area (nothing on top of it) for a clean, smooth drag.
         self.top_bar(ui_root, frame, &mut actions);
+        self.query_tab_bar(ui_root, &mut actions);
         self.status_bar(ui_root);
         self.query_console(ui_root, &mut actions);
         if self.show_connection_tabs {
@@ -768,8 +1062,27 @@ impl DbGuiApp {
         self.connection_dialog(&ctx, &mut actions);
         self.settings_dialog(&ctx, &mut actions);
 
+        let structural = actions.iter().any(|a| {
+            matches!(
+                a,
+                Action::NewTab
+                    | Action::CloseTab(_)
+                    | Action::SelectTab(_)
+                    | Action::Connect(_)
+                    | Action::BindConnection(_)
+                    | Action::OpenTable { .. }
+                    | Action::DeleteConnection(_)
+            )
+        });
         for action in actions {
             self.apply_action(action);
+        }
+
+        // Persist the workspace: immediately after structural changes, otherwise on a throttle
+        // (so typing SQL into a tab is eventually saved without writing every frame).
+        self.maybe_save_workspace(structural);
+        if self.workspace_dirty {
+            ctx.request_repaint_after(std::time::Duration::from_millis(1600));
         }
 
         // Keep animating the spinner while background work is in flight.
@@ -899,23 +1212,118 @@ mod tests {
     #[test]
     fn filter_recomputes_view() {
         let mut app = DbGuiApp::construct();
+        let tab = app.tab_mut();
         // 10 rows, col 0 = 0..10. Keep rows where col0 < 4.
-        app.set_result(fake_result(10, 2));
-        assert_eq!(app.row_order.len(), 10);
+        tab.set_result(fake_result(10, 2));
+        assert_eq!(tab.row_order.len(), 10);
 
-        app.filter.visible = true;
-        app.filter.conditions = vec![crate::filter::Condition {
+        tab.filter.visible = true;
+        tab.filter.conditions = vec![crate::filter::Condition {
             enabled: true,
             column: 0,
             op: crate::filter::FilterOp::Less,
             value: "8".into(), // col0 values step by `cols`=2: 0,2,4,6,8,... → <8 keeps 4 rows
         }];
-        app.recompute_view();
-        assert_eq!(app.row_order.len(), 4);
+        tab.recompute_view();
+        assert_eq!(tab.row_order.len(), 4);
 
-        app.filter.reset();
-        app.recompute_view();
-        assert_eq!(app.row_order.len(), 10);
+        tab.filter.reset();
+        tab.recompute_view();
+        assert_eq!(tab.row_order.len(), 10);
+    }
+
+    /// A new app always has exactly one tab, and `active()` resolves through the active tab's
+    /// connection binding.
+    #[test]
+    fn active_resolves_through_tab_binding() {
+        let mut app = DbGuiApp::construct();
+        assert_eq!(app.tabs.len(), 1);
+        assert!(app.active().is_none()); // unbound tab → no connection
+
+        // Make a live connection and bind the active tab to it.
+        let db: std::sync::Arc<dyn dbcore::Database> = std::sync::Arc::new(DummyDb);
+        app.active_connections.push(ActiveConnection {
+            config_id: "c1".into(),
+            name: "one".into(),
+            db,
+            schema: fake_schema(2, 2),
+        });
+        app.tab_mut().conn_id = Some("c1".into());
+        assert!(app.active().is_some());
+        assert_eq!(app.active().unwrap().config_id, "c1");
+
+        // A second tab bound to nothing resolves to no connection again.
+        app.new_tab();
+        assert_eq!(app.tabs.len(), 2);
+        // new_tab inherits the previous tab's connection, so it should still resolve.
+        assert_eq!(app.active().unwrap().config_id, "c1");
+        app.tab_mut().conn_id = None;
+        assert!(app.active().is_none());
+    }
+
+    /// Switching tabs swaps the active result; per-tab state stays independent.
+    #[test]
+    fn tabs_keep_independent_state() {
+        let mut app = DbGuiApp::construct();
+        app.tab_mut().set_result(fake_result(5, 2));
+        app.new_tab(); // tab 1, empty
+        assert!(app.tab().result.is_none());
+        app.select_tab(0);
+        assert!(app.tab().result.is_some());
+        assert_eq!(app.tab().row_order.len(), 5);
+    }
+
+    /// Opening tables: the single italic preview tab is reused, an already-open table is
+    /// re-activated rather than duplicated, and pinning makes a tab permanent.
+    #[test]
+    fn open_table_previews_dedupes_and_pins() {
+        // No live connection, so `start_query_for` returns early (no background spawn) but the
+        // tab is still set up — exactly the state we assert on.
+        let src = |t: &str| EditSource {
+            schema: None,
+            table: t.into(),
+            pk_cols: vec!["id".into()],
+        };
+
+        let mut app = DbGuiApp::construct();
+        app.tab_mut().sql.clear(); // make the single default tab a blank scratch tab
+        // First table reuses the blank scratch tab as a preview.
+        app.open_table("q".into(), src("users"), false);
+        assert_eq!(app.tabs.len(), 1);
+        assert!(app.tab().preview);
+        assert_eq!(app.tab().title, "users");
+
+        // Re-opening the same table doesn't add a tab.
+        app.open_table("q".into(), src("users"), false);
+        assert_eq!(app.tabs.len(), 1);
+
+        // A different table reuses the same preview slot (no pile-up).
+        app.open_table("q".into(), src("orders"), false);
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.tab().title, "orders");
+        assert!(app.tab().preview);
+
+        // Pinning the open table (double-click) makes it permanent.
+        app.open_table("q".into(), src("orders"), true);
+        assert_eq!(app.tabs.len(), 1);
+        assert!(!app.tab().preview);
+
+        // With no preview slot and a non-scratch active tab, a new table opens a new tab.
+        app.open_table("q".into(), src("products"), false);
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.tab().title, "products");
+        assert!(app.tab().preview);
+    }
+
+    /// Closing the only tab keeps one (blank) tab rather than leaving zero.
+    #[test]
+    fn closing_last_tab_keeps_one() {
+        let mut app = DbGuiApp::construct();
+        app.tab_mut().sql = "SELECT 99;".into();
+        app.close_tab(0);
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.active_query_tab, 0);
+        assert_eq!(app.tab().sql, ""); // reset to a blank scratch tab
     }
 
     /// Drive the full app layout headlessly while scrolling, and capture egui "ID clash"
@@ -928,11 +1336,18 @@ mod tests {
         ctx.set_pixels_per_point(2.0); // emulate a retina display
 
         let mut app = DbGuiApp::construct();
+        // Add a second tab so the query-tab bar renders multiple chips (exercises its ids).
+        app.new_tab();
+        app.select_tab(0);
         let result = fake_result(2000, 6);
-        app.row_order = (0..result.rows.len()).collect();
-        app.result = Some(result);
-        app.selected_row = Some(7); // render the Details panel
-        app.filter.visible = true; // render the filter bar too
+        {
+            let tab = app.tab_mut();
+            tab.row_order = (0..result.rows.len()).collect();
+            tab.result = Some(result);
+            tab.selected_row = Some(7); // render the Details panel
+            tab.filter.visible = true; // render the filter bar too
+            tab.conn_id = Some("test".into());
+        }
         let db: std::sync::Arc<dyn dbcore::Database> = std::sync::Arc::new(DummyDb);
         app.active_connections.push(ActiveConnection {
             config_id: "test".into(),
@@ -940,7 +1355,6 @@ mod tests {
             db,
             schema: fake_schema(15, 5),
         });
-        app.active_tab = Some(0);
 
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
         let mut clashes: Vec<String> = Vec::new();

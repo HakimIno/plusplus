@@ -1,4 +1,4 @@
-use super::{Action, Busy, DbGuiApp};
+use super::{Action, Busy, DbGuiApp, QueryTab};
 use crate::filter::{self, FilterEvent};
 use crate::grid::results_grid;
 use crate::icons;
@@ -23,7 +23,7 @@ impl DbGuiApp {
                 let bar_rect = ui.max_rect();
                 let cols = title_bar::columns(bar_rect, chrome_inset);
                 let connected = self.active().is_some();
-                let has_result = self.result.is_some();
+                let has_result = self.tab().result.is_some();
                 let breadcrumb = self.breadcrumb_text();
 
                 title_bar::column(ui, cols.left, |ui| {
@@ -60,7 +60,8 @@ impl DbGuiApp {
                                 )
                                 .clicked()
                                 {
-                                    self.filter.visible = !self.filter.visible;
+                                    let visible = self.tab().filter.visible;
+                                    self.tab_mut().filter.visible = !visible;
                                 }
                             }
                         },
@@ -128,6 +129,53 @@ impl DbGuiApp {
             });
     }
 
+    /// Horizontal strip of query tabs (with a × per tab) plus a + button, directly below the
+    /// title bar. Switching a tab swaps the whole editor/result/connection view.
+    pub(super) fn query_tab_bar(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
+        egui::Panel::top("query_tabs")
+            .resizable(false)
+            .exact_size(34.0)
+            .frame(
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(6, 4))
+                    .fill(palette::PANEL()),
+            )
+            .show_separator_line(true)
+            .show_inside(root, |ui| {
+                egui::ScrollArea::horizontal()
+                    .id_salt("query_tab_scroll")
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            for idx in 0..self.tabs.len() {
+                                let selected = idx == self.active_query_tab;
+                                let label = self.tab_label(idx);
+                                let preview = self.tabs[idx].preview;
+                                let resp = super::widgets::query_tab_item(
+                                    ui, &label, selected, preview,
+                                );
+                                if resp.close {
+                                    actions.push(Action::CloseTab(idx));
+                                } else if resp.pinned {
+                                    actions.push(Action::PinTab(idx));
+                                } else if resp.clicked {
+                                    actions.push(Action::SelectTab(idx));
+                                }
+                                ui.add_space(2.0);
+                            }
+                            if super::widgets::toolbar_icon_button(
+                                ui,
+                                icons::plus(),
+                                "New query tab (Cmd/Ctrl+T)",
+                            )
+                            .clicked()
+                            {
+                                actions.push(Action::NewTab);
+                            }
+                        });
+                    });
+            });
+    }
+
     /// Thin status strip pinned to the very bottom edge: row count / selection / errors.
     pub(super) fn status_bar(&mut self, root: &mut egui::Ui) {
         egui::Panel::bottom("status_bar").show_inside(root, |ui| {
@@ -150,17 +198,18 @@ impl DbGuiApp {
                             .size(11.0)
                             .color(palette::TEXT_WEAK()),
                     );
-                    if let Some(res) = &self.result {
-                        if self.filter.is_active() && self.row_order.len() != res.row_count() {
+                    let tab = self.tab();
+                    if let Some(res) = &tab.result {
+                        if tab.filter.is_active() && tab.row_order.len() != res.row_count() {
                             ui.colored_label(palette::TEXT_FAINT(), "·");
                             icons::show_colored(ui, icons::filter(), 13.0, palette::ACCENT());
                             ui.colored_label(
                                 palette::ACCENT(),
-                                format!("{} of {} rows", self.row_order.len(), res.row_count()),
+                                format!("{} of {} rows", tab.row_order.len(), res.row_count()),
                             );
                         }
                     }
-                    if let (Some(sel), true) = (self.selected_row, self.result.is_some()) {
+                    if let (Some(sel), true) = (tab.selected_row, tab.result.is_some()) {
                         ui.colored_label(palette::TEXT_FAINT(), "·");
                         ui.colored_label(palette::TEXT_WEAK(), format!("row {}", sel + 1));
                     }
@@ -207,14 +256,23 @@ impl DbGuiApp {
                     .id_salt("sql_scroll")
                     .auto_shrink(false)
                     .show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.sql)
+                        let resp = ui.add(
+                            egui::TextEdit::multiline(&mut self.tab_mut().sql)
                                 .code_editor()
                                 .desired_rows(5)
                                 .desired_width(f32::INFINITY)
                                 .layouter(&mut layouter)
                                 .hint_text("Write SQL here, then press Run (Cmd/Ctrl+Enter)"),
                         );
+                        if resp.changed() {
+                            // Editing the SQL by hand means the result can no longer be mapped
+                            // back to one table, so it's no longer editable; and a previewed
+                            // tab becomes permanent (just like other editors).
+                            let tab = self.tab_mut();
+                            tab.edits.source = None;
+                            tab.preview = false;
+                            self.workspace_dirty = true;
+                        }
                     });
             });
     }
@@ -224,17 +282,18 @@ impl DbGuiApp {
         // The details panel only makes sense for a selected row; with nothing selected we
         // hide it entirely so the grid gets the full width (rather than showing an empty
         // placeholder panel).
-        let selected = match (self.result.as_ref(), self.selected_row) {
-            (Some(res), Some(disp)) if disp < self.row_order.len() => {
-                Some((res, self.row_order[disp]))
-            }
-            _ => None,
+        let idx = self.active_query_tab;
+        let tab = &mut self.tabs[idx];
+        let row_idx = match (tab.result.as_ref(), tab.selected_row) {
+            (Some(_), Some(disp)) if disp < tab.row_order.len() => tab.row_order[disp],
+            _ => return,
         };
-        let Some((res, row_idx)) = selected else {
-            return;
-        };
-        let editable = self.edits.editable();
-        let edits = &mut self.edits;
+        let editable = tab.edits.editable();
+        // Split the borrow so the closure can hold the result immutably and edits mutably.
+        let QueryTab {
+            result, edits, ..
+        } = tab;
+        let res = result.as_ref().expect("row_idx implies a result");
 
         egui::Panel::right("details_panel")
             .resizable(true)
@@ -342,29 +401,33 @@ impl DbGuiApp {
                         egui::ScrollArea::vertical()
                             .id_salt("active_connection_tabs")
                             .show(ui, |ui| {
+                                let bound_id =
+                                    self.tabs[self.active_query_tab].conn_id.clone();
                                 for (idx, conn) in self.connections.iter().enumerate() {
-                                    let active_idx = self
+                                    let live = self
                                         .active_connections
                                         .iter()
-                                        .position(|active| active.config_id == conn.id);
-                                    let selected =
-                                        active_idx.is_some_and(|i| self.active_tab == Some(i));
+                                        .any(|active| active.config_id == conn.id);
+                                    // Highlight the connection the active tab is bound to.
+                                    let selected = bound_id.as_deref() == Some(conn.id.as_str());
                                     let resp = super::widgets::connection_tab_item(
                                         ui,
                                         &conn.name,
                                         selected,
-                                        active_idx.is_some(),
+                                        live,
                                     )
                                     .on_hover_text(conn.target_summary());
                                     if resp.clicked() {
-                                        if let Some(active_idx) = active_idx {
-                                            actions.push(Action::SelectActive(active_idx));
+                                        if live {
+                                            actions.push(Action::BindConnection(idx));
                                         } else {
                                             actions.push(Action::Connect(idx));
                                         }
                                     }
                                     resp.context_menu(|ui| {
-                                        if icons::button(ui, icons::connect(), "Connect", true)
+                                        let connect_label =
+                                            if live { "Reconnect" } else { "Connect" };
+                                        if icons::button(ui, icons::connect(), connect_label, true)
                                             .clicked()
                                         {
                                             actions.push(Action::Connect(idx));
@@ -375,13 +438,17 @@ impl DbGuiApp {
                                             actions.push(Action::EditConnection(idx));
                                             ui.close();
                                         }
-                                        if let Some(active_idx) = active_idx {
-                                            if icons::button(ui, icons::close(), "Close tab", true)
-                                                .clicked()
-                                            {
-                                                actions.push(Action::CloseActive(active_idx));
-                                                ui.close();
-                                            }
+                                        if live
+                                            && icons::button(
+                                                ui,
+                                                icons::disconnect(),
+                                                "Disconnect",
+                                                true,
+                                            )
+                                            .clicked()
+                                        {
+                                            actions.push(Action::DisconnectConn(idx));
+                                            ui.close();
                                         }
                                         if icons::button(ui, icons::trash(), "Delete", true)
                                             .clicked()
@@ -519,8 +586,12 @@ impl DbGuiApp {
                     }
                 });
 
-            let resp = header.inner.on_hover_text("Click to preview rows");
-            if resp.clicked() {
+            let resp = header
+                .inner
+                .on_hover_text("Click to preview · double-click to open");
+            // Single-click previews (reuses the italic preview tab); double-click pins.
+            let pin = resp.double_clicked();
+            if resp.clicked() || pin {
                 // Carry the table + its primary key so the previewed rows become editable.
                 let source = crate::edit::EditSource {
                     schema: table.schema.clone(),
@@ -535,6 +606,7 @@ impl DbGuiApp {
                 actions.push(Action::OpenTable {
                     sql: active.db.kind().preview_query(&table.qualified(), 100),
                     source,
+                    pin,
                 });
             }
         }
@@ -544,10 +616,11 @@ impl DbGuiApp {
     /// and a result with columns is loaded. Edits mutate `self.filter` directly; an Apply or
     /// Clear rebuilds the view.
     pub(super) fn filter_bar(&mut self, root: &mut egui::Ui) {
-        if !self.filter.visible {
+        let idx = self.active_query_tab;
+        if !self.tabs[idx].filter.visible {
             return;
         }
-        let col_names: Vec<String> = match &self.result {
+        let col_names: Vec<String> = match &self.tabs[idx].result {
             Some(res) if res.column_count() > 0 => {
                 res.columns.iter().map(|c| c.name.clone()).collect()
             }
@@ -558,68 +631,79 @@ impl DbGuiApp {
         egui::Panel::top("filter_bar")
             .resizable(false)
             .show_inside(root, |ui| {
-                event = filter::ui(ui, &mut self.filter, &col_names);
+                event = filter::ui(ui, &mut self.tabs[idx].filter, &col_names);
             });
 
         match event {
-            Some(FilterEvent::Apply) => self.recompute_view(),
+            Some(FilterEvent::Apply) => self.tabs[idx].recompute_view(),
             Some(FilterEvent::Clear) => {
-                self.filter.reset();
-                self.recompute_view();
+                self.tabs[idx].filter.reset();
+                self.tabs[idx].recompute_view();
             }
             None => {}
         }
     }
 
     pub(super) fn central_panel(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
-        let editable = self.edits.editable();
-        egui::CentralPanel::default().show_inside(root, |ui| match &self.result {
+        let idx = self.active_query_tab;
+        let editable = self.tabs[idx].edits.editable();
+        let status_msg = &self.status_msg;
+        let QueryTab {
+            result,
+            row_order,
+            sort,
+            selected_row,
+            edits,
+            ..
+        } = &mut self.tabs[idx];
+        let sort = *sort;
+        egui::CentralPanel::default().show_inside(root, |ui| match result.as_ref() {
             Some(result) if result.column_count() > 0 => {
                 let resp = results_grid(
                     ui,
                     result,
-                    &self.row_order,
-                    self.sort,
-                    self.selected_row,
-                    &mut self.edits,
+                    row_order,
+                    sort,
+                    *selected_row,
+                    edits,
                     editable,
                 );
                 if let Some(col) = resp.sort {
                     actions.push(Action::SortBy(col));
                 }
                 if let Some(row) = resp.selected {
-                    self.selected_row = Some(row);
+                    *selected_row = Some(row);
                 }
                 // Commit/cancel the open editor before opening a new one, so switching cells
                 // doesn't drop the in-progress edit. Values are typed against the stored cell.
                 if resp.commit_edit {
-                    let cell = self.edits.active.as_ref().map(|a| (a.row, a.col));
+                    let cell = edits.active.as_ref().map(|a| (a.row, a.col));
                     if let Some((ar, ac)) = cell {
                         match result.rows.get(ar).and_then(|row| row.get(ac)).cloned() {
                             Some(orig) => {
-                                let _ = self.edits.commit_active(&orig);
+                                let _ = edits.commit_active(&orig);
                             }
-                            None => self.edits.cancel_active(),
+                            None => edits.cancel_active(),
                         }
                     }
                 }
                 if resp.cancel_edit {
-                    self.edits.cancel_active();
+                    edits.cancel_active();
                 }
                 if let Some((r, c)) = resp.begin_edit {
                     if let Some(orig) = result.rows.get(r).and_then(|row| row.get(c)).cloned() {
-                        self.edits.begin(r, c, &orig);
+                        edits.begin(r, c, &orig);
                     }
                 }
                 // A boolean cell flips in place rather than opening an editor.
                 if let Some((r, c)) = resp.toggle {
                     if let Some(orig) = result.rows.get(r).and_then(|row| row.get(c)).cloned() {
-                        self.edits.toggle_bool(r, c, &orig);
+                        edits.toggle_bool(r, c, &orig);
                     }
                 }
             }
             Some(_) => {
-                style::empty_state(ui, icons::table(), "No columns", &self.status_msg);
+                style::empty_state(ui, icons::table(), "No columns", status_msg);
             }
             None => {
                 style::empty_illustration(ui, icons::empty_results());

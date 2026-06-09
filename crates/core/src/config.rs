@@ -77,6 +77,62 @@ pub fn save_settings(settings: &Settings) -> Result<()> {
     write_json_atomic(&settings_path()?, settings)
 }
 
+/// Path to the JSON file holding the saved workspace (open query tabs + their state).
+pub fn workspace_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("workspace.json"))
+}
+
+/// The table a tab's result was read from, persisted so a restored tab can re-run its
+/// query and stay editable. Mirrors the UI's `EditSource` without depending on it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorkspaceSource {
+    #[serde(default)]
+    pub schema: Option<String>,
+    pub table: String,
+    #[serde(default)]
+    pub pk_cols: Vec<String>,
+}
+
+/// One saved query tab. Only non-transient state is kept — never the result rows, which are
+/// re-fetched on demand when the user re-runs the query.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorkspaceTab {
+    #[serde(default)]
+    pub title: String,
+    /// Id of the connection this tab runs against (`None` = unbound).
+    #[serde(default)]
+    pub conn_id: Option<String>,
+    #[serde(default)]
+    pub sql: String,
+    /// The table this tab represents, if it was opened from the schema sidebar.
+    #[serde(default)]
+    pub source: Option<WorkspaceSource>,
+}
+
+/// The persisted workspace: the open query tabs and which one was active.
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Workspace {
+    #[serde(default)]
+    pub active_tab: usize,
+    #[serde(default)]
+    pub tabs: Vec<WorkspaceTab>,
+}
+
+/// Load the saved workspace. A missing or unreadable file yields the default (empty) — the
+/// workspace is a convenience, never load-bearing, so we don't surface an error.
+pub fn load_workspace() -> Workspace {
+    workspace_path()
+        .ok()
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// Atomically persist the workspace.
+pub fn save_workspace(workspace: &Workspace) -> Result<()> {
+    write_json_atomic(&workspace_path()?, workspace)
+}
+
 /// Serialise `value` to pretty JSON and write it to `path` atomically (temp file + rename),
 /// creating the config directory if needed.
 fn write_json_atomic<T: serde::Serialize + ?Sized>(
@@ -93,4 +149,60 @@ fn write_json_atomic<T: serde::Serialize + ?Sized>(
     std::fs::rename(&tmp, path)
         .map_err(|e| CoreError::Config(format!("renaming into {}: {e}", path.display())))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A workspace survives a JSON serialise/deserialise round-trip with all fields intact.
+    #[test]
+    fn workspace_round_trips_through_json() {
+        let ws = Workspace {
+            active_tab: 1,
+            tabs: vec![
+                WorkspaceTab {
+                    title: "Query 1".into(),
+                    conn_id: Some("conn-abc".into()),
+                    sql: "SELECT * FROM users;".into(),
+                    source: Some(WorkspaceSource {
+                        schema: Some("public".into()),
+                        table: "users".into(),
+                        pk_cols: vec!["id".into()],
+                    }),
+                },
+                WorkspaceTab {
+                    title: "scratch".into(),
+                    conn_id: None,
+                    sql: "SELECT 1;".into(),
+                    source: None,
+                },
+            ],
+        };
+
+        let json = serde_json::to_vec(&ws).unwrap();
+        let back: Workspace = serde_json::from_slice(&json).unwrap();
+
+        assert_eq!(back.active_tab, 1);
+        assert_eq!(back.tabs.len(), 2);
+        assert_eq!(back.tabs[0].conn_id.as_deref(), Some("conn-abc"));
+        assert_eq!(back.tabs[0].sql, "SELECT * FROM users;");
+        let src = back.tabs[0].source.as_ref().unwrap();
+        assert_eq!(src.table, "users");
+        assert_eq!(src.pk_cols, vec!["id".to_string()]);
+        assert!(back.tabs[1].conn_id.is_none());
+        assert!(back.tabs[1].source.is_none());
+    }
+
+    /// Missing/empty fields fall back to defaults (forward-compatible with older files).
+    #[test]
+    fn workspace_tolerates_missing_fields() {
+        let json = br#"{"tabs":[{"sql":"SELECT 1;"}]}"#;
+        let ws: Workspace = serde_json::from_slice(json).unwrap();
+        assert_eq!(ws.active_tab, 0);
+        assert_eq!(ws.tabs.len(), 1);
+        assert_eq!(ws.tabs[0].sql, "SELECT 1;");
+        assert_eq!(ws.tabs[0].title, "");
+        assert!(ws.tabs[0].conn_id.is_none());
+    }
 }
