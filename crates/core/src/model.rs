@@ -52,6 +52,77 @@ impl DbKind {
             _ => format!("SELECT * FROM {qualified_table} LIMIT {limit};"),
         }
     }
+
+    /// Quote a table/column identifier for this dialect. MySQL/MariaDB use backticks; the
+    /// rest use ANSI double quotes. Embedded quote characters are doubled to neutralise them.
+    pub fn quote_ident(self, ident: &str) -> String {
+        match self {
+            DbKind::MySql | DbKind::MariaDb => format!("`{}`", ident.replace('`', "``")),
+            _ => format!("\"{}\"", ident.replace('"', "\"\"")),
+        }
+    }
+}
+
+/// Render `value` as a SQL literal for `kind`, safely escaping strings. Returns `None` for
+/// [`Value::Bytes`], which has no portable literal form (those cells aren't editable).
+fn value_to_literal(value: &Value, kind: DbKind) -> Option<String> {
+    Some(match value {
+        Value::Null => "NULL".to_string(),
+        Value::Int(i) => i.to_string(),
+        Value::Float(f) => f.to_string(),
+        Value::Bool(b) => match kind {
+            // Postgres has a real boolean type; the others store it as an integer/bit.
+            DbKind::Postgres => if *b { "TRUE" } else { "FALSE" }.to_string(),
+            _ => if *b { "1" } else { "0" }.to_string(),
+        },
+        Value::Text(s) => {
+            // Double single-quotes everywhere; MySQL also treats backslash as an escape
+            // unless NO_BACKSLASH_ESCAPES is set, so double those too for that dialect.
+            let escaped = s.replace('\'', "''");
+            let escaped = match kind {
+                DbKind::MySql | DbKind::MariaDb => escaped.replace('\\', "\\\\"),
+                _ => escaped,
+            };
+            format!("'{escaped}'")
+        }
+        Value::Bytes(_) => return None,
+    })
+}
+
+/// Build a single-row `UPDATE` statement: `SET` the given `sets`, matched by the `keys`
+/// (typically primary-key columns). Returns `None` if any value can't be rendered as a
+/// literal (e.g. binary data). Identifiers and string values are escaped for `kind`.
+pub fn build_update_sql(
+    kind: DbKind,
+    schema: Option<&str>,
+    table: &str,
+    sets: &[(&str, &Value)],
+    keys: &[(&str, &Value)],
+) -> Option<String> {
+    if sets.is_empty() || keys.is_empty() {
+        return None;
+    }
+    let table_ref = match schema {
+        Some(s) => format!("{}.{}", kind.quote_ident(s), kind.quote_ident(table)),
+        None => kind.quote_ident(table),
+    };
+    let set_clause = sets
+        .iter()
+        .map(|(c, v)| Some(format!("{} = {}", kind.quote_ident(c), value_to_literal(v, kind)?)))
+        .collect::<Option<Vec<_>>>()?
+        .join(", ");
+    let where_clause = keys
+        .iter()
+        .map(|(c, v)| {
+            Some(if v.is_null() {
+                format!("{} IS NULL", kind.quote_ident(c))
+            } else {
+                format!("{} = {}", kind.quote_ident(c), value_to_literal(v, kind)?)
+            })
+        })
+        .collect::<Option<Vec<_>>>()?
+        .join(" AND ");
+    Some(format!("UPDATE {table_ref} SET {set_clause} WHERE {where_clause};"))
 }
 
 /// A saved connection. Secret fields (passwords) are **never** stored here — they live in

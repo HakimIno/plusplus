@@ -21,8 +21,8 @@ use std::sync::Arc;
 pub use database::Database;
 pub use error::{CoreError, Result};
 pub use model::{
-    ColumnInfo, ColumnMeta, ConnectionConfig, DbKind, IndexInfo, QueryResult, QueryStats,
-    SchemaTree, TableInfo,
+    build_update_sql, ColumnInfo, ColumnMeta, ConnectionConfig, DbKind, IndexInfo, QueryResult,
+    QueryStats, SchemaTree, TableInfo,
 };
 pub use value::Value;
 
@@ -177,6 +177,55 @@ mod tests {
         assert_eq!(v[1], Value::Float(2.0));
         assert_eq!(v[2], Value::Int(3));
         assert!(v[3].is_null()); // NULL sorts last
+    }
+
+    #[test]
+    fn build_update_escapes_and_quotes_per_dialect() {
+        use model::build_update_sql;
+
+        // Postgres: ANSI double-quoted identifiers, doubled single-quotes in strings.
+        let sql = build_update_sql(
+            DbKind::Postgres,
+            Some("public"),
+            "users",
+            &[("name", &Value::Text("O'Brien".into())), ("age", &Value::Int(30))],
+            &[("id", &Value::Int(7))],
+        )
+        .unwrap();
+        assert_eq!(
+            sql,
+            r#"UPDATE "public"."users" SET "name" = 'O''Brien', "age" = 30 WHERE "id" = 7;"#
+        );
+
+        // MySQL: backtick identifiers, and backslashes are escaped in strings.
+        let sql = build_update_sql(
+            DbKind::MySql,
+            None,
+            "logs",
+            &[("path", &Value::Text(r"C:\tmp".into()))],
+            &[("id", &Value::Int(1))],
+        )
+        .unwrap();
+        assert_eq!(sql, r"UPDATE `logs` SET `path` = 'C:\\tmp' WHERE `id` = 1;");
+
+        // A NULL key matches with IS NULL, and binary SET values are rejected.
+        let sql = build_update_sql(
+            DbKind::Sqlite,
+            None,
+            "t",
+            &[("v", &Value::Null)],
+            &[("k", &Value::Null)],
+        )
+        .unwrap();
+        assert_eq!(sql, r#"UPDATE "t" SET "v" = NULL WHERE "k" IS NULL;"#);
+        assert!(build_update_sql(
+            DbKind::Sqlite,
+            None,
+            "t",
+            &[("v", &Value::Bytes(vec![1, 2]))],
+            &[("k", &Value::Int(1))]
+        )
+        .is_none());
     }
 
     #[test]

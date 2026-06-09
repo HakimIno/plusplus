@@ -191,6 +191,8 @@ impl DbGuiApp {
         let Some((res, row_idx)) = selected else {
             return;
         };
+        let editable = self.edits.editable();
+        let edits = &mut self.edits;
 
         egui::Panel::right("details_panel")
             .resizable(true)
@@ -219,14 +221,72 @@ impl DbGuiApp {
                                 );
                             });
                             let value = &res.rows[row_idx][c];
-                            if value.is_null() {
-                                ui.weak(egui::RichText::new("NULL").italics());
+
+                            if edits.is_active(row_idx, c) {
+                                let mut commit = false;
+                                let mut cancel = false;
+                                if let Some(active) = edits.active.as_mut() {
+                                    {
+                                        let cr = egui::CornerRadius::same(3);
+                                        let w = &mut ui.visuals_mut().widgets;
+                                        w.inactive.corner_radius = cr;
+                                        w.hovered.corner_radius = cr;
+                                        w.active.corner_radius = cr;
+                                    }
+                                    let resp = ui.add(
+                                        egui::TextEdit::singleline(&mut active.buf)
+                                            .desired_width(f32::INFINITY)
+                                            .margin(egui::vec2(4.0, 3.0)),
+                                    );
+                                    if active.focus {
+                                        resp.request_focus();
+                                        active.focus = false;
+                                    }
+                                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                        cancel = true;
+                                    } else if resp.lost_focus() {
+                                        commit = true;
+                                    }
+                                }
+                                if commit {
+                                    edits.commit_active(value);
+                                }
+                                if cancel {
+                                    edits.cancel_active();
+                                }
                             } else {
-                                ui.add(
-                                    egui::Label::new(value.display())
+                                let staged = edits.staged(row_idx, c);
+                                let shown = staged.unwrap_or(value);
+                                let color = if staged.is_some() {
+                                    palette::SUCCESS()
+                                } else if shown.is_null() {
+                                    palette::TEXT_FAINT()
+                                } else {
+                                    palette::TEXT()
+                                };
+                                let text = if shown.is_null() {
+                                    egui::RichText::new("NULL").italics()
+                                } else {
+                                    egui::RichText::new(shown.display())
+                                };
+                                let resp = ui.add(
+                                    egui::Label::new(text.color(color))
                                         .wrap()
-                                        .halign(egui::Align::LEFT),
+                                        .halign(egui::Align::LEFT)
+                                        .sense(egui::Sense::click()),
                                 );
+                                let resp = if editable && !matches!(value, dbcore::Value::Bytes(_))
+                                {
+                                    resp.on_hover_text("Double-click to edit")
+                                } else {
+                                    resp
+                                };
+                                if editable
+                                    && resp.double_clicked()
+                                    && !matches!(value, dbcore::Value::Bytes(_))
+                                {
+                                    edits.begin(row_idx, c, value);
+                                }
                             }
                             ui.separator();
                         }
@@ -427,9 +487,21 @@ impl DbGuiApp {
 
             let resp = header.inner.on_hover_text("Click to preview rows");
             if resp.clicked() {
-                actions.push(Action::OpenTable(
-                    active.db.kind().preview_query(&table.qualified(), 100),
-                ));
+                // Carry the table + its primary key so the previewed rows become editable.
+                let source = crate::edit::EditSource {
+                    schema: table.schema.clone(),
+                    table: table.name.clone(),
+                    pk_cols: table
+                        .columns
+                        .iter()
+                        .filter(|c| c.primary_key)
+                        .map(|c| c.name.clone())
+                        .collect(),
+                };
+                actions.push(Action::OpenTable {
+                    sql: active.db.kind().preview_query(&table.qualified(), 100),
+                    source,
+                });
             }
         }
     }
@@ -466,14 +538,42 @@ impl DbGuiApp {
     }
 
     pub(super) fn central_panel(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let editable = self.edits.editable();
         egui::CentralPanel::default().show_inside(root, |ui| match &self.result {
             Some(result) if result.column_count() > 0 => {
-                let resp = results_grid(ui, result, &self.row_order, self.sort, self.selected_row);
+                let resp = results_grid(
+                    ui,
+                    result,
+                    &self.row_order,
+                    self.sort,
+                    self.selected_row,
+                    &mut self.edits,
+                    editable,
+                );
                 if let Some(col) = resp.sort {
                     actions.push(Action::SortBy(col));
                 }
                 if let Some(row) = resp.selected {
                     self.selected_row = Some(row);
+                }
+                // Commit/cancel the open editor before opening a new one, so switching cells
+                // doesn't drop the in-progress edit. Values are typed against the stored cell.
+                if resp.commit_edit {
+                    let cell = self.edits.active.as_ref().map(|a| (a.row, a.col));
+                    if let Some((ar, ac)) = cell {
+                        match result.rows.get(ar).and_then(|row| row.get(ac)).cloned() {
+                            Some(orig) => self.edits.commit_active(&orig),
+                            None => self.edits.cancel_active(),
+                        }
+                    }
+                }
+                if resp.cancel_edit {
+                    self.edits.cancel_active();
+                }
+                if let Some((r, c)) = resp.begin_edit {
+                    if let Some(orig) = result.rows.get(r).and_then(|row| row.get(c)).cloned() {
+                        self.edits.begin(r, c, &orig);
+                    }
                 }
             }
             Some(_) => {

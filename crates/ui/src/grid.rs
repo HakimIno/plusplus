@@ -3,6 +3,7 @@
 //! dense rows, click-to-select with row highlight, and click-to-sort headers.
 //! Only the visible rows are rendered each frame, so it stays smooth at 100k+ rows.
 
+use crate::edit::Edits;
 use crate::style::palette;
 use dbcore::{QueryResult, Value};
 use egui_extras::{Column, TableBuilder};
@@ -18,16 +19,25 @@ pub struct GridResponse {
     pub sort: Option<usize>,
     /// A row was clicked → select this *display* row index (index into `order`).
     pub selected: Option<usize>,
+    /// A cell was double-clicked → start editing it (raw row index, column index).
+    pub begin_edit: Option<(usize, usize)>,
+    /// The open editor should be committed (Enter pressed or focus lost).
+    pub commit_edit: bool,
+    /// The open editor should be discarded (Escape pressed).
+    pub cancel_edit: bool,
 }
 
 /// Render the result set. `order` maps display rows → indices into `result.rows`.
 /// `selected` is the currently selected display row.
+#[allow(clippy::too_many_arguments)]
 pub fn results_grid(
     ui: &mut egui::Ui,
     result: &QueryResult,
     order: &[usize],
     sort: Option<(usize, bool)>,
     selected: Option<usize>,
+    edits: &mut Edits,
+    editable: bool,
 ) -> GridResponse {
     let mut out = GridResponse::default();
     let ncols = result.columns.len();
@@ -50,14 +60,19 @@ pub fn results_grid(
     let desired_total = gutter_w + ncols as f32 * (COL_W + spacing);
 
     if desired_total <= ui.available_width() {
-        build_grid(ui, result, order, sort, selected, gutter_w, row_height, &mut out);
+        build_grid(
+            ui, result, order, sort, selected, edits, editable, gutter_w, row_height, &mut out,
+        );
     } else {
         egui::ScrollArea::horizontal()
             .id_salt("results_hscroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.set_width(desired_total);
-                build_grid(ui, result, order, sort, selected, gutter_w, row_height, &mut out);
+                build_grid(
+                    ui, result, order, sort, selected, edits, editable, gutter_w, row_height,
+                    &mut out,
+                );
             });
     }
 
@@ -73,6 +88,8 @@ fn build_grid(
     order: &[usize],
     sort: Option<(usize, bool)>,
     selected: Option<usize>,
+    edits: &mut Edits,
+    editable: bool,
     gutter_w: f32,
     row_height: f32,
     out: &mut GridResponse,
@@ -133,17 +150,66 @@ fn build_grid(
                 let disp = row.index();
                 let r = order[disp];
                 row.set_selected(selected == Some(disp));
+                // A row with staged (unsaved) edits is tinted green, TablePlus-style.
+                let dirty = edits.row_dirty(r);
 
                 // Row-number gutter.
                 row.col(|ui| {
+                    if dirty {
+                        tint_cell(ui);
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(4.0);
                         ui.weak(egui::RichText::new(format!("{}", disp + 1)).monospace());
                     });
                 });
 
-                for value in &result.rows[r] {
-                    row.col(|ui| cell(ui, value));
+                for (c, value) in result.rows[r].iter().enumerate() {
+                    let (_, resp) = row.col(|ui| {
+                        if dirty {
+                            tint_cell(ui);
+                        }
+                        if edits.is_active(r, c) {
+                            // The cell under edit: a text field that fills the whole cell, with
+                            // slightly rounded corners so it reads as an input box.
+                            if let Some(active) = edits.active.as_mut() {
+                                {
+                                    let cr = egui::CornerRadius::same(3);
+                                    let w = &mut ui.visuals_mut().widgets;
+                                    w.inactive.corner_radius = cr;
+                                    w.hovered.corner_radius = cr;
+                                    w.active.corner_radius = cr;
+                                }
+                                let size = ui.available_size();
+                                let resp = ui.add_sized(
+                                    size,
+                                    egui::TextEdit::singleline(&mut active.buf)
+                                        .margin(egui::vec2(4.0, 2.0)),
+                                );
+                                if active.focus {
+                                    resp.request_focus();
+                                    active.focus = false;
+                                }
+                                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                    out.cancel_edit = true;
+                                } else if resp.lost_focus() {
+                                    out.commit_edit = true;
+                                }
+                            }
+                        } else {
+                            // Show the staged value if present, else the stored one.
+                            let staged = edits.staged(r, c);
+                            cell(ui, staged.unwrap_or(value), staged.is_some());
+                        }
+                    });
+
+                    // Double-click a cell to edit it (binary cells aren't editable).
+                    if editable
+                        && resp.double_clicked()
+                        && !matches!(value, Value::Bytes(_))
+                    {
+                        out.begin_edit = Some((r, c));
+                    }
                 }
 
                 if row.response().clicked() {
@@ -151,6 +217,13 @@ fn build_grid(
                 }
             });
         });
+}
+
+/// Paint a faint green wash over the current cell to flag an unsaved edit.
+fn tint_cell(ui: &egui::Ui) {
+    let s = palette::SUCCESS();
+    let tint = egui::Color32::from_rgba_unmultiplied(s.r(), s.g(), s.b(), 28);
+    ui.painter().rect_filled(ui.max_rect(), 0.0, tint);
 }
 
 #[cfg(test)]
@@ -226,9 +299,10 @@ mod tests {
                 events,
                 ..Default::default()
             };
+            let mut edits = Edits::default();
             let out = ctx.run_ui(raw, |ui| {
                 egui::CentralPanel::default().show_inside(ui, |ui| {
-                    let _ = results_grid(ui, &result, &order, None, None);
+                    let _ = results_grid(ui, &result, &order, None, None, &mut edits, false);
                 });
             });
             collect_clash_text(&out.shapes, &mut clashes);
@@ -242,8 +316,17 @@ mod tests {
     }
 }
 
-/// Render a single cell, dimming NULLs and monospacing numbers.
-fn cell(ui: &mut egui::Ui, value: &Value) {
+/// Render a single cell, dimming NULLs and monospacing numbers. A `staged` value (an edit
+/// not yet saved) is drawn in the success colour so it stands out from stored data.
+fn cell(ui: &mut egui::Ui, value: &Value, staged: bool) {
+    if staged {
+        let text = match value {
+            Value::Null => egui::RichText::new("NULL").italics(),
+            other => egui::RichText::new(other.display()),
+        };
+        ui.colored_label(palette::SUCCESS(), text);
+        return;
+    }
     match value {
         Value::Null => {
             ui.colored_label(palette::TEXT_FAINT(), egui::RichText::new("NULL").italics());

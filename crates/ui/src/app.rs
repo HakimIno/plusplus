@@ -13,6 +13,7 @@ use dbcore::{ConnectionConfig, Database, DbKind, QueryResult, SchemaTree};
 mod panels;
 mod widgets;
 
+use crate::edit::{EditSource, Edits};
 use crate::filter::{self, FilterState};
 use crate::theme::ThemeId;
 
@@ -26,6 +27,8 @@ enum AppMessage {
     },
     /// A query finished.
     Queried(Result<QueryResult, String>),
+    /// A batch of staged edits was saved (`Ok` carries the number of rows updated).
+    Committed(Result<usize, String>),
 }
 
 /// What the background runtime is currently doing (drives the spinner / disables buttons).
@@ -69,7 +72,11 @@ enum Action {
     CancelDialog,
     BrowseSqlitePath,
     RunQuery,
-    OpenTable(String),
+    /// Open a table's rows from the sidebar. `source` makes the result editable.
+    OpenTable {
+        sql: String,
+        source: EditSource,
+    },
     SortBy(usize),
 }
 
@@ -96,6 +103,8 @@ pub struct DbGuiApp {
     sort: Option<(usize, bool)>,
     /// Currently selected display row (drives the Details panel).
     selected_row: Option<usize>,
+    /// Staged cell edits and the editable source of the current result.
+    edits: Edits,
 
     // --- transient UI state ---
     editor: Option<ConnEditor>,
@@ -164,6 +173,7 @@ impl DbGuiApp {
             row_order: Vec::new(),
             sort: None,
             selected_row: None,
+            edits: Edits::default(),
             editor: None,
             schema_filter: String::new(),
             filter: FilterState::default(),
@@ -275,10 +285,32 @@ impl DbGuiApp {
                 AppMessage::Queried(result) => {
                     self.busy = Busy::Idle;
                     match result {
-                        Ok(res) => self.set_result(res),
+                        Ok(res) => {
+                            // Promote the in-flight source and start from a clean edit slate.
+                            self.edits.source = self.edits.pending_source.take();
+                            self.edits.clear();
+                            self.set_result(res);
+                        }
                         Err(e) => {
                             self.error = Some(format!("Query error: {e}"));
                             self.status_msg = "Query failed".to_string();
+                        }
+                    }
+                }
+                AppMessage::Committed(result) => {
+                    self.busy = Busy::Idle;
+                    match result {
+                        Ok(n) => {
+                            self.status_msg = format!("Saved {n} change(s)");
+                            self.error = None;
+                            // Reload so the grid reflects exactly what the database now holds
+                            // (triggers, defaults, type coercions). Keep the source editable.
+                            self.edits.pending_source = self.edits.source.clone();
+                            self.start_query();
+                        }
+                        Err(e) => {
+                            self.error = Some(format!("Save failed: {e}"));
+                            self.status_msg = "Save failed".to_string();
                         }
                     }
                 }
@@ -388,6 +420,108 @@ impl DbGuiApp {
         });
     }
 
+    /// Commit the cell currently being typed into the staged set, so its value isn't lost
+    /// when focus moves or a save is triggered.
+    fn flush_active_edit(&mut self) {
+        let Some(active) = self.edits.active.as_ref() else {
+            return;
+        };
+        let original = self
+            .result
+            .as_ref()
+            .and_then(|r| r.rows.get(active.row).and_then(|row| row.get(active.col)))
+            .cloned();
+        if let Some(original) = original {
+            self.edits.commit_active(&original);
+        } else {
+            self.edits.cancel_active();
+        }
+    }
+
+    /// Turn all staged edits into `UPDATE` statements and run them on the background runtime.
+    /// Each changed row becomes one statement keyed by the source table's primary key.
+    fn commit_edits(&mut self) {
+        self.flush_active_edit();
+        if !self.edits.has_pending() {
+            return;
+        }
+        let Some(source) = self.edits.source.clone() else {
+            return;
+        };
+        // Grab the dialect + a connection handle, then drop the `active()` borrow so we can
+        // freely touch `self` below.
+        let (kind, db) = match self.active() {
+            Some(active) => (active.db.kind(), active.db.clone()),
+            None => return,
+        };
+        let Some(result) = &self.result else { return };
+
+        // Resolve each primary-key column to its position in the result set.
+        let pk_idx: Option<Vec<(String, usize)>> = source
+            .pk_cols
+            .iter()
+            .map(|name| {
+                result
+                    .columns
+                    .iter()
+                    .position(|c| &c.name == name)
+                    .map(|i| (name.clone(), i))
+            })
+            .collect();
+        let Some(pk_idx) = pk_idx else {
+            self.error = Some("Cannot save: primary key columns are not in the result.".into());
+            return;
+        };
+
+        let mut statements = Vec::new();
+        for (&row, colmap) in &self.edits.cells {
+            // Owned (name, value) pairs first, then borrow them for the builder.
+            let sets: Vec<(String, dbcore::Value)> = colmap
+                .iter()
+                .map(|(&col, v)| (result.columns[col].name.clone(), v.clone()))
+                .collect();
+            let keys: Vec<(String, dbcore::Value)> = pk_idx
+                .iter()
+                .map(|(name, idx)| (name.clone(), result.rows[row][*idx].clone()))
+                .collect();
+            let set_refs: Vec<(&str, &dbcore::Value)> =
+                sets.iter().map(|(c, v)| (c.as_str(), v)).collect();
+            let key_refs: Vec<(&str, &dbcore::Value)> =
+                keys.iter().map(|(c, v)| (c.as_str(), v)).collect();
+            match dbcore::build_update_sql(
+                kind,
+                source.schema.as_deref(),
+                &source.table,
+                &set_refs,
+                &key_refs,
+            ) {
+                Some(sql) => statements.push(sql),
+                None => {
+                    self.error = Some("Cannot save: a cell holds a value that can't be written "
+                        .to_string()
+                        + "(e.g. binary data).");
+                    return;
+                }
+            }
+        }
+
+        let n = statements.len();
+        let tx = self.tx.clone();
+        self.busy = Busy::Querying;
+        self.error = None;
+        self.status_msg = format!("Saving {n} change(s)…");
+        self.rt.spawn(async move {
+            let mut outcome = Ok(n);
+            for stmt in &statements {
+                if let Err(e) = db.execute(stmt).await {
+                    outcome = Err(e.to_string());
+                    break;
+                }
+            }
+            let _ = tx.send(AppMessage::Committed(outcome));
+        });
+    }
+
     fn apply_sort(&mut self, col: usize) {
         let Some(result) = &self.result else { return };
         if col >= result.column_count() {
@@ -471,8 +605,13 @@ impl DbGuiApp {
                     }
                 }
             }
-            Action::RunQuery => self.start_query(),
-            Action::OpenTable(sql) => {
+            Action::RunQuery => {
+                // An ad-hoc query can't be mapped back to one table, so it isn't editable.
+                self.edits.pending_source = None;
+                self.start_query();
+            }
+            Action::OpenTable { sql, source } => {
+                self.edits.pending_source = Some(source);
                 self.sql = sql;
                 self.start_query();
             }
@@ -520,6 +659,10 @@ impl DbGuiApp {
         // Global shortcut: Cmd/Ctrl+Enter runs the query.
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter)) {
             actions.push(Action::RunQuery);
+        }
+        // Cmd/Ctrl+S saves staged cell edits (TablePlus-style) as UPDATE statements.
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
+            self.commit_edits();
         }
         // Cmd/Ctrl+F toggles the filter bar (when there's a result to filter); Esc hides it.
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F))
