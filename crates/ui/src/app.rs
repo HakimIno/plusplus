@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use dbcore::{ConnectionConfig, Database, DbKind, QueryResult, SchemaTree};
 
+use crate::filter::{self, FilterEvent, FilterState};
 use crate::grid::results_grid;
 use crate::style::{self, palette};
 use crate::theme::ThemeId;
@@ -96,6 +97,8 @@ pub struct DbGuiApp {
     // --- transient UI state ---
     editor: Option<ConnEditor>,
     schema_filter: String,
+    /// TablePlus-style result filter bar (column / operator / value conditions).
+    filter: FilterState,
     status_msg: String,
     error: Option<String>,
 
@@ -159,6 +162,7 @@ impl DbGuiApp {
             selected_row: None,
             editor: None,
             schema_filter: String::new(),
+            filter: FilterState::default(),
             status_msg: "Ready".to_string(),
             error: None,
             theme,
@@ -218,9 +222,12 @@ impl DbGuiApp {
     }
 
     fn set_result(&mut self, res: QueryResult) {
-        self.row_order = (0..res.rows.len()).collect();
         self.sort = None;
         self.selected_row = None;
+        // A fresh result may have a different column count; keep filter conditions but stop
+        // them indexing past the new columns, then rebuild the display order through the
+        // filter (so a still-open filter bar keeps applying).
+        self.filter.clamp_columns(res.column_count());
         self.status_msg = match res.stats.rows_affected {
             Some(n) => format!("OK — {n} row(s) affected in {:.1} ms", res.stats.elapsed_ms),
             None => format!(
@@ -232,6 +239,31 @@ impl DbGuiApp {
         };
         self.error = None;
         self.result = Some(res);
+        self.recompute_view();
+    }
+
+    /// Rebuild `row_order` (the grid's display order) from the current result by applying the
+    /// filter, then the active sort. The single place both filtering and sorting funnel
+    /// through, so they always compose the same way.
+    fn recompute_view(&mut self) {
+        let Some(result) = &self.result else {
+            self.row_order.clear();
+            return;
+        };
+        let mut order = filter::passing_rows(result, &self.filter);
+        if let Some((col, ascending)) = self.sort {
+            if col < result.column_count() {
+                order.sort_by(|&a, &b| {
+                    let ord = result.rows[a][col].sort_cmp(&result.rows[b][col]);
+                    if ascending { ord } else { ord.reverse() }
+                });
+            }
+        }
+        self.row_order = order;
+        // A row that filtered out can't stay selected.
+        if self.selected_row.is_some_and(|s| s >= self.row_order.len()) {
+            self.selected_row = None;
+        }
     }
 
     fn start_connect(&mut self, idx: usize) {
@@ -296,15 +328,8 @@ impl DbGuiApp {
             Some((c, asc)) if c == col => !asc,
             _ => true,
         };
-        self.row_order.sort_by(|&a, &b| {
-            let ord = result.rows[a][col].sort_cmp(&result.rows[b][col]);
-            if ascending {
-                ord
-            } else {
-                ord.reverse()
-            }
-        });
         self.sort = Some((col, ascending));
+        self.recompute_view();
     }
 
     // --- action dispatch --------------------------------------------------
@@ -410,6 +435,14 @@ impl DbGuiApp {
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter)) {
             actions.push(Action::RunQuery);
         }
+        // Cmd/Ctrl+F toggles the filter bar (when there's a result to filter); Esc hides it.
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) && self.result.is_some()
+        {
+            self.filter.visible = !self.filter.visible;
+        }
+        if self.filter.visible && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.filter.visible = false;
+        }
 
         // Order matters: top/bottom/left/right carve space, central takes the rest.
         self.top_bar(ui_root, &mut actions);
@@ -417,6 +450,8 @@ impl DbGuiApp {
         self.status_bar(ui_root);
         self.left_panel(ui_root, &mut actions);
         self.right_panel(ui_root);
+        // A top panel after left/right carves the strip directly above the grid.
+        self.filter_bar(ui_root);
         self.central_panel(ui_root, &mut actions);
         self.connection_dialog(&ctx, &mut actions);
 
@@ -451,6 +486,17 @@ impl DbGuiApp {
                     if icons::button(ui, icons::disconnect(), "Disconnect", true).clicked() {
                         actions.push(Action::Disconnect);
                     }
+                }
+
+                // Filter toggle — enabled once there's a result to filter, highlighted while
+                // the bar is open (TablePlus's ⌘F).
+                let has_result = self.result.is_some();
+                let filter_on = self.filter.visible;
+                if icons::toggle_button(ui, icons::filter(), "Filter", has_result, filter_on)
+                    .on_hover_text("Show / hide filter bar  (Cmd/Ctrl+F)")
+                    .clicked()
+                {
+                    self.filter.visible = !self.filter.visible;
                 }
 
                 ui.add_space(4.0);
@@ -521,6 +567,17 @@ impl DbGuiApp {
                 } else {
                     icons::show_weak(ui, icons::table(), 14.0);
                     ui.colored_label(palette::TEXT_WEAK(), &self.status_msg);
+                    // When a filter is narrowing the result, show "shown of total".
+                    if let Some(res) = &self.result {
+                        if self.filter.is_active() && self.row_order.len() != res.row_count() {
+                            ui.colored_label(palette::TEXT_FAINT(), "·");
+                            icons::show_colored(ui, icons::filter(), 13.0, palette::ACCENT());
+                            ui.colored_label(
+                                palette::ACCENT(),
+                                format!("{} of {} rows", self.row_order.len(), res.row_count()),
+                            );
+                        }
+                    }
                     if let (Some(sel), true) = (self.selected_row, self.result.is_some()) {
                         ui.colored_label(palette::TEXT_FAINT(), "·");
                         ui.colored_label(palette::TEXT_WEAK(), format!("row {}", sel + 1));
@@ -691,11 +748,8 @@ impl DbGuiApp {
                 style::section_header(ui, "Schema");
                 ui.horizontal(|ui| {
                     icons::show_weak(ui, icons::filter(), 15.0);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.schema_filter)
-                            .hint_text("filter tables…")
-                            .desired_width(f32::INFINITY),
-                    );
+                    let w = ui.available_width();
+                    style::text_input(ui, &mut self.schema_filter, "filter tables…", w);
                 });
                 ui.add_space(4.0);
 
@@ -782,6 +836,39 @@ impl DbGuiApp {
         }
     }
 
+    /// The TablePlus-style filter strip directly above the grid. Only shown when toggled on
+    /// and a result with columns is loaded. Edits mutate `self.filter` directly; an Apply or
+    /// Clear rebuilds the view.
+    fn filter_bar(&mut self, root: &mut egui::Ui) {
+        if !self.filter.visible {
+            return;
+        }
+        // Snapshot the column names so the closure can borrow `self.filter` mutably without
+        // also holding a borrow of `self.result`.
+        let col_names: Vec<String> = match &self.result {
+            Some(res) if res.column_count() > 0 => {
+                res.columns.iter().map(|c| c.name.clone()).collect()
+            }
+            _ => return,
+        };
+
+        let mut event: Option<FilterEvent> = None;
+        egui::Panel::top("filter_bar")
+            .resizable(false)
+            .show_inside(root, |ui| {
+                event = filter::ui(ui, &mut self.filter, &col_names);
+            });
+
+        match event {
+            Some(FilterEvent::Apply) => self.recompute_view(),
+            Some(FilterEvent::Clear) => {
+                self.filter.reset();
+                self.recompute_view();
+            }
+            None => {}
+        }
+    }
+
     fn central_panel(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
         egui::CentralPanel::default().show_inside(root, |ui| {
             match &self.result {
@@ -833,8 +920,11 @@ impl DbGuiApp {
                     .num_columns(2)
                     .spacing([8.0, 8.0])
                     .show(ui, |ui| {
+                        // One width for every field so the form reads as a tidy column.
+                        let field_w = 240.0;
+
                         ui.label("Name");
-                        ui.text_edit_singleline(&mut editor.config.name);
+                        style::text_input(ui, &mut editor.config.name, "", field_w);
                         ui.end_row();
 
                         ui.label("Type");
@@ -856,31 +946,41 @@ impl DbGuiApp {
 
                         if editor.config.kind.is_server() {
                             ui.label("Host");
-                            ui.text_edit_singleline(&mut editor.config.host);
+                            style::text_input(ui, &mut editor.config.host, "", field_w);
                             ui.end_row();
 
                             ui.label("Port");
-                            ui.add(egui::DragValue::new(&mut editor.config.port));
+                            ui.add_sized(
+                                egui::vec2(80.0, style::CONTROL_H),
+                                egui::DragValue::new(&mut editor.config.port),
+                            );
                             ui.end_row();
 
                             ui.label("User");
-                            ui.text_edit_singleline(&mut editor.config.user);
+                            style::text_input(ui, &mut editor.config.user, "", field_w);
                             ui.end_row();
 
                             ui.label("Password");
-                            ui.add(egui::TextEdit::singleline(&mut editor.password).password(true));
+                            ui.add_sized(
+                                egui::vec2(field_w, style::CONTROL_H),
+                                egui::TextEdit::singleline(&mut editor.password)
+                                    .password(true)
+                                    .vertical_align(egui::Align::Center)
+                                    .margin(egui::Margin::symmetric(8, 0)),
+                            );
                             ui.end_row();
 
                             ui.label("Database");
-                            ui.text_edit_singleline(&mut editor.config.database);
+                            style::text_input(ui, &mut editor.config.database, "", field_w);
                             ui.end_row();
                         } else {
                             ui.label("File");
                             ui.horizontal(|ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut editor.config.sqlite_path)
-                                        .desired_width(220.0)
-                                        .hint_text("/path/to/database.sqlite"),
+                                style::text_input(
+                                    ui,
+                                    &mut editor.config.sqlite_path,
+                                    "/path/to/database.sqlite",
+                                    field_w,
                                 );
                                 if ui.button("Browse…").clicked() {
                                     actions.push(Action::BrowseSqlitePath);
@@ -1016,6 +1116,29 @@ mod tests {
         );
     }
 
+    /// Filtering narrows `row_order` to the matching rows, and clearing restores them all.
+    #[test]
+    fn filter_recomputes_view() {
+        let mut app = DbGuiApp::construct();
+        // 10 rows, col 0 = 0..10. Keep rows where col0 < 4.
+        app.set_result(fake_result(10, 2));
+        assert_eq!(app.row_order.len(), 10);
+
+        app.filter.visible = true;
+        app.filter.conditions = vec![crate::filter::Condition {
+            enabled: true,
+            column: 0,
+            op: crate::filter::FilterOp::Less,
+            value: "8".into(), // col0 values step by `cols`=2: 0,2,4,6,8,... → <8 keeps 4 rows
+        }];
+        app.recompute_view();
+        assert_eq!(app.row_order.len(), 4);
+
+        app.filter.reset();
+        app.recompute_view();
+        assert_eq!(app.row_order.len(), 10);
+    }
+
     /// Drive the full app layout headlessly while scrolling, and capture egui "ID clash"
     /// markers (🔥) to pinpoint the offending widget.
     #[test]
@@ -1030,6 +1153,7 @@ mod tests {
         app.row_order = (0..result.rows.len()).collect();
         app.result = Some(result);
         app.selected_row = Some(7); // render the Details panel
+        app.filter.visible = true; // render the filter bar too
         let db: std::sync::Arc<dyn dbcore::Database> = std::sync::Arc::new(DummyDb);
         app.active = Some(ActiveConnection {
             config_id: "test".into(),

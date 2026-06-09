@@ -6,24 +6,24 @@ use std::path::PathBuf;
 use crate::error::{CoreError, Result};
 use crate::model::ConnectionConfig;
 
-/// Directory where db-gui stores its config, e.g. `~/.config/db-gui` on Linux/macOS or
-/// `%APPDATA%\db-gui` on Windows. We avoid an extra crate and derive it from env vars.
+/// Directory where plusplus stores its config, e.g. `~/.config/plusplus` on Linux/macOS or
+/// `%APPDATA%\plusplus` on Windows. We avoid an extra crate and derive it from env vars.
 fn config_dir() -> Result<PathBuf> {
-    // Honour XDG on unix, APPDATA on Windows, else fall back to ~/.db-gui.
+    // Honour XDG on unix, APPDATA on Windows, else fall back to ~/.config/plusplus.
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         if !xdg.is_empty() {
-            return Ok(PathBuf::from(xdg).join("db-gui"));
+            return Ok(PathBuf::from(xdg).join("plusplus"));
         }
     }
     if let Ok(appdata) = std::env::var("APPDATA") {
         if !appdata.is_empty() {
-            return Ok(PathBuf::from(appdata).join("db-gui"));
+            return Ok(PathBuf::from(appdata).join("plusplus"));
         }
     }
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .map_err(|_| CoreError::Config("could not determine home directory".into()))?;
-    Ok(PathBuf::from(home).join(".config").join("db-gui"))
+    Ok(PathBuf::from(home).join(".config").join("plusplus"))
 }
 
 /// Path to the JSON file holding the list of saved connections.

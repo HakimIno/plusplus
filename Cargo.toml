@@ -1,4 +1,4 @@
-# Workspace manifest for db-gui — a native Rust database GUI (TablePlus-in-Rust).
+# Workspace manifest for plusplus — a native Rust database GUI (TablePlus-in-Rust).
 # The data/analysis layers (`core`, `analysis`) are kept free of any GUI dependency
 # so they can be unit-tested without a window.
 [workspace]
@@ -21,9 +21,9 @@ rust-version = "1.80"
 # --- internal crates ---
 # Imported as `dbcore` (not `core`) so it doesn't shadow Rust's std `core` crate in
 # dependents, which would break macro expansions that reference `::core::`.
-dbcore = { path = "crates/core", package = "db-gui-core" }
-analysis = { path = "crates/analysis", package = "db-gui-analysis" }
-ui = { path = "crates/ui", package = "db-gui-ui" }
+dbcore = { path = "crates/core", package = "plusplus-core" }
+analysis = { path = "crates/analysis", package = "plusplus-analysis" }
+ui = { path = "crates/ui", package = "plusplus-ui" }
 
 # --- GUI ---
 eframe = { version = "0.34", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }

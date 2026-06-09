@@ -1,5 +1,5 @@
 [package]
-name = "db-gui-app"
+name = "plusplus-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ rust-version.workspace = true
 description = "eframe entry point that wires the UI, data, and analysis layers together."
 
 [[bin]]
-name = "db-gui"
+name = "plusplus"
 path = "src/main.rs"
 
 [dependencies]

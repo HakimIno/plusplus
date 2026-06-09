@@ -1,4 +1,4 @@
-//! db-gui — native database GUI. This crate is just the eframe entry point: it sets up
+//! plusplus — native database GUI. This crate is just the eframe entry point: it sets up
 //! the window, installs the Thai font, and hands control to [`ui::DbGuiApp`].
 
 // On Windows, don't pop up a console window alongside the GUI in release builds.
@@ -13,12 +13,12 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([800.0, 500.0])
-            .with_title("db-gui"),
+            .with_title("plusplus"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "db-gui",
+        "plusplus",
         native_options,
         Box::new(|cc| {
             ui::install_fonts(&cc.egui_ctx, THAI_FONT);

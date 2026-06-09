@@ -1,4 +1,4 @@
-# db-gui
+# plusplus
 
 A native, cross-platform database GUI written entirely in Rust — TablePlus in spirit, with
 a fast, virtualized data grid at its core. Browse schemas, run SQL, and (from Phase 2)
@@ -29,7 +29,7 @@ A Cargo workspace keeps the data/analysis logic decoupled from the GUI and unit-
 without a window:
 
 ```
-db-gui/
+plusplus/
   Cargo.toml            # workspace + pinned dependency versions
   crates/
     core/               # DB abstraction: connections, schema introspection, query execution
@@ -63,10 +63,10 @@ Requires a recent stable Rust (≥ 1.94; pinned via `rust-toolchain.toml`). SQLi
 cargo build
 
 # run the GUI
-cargo run -p db-gui-app        # or: cargo run --bin db-gui
+cargo run -p plusplus-app      # or: cargo run --bin plusplus
 
 # run the (GUI-free) data-layer tests
-cargo test -p db-gui-core
+cargo test -p plusplus-core
 ```
 
 ### Try it with the sample database
@@ -84,7 +84,7 @@ A small SQLite database with mixed Thai/English data lives at `examples/sample.s
 ### Connecting to PostgreSQL
 
 Use the connection dialog (host / port / user / password / database). The password is saved
-to your OS keychain under the service `db-gui`.
+to your OS keychain under the service `plusplus`.
 
 ## Tech stack
 

@@ -1,4 +1,4 @@
-//! `core` — the backend-agnostic data layer for db-gui.
+//! `core` — the backend-agnostic data layer for plusplus.
 //!
 //! This crate knows nothing about egui. It exposes:
 //! - [`Database`]: the trait every backend implements.

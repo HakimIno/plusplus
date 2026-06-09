@@ -5,7 +5,7 @@ use keyring::Entry;
 
 use crate::error::{CoreError, Result};
 
-const SERVICE: &str = "db-gui";
+const SERVICE: &str = "plusplus";
 
 fn entry(connection_id: &str) -> Result<Entry> {
     Entry::new(SERVICE, connection_id).map_err(|e| CoreError::Keyring(e.to_string()))

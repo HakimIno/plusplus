@@ -1,9 +1,10 @@
-//! `ui` — egui views, widgets and application state for db-gui.
+//! `ui` — egui views, widgets and application state for plusplus.
 //!
 //! The entry point is [`DbGuiApp`], which implements [`eframe::App`]. The `app` crate
 //! constructs it and runs it; this crate owns all rendering and UI state.
 
 mod app;
+mod filter;
 mod grid;
 mod highlight;
 mod icons;

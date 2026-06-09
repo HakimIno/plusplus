@@ -1,5 +1,5 @@
 [package]
-name = "db-gui-core"
+name = "plusplus-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,7 +10,7 @@ description = "Backend-agnostic database abstraction: connections, schema intros
 # macro expansions (e.g. thiserror's `::core::convert`). Dependents still import it as
 # `core` via the workspace dependency rename in the root Cargo.toml.
 [lib]
-name = "db_gui_core"
+name = "plusplus_core"
 path = "src/lib.rs"
 
 [dependencies]

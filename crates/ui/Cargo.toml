@@ -1,10 +1,10 @@
 [package]
-name = "db-gui-ui"
+name = "plusplus-ui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "egui views, widgets and application state for db-gui."
+description = "egui views, widgets and application state for plusplus."
 
 [lib]
 name = "ui"

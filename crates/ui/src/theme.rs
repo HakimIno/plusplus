@@ -50,7 +50,7 @@ pub struct Theme {
 pub enum ThemeId {
     /// Near-black, neutral. The default — deep blacks in the spirit of an OLED editor.
     Carbon,
-    /// A calm, slightly-cool dark palette (the original db-gui look).
+    /// A calm, slightly-cool dark palette (the original plusplus look).
     Midnight,
     /// A clean light theme for bright environments.
     Daylight,
@@ -126,7 +126,7 @@ fn carbon() -> Theme {
     }
 }
 
-/// The original db-gui look: a calm, slightly-cool dark palette (Linear / Raycast).
+/// The original plusplus look: a calm, slightly-cool dark palette (Linear / Raycast).
 fn midnight() -> Theme {
     Theme {
         is_dark: true,

@@ -59,7 +59,13 @@ pub mod palette {
     pub fn WARNING() -> Color32 { current().warning }
 }
 
-/// Apply the db-gui look to a context.
+/// Shared height (in points) for form controls — text inputs, dropdowns, and buttons all
+/// line up to this so a row of them reads as one clean band. This is the single knob for the
+/// whole app's control sizing: change it here and every control follows. Buttons/combos pick
+/// it up via `spacing.interact_size.y` (set in [`apply`]); text fields via [`text_input`].
+pub const CONTROL_H: f32 = 30.0;
+
+/// Apply the plusplus look to a context.
 pub fn apply(ctx: &egui::Context) {
     ctx.set_visuals(visuals());
 
@@ -81,7 +87,8 @@ pub fn apply(ctx: &egui::Context) {
     s.button_padding = egui::vec2(10.0, 6.0);
     s.menu_margin = Margin::same(6);
     s.indent = 16.0;
-    s.interact_size.y = 27.0;
+    // Buttons and combo boxes adopt the shared control height from here.
+    s.interact_size.y = CONTROL_H;
     s.window_margin = Margin::same(14);
     s.scroll.bar_width = 9.0;
     s.scroll.bar_inner_margin = 3.0;
@@ -174,6 +181,26 @@ fn visuals() -> egui::Visuals {
 }
 
 // --- reusable building blocks ------------------------------------------------
+
+/// The app's single-line text field. Every text input in the app should go through this so
+/// they share one height ([`CONTROL_H`]), padding, and alignment — change the look here and
+/// it propagates everywhere. `width` is the exact outer width; pass `ui.available_width()` to
+/// fill the rest of a row.
+pub fn text_input(
+    ui: &mut egui::Ui,
+    text: &mut String,
+    hint: &str,
+    width: f32,
+) -> egui::Response {
+    ui.add_sized(
+        egui::vec2(width, CONTROL_H),
+        egui::TextEdit::singleline(text)
+            .hint_text(hint)
+            .vertical_align(egui::Align::Center)
+            .margin(Margin::symmetric(8, 0)),
+    )
+}
+
 
 /// A muted, letter-spaced uppercase section label — the small caption that titles each
 /// panel (CONNECTIONS, SCHEMA, …). Adds a little breathing room above itself.

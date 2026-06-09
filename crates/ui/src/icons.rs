@@ -92,6 +92,36 @@ pub fn primary_button(
     ui.add_enabled(enabled, btn)
 }
 
+/// A text button with a leading icon that reads as "on" (accent-tinted with a soft fill)
+/// when `active`. Used for toggles like the filter-bar switch.
+pub fn toggle_button(
+    ui: &mut egui::Ui,
+    src: ImageSource<'static>,
+    text: &str,
+    enabled: bool,
+    active: bool,
+) -> egui::Response {
+    use crate::style::palette;
+    let tint = if active {
+        palette::ACCENT()
+    } else {
+        ui.visuals().widgets.inactive.fg_stroke.color
+    };
+    let img = image(ui, src, SIZE, tint);
+    let label = if active {
+        egui::RichText::new(text).color(palette::ACCENT()).strong()
+    } else {
+        egui::RichText::new(text)
+    };
+    let mut btn = egui::Button::image_and_text(img, label);
+    if active {
+        btn = btn
+            .fill(palette::SELECTION())
+            .stroke(egui::Stroke::new(1.0, palette::ACCENT()));
+    }
+    ui.add_enabled(enabled, btn)
+}
+
 /// A compact icon-only button with a hover tooltip.
 pub fn icon_button(ui: &mut egui::Ui, src: ImageSource<'static>, hover: &str) -> egui::Response {
     let tint = ui.visuals().widgets.inactive.fg_stroke.color;
