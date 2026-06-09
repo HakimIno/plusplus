@@ -12,6 +12,7 @@ use dbcore::{ConnectionConfig, Database, DbKind, QueryResult, SchemaTree};
 
 use crate::grid::results_grid;
 use crate::style::{self, palette};
+use crate::theme::ThemeId;
 use crate::icons;
 
 /// Messages sent from background tasks back to the UI thread.
@@ -97,10 +98,17 @@ pub struct DbGuiApp {
     schema_filter: String,
     status_msg: String,
     error: Option<String>,
+
+    // --- preferences ---
+    /// Currently selected colour theme (persisted to settings.json).
+    theme: ThemeId,
 }
 
 impl DbGuiApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Build state first: `construct` activates the saved theme, which `apply` then reads.
+        let app = Self::construct();
+
         // Theme + SVG icon loader (Iconoir icons are embedded SVGs).
         crate::style::apply(&cc.egui_ctx);
         egui_extras::install_image_loaders(&cc.egui_ctx);
@@ -112,13 +120,24 @@ impl DbGuiApp {
         // tests, so we turn off this debug-only diagnostic (it never fires in release).
         cc.egui_ctx.options_mut(|o| o.warn_on_id_clash = false);
 
-        Self::construct()
+        app
     }
 
     /// Build the app state without touching an egui context (used by `new` and tests).
+    ///
+    /// Side effect: activates the saved theme via [`crate::theme::set_current`] so a later
+    /// [`crate::style::apply`] renders in it. This is a thread-local, no context needed.
     fn construct() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         let connections = dbcore::config::load_connections().unwrap_or_default();
+
+        // Restore the saved theme (falling back to the default), and make it active.
+        let theme = dbcore::config::load_settings()
+            .theme
+            .as_deref()
+            .and_then(ThemeId::from_key)
+            .unwrap_or(ThemeId::DEFAULT);
+        crate::theme::set_current(theme);
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -142,6 +161,18 @@ impl DbGuiApp {
             schema_filter: String::new(),
             status_msg: "Ready".to_string(),
             error: None,
+            theme,
+        }
+    }
+
+    /// Switch the active theme, re-apply the egui style, and persist the choice.
+    fn set_theme(&mut self, ctx: &egui::Context, id: ThemeId) {
+        self.theme = id;
+        crate::theme::set_current(id);
+        crate::style::apply(ctx);
+        let settings = dbcore::config::Settings { theme: Some(id.key().to_string()) };
+        if let Err(e) = dbcore::config::save_settings(&settings) {
+            self.error = Some(format!("Could not save theme: {e}"));
         }
     }
 
@@ -428,34 +459,54 @@ impl DbGuiApp {
 
                 // Breadcrumb: ● connection › database.
                 if let Some(active) = &self.active {
-                    style::status_dot(ui, palette::SUCCESS);
+                    style::status_dot(ui, palette::SUCCESS());
                     ui.add_space(1.0);
                     ui.strong(&active.name);
-                    ui.colored_label(palette::TEXT_FAINT, "›");
-                    ui.colored_label(palette::TEXT_WEAK, &active.schema.database_name);
+                    ui.colored_label(palette::TEXT_FAINT(), "›");
+                    ui.colored_label(palette::TEXT_WEAK(), &active.schema.database_name);
                 } else {
-                    style::status_dot(ui, palette::TEXT_FAINT);
+                    style::status_dot(ui, palette::TEXT_FAINT());
                     ui.add_space(1.0);
-                    ui.colored_label(palette::TEXT_WEAK, "Not connected — pick a connection on the left");
+                    ui.colored_label(palette::TEXT_WEAK(), "Not connected — pick a connection on the left");
                 }
 
-                // Busy indicator on the right.
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match self.busy {
-                    Busy::Connecting => {
-                        ui.add_space(2.0);
-                        ui.colored_label(palette::TEXT_WEAK, "connecting…");
-                        ui.spinner();
+                // Theme picker + busy indicator, right-aligned.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.theme_picker(ui);
+
+                    match self.busy {
+                        Busy::Connecting => {
+                            ui.add_space(2.0);
+                            ui.colored_label(palette::TEXT_WEAK(), "connecting…");
+                            ui.spinner();
+                        }
+                        Busy::Querying => {
+                            ui.add_space(2.0);
+                            ui.colored_label(palette::TEXT_WEAK(), "running…");
+                            ui.spinner();
+                        }
+                        Busy::Idle => {}
                     }
-                    Busy::Querying => {
-                        ui.add_space(2.0);
-                        ui.colored_label(palette::TEXT_WEAK, "running…");
-                        ui.spinner();
-                    }
-                    Busy::Idle => {}
                 });
             });
             ui.add_space(7.0);
         });
+    }
+
+    /// A small combo box for choosing the colour theme. Switching applies immediately and
+    /// the choice is remembered across launches.
+    fn theme_picker(&mut self, ui: &mut egui::Ui) {
+        let mut chosen = self.theme;
+        egui::ComboBox::from_id_salt("theme_picker")
+            .selected_text(self.theme.label())
+            .show_ui(ui, |ui| {
+                for id in ThemeId::ALL {
+                    ui.selectable_value(&mut chosen, id, id.label());
+                }
+            });
+        if chosen != self.theme {
+            self.set_theme(ui.ctx(), chosen);
+        }
     }
 
     /// Thin bar between the grid and the SQL console: row count / selection / errors.
@@ -465,14 +516,14 @@ impl DbGuiApp {
             ui.horizontal(|ui| {
                 ui.add_space(2.0);
                 if let Some(err) = &self.error {
-                    icons::show_colored(ui, icons::warning(), 15.0, palette::DANGER);
-                    ui.colored_label(palette::DANGER, err);
+                    icons::show_colored(ui, icons::warning(), 15.0, palette::DANGER());
+                    ui.colored_label(palette::DANGER(), err);
                 } else {
                     icons::show_weak(ui, icons::table(), 14.0);
-                    ui.colored_label(palette::TEXT_WEAK, &self.status_msg);
+                    ui.colored_label(palette::TEXT_WEAK(), &self.status_msg);
                     if let (Some(sel), true) = (self.selected_row, self.result.is_some()) {
-                        ui.colored_label(palette::TEXT_FAINT, "·");
-                        ui.colored_label(palette::TEXT_WEAK, format!("row {}", sel + 1));
+                        ui.colored_label(palette::TEXT_FAINT(), "·");
+                        ui.colored_label(palette::TEXT_WEAK(), format!("row {}", sel + 1));
                     }
                 }
             });
@@ -603,7 +654,7 @@ impl DbGuiApp {
                             let is_active = self.active.is_some() && selected;
                             let resp = ui
                                 .horizontal(|ui| {
-                                    let dot = if is_active { palette::SUCCESS } else { palette::TEXT_FAINT };
+                                    let dot = if is_active { palette::SUCCESS() } else { palette::TEXT_FAINT() };
                                     style::status_dot(ui, dot);
                                     ui.add_space(2.0);
                                     ui.selectable_label(selected, &conn.name)
@@ -629,8 +680,8 @@ impl DbGuiApp {
                         }
                         if self.connections.is_empty() {
                             ui.add_space(4.0);
-                            ui.colored_label(palette::TEXT_FAINT, "No saved connections.");
-                            ui.colored_label(palette::TEXT_FAINT, "Click + to add one.");
+                            ui.colored_label(palette::TEXT_FAINT(), "No saved connections.");
+                            ui.colored_label(palette::TEXT_FAINT(), "Click + to add one.");
                         }
                     });
 
@@ -659,7 +710,7 @@ impl DbGuiApp {
     fn schema_tree(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let Some(active) = &self.active else {
             ui.add_space(4.0);
-            ui.colored_label(palette::TEXT_FAINT, "Connect to a database to browse its schema.");
+            ui.colored_label(palette::TEXT_FAINT(), "Connect to a database to browse its schema.");
             return;
         };
 

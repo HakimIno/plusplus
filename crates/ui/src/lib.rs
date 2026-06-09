@@ -8,6 +8,7 @@ mod grid;
 mod highlight;
 mod icons;
 mod style;
+mod theme;
 
 pub use app::DbGuiApp;
 

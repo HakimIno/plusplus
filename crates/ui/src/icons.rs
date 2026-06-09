@@ -82,13 +82,13 @@ pub fn primary_button(
     enabled: bool,
 ) -> egui::Response {
     use crate::style::palette;
-    let img = image(ui, src, SIZE, palette::ON_ACCENT);
+    let img = image(ui, src, SIZE, palette::ON_ACCENT());
     let btn = egui::Button::image_and_text(
         img,
-        egui::RichText::new(text).color(palette::ON_ACCENT).strong(),
+        egui::RichText::new(text).color(palette::ON_ACCENT()).strong(),
     )
-    .fill(palette::ACCENT)
-    .stroke(egui::Stroke::new(1.0, palette::ACCENT_HOVER));
+    .fill(palette::ACCENT())
+    .stroke(egui::Stroke::new(1.0, palette::ACCENT_HOVER()));
     ui.add_enabled(enabled, btn)
 }
 

@@ -1,53 +1,62 @@
 //! Visual design system: a single source of truth for colour, type, and spacing.
 //!
 //! Everything UI-facing pulls from [`palette`] rather than hard-coding colours, so the
-//! whole app stays cohesive and re-themeable. Applied once at startup via [`apply`].
+//! whole app stays cohesive and re-themeable. The concrete colours come from the active
+//! [`crate::theme::Theme`], so the same call sites follow whichever theme the user picks.
+//! Applied at startup — and again whenever the theme changes — via [`apply`].
 
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, CornerRadius, FontFamily, FontId, Margin, Stroke, TextStyle};
 
-/// Named colour tokens. A calm, slightly-cool dark palette in the spirit of modern
-/// developer tools (Linear / Raycast): layered surfaces, one confident accent, muted text.
+/// Named colour tokens, resolved against the currently-active theme. UI code reads colours
+/// through these accessors (e.g. `palette::ACCENT()`) so a theme switch flows everywhere
+/// without touching call sites. See [`crate::theme`] for the underlying palettes.
+///
+/// `dead_code` is allowed because this is a complete design-system token set: a few tokens
+/// (surfaces/borders) are consumed by [`visuals`] directly off the `Theme` rather than
+/// through these accessors, but we expose them all for use by future call sites.
+#[allow(non_snake_case, dead_code)]
 pub mod palette {
     use egui::Color32;
 
-    // --- surfaces (darkest → lightest) ---
+    use crate::theme::current;
+
+    // --- surfaces (darkest → lightest, for a dark theme) ---
     /// App / window background.
-    pub const BASE: Color32 = Color32::from_rgb(0x15, 0x16, 0x1a);
+    pub fn BASE() -> Color32 { current().base }
     /// Side and tool panels.
-    pub const PANEL: Color32 = Color32::from_rgb(0x1a, 0x1c, 0x21);
+    pub fn PANEL() -> Color32 { current().panel }
     /// Raised controls: buttons, inputs, list items.
-    pub const SURFACE: Color32 = Color32::from_rgb(0x23, 0x26, 0x2d);
+    pub fn SURFACE() -> Color32 { current().surface }
     /// Hover state for raised controls.
-    pub const SURFACE_HOVER: Color32 = Color32::from_rgb(0x2c, 0x30, 0x39);
+    pub fn SURFACE_HOVER() -> Color32 { current().surface_hover }
     /// Code / text-edit background (the deepest well).
-    pub const CODE_BG: Color32 = Color32::from_rgb(0x11, 0x12, 0x16);
+    pub fn CODE_BG() -> Color32 { current().code_bg }
     /// Striped / alternate rows.
-    pub const STRIPE: Color32 = Color32::from_rgb(0x1e, 0x21, 0x27);
+    pub fn STRIPE() -> Color32 { current().stripe }
     /// Selected-row / selection fill (accent-tinted, opaque so it reads on any surface).
-    pub const SELECTION: Color32 = Color32::from_rgb(0x2a, 0x37, 0x5e);
+    pub fn SELECTION() -> Color32 { current().selection }
 
     // --- borders ---
-    pub const BORDER: Color32 = Color32::from_rgb(0x2b, 0x2f, 0x38);
-    pub const BORDER_STRONG: Color32 = Color32::from_rgb(0x3a, 0x40, 0x4c);
+    pub fn BORDER() -> Color32 { current().border }
+    pub fn BORDER_STRONG() -> Color32 { current().border_strong }
 
     // --- text ---
-    pub const TEXT: Color32 = Color32::from_rgb(0xe4, 0xe6, 0xea);
-    pub const TEXT_WEAK: Color32 = Color32::from_rgb(0x99, 0xa0, 0xac);
-    pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x68, 0x6f, 0x7d);
+    pub fn TEXT() -> Color32 { current().text }
+    pub fn TEXT_WEAK() -> Color32 { current().text_weak }
+    pub fn TEXT_FAINT() -> Color32 { current().text_faint }
 
     // --- accent ---
-    pub const ACCENT: Color32 = Color32::from_rgb(0x6e, 0x8e, 0xff);
-    pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0x84, 0x9f, 0xff);
+    pub fn ACCENT() -> Color32 { current().accent }
+    pub fn ACCENT_HOVER() -> Color32 { current().accent_hover }
     /// Text/icon colour that sits on top of an accent fill.
-    pub const ON_ACCENT: Color32 = Color32::from_rgb(0xf6, 0xf8, 0xff);
+    pub fn ON_ACCENT() -> Color32 { current().on_accent }
 
     // --- semantic ---
-    pub const SUCCESS: Color32 = Color32::from_rgb(0x4a, 0xcf, 0x8b);
-    pub const DANGER: Color32 = Color32::from_rgb(0xee, 0x6a, 0x6a);
+    pub fn SUCCESS() -> Color32 { current().success }
+    pub fn DANGER() -> Color32 { current().danger }
     /// Part of the token set for completeness; reserved for non-fatal notices.
-    #[allow(dead_code)]
-    pub const WARNING: Color32 = Color32::from_rgb(0xe0, 0xaf, 0x68);
+    pub fn WARNING() -> Color32 { current().warning }
 }
 
 /// Apply the db-gui look to a context.
@@ -99,20 +108,20 @@ pub fn apply(ctx: &egui::Context) {
 }
 
 fn visuals() -> egui::Visuals {
-    use palette::*;
-    let mut v = egui::Visuals::dark();
+    let t = crate::theme::current();
+    let mut v = if t.is_dark { egui::Visuals::dark() } else { egui::Visuals::light() };
 
-    v.panel_fill = PANEL;
-    v.window_fill = BASE;
-    v.extreme_bg_color = CODE_BG;
-    v.faint_bg_color = STRIPE;
-    v.override_text_color = Some(TEXT);
-    v.hyperlink_color = ACCENT;
-    v.selection.bg_fill = SELECTION;
-    v.selection.stroke = Stroke::new(1.0, ACCENT);
+    v.panel_fill = t.panel;
+    v.window_fill = t.base;
+    v.extreme_bg_color = t.code_bg;
+    v.faint_bg_color = t.stripe;
+    v.override_text_color = Some(t.text);
+    v.hyperlink_color = t.accent;
+    v.selection.bg_fill = t.selection;
+    v.selection.stroke = Stroke::new(1.0, t.accent);
 
     // Subtle 1px hairlines instead of egui's heavier defaults.
-    v.window_stroke = Stroke::new(1.0, BORDER);
+    v.window_stroke = Stroke::new(1.0, t.border);
     v.window_shadow = egui::epaint::Shadow {
         offset: [0, 8],
         blur: 28,
@@ -136,30 +145,30 @@ fn visuals() -> egui::Visuals {
     }
 
     // Separators / frame hairlines.
-    w.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
+    w.noninteractive.bg_stroke = Stroke::new(1.0, t.border);
 
     // Default (resting) controls.
-    w.inactive.bg_fill = SURFACE;
-    w.inactive.weak_bg_fill = SURFACE;
-    w.inactive.bg_stroke = Stroke::new(1.0, BORDER);
-    w.inactive.fg_stroke = Stroke::new(1.0, TEXT_WEAK);
+    w.inactive.bg_fill = t.surface;
+    w.inactive.weak_bg_fill = t.surface;
+    w.inactive.bg_stroke = Stroke::new(1.0, t.border);
+    w.inactive.fg_stroke = Stroke::new(1.0, t.text_weak);
 
     // Hover.
-    w.hovered.bg_fill = SURFACE_HOVER;
-    w.hovered.weak_bg_fill = SURFACE_HOVER;
-    w.hovered.bg_stroke = Stroke::new(1.0, BORDER_STRONG);
-    w.hovered.fg_stroke = Stroke::new(1.0, TEXT);
+    w.hovered.bg_fill = t.surface_hover;
+    w.hovered.weak_bg_fill = t.surface_hover;
+    w.hovered.bg_stroke = Stroke::new(1.0, t.border_strong);
+    w.hovered.fg_stroke = Stroke::new(1.0, t.text);
 
     // Pressed / active.
-    w.active.bg_fill = ACCENT;
-    w.active.weak_bg_fill = ACCENT;
-    w.active.bg_stroke = Stroke::new(1.0, ACCENT_HOVER);
-    w.active.fg_stroke = Stroke::new(1.0, ON_ACCENT);
+    w.active.bg_fill = t.accent;
+    w.active.weak_bg_fill = t.accent;
+    w.active.bg_stroke = Stroke::new(1.0, t.accent_hover);
+    w.active.fg_stroke = Stroke::new(1.0, t.on_accent);
 
     // Open (combo boxes etc.).
-    w.open.bg_fill = SURFACE_HOVER;
-    w.open.weak_bg_fill = SURFACE_HOVER;
-    w.open.bg_stroke = Stroke::new(1.0, BORDER_STRONG);
+    w.open.bg_fill = t.surface_hover;
+    w.open.weak_bg_fill = t.surface_hover;
+    w.open.bg_stroke = Stroke::new(1.0, t.border_strong);
 
     v
 }
@@ -176,7 +185,7 @@ pub fn section_header(ui: &mut egui::Ui, text: &str) {
         0.0,
         TextFormat {
             font_id: FontId::new(11.0, FontFamily::Proportional),
-            color: palette::TEXT_FAINT,
+            color: palette::TEXT_FAINT(),
             extra_letter_spacing: 1.4,
             ..Default::default()
         },
@@ -208,15 +217,15 @@ pub fn empty_state(
         ui.add(
             egui::Image::new(icon)
                 .fit_to_exact_size(egui::vec2(40.0, 40.0))
-                .tint(palette::TEXT_FAINT),
+                .tint(palette::TEXT_FAINT()),
         );
         ui.add_space(12.0);
         ui.label(
             egui::RichText::new(title)
                 .size(14.5)
-                .color(palette::TEXT_WEAK),
+                .color(palette::TEXT_WEAK()),
         );
         ui.add_space(3.0);
-        ui.label(egui::RichText::new(hint).color(palette::TEXT_FAINT));
+        ui.label(egui::RichText::new(hint).color(palette::TEXT_FAINT()));
     });
 }

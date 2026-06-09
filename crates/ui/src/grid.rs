@@ -68,7 +68,7 @@ pub fn results_grid(
                         _ => ("", false),
                     };
                     let mut text = egui::RichText::new(format!("{}{arrow}", col.name)).strong();
-                    text = text.color(if sorted { palette::ACCENT } else { palette::TEXT });
+                    text = text.color(if sorted { palette::ACCENT() } else { palette::TEXT() });
                     let label = egui::Label::new(text)
                         .sense(egui::Sense::click())
                         .selectable(false);
@@ -197,7 +197,7 @@ mod tests {
 fn cell(ui: &mut egui::Ui, value: &Value) {
     match value {
         Value::Null => {
-            ui.colored_label(palette::TEXT_FAINT, egui::RichText::new("NULL").italics());
+            ui.colored_label(palette::TEXT_FAINT(), egui::RichText::new("NULL").italics());
         }
         Value::Int(_) | Value::Float(_) => {
             ui.label(egui::RichText::new(value.display()).monospace());
