@@ -11,6 +11,7 @@ mod highlight;
 mod icons;
 mod style;
 mod theme;
+mod title_bar;
 
 pub use app::DbGuiApp;
 

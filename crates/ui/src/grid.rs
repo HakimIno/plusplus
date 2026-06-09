@@ -3,7 +3,7 @@
 //! dense rows, click-to-select with row highlight, and click-to-sort headers.
 //! Only the visible rows are rendered each frame, so it stays smooth at 100k+ rows.
 
-use crate::edit::Edits;
+use crate::edit::{EditOutcome, EditorKind, Edits};
 use crate::style::palette;
 use dbcore::{QueryResult, Value};
 use egui_extras::{Column, TableBuilder};
@@ -21,6 +21,8 @@ pub struct GridResponse {
     pub selected: Option<usize>,
     /// A cell was double-clicked → start editing it (raw row index, column index).
     pub begin_edit: Option<(usize, usize)>,
+    /// A boolean cell was double-clicked → flip it (raw row index, column index).
+    pub toggle: Option<(usize, usize)>,
     /// The open editor should be committed (Enter pressed or focus lost).
     pub commit_edit: bool,
     /// The open editor should be discarded (Escape pressed).
@@ -170,30 +172,14 @@ fn build_grid(
                             tint_cell(ui);
                         }
                         if edits.is_active(r, c) {
-                            // The cell under edit: a text field that fills the whole cell, with
-                            // slightly rounded corners so it reads as an input box.
+                            // The cell under edit fills the whole cell; the editor is
+                            // type-aware and validates numbers/dates before they can commit.
                             if let Some(active) = edits.active.as_mut() {
-                                {
-                                    let cr = egui::CornerRadius::same(3);
-                                    let w = &mut ui.visuals_mut().widgets;
-                                    w.inactive.corner_radius = cr;
-                                    w.hovered.corner_radius = cr;
-                                    w.active.corner_radius = cr;
-                                }
                                 let size = ui.available_size();
-                                let resp = ui.add_sized(
-                                    size,
-                                    egui::TextEdit::singleline(&mut active.buf)
-                                        .margin(egui::vec2(4.0, 2.0)),
-                                );
-                                if active.focus {
-                                    resp.request_focus();
-                                    active.focus = false;
-                                }
-                                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                                    out.cancel_edit = true;
-                                } else if resp.lost_focus() {
-                                    out.commit_edit = true;
+                                match crate::edit::render_editor(ui, active, Some(size)) {
+                                    EditOutcome::Commit => out.commit_edit = true,
+                                    EditOutcome::Cancel => out.cancel_edit = true,
+                                    EditOutcome::Continue => {}
                                 }
                             }
                         } else {
@@ -203,12 +189,14 @@ fn build_grid(
                         }
                     });
 
-                    // Double-click a cell to edit it (binary cells aren't editable).
-                    if editable
-                        && resp.double_clicked()
-                        && !matches!(value, Value::Bytes(_))
-                    {
-                        out.begin_edit = Some((r, c));
+                    // Double-click to edit (binary cells aren't editable). Booleans toggle
+                    // in place; everything else opens the inline editor.
+                    if editable && resp.double_clicked() && !matches!(value, Value::Bytes(_)) {
+                        if edits.col_kind(c) == EditorKind::Bool {
+                            out.toggle = Some((r, c));
+                        } else {
+                            out.begin_edit = Some((r, c));
+                        }
                     }
                 }
 

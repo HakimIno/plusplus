@@ -19,7 +19,7 @@ pub(super) fn connection_tab_item(
     selected: bool,
     connected: bool,
 ) -> egui::Response {
-    let size = egui::vec2(56.0, 44.0);
+    let size = egui::vec2(48.0, 40.0);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
 
     let fill = if selected {
@@ -47,8 +47,8 @@ pub(super) fn connection_tab_item(
         );
         if connected {
             ui.painter().circle_filled(
-                rect.left_top() + egui::vec2(7.0, 7.0),
-                2.5,
+                rect.left_top() + egui::vec2(6.0, 6.0),
+                2.0,
                 palette::SUCCESS(),
             );
         }
@@ -56,19 +56,19 @@ pub(super) fn connection_tab_item(
 
     let content_rect = rect.shrink2(egui::vec2(3.0, 4.0));
     let icon_rect = egui::Rect::from_center_size(
-        egui::pos2(content_rect.center().x, content_rect.top() + 10.0),
-        egui::vec2(16.0, 16.0),
+        egui::pos2(content_rect.center().x, content_rect.top() + 9.0),
+        egui::vec2(14.0, 14.0),
     );
     let label_rect = egui::Rect::from_min_size(
-        egui::pos2(content_rect.left(), content_rect.top() + 22.0),
-        egui::vec2(content_rect.width(), 14.0),
+        egui::pos2(content_rect.left(), content_rect.top() + 20.0),
+        egui::vec2(content_rect.width(), 12.0),
     );
 
     ui.scope_builder(egui::UiBuilder::new().max_rect(icon_rect), |ui| {
         icons::show_colored(
             ui,
             icons::database(),
-            16.0,
+            14.0,
             if selected {
                 palette::TEXT()
             } else {
@@ -81,7 +81,7 @@ pub(super) fn connection_tab_item(
             ui.add(
                 egui::Label::new(
                     egui::RichText::new(compact_connection_label(name))
-                        .size(9.0)
+                        .size(8.5)
                         .color(if selected {
                             palette::TEXT()
                         } else {
@@ -96,20 +96,111 @@ pub(super) fn connection_tab_item(
     resp
 }
 
+/// Small layout toggle (sidebar on/off) used in the unified title bar.
+pub(super) fn layout_toggle(
+    ui: &mut egui::Ui,
+    active: bool,
+    side: LayoutSide,
+    hover: &str,
+) -> egui::Response {
+    let size = egui::vec2(22.0, 20.0);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+
+    let fill = if active {
+        palette::SURFACE()
+    } else if resp.hovered() {
+        palette::SURFACE_HOVER()
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    let stroke = if active {
+        egui::Stroke::new(1.0, palette::ACCENT())
+    } else if resp.hovered() {
+        egui::Stroke::new(1.0, palette::BORDER())
+    } else {
+        egui::Stroke::NONE
+    };
+
+    if ui.is_rect_visible(rect) {
+        ui.painter().rect(
+            rect,
+            egui::CornerRadius::same(4),
+            fill,
+            stroke,
+            egui::StrokeKind::Outside,
+        );
+
+        let icon = rect.shrink(4.0);
+        let bar_w = 3.0;
+        let gap = 1.5;
+        let color = if active {
+            palette::ACCENT()
+        } else {
+            palette::TEXT_WEAK()
+        };
+
+        match side {
+            LayoutSide::Connections => {
+                let left = egui::Rect::from_min_size(icon.min, egui::vec2(bar_w, icon.height()));
+                ui.painter().rect_filled(left, egui::CornerRadius::same(1), color);
+            }
+            LayoutSide::Schema => {
+                let left = egui::Rect::from_min_size(icon.min, egui::vec2(bar_w, icon.height()));
+                let mid = egui::Rect::from_min_size(
+                    egui::pos2(icon.min.x + bar_w + gap, icon.min.y),
+                    egui::vec2(bar_w * 1.4, icon.height()),
+                );
+                ui.painter().rect_filled(left, egui::CornerRadius::same(1), color);
+                ui.painter().rect_filled(mid, egui::CornerRadius::same(1), color);
+            }
+            LayoutSide::Details => {
+                let right = egui::Rect::from_min_size(
+                    egui::pos2(icon.max.x - bar_w, icon.min.y),
+                    egui::vec2(bar_w, icon.height()),
+                );
+                ui.painter().rect_filled(right, egui::CornerRadius::same(1), color);
+            }
+        }
+    }
+
+    resp.on_hover_text(hover)
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum LayoutSide {
+    Connections,
+    Schema,
+    Details,
+}
+
 pub(super) fn toolbar_icon_button(
     ui: &mut egui::Ui,
     src: egui::ImageSource<'static>,
     hover: &str,
 ) -> egui::Response {
     ui.add_sized(
-        egui::vec2(32.0, 28.0),
+        egui::vec2(26.0, 22.0),
         egui::Button::image(
             egui::Image::new(src)
-                .fit_to_exact_size(egui::vec2(17.0, 17.0))
+                .fit_to_exact_size(egui::vec2(14.0, 14.0))
                 .tint(palette::TEXT_WEAK()),
         )
         .fill(egui::Color32::TRANSPARENT)
         .stroke(egui::Stroke::NONE),
     )
     .on_hover_text(hover)
+}
+
+/// Hairline separator between toolbar icon groups.
+pub(super) fn toolbar_sep(ui: &mut egui::Ui) {
+    let h = 14.0;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(5.0, h), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let x = rect.center().x;
+        ui.painter().vline(
+            x,
+            rect.top()..=rect.bottom(),
+            egui::Stroke::new(1.0, palette::BORDER()),
+        );
+    }
 }

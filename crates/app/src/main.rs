@@ -16,11 +16,23 @@ const THAI_REGULAR: &[u8] = include_bytes!("../assets/Anuphan-Regular.ttf");
 const THAI_SEMIBOLD: &[u8] = include_bytes!("../assets/Anuphan-SemiBold.ttf");
 
 fn main() -> eframe::Result<()> {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1280.0, 820.0])
+        .with_min_inner_size([800.0, 500.0])
+        .with_title("plusplus");
+
+    // Unified title bar: draw our toolbar behind the native traffic lights (macOS).
+    #[cfg(target_os = "macos")]
+    {
+        viewport = viewport
+            .with_fullsize_content_view(true)
+            .with_titlebar_shown(false)
+            .with_title_shown(false)
+            .with_titlebar_buttons_shown(true);
+    }
+
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 820.0])
-            .with_min_inner_size([800.0, 500.0])
-            .with_title("plusplus"),
+        viewport,
         ..Default::default()
     };
 

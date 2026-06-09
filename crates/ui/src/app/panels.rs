@@ -4,93 +4,134 @@ use crate::grid::results_grid;
 use crate::icons;
 use crate::style::{self, palette};
 use crate::theme::ThemeId;
+use crate::title_bar;
 
 impl DbGuiApp {
-    pub(super) fn top_bar(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
+    pub(super) fn top_bar(
+        &mut self,
+        root: &mut egui::Ui,
+        frame: Option<&eframe::Frame>,
+        actions: &mut Vec<Action>,
+    ) {
+        let chrome_inset = title_bar::traffic_lights_inset(root.ctx(), frame);
+        let bar_height = title_bar::height(chrome_inset);
+
         egui::Panel::top("top_bar")
             .resizable(false)
-            .exact_size(34.0)
+            .exact_size(bar_height)
             .show_inside(root, |ui| {
-                ui.add_space(3.0);
-                ui.horizontal_centered(|ui| {
-                    ui.add_space(6.0);
-                    let connected = self.active().is_some();
+                let bar_rect = ui.max_rect();
+                // Single chrome layer behind widgets: drag + double-click zoom.
+                title_bar::chrome_behind(ui, bar_rect, chrome_inset);
+                let cols = title_bar::columns(bar_rect, chrome_inset);
+                let connected = self.active().is_some();
+                let has_result = self.result.is_some();
+                let breadcrumb = self.breadcrumb_text();
 
-                    if super::widgets::toolbar_icon_button(ui, icons::plus(), "New connection")
-                        .clicked()
-                    {
-                        actions.push(Action::NewConnection);
-                    }
-                    ui.add_space(4.0);
-
-                    if super::widgets::toolbar_icon_button(ui, icons::disconnect(), "Disconnect")
-                        .clicked()
-                        && connected
-                    {
-                        actions.push(Action::Disconnect);
-                    }
-                    ui.add_space(4.0);
-                    ui.separator();
-                    ui.add_space(4.0);
-
-                    let has_result = self.result.is_some();
-                    if super::widgets::toolbar_icon_button(
-                        ui,
-                        icons::filter(),
-                        "Show / hide filter",
-                    )
-                    .clicked()
-                        && has_result
-                    {
-                        self.filter.visible = !self.filter.visible;
-                    }
-                    ui.add_space(4.0);
-
-                    icons::show_weak(ui, icons::table(), 18.0).on_hover_text("Tables");
-                    ui.add_space(4.0);
-                    ui.separator();
-                    ui.add_space(4.0);
-
-                    icons::show_weak(ui, icons::key(), 18.0).on_hover_text("Keys / permissions");
-                    ui.add_space(6.0);
-
-                    icons::show_weak(ui, icons::database(), 18.0).on_hover_text("Database");
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(8.0);
-                        ui.label(
-                            egui::RichText::new("SQL")
-                                .size(12.0)
-                                .strong()
-                                .color(palette::TEXT_WEAK()),
-                        );
-                        ui.add_space(8.0);
-                        self.theme_picker(ui);
-
-                        match self.busy {
-                            Busy::Connecting => {
-                                ui.add_space(2.0);
-                                ui.colored_label(palette::TEXT_WEAK(), "connecting…");
-                                ui.spinner();
+                title_bar::column(ui, cols.left, |ui| {
+                    ui.allocate_ui_with_layout(
+                        ui.available_size(),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.add_space(chrome_inset.max(4.0));
+                            if super::widgets::toolbar_icon_button(
+                                ui,
+                                icons::plus(),
+                                "New connection",
+                            )
+                            .clicked()
+                            {
+                                actions.push(Action::NewConnection);
                             }
-                            Busy::Querying => {
-                                ui.add_space(2.0);
-                                ui.colored_label(palette::TEXT_WEAK(), "running…");
-                                ui.spinner();
+                            if super::widgets::toolbar_icon_button(
+                                ui,
+                                icons::disconnect(),
+                                "Disconnect",
+                            )
+                            .clicked()
+                                && connected
+                            {
+                                actions.push(Action::Disconnect);
                             }
-                            Busy::Idle => {}
-                        }
-                    });
+                            if has_result {
+                                super::widgets::toolbar_sep(ui);
+                                if super::widgets::toolbar_icon_button(
+                                    ui,
+                                    icons::filter(),
+                                    "Filter results",
+                                )
+                                .clicked()
+                                {
+                                    self.filter.visible = !self.filter.visible;
+                                }
+                            }
+                        },
+                    );
+                });
+
+                title_bar::column(ui, cols.center, |ui| {
+                    ui.allocate_ui_with_layout(
+                        ui.available_size(),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            title_bar::breadcrumb(ui, &breadcrumb);
+                        },
+                    );
+                });
+
+                title_bar::column(ui, cols.right, |ui| {
+                    ui.allocate_ui_with_layout(
+                        ui.available_size(),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            ui.add_space(6.0);
+                            self.theme_picker(ui);
+                            if super::widgets::layout_toggle(
+                                ui,
+                                self.show_details_panel,
+                                super::widgets::LayoutSide::Details,
+                                "Details panel",
+                            )
+                            .clicked()
+                            {
+                                self.show_details_panel = !self.show_details_panel;
+                            }
+                            if super::widgets::layout_toggle(
+                                ui,
+                                self.show_schema_panel,
+                                super::widgets::LayoutSide::Schema,
+                                "Schema panel",
+                            )
+                            .clicked()
+                            {
+                                self.show_schema_panel = !self.show_schema_panel;
+                            }
+                            if super::widgets::layout_toggle(
+                                ui,
+                                self.show_connection_tabs,
+                                super::widgets::LayoutSide::Connections,
+                                "Connection tabs",
+                            )
+                            .clicked()
+                            {
+                                self.show_connection_tabs = !self.show_connection_tabs;
+                            }
+                        },
+                    );
                 });
             });
     }
 
-    /// A small combo box for choosing the colour theme. Switching applies immediately and
-    /// the choice is remembered across launches.
+    /// Compact theme selector for the title bar.
     fn theme_picker(&mut self, ui: &mut egui::Ui) {
         let mut chosen = self.theme;
         egui::ComboBox::from_id_salt("theme_picker")
-            .selected_text(self.theme.label())
+            .width(68.0)
+            .selected_text(
+                egui::RichText::new(self.theme.label())
+                    .size(10.0)
+                    .color(palette::TEXT_WEAK()),
+            )
             .show_ui(ui, |ui| {
                 for id in ThemeId::ALL {
                     ui.selectable_value(&mut chosen, id, id.label());
@@ -104,15 +145,25 @@ impl DbGuiApp {
     /// Thin bar between the grid and the SQL console: row count / selection / errors.
     pub(super) fn status_bar(&mut self, root: &mut egui::Ui) {
         egui::Panel::bottom("status_bar").show_inside(root, |ui| {
-            ui.add_space(3.0);
+            ui.add_space(2.0);
             ui.horizontal(|ui| {
-                ui.add_space(2.0);
+                ui.add_space(4.0);
                 if let Some(err) = &self.error {
-                    icons::show_colored(ui, icons::warning(), 15.0, palette::DANGER());
-                    ui.colored_label(palette::DANGER(), err);
+                    icons::show_colored(ui, icons::warning(), 13.0, palette::DANGER());
+                    ui.label(
+                        egui::RichText::new(err).size(11.0).color(palette::DANGER()),
+                    );
                 } else {
-                    icons::show_weak(ui, icons::table(), 14.0);
-                    ui.colored_label(palette::TEXT_WEAK(), &self.status_msg);
+                    if self.busy != Busy::Idle {
+                        ui.add(egui::Spinner::new().size(11.0));
+                        ui.add_space(4.0);
+                    }
+                    icons::show_weak(ui, icons::table(), 12.0);
+                    ui.label(
+                        egui::RichText::new(&self.status_msg)
+                            .size(11.0)
+                            .color(palette::TEXT_WEAK()),
+                    );
                     if let Some(res) = &self.result {
                         if self.filter.is_active() && self.row_order.len() != res.row_count() {
                             ui.colored_label(palette::TEXT_FAINT(), "·");
@@ -223,36 +274,16 @@ impl DbGuiApp {
                             let value = &res.rows[row_idx][c];
 
                             if edits.is_active(row_idx, c) {
-                                let mut commit = false;
-                                let mut cancel = false;
-                                if let Some(active) = edits.active.as_mut() {
-                                    {
-                                        let cr = egui::CornerRadius::same(3);
-                                        let w = &mut ui.visuals_mut().widgets;
-                                        w.inactive.corner_radius = cr;
-                                        w.hovered.corner_radius = cr;
-                                        w.active.corner_radius = cr;
+                                let outcome = edits
+                                    .active
+                                    .as_mut()
+                                    .map(|active| crate::edit::render_editor(ui, active, None));
+                                match outcome {
+                                    Some(crate::edit::EditOutcome::Commit) => {
+                                        let _ = edits.commit_active(value);
                                     }
-                                    let resp = ui.add(
-                                        egui::TextEdit::singleline(&mut active.buf)
-                                            .desired_width(f32::INFINITY)
-                                            .margin(egui::vec2(4.0, 3.0)),
-                                    );
-                                    if active.focus {
-                                        resp.request_focus();
-                                        active.focus = false;
-                                    }
-                                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                                        cancel = true;
-                                    } else if resp.lost_focus() {
-                                        commit = true;
-                                    }
-                                }
-                                if commit {
-                                    edits.commit_active(value);
-                                }
-                                if cancel {
-                                    edits.cancel_active();
+                                    Some(crate::edit::EditOutcome::Cancel) => edits.cancel_active(),
+                                    _ => {}
                                 }
                             } else {
                                 let staged = edits.staged(row_idx, c);
@@ -285,7 +316,11 @@ impl DbGuiApp {
                                     && resp.double_clicked()
                                     && !matches!(value, dbcore::Value::Bytes(_))
                                 {
-                                    edits.begin(row_idx, c, value);
+                                    if edits.col_kind(c) == crate::edit::EditorKind::Bool {
+                                        edits.toggle_bool(row_idx, c, value);
+                                    } else {
+                                        edits.begin(row_idx, c, value);
+                                    }
                                 }
                             }
                             ui.separator();
@@ -297,7 +332,7 @@ impl DbGuiApp {
     pub(super) fn connection_tabs(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
         egui::Panel::left("connection_tabs")
             .resizable(false)
-            .exact_size(68.0)
+            .exact_size(56.0)
             .show_inside(root, |ui| {
                 ui.add_space(4.0);
                 let list_h = ui.available_height();
@@ -562,7 +597,9 @@ impl DbGuiApp {
                     let cell = self.edits.active.as_ref().map(|a| (a.row, a.col));
                     if let Some((ar, ac)) = cell {
                         match result.rows.get(ar).and_then(|row| row.get(ac)).cloned() {
-                            Some(orig) => self.edits.commit_active(&orig),
+                            Some(orig) => {
+                                let _ = self.edits.commit_active(&orig);
+                            }
                             None => self.edits.cancel_active(),
                         }
                     }
@@ -573,6 +610,12 @@ impl DbGuiApp {
                 if let Some((r, c)) = resp.begin_edit {
                     if let Some(orig) = result.rows.get(r).and_then(|row| row.get(c)).cloned() {
                         self.edits.begin(r, c, &orig);
+                    }
+                }
+                // A boolean cell flips in place rather than opening an editor.
+                if let Some((r, c)) = resp.toggle {
+                    if let Some(orig) = result.rows.get(r).and_then(|row| row.get(c)).cloned() {
+                        self.edits.toggle_bool(r, c, &orig);
                     }
                 }
             }

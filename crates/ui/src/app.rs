@@ -114,6 +114,11 @@ pub struct DbGuiApp {
     status_msg: String,
     error: Option<String>,
 
+    // --- layout ---
+    show_connection_tabs: bool,
+    show_schema_panel: bool,
+    show_details_panel: bool,
+
     // --- preferences ---
     /// Currently selected colour theme (persisted to settings.json).
     theme: ThemeId,
@@ -179,8 +184,40 @@ impl DbGuiApp {
             filter: FilterState::default(),
             status_msg: "Ready".to_string(),
             error: None,
+            show_connection_tabs: true,
+            show_schema_panel: true,
+            show_details_panel: true,
             theme,
         }
+    }
+
+    /// Path string for the unified title-bar breadcrumb.
+    fn breadcrumb_text(&self) -> String {
+        let Some(active) = self.active() else {
+            if let Some(idx) = self.selected_conn {
+                if let Some(cfg) = self.connections.get(idx) {
+                    return format!("{} | {} — not connected", cfg.name, cfg.kind.label());
+                }
+            }
+            return "No connection".to_string();
+        };
+
+        let mut path = format!(
+            "{} | {} : {}",
+            active.name,
+            active.db.kind().label(),
+            active.schema.database_name,
+        );
+
+        if let Some(source) = &self.edits.source {
+            let table = match &source.schema {
+                Some(schema) => format!("{schema}.{}", source.table),
+                None => source.table.clone(),
+            };
+            path.push_str(&format!(" : {table}"));
+        }
+
+        path
     }
 
     /// Switch the active theme, re-apply the egui style, and persist the choice.
@@ -336,6 +373,8 @@ impl DbGuiApp {
             ),
         };
         self.error = None;
+        // Classify each column once so the cell editors can be type-aware.
+        self.edits.set_columns(&res.columns);
         self.result = Some(res);
         self.recompute_view();
     }
@@ -422,28 +461,49 @@ impl DbGuiApp {
 
     /// Commit the cell currently being typed into the staged set, so its value isn't lost
     /// when focus moves or a save is triggered.
-    fn flush_active_edit(&mut self) {
+    /// Stage the cell being typed into. Returns `false` if its value is invalid (the editor
+    /// stays open), so callers can refuse to proceed.
+    fn flush_active_edit(&mut self) -> bool {
         let Some(active) = self.edits.active.as_ref() else {
-            return;
+            return true;
         };
         let original = self
             .result
             .as_ref()
             .and_then(|r| r.rows.get(active.row).and_then(|row| row.get(active.col)))
             .cloned();
-        if let Some(original) = original {
-            self.edits.commit_active(&original);
-        } else {
-            self.edits.cancel_active();
+        match original {
+            Some(original) => self.edits.commit_active(&original),
+            None => {
+                self.edits.cancel_active();
+                true
+            }
         }
     }
 
     /// Turn all staged edits into `UPDATE` statements and run them on the background runtime.
     /// Each changed row becomes one statement keyed by the source table's primary key.
     fn commit_edits(&mut self) {
-        self.flush_active_edit();
+        // A cell still being edited with invalid (red) input blocks the whole save.
+        if !self.flush_active_edit() {
+            self.error = Some("Fix the highlighted cell before saving.".into());
+            self.status_msg = "Invalid value — not saved".to_string();
+            return;
+        }
         if !self.edits.has_pending() {
             return;
+        }
+        // Defence in depth: every staged value must still match its column kind before we
+        // build any SQL, so a malformed value can never reach the database.
+        for (_, colmap) in &self.edits.cells {
+            for (&col, value) in colmap {
+                if !self.edits.col_kind(col).accepts(value) {
+                    self.error =
+                        Some("Cannot save: a cell holds a value invalid for its type.".into());
+                    self.status_msg = "Invalid value — not saved".to_string();
+                    return;
+                }
+            }
         }
         let Some(source) = self.edits.source.clone() else {
             return;
@@ -642,15 +702,15 @@ impl DbGuiApp {
 
 impl eframe::App for DbGuiApp {
     // eframe 0.34 hands us a root `Ui`; panels are added with `show_inside`.
-    fn ui(&mut self, ui_root: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.draw(ui_root);
+    fn ui(&mut self, ui_root: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.draw(ui_root, Some(frame));
     }
 }
 
 impl DbGuiApp {
     /// Draw one frame into the given root ui. Split out from `eframe::App::ui` so it can be
     /// driven headlessly in tests (no `eframe::Frame` needed).
-    fn draw(&mut self, ui_root: &mut egui::Ui) {
+    fn draw(&mut self, ui_root: &mut egui::Ui, frame: Option<&eframe::Frame>) {
         let ctx = ui_root.ctx().clone();
         self.poll_messages(&ctx);
 
@@ -675,12 +735,18 @@ impl DbGuiApp {
         }
 
         // Order matters: top/bottom/left/right carve space, central takes the rest.
-        self.top_bar(ui_root, &mut actions);
+        self.top_bar(ui_root, frame, &mut actions);
         self.query_console(ui_root, &mut actions);
         self.status_bar(ui_root);
-        self.connection_tabs(ui_root, &mut actions);
-        self.left_panel(ui_root, &mut actions);
-        self.right_panel(ui_root);
+        if self.show_connection_tabs {
+            self.connection_tabs(ui_root, &mut actions);
+        }
+        if self.show_schema_panel {
+            self.left_panel(ui_root, &mut actions);
+        }
+        if self.show_details_panel {
+            self.right_panel(ui_root);
+        }
         // A top panel after left/right carves the strip directly above the grid.
         self.filter_bar(ui_root);
         self.central_panel(ui_root, &mut actions);
@@ -879,7 +945,7 @@ mod tests {
                 events,
                 ..Default::default()
             };
-            let out = ctx.run_ui(raw, |ui| app.draw(ui));
+            let out = ctx.run_ui(raw, |ui| app.draw(ui, None));
             clashes.extend(collect_clash_text(&out.shapes));
         }
 
