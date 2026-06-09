@@ -7,6 +7,10 @@ use crate::style::palette;
 use dbcore::{QueryResult, Value};
 use egui_extras::{Column, TableBuilder};
 
+/// Natural per-column width: columns expand past this to fill spare space, but never shrink
+/// below it — once the total exceeds the panel the grid scrolls horizontally instead.
+const COL_W: f32 = 160.0;
+
 /// What the grid reports back to the app after a frame.
 #[derive(Default)]
 pub struct GridResponse {
@@ -37,6 +41,43 @@ pub fn results_grid(
     let digits = (order.len().max(1) as f64).log10().floor() as usize + 1;
     let gutter_w = 18.0 + 8.0 * digits as f32;
 
+    // egui_extras' Table hardcodes horizontal scrolling off, so once the columns no longer
+    // fit it just squeezes them. We detect that case and wrap the table in our own
+    // horizontal ScrollArea, sizing the inner ui to the columns' natural width so they keep
+    // a readable width and scroll sideways instead. When they fit, render inline so columns
+    // still expand to fill the panel.
+    let spacing = ui.spacing().item_spacing.x;
+    let desired_total = gutter_w + ncols as f32 * (COL_W + spacing);
+
+    if desired_total <= ui.available_width() {
+        build_grid(ui, result, order, sort, selected, gutter_w, row_height, &mut out);
+    } else {
+        egui::ScrollArea::horizontal()
+            .id_salt("results_hscroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_width(desired_total);
+                build_grid(ui, result, order, sort, selected, gutter_w, row_height, &mut out);
+            });
+    }
+
+    out
+}
+
+/// Build the `egui_extras` table into `ui`, reporting header/row clicks via `out`. Split out
+/// of [`results_grid`] so it can render either inline or inside a horizontal scroll area.
+#[allow(clippy::too_many_arguments)]
+fn build_grid(
+    ui: &mut egui::Ui,
+    result: &QueryResult,
+    order: &[usize],
+    sort: Option<(usize, bool)>,
+    selected: Option<usize>,
+    gutter_w: f32,
+    row_height: f32,
+    out: &mut GridResponse,
+) {
+    let ncols = result.columns.len();
     let mut builder = TableBuilder::new(ui)
         // A stable, unique id keeps the table's internal scroll/resize/row ids consistent
         // across frames — this is what prevents egui's "ID clash" outline from flickering
@@ -53,7 +94,7 @@ pub fn results_grid(
         .column(Column::exact(gutter_w)); // gutter (not resizable)
     for _ in 0..ncols {
         builder = builder.column(
-            Column::initial(160.0)
+            Column::initial(COL_W)
                 .at_least(40.0)
                 .clip(true)
                 .resizable(true),
@@ -110,8 +151,6 @@ pub fn results_grid(
                 }
             });
         });
-
-    out
 }
 
 #[cfg(test)]

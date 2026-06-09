@@ -179,6 +179,19 @@ impl DbGuiApp {
 
     /// Right-hand Details panel: the selected row's columns and values.
     pub(super) fn right_panel(&mut self, root: &mut egui::Ui) {
+        // The details panel only makes sense for a selected row; with nothing selected we
+        // hide it entirely so the grid gets the full width (rather than showing an empty
+        // placeholder panel).
+        let selected = match (self.result.as_ref(), self.selected_row) {
+            (Some(res), Some(disp)) if disp < self.row_order.len() => {
+                Some((res, self.row_order[disp]))
+            }
+            _ => None,
+        };
+        let Some((res, row_idx)) = selected else {
+            return;
+        };
+
         egui::Panel::right("details_panel")
             .resizable(true)
             .default_size(260.0)
@@ -186,23 +199,6 @@ impl DbGuiApp {
                 ui.add_space(6.0);
                 style::section_header(ui, "Details");
                 ui.separator();
-
-                let selected = match (self.result.as_ref(), self.selected_row) {
-                    (Some(res), Some(disp)) if disp < self.row_order.len() => {
-                        Some((res, self.row_order[disp]))
-                    }
-                    _ => None,
-                };
-
-                let Some((res, row_idx)) = selected else {
-                    style::empty_state(
-                        ui,
-                        icons::table(),
-                        "No row selected",
-                        "Click a row to inspect it",
-                    );
-                    return;
-                };
 
                 egui::ScrollArea::vertical()
                     .id_salt("details_scroll")
