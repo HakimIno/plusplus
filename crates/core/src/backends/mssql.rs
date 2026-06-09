@@ -11,7 +11,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use tiberius::{Column, ColumnData, FromSqlOwned, Row};
 
-use crate::database::{returns_rows, Database};
+use crate::database::{statements_return_rows, Database, ROW_KEYWORDS};
 use crate::error::{CoreError, Result};
 use crate::model::{
     ColumnInfo, ColumnMeta, ConnectionConfig, DbKind, IndexInfo, QueryResult, QueryStats,
@@ -20,6 +20,12 @@ use crate::model::{
 use crate::value::Value;
 
 type Pool = bb8::Pool<bb8_tiberius::ConnectionManager>;
+
+/// Does this T-SQL batch return rows? Extends the shared classifier with `EXEC`/`EXECUTE`,
+/// since a stored procedure invoked with `EXEC` can return result sets we want to display.
+fn mssql_returns_rows(sql: &str) -> bool {
+    statements_return_rows(sql, ROW_KEYWORDS) || statements_return_rows(sql, &["exec", "execute"])
+}
 
 pub struct MsSqlDb {
     pool: Pool,
@@ -189,7 +195,7 @@ impl Database for MsSqlDb {
         let start = Instant::now();
         let elapsed = |start: Instant| start.elapsed().as_secs_f64() * 1000.0;
 
-        if returns_rows(sql) {
+        if mssql_returns_rows(sql) {
             let rows = self.fetch(sql).await?;
             let columns = rows.first().map(column_meta).unwrap_or_default();
             let data = rows

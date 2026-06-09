@@ -104,6 +104,16 @@ impl Default for Condition {
     }
 }
 
+impl Condition {
+    /// Whether this condition actually narrows the result. A disabled condition never does;
+    /// neither does an enabled value-operator (`contains`, `equals`, …) whose value box is
+    /// still blank — that's a half-typed filter, so it must pass every row rather than, say,
+    /// dropping NULL cells. Null/empty operators need no value and are effective when enabled.
+    pub fn is_effective(&self) -> bool {
+        self.enabled && (!self.op.needs_value() || !self.value.trim().is_empty())
+    }
+}
+
 /// How multiple enabled conditions combine.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Conjunction {
@@ -147,9 +157,9 @@ impl FilterState {
         }
     }
 
-    /// Whether any condition is currently enabled (and thus actually narrows the rows).
+    /// Whether any condition actually narrows the rows (enabled, and not a blank value box).
     pub fn is_active(&self) -> bool {
-        self.conditions.iter().any(|c| c.enabled)
+        self.conditions.iter().any(|c| c.is_effective())
     }
 }
 
@@ -164,10 +174,10 @@ pub enum FilterEvent {
 
 // --- matching ----------------------------------------------------------------
 
-/// Does `row` satisfy the enabled `conditions` under `conj`? With no enabled conditions,
-/// every row passes (an empty filter is a no-op).
+/// Does `row` satisfy the `conditions` under `conj`? Only *effective* conditions count (see
+/// [`Condition::is_effective`]); with none, every row passes (an empty filter is a no-op).
 pub fn matches_row(row: &[Value], conditions: &[Condition], conj: Conjunction) -> bool {
-    let mut active = conditions.iter().filter(|c| c.enabled).peekable();
+    let mut active = conditions.iter().filter(|c| c.is_effective()).peekable();
     if active.peek().is_none() {
         return true;
     }
@@ -475,10 +485,10 @@ mod tests {
             &[cond(0, FilterOp::IsNotEmpty, "")],
             Conjunction::All
         ));
-        // A value operator never matches NULL.
+        // A value operator never matches NULL (with an actual value to compare against).
         assert!(!matches_row(
             &nul,
-            &[cond(0, FilterOp::Contains, "")],
+            &[cond(0, FilterOp::Contains, "x")],
             Conjunction::All
         ));
     }
@@ -503,5 +513,26 @@ mod tests {
         }];
         assert!(matches_row(&r, &disabled, Conjunction::All));
         assert!(matches_row(&r, &[], Conjunction::All));
+    }
+
+    #[test]
+    fn blank_value_condition_is_a_no_op_even_for_null_cells() {
+        // The default filter bar holds one enabled `contains` condition with an empty value.
+        // It must not narrow anything — not even rows whose target cell is NULL — until the
+        // user actually types a value. (Regression: a fresh result showed "0 of N rows".)
+        let default = vec![Condition::default()];
+        assert!(!FilterState::default().is_active());
+        assert!(matches_row(&[Value::Null], &default, Conjunction::All));
+        assert!(matches_row(
+            &[Value::Text("x".into())],
+            &default,
+            Conjunction::All
+        ));
+        // Once a value is typed, it filters again (and a value op still skips NULLs).
+        let typed = vec![cond(0, FilterOp::Contains, "x")];
+        assert!(matches_row(&[Value::Text("xyz".into())], &typed, Conjunction::All));
+        assert!(!matches_row(&[Value::Null], &typed, Conjunction::All));
+        // A no-value operator (is null) stays effective with an empty value box.
+        assert!(matches_row(&[Value::Null], &[cond(0, FilterOp::IsNull, "")], Conjunction::All));
     }
 }

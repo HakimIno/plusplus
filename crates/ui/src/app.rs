@@ -746,10 +746,13 @@ impl DbGuiApp {
             self.filter.visible = false;
         }
 
-        // Order matters: top/bottom/left/right carve space, central takes the rest.
+        // Order matters: top/bottom/left/right carve space, central takes the rest. The
+        // status bar is carved first so it pins to the very bottom edge; the query console is
+        // carved next so it sits directly below the grid, leaving its top resize handle
+        // bordering the central area (nothing on top of it) for a clean, smooth drag.
         self.top_bar(ui_root, frame, &mut actions);
-        self.query_console(ui_root, &mut actions);
         self.status_bar(ui_root);
+        self.query_console(ui_root, &mut actions);
         if self.show_connection_tabs {
             self.connection_tabs(ui_root, &mut actions);
         }

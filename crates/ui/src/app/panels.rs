@@ -128,7 +128,7 @@ impl DbGuiApp {
             });
     }
 
-    /// Thin bar between the grid and the SQL console: row count / selection / errors.
+    /// Thin status strip pinned to the very bottom edge: row count / selection / errors.
     pub(super) fn status_bar(&mut self, root: &mut egui::Ui) {
         egui::Panel::bottom("status_bar").show_inside(root, |ui| {
             ui.add_space(2.0);
@@ -175,6 +175,7 @@ impl DbGuiApp {
         egui::Panel::bottom("query_console")
             .resizable(true)
             .default_size(150.0)
+            .min_size(72.0)
             .show_inside(root, |ui| {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
@@ -198,8 +199,13 @@ impl DbGuiApp {
                     ui.ctx().fonts_mut(|f| f.layout_job(job))
                 };
 
+                // Fill the panel's height instead of shrinking to the text: otherwise a long
+                // query would grow the scroll area and push the whole panel taller, fighting
+                // the size the user dragged it to. With `auto_shrink` off the editor keeps the
+                // panel's height and scrolls its content internally.
                 egui::ScrollArea::vertical()
                     .id_salt("sql_scroll")
+                    .auto_shrink(false)
                     .show(ui, |ui| {
                         ui.add(
                             egui::TextEdit::multiline(&mut self.sql)
@@ -210,7 +216,6 @@ impl DbGuiApp {
                                 .hint_text("Write SQL here, then press Run (Cmd/Ctrl+Enter)"),
                         );
                     });
-                ui.add_space(4.0);
             });
     }
 
