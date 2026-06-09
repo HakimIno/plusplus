@@ -19,7 +19,7 @@ pub(super) fn connection_tab_item(
     selected: bool,
     connected: bool,
 ) -> egui::Response {
-    let size = egui::vec2(48.0, 40.0);
+    let size = egui::vec2(40.0, 36.0);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
 
     let fill = if selected {
@@ -47,7 +47,7 @@ pub(super) fn connection_tab_item(
         );
         if connected {
             ui.painter().circle_filled(
-                rect.left_top() + egui::vec2(6.0, 6.0),
+                rect.left_top() + egui::vec2(5.0, 5.0),
                 2.0,
                 palette::SUCCESS(),
             );
@@ -56,19 +56,19 @@ pub(super) fn connection_tab_item(
 
     let content_rect = rect.shrink2(egui::vec2(3.0, 4.0));
     let icon_rect = egui::Rect::from_center_size(
-        egui::pos2(content_rect.center().x, content_rect.top() + 9.0),
-        egui::vec2(14.0, 14.0),
+        egui::pos2(content_rect.center().x, content_rect.top() + 8.0),
+        egui::vec2(13.0, 13.0),
     );
     let label_rect = egui::Rect::from_min_size(
-        egui::pos2(content_rect.left(), content_rect.top() + 20.0),
-        egui::vec2(content_rect.width(), 12.0),
+        egui::pos2(content_rect.left(), content_rect.top() + 18.0),
+        egui::vec2(content_rect.width(), 11.0),
     );
 
     ui.scope_builder(egui::UiBuilder::new().max_rect(icon_rect), |ui| {
         icons::show_colored(
             ui,
             icons::database(),
-            14.0,
+            13.0,
             if selected {
                 palette::TEXT()
             } else {
@@ -81,7 +81,7 @@ pub(super) fn connection_tab_item(
             ui.add(
                 egui::Label::new(
                     egui::RichText::new(compact_connection_label(name))
-                        .size(8.5)
+                        .size(8.0)
                         .color(if selected {
                             palette::TEXT()
                         } else {

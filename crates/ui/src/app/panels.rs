@@ -234,6 +234,7 @@ impl DbGuiApp {
         egui::Panel::right("details_panel")
             .resizable(true)
             .default_size(260.0)
+            .show_separator_line(true)
             .show_inside(root, |ui| {
                 ui.add_space(6.0);
                 style::section_header(ui, "Details");
@@ -318,7 +319,13 @@ impl DbGuiApp {
     pub(super) fn connection_tabs(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
         egui::Panel::left("connection_tabs")
             .resizable(false)
-            .exact_size(56.0)
+            .exact_size(52.0)
+            .frame(
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(6, 2))
+                    .fill(palette::PANEL()),
+            )
+            .show_separator_line(true)
             .show_inside(root, |ui| {
                 ui.add_space(4.0);
                 let list_h = ui.available_height();
@@ -383,7 +390,7 @@ impl DbGuiApp {
 
                                 if self.connections.is_empty() {
                                     ui.vertical_centered(|ui| {
-                                        icons::show_weak(ui, icons::database(), 18.0);
+                                        icons::show_weak(ui, icons::database(), 16.0);
                                     });
                                 }
                             });
@@ -398,6 +405,7 @@ impl DbGuiApp {
             .default_size(280.0)
             .min_size(200.0)
             .max_size(360.0)
+            .show_separator_line(true)
             .show_inside(root, |ui| {
                 ui.add_space(8.0);
                 style::section_header(ui, "Schema");

@@ -711,6 +711,12 @@ impl eframe::App for DbGuiApp {
     fn ui(&mut self, ui_root: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.draw(ui_root, Some(frame));
     }
+
+    /// Match the window clear colour to the active theme so hairline panel gaps don't flash
+    /// eframe's default near-black clear (reads as a thick black bar on light themes).
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        crate::theme::current().base.to_normalized_gamma_f32()
+    }
 }
 
 impl DbGuiApp {
