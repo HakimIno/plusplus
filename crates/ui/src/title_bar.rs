@@ -9,8 +9,9 @@ use crate::style::palette;
 #[cfg(target_os = "macos")]
 const MAC_TRAFFIC_LIGHTS_INSET: f32 = 78.0;
 
-/// Width reserved for the right-hand tool cluster.
-const RIGHT_TOOLS_WIDTH: f32 = 140.0;
+/// Width reserved for the right-hand tool cluster: settings + four layout toggles
+/// (connections, query console, schema, details), each 26px wide with 4px gap, plus margin.
+const RIGHT_TOOLS_WIDTH: f32 = 174.0;
 /// Width of the left-hand icon cluster (excluding traffic-light inset).
 const LEFT_TOOLS_WIDTH: f32 = 108.0;
 

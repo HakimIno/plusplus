@@ -190,6 +190,16 @@ impl DbGuiApp {
                             }
                             if super::widgets::layout_toggle(
                                 ui,
+                                self.show_query_console,
+                                super::widgets::LayoutSide::Query,
+                                "Query console",
+                            )
+                            .clicked()
+                            {
+                                self.show_query_console = !self.show_query_console;
+                            }
+                            if super::widgets::layout_toggle(
+                                ui,
                                 self.show_connection_tabs,
                                 super::widgets::LayoutSide::Connections,
                                 "Connection tabs",
@@ -953,7 +963,7 @@ impl DbGuiApp {
                         edits.toggle_bool(r, c, &orig);
                     }
                 }
-                // Double-clicking the trailing strip appends a new (insert) row.
+                // Double-clicking empty table space appends a new (insert) row.
                 if resp.add_row {
                     edits.add_new_row();
                 }

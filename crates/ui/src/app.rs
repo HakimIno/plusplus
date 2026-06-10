@@ -438,6 +438,7 @@ pub struct DbGuiApp {
     show_connection_tabs: bool,
     show_schema_panel: bool,
     show_details_panel: bool,
+    show_query_console: bool,
 
     // --- preferences ---
     /// Currently selected colour theme (persisted to settings.json).
@@ -529,6 +530,7 @@ impl DbGuiApp {
             show_connection_tabs: true,
             show_schema_panel: true,
             show_details_panel: true,
+            show_query_console: true,
             theme,
             beautify,
         }
@@ -1596,7 +1598,9 @@ impl DbGuiApp {
         self.top_bar(ui_root, frame, &mut actions);
         self.query_tab_bar(ui_root, &mut actions);
         self.status_bar(ui_root);
-        self.query_console(ui_root, &mut actions);
+        if self.show_query_console {
+            self.query_console(ui_root, &mut actions);
+        }
         if self.show_connection_tabs {
             self.connection_tabs(ui_root, &mut actions);
         }

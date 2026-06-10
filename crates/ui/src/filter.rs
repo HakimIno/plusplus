@@ -14,72 +14,106 @@
 use dbcore::{QueryResult, Value};
 
 /// A comparison operator for a single filter condition. Ordering operators (`>`, `<`, …)
-/// compare numerically when both sides parse as numbers and fall back to text otherwise; the
-/// text operators are case-insensitive.
+/// and `BETWEEN` compare numerically when both sides parse as numbers and fall back to text
+/// (case-insensitive) otherwise; the text operators are case-insensitive.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FilterOp {
-    Contains,
-    NotContains,
     Equals,
     NotEquals,
-    BeginsWith,
-    EndsWith,
-    Greater,
     Less,
-    GreaterEq,
+    Greater,
     LessEq,
+    GreaterEq,
+    In,
+    NotIn,
     IsNull,
     IsNotNull,
-    IsEmpty,
-    IsNotEmpty,
+    Between,
+    NotBetween,
+    Contains,
+    NotContains,
+    BeginsWith,
+    EndsWith,
 }
 
 impl FilterOp {
-    /// All operators, in the order they appear in the dropdown.
-    pub const ALL: [FilterOp; 14] = [
-        FilterOp::Contains,
-        FilterOp::NotContains,
-        FilterOp::Equals,
-        FilterOp::NotEquals,
-        FilterOp::BeginsWith,
-        FilterOp::EndsWith,
-        FilterOp::Greater,
-        FilterOp::Less,
-        FilterOp::GreaterEq,
-        FilterOp::LessEq,
-        FilterOp::IsNull,
-        FilterOp::IsNotNull,
-        FilterOp::IsEmpty,
-        FilterOp::IsNotEmpty,
+    /// Operators grouped exactly as they appear in the dropdown; each inner slice is drawn as
+    /// a block with a separator between blocks.
+    pub const GROUPS: [&'static [FilterOp]; 6] = [
+        &[
+            FilterOp::Equals,
+            FilterOp::NotEquals,
+            FilterOp::Less,
+            FilterOp::Greater,
+            FilterOp::LessEq,
+            FilterOp::GreaterEq,
+        ],
+        &[FilterOp::In, FilterOp::NotIn],
+        &[FilterOp::IsNull, FilterOp::IsNotNull],
+        &[FilterOp::Between, FilterOp::NotBetween],
+        &[FilterOp::Contains, FilterOp::NotContains],
+        &[FilterOp::BeginsWith, FilterOp::EndsWith],
     ];
 
-    /// Human-readable label for the operator dropdown.
+    /// Short label shown in the dropdown and selected box — a symbol for the comparison
+    /// operators, an uppercase keyword or title-case phrase for the rest. Symbols keep the
+    /// common operators compact and instantly recognisable.
     pub fn label(self) -> &'static str {
         match self {
-            FilterOp::Contains => "contains",
-            FilterOp::NotContains => "does not contain",
-            FilterOp::Equals => "equals",
-            FilterOp::NotEquals => "not equal",
-            FilterOp::BeginsWith => "begins with",
-            FilterOp::EndsWith => "ends with",
-            FilterOp::Greater => "greater than",
-            FilterOp::Less => "less than",
-            FilterOp::GreaterEq => "greater or equal",
-            FilterOp::LessEq => "less or equal",
-            FilterOp::IsNull => "is null",
-            FilterOp::IsNotNull => "is not null",
-            FilterOp::IsEmpty => "is empty",
-            FilterOp::IsNotEmpty => "is not empty",
+            FilterOp::Equals => "=",
+            FilterOp::NotEquals => "<>",
+            FilterOp::Less => "<",
+            FilterOp::Greater => ">",
+            FilterOp::LessEq => "<=",
+            FilterOp::GreaterEq => ">=",
+            FilterOp::In => "IN",
+            FilterOp::NotIn => "NOT IN",
+            FilterOp::IsNull => "IS NULL",
+            FilterOp::IsNotNull => "IS NOT NULL",
+            FilterOp::Between => "BETWEEN",
+            FilterOp::NotBetween => "NOT BETWEEN",
+            FilterOp::Contains => "Contains",
+            FilterOp::NotContains => "Not contains",
+            FilterOp::BeginsWith => "Has prefix",
+            FilterOp::EndsWith => "Has suffix",
         }
     }
 
-    /// Whether this operator reads the typed value. Null/empty checks ignore it, so the
-    /// value box is disabled for them.
+    /// Plain-language description shown on hover, so the symbols stay discoverable.
+    pub fn description(self) -> &'static str {
+        match self {
+            FilterOp::Equals => "equals",
+            FilterOp::NotEquals => "not equal",
+            FilterOp::Less => "less than",
+            FilterOp::Greater => "greater than",
+            FilterOp::LessEq => "less than or equal",
+            FilterOp::GreaterEq => "greater than or equal",
+            FilterOp::In => "in a comma-separated list",
+            FilterOp::NotIn => "not in a comma-separated list",
+            FilterOp::IsNull => "is null",
+            FilterOp::IsNotNull => "is not null",
+            FilterOp::Between => "between two values (inclusive)",
+            FilterOp::NotBetween => "not between two values",
+            FilterOp::Contains => "contains the text",
+            FilterOp::NotContains => "does not contain the text",
+            FilterOp::BeginsWith => "begins with the text",
+            FilterOp::EndsWith => "ends with the text",
+        }
+    }
+
+    /// Placeholder for the value box, hinting the expected input for multi-value operators.
+    pub fn value_hint(self) -> &'static str {
+        match self {
+            FilterOp::In | FilterOp::NotIn => "a, b, c",
+            FilterOp::Between | FilterOp::NotBetween => "min, max",
+            _ => "value",
+        }
+    }
+
+    /// Whether this operator reads the typed value. Null checks ignore it, so the value box
+    /// is disabled for them.
     pub fn needs_value(self) -> bool {
-        !matches!(
-            self,
-            FilterOp::IsNull | FilterOp::IsNotNull | FilterOp::IsEmpty | FilterOp::IsNotEmpty
-        )
+        !matches!(self, FilterOp::IsNull | FilterOp::IsNotNull)
     }
 }
 
@@ -198,6 +232,36 @@ fn numeric(v: &Value) -> Option<f64> {
     }
 }
 
+/// Order `v` against the string `s`: numerically when both parse as numbers, else
+/// case-insensitive lexicographic. `None` only for incomparable floats (NaN).
+fn compare(v: &Value, s: &str) -> Option<std::cmp::Ordering> {
+    match (numeric(v), s.trim().parse::<f64>()) {
+        (Some(a), Ok(b)) => a.partial_cmp(&b),
+        _ => Some(v.display().to_lowercase().cmp(&s.trim().to_lowercase())),
+    }
+}
+
+/// Split a `BETWEEN` value box into its two bounds. Accepts `min, max` or `min and max`.
+fn two_bounds(s: &str) -> Option<(String, String)> {
+    let (a, b) = if let Some((a, b)) = s.split_once(',') {
+        (a, b)
+    } else if let Some(idx) = s.to_lowercase().find(" and ") {
+        (&s[..idx], &s[idx + 5..])
+    } else {
+        return None;
+    };
+    let (a, b) = (a.trim(), b.trim());
+    (!a.is_empty() && !b.is_empty()).then(|| (a.to_string(), b.to_string()))
+}
+
+/// Whether `v` equals the string `s` (numeric when both are numbers, else case-insensitive).
+fn value_equals(v: &Value, s: &str) -> bool {
+    match (numeric(v), s.trim().parse::<f64>()) {
+        (Some(a), Ok(b)) => a == b,
+        _ => v.display().to_lowercase() == s.trim().to_lowercase(),
+    }
+}
+
 /// Evaluate one condition against one (possibly missing) cell.
 fn cell_matches(cell: Option<&Value>, c: &Condition) -> bool {
     let Some(v) = cell else { return false };
@@ -206,8 +270,6 @@ fn cell_matches(cell: Option<&Value>, c: &Condition) -> bool {
     match c.op {
         IsNull => return v.is_null(),
         IsNotNull => return !v.is_null(),
-        IsEmpty => return v.is_null() || v.display().is_empty(),
-        IsNotEmpty => return !(v.is_null() || v.display().is_empty()),
         _ => {}
     }
 
@@ -216,33 +278,61 @@ fn cell_matches(cell: Option<&Value>, c: &Condition) -> bool {
         return false;
     }
 
-    // Ordering operators: prefer a numeric comparison, fall back to lexicographic.
-    if matches!(c.op, Greater | Less | GreaterEq | LessEq) {
-        let ord = match (numeric(v), c.value.trim().parse::<f64>()) {
-            (Some(a), Ok(b)) => a.partial_cmp(&b),
-            _ => Some(v.display().cmp(&c.value)),
-        };
-        let Some(ord) = ord else { return false };
-        return match c.op {
-            Greater => ord.is_gt(),
-            Less => ord.is_lt(),
-            GreaterEq => ord.is_ge(),
-            LessEq => ord.is_le(),
-            _ => unreachable!(),
-        };
-    }
-
-    // Text operators: case-insensitive substring/equality.
-    let hay = v.display().to_lowercase();
-    let needle = c.value.to_lowercase();
     match c.op {
-        Contains => hay.contains(&needle),
-        NotContains => !hay.contains(&needle),
-        Equals => hay == needle,
-        NotEquals => hay != needle,
-        BeginsWith => hay.starts_with(&needle),
-        EndsWith => hay.ends_with(&needle),
-        _ => true,
+        // Ordering: numeric when possible, lexicographic otherwise.
+        Greater | Less | GreaterEq | LessEq => {
+            let Some(ord) = compare(v, &c.value) else {
+                return false;
+            };
+            match c.op {
+                Greater => ord.is_gt(),
+                Less => ord.is_lt(),
+                GreaterEq => ord.is_ge(),
+                LessEq => ord.is_le(),
+                _ => unreachable!(),
+            }
+        }
+        // Inclusive range; an unparseable range matches nothing (and `NOT BETWEEN` everything).
+        Between | NotBetween => {
+            let within = two_bounds(&c.value).is_some_and(|(lo, hi)| {
+                matches!(compare(v, &lo), Some(o) if o.is_ge())
+                    && matches!(compare(v, &hi), Some(o) if o.is_le())
+            });
+            if c.op == Between {
+                within
+            } else {
+                !within
+            }
+        }
+        // Membership in a comma-separated list (blank items ignored).
+        In | NotIn => {
+            let found = c
+                .value
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .any(|item| value_equals(v, item));
+            if c.op == In {
+                found
+            } else {
+                !found
+            }
+        }
+        // Text operators: case-insensitive.
+        Contains | NotContains | Equals | NotEquals | BeginsWith | EndsWith => {
+            let hay = v.display().to_lowercase();
+            let needle = c.value.to_lowercase();
+            match c.op {
+                Contains => hay.contains(&needle),
+                NotContains => !hay.contains(&needle),
+                Equals => value_equals(v, &c.value),
+                NotEquals => !value_equals(v, &c.value),
+                BeginsWith => hay.starts_with(&needle),
+                EndsWith => hay.ends_with(&needle),
+                _ => unreachable!(),
+            }
+        }
+        IsNull | IsNotNull => unreachable!("handled above"),
     }
 }
 
@@ -288,13 +378,19 @@ pub fn ui(ui: &mut egui::Ui, state: &mut FilterState, columns: &[String]) -> Opt
                     }
                 });
 
-            // Operator picker.
+            // Operator picker — symbols/keywords grouped with separators (see `GROUPS`).
             egui::ComboBox::from_id_salt(("filter_op", i))
                 .width(160.0)
                 .selected_text(cond.op.label())
                 .show_ui(ui, |ui| {
-                    for op in FilterOp::ALL {
-                        ui.selectable_value(&mut cond.op, op, op.label());
+                    for (gi, group) in FilterOp::GROUPS.iter().enumerate() {
+                        if gi > 0 {
+                            ui.separator();
+                        }
+                        for &op in *group {
+                            ui.selectable_value(&mut cond.op, op, op.label())
+                                .on_hover_text(op.description());
+                        }
                     }
                 });
 
@@ -325,7 +421,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut FilterState, columns: &[String]) -> Opt
                 let width = ui.available_width();
                 let resp = ui
                     .add_enabled_ui(needs_value, |ui| {
-                        let hint = if needs_value { "value" } else { "" };
+                        let hint = if needs_value { cond.op.value_hint() } else { "" };
                         crate::style::text_input(ui, &mut cond.value, hint, width)
                     })
                     .inner;
@@ -466,9 +562,8 @@ mod tests {
     }
 
     #[test]
-    fn null_and_empty_checks() {
+    fn null_checks() {
         let nul = row(&[Value::Null]);
-        let empty = row(&[Value::Text(String::new())]);
         let filled = row(&[Value::Text("x".into())]);
         assert!(matches_row(
             &nul,
@@ -476,19 +571,68 @@ mod tests {
             Conjunction::All
         ));
         assert!(matches_row(
-            &empty,
-            &[cond(0, FilterOp::IsEmpty, "")],
-            Conjunction::All
-        ));
-        assert!(matches_row(
             &filled,
-            &[cond(0, FilterOp::IsNotEmpty, "")],
+            &[cond(0, FilterOp::IsNotNull, "")],
             Conjunction::All
         ));
         // A value operator never matches NULL (with an actual value to compare against).
         assert!(!matches_row(
             &nul,
             &[cond(0, FilterOp::Contains, "x")],
+            Conjunction::All
+        ));
+    }
+
+    #[test]
+    fn in_list_matches_any_item() {
+        let r = row(&[Value::Text("cat".into())]);
+        assert!(matches_row(
+            &r,
+            &[cond(0, FilterOp::In, "dog, CAT, bird")],
+            Conjunction::All
+        ));
+        assert!(!matches_row(
+            &r,
+            &[cond(0, FilterOp::NotIn, "dog, cat")],
+            Conjunction::All
+        ));
+        // Numeric items compare as numbers, so "007" matches 7.
+        let n = row(&[Value::Int(7)]);
+        assert!(matches_row(
+            &n,
+            &[cond(0, FilterOp::In, "1, 007, 9")],
+            Conjunction::All
+        ));
+    }
+
+    #[test]
+    fn between_is_inclusive_and_numeric() {
+        let r = row(&[Value::Int(50)]);
+        assert!(matches_row(
+            &r,
+            &[cond(0, FilterOp::Between, "10, 100")],
+            Conjunction::All
+        ));
+        // Inclusive at the bounds.
+        assert!(matches_row(
+            &r,
+            &[cond(0, FilterOp::Between, "50 and 100")],
+            Conjunction::All
+        ));
+        assert!(!matches_row(
+            &r,
+            &[cond(0, FilterOp::Between, "60, 100")],
+            Conjunction::All
+        ));
+        assert!(matches_row(
+            &r,
+            &[cond(0, FilterOp::NotBetween, "60, 100")],
+            Conjunction::All
+        ));
+        // A range with only one bound parses to nothing → BETWEEN matches no row.
+        assert!(!matches_row(
+            &r,
+            &[cond(0, FilterOp::Between, "50")],
             Conjunction::All
         ));
     }

@@ -473,6 +473,14 @@ pub(super) fn layout_toggle(
                 ui.painter()
                     .rect_filled(right, egui::CornerRadius::ZERO, color);
             }
+            LayoutSide::Query => {
+                let bottom = egui::Rect::from_min_size(
+                    egui::pos2(icon.min.x, icon.max.y - bar_w),
+                    egui::vec2(icon.width(), bar_w),
+                );
+                ui.painter()
+                    .rect_filled(bottom, egui::CornerRadius::ZERO, color);
+            }
         }
     }
 
@@ -485,6 +493,7 @@ pub(super) enum LayoutSide {
     Connections,
     Schema,
     Details,
+    Query,
 }
 
 pub(super) fn toolbar_icon_button(

@@ -27,7 +27,7 @@ pub struct GridResponse {
     pub commit_edit: bool,
     /// The open editor should be discarded (Escape pressed).
     pub cancel_edit: bool,
-    /// The trailing "add row" strip was double-clicked → append a new (insert) row.
+    /// Empty table space was double-clicked → append a new (insert) row.
     pub add_row: bool,
 }
 
@@ -37,8 +37,6 @@ enum RowKind {
     Stored(usize),
     /// A new (insert) row being filled in (value is its [`crate::edit::NEW_ROW_BASE`] id).
     New(usize),
-    /// The trailing affordance row that adds a new row when double-clicked.
-    Adder,
 }
 
 /// Render the result set. `order` maps display rows → indices into `result.rows`.
@@ -72,6 +70,8 @@ pub fn results_grid(
     // still expand to fill the panel.
     let spacing = ui.spacing().item_spacing.x;
     let desired_total = gutter_w + ncols as f32 * (COL_W + spacing);
+    let table_rect = ui.available_rect_before_wrap();
+    let rendered_rows = order.len() + edits.new_rows;
 
     if desired_total <= ui.available_width() {
         build_grid(
@@ -89,6 +89,7 @@ pub fn results_grid(
                 );
             });
     }
+    capture_empty_table_double_click(ui, table_rect, rendered_rows, row_height, editable, &mut out);
 
     out
 }
@@ -161,31 +162,23 @@ fn build_grid(
         })
         .body(|body| {
             let new_rows = edits.new_rows;
-            // A trailing "add row" strip is shown only when the result is editable.
-            let adder = usize::from(editable);
-            let total = order.len() + new_rows + adder;
+            let total = order.len() + new_rows;
             body.rows(row_height, total, |mut row| {
                 let disp = row.index();
-                // Display index splits into: stored rows, then new rows, then the adder.
+                // Display index splits into: stored rows, then new rows.
                 let kind = if disp < order.len() {
                     RowKind::Stored(order[disp])
-                } else if disp < order.len() + new_rows {
-                    RowKind::New(crate::edit::NEW_ROW_BASE + (disp - order.len()))
                 } else {
-                    RowKind::Adder
+                    RowKind::New(crate::edit::NEW_ROW_BASE + (disp - order.len()))
                 };
                 let r = match kind {
                     RowKind::Stored(r) | RowKind::New(r) => r,
-                    RowKind::Adder => usize::MAX,
                 };
-                let state = match kind {
-                    RowKind::Adder => crate::edit::RowState::Clean,
-                    _ => edits.row_state(r),
-                };
+                let state = edits.row_state(r);
                 row.set_selected(selected == Some(disp));
 
-                // Row-number gutter: number for stored rows, a mark for new rows, a plus
-                // for the adder. Tinted green (edit/new) or red (delete) like the cells.
+                // Row-number gutter: number for stored rows, a mark for new rows. Tinted
+                // green (edit/new) or red (delete) like the cells.
                 row.col(|ui| {
                     tint_row(ui, state);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -193,33 +186,10 @@ fn build_grid(
                         let label = match kind {
                             RowKind::Stored(_) => format!("{}", disp + 1),
                             RowKind::New(_) => "✱".to_string(),
-                            RowKind::Adder => "＋".to_string(),
                         };
                         ui.weak(egui::RichText::new(label).monospace());
                     });
                 });
-
-                // The adder strip: a faint prompt; a double-click anywhere appends a row.
-                if matches!(kind, RowKind::Adder) {
-                    let mut dbl = false;
-                    for c in 0..ncols {
-                        let (_, resp) = row.col(|ui| {
-                            if c == 0 {
-                                ui.add_space(4.0);
-                                ui.weak(
-                                    egui::RichText::new("Double-click to add a row")
-                                        .italics()
-                                        .color(palette::TEXT_FAINT()),
-                                );
-                            }
-                        });
-                        dbl |= resp.double_clicked();
-                    }
-                    if dbl {
-                        out.add_row = true;
-                    }
-                    return;
-                }
 
                 let null = Value::Null;
                 for c in 0..ncols {
@@ -275,6 +245,38 @@ fn build_grid(
                 }
             });
         });
+}
+
+/// Reserve the blank space under the table rows as an invisible add-row target. This keeps
+/// the grid visually clean while still allowing "double-click anywhere in the empty table
+/// area" to create a row.
+fn capture_empty_table_double_click(
+    ui: &mut egui::Ui,
+    table_rect: egui::Rect,
+    rendered_rows: usize,
+    row_height: f32,
+    editable: bool,
+    out: &mut GridResponse,
+) {
+    if !editable {
+        return;
+    }
+    let empty_top = table_rect.top() + 24.0 + rendered_rows as f32 * row_height;
+    if empty_top >= table_rect.bottom() {
+        return;
+    }
+    let empty_rect = egui::Rect::from_min_max(
+        egui::pos2(table_rect.left(), empty_top),
+        egui::pos2(table_rect.right(), table_rect.bottom()),
+    );
+    let resp = ui.interact(
+        empty_rect,
+        ui.id().with("results_grid_empty_add_row"),
+        egui::Sense::click(),
+    );
+    if resp.double_clicked() {
+        out.add_row = true;
+    }
 }
 
 /// Paint a faint wash over the current cell to flag its pending state: green for edited or
