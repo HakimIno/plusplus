@@ -46,6 +46,16 @@ enum Busy {
     Querying,
 }
 
+/// Which view of a table tab the central panel shows: the row data, or the introspected
+/// structure (columns + indexes), TablePlus-style. Only meaningful for tabs opened on a
+/// table; plain query tabs always show data.
+#[derive(Clone, Copy, PartialEq, Default)]
+enum TabView {
+    #[default]
+    Data,
+    Structure,
+}
+
 /// A live connection plus its introspected schema.
 struct ActiveConnection {
     /// Id of the originating config; kept for reconnect/refresh in later phases.
@@ -81,6 +91,8 @@ struct QueryTab {
     edits: Edits,
     /// TablePlus-style result filter bar (column / operator / value conditions).
     filter: FilterState,
+    /// Data vs Structure view in the central panel (table tabs only).
+    view: TabView,
 }
 
 impl QueryTab {
@@ -97,6 +109,7 @@ impl QueryTab {
             selected_row: None,
             edits: Edits::default(),
             filter: FilterState::default(),
+            view: TabView::default(),
         }
     }
 
@@ -772,6 +785,31 @@ impl DbGuiApp {
         })
     }
 
+    /// The introspected [`dbcore::TableInfo`] behind the tab at `idx`: the table it was
+    /// opened on (loaded or still in flight), looked up in its live connection's schema.
+    /// `None` for plain query tabs or when the connection is down — the Structure view
+    /// needs this, so without it the tab falls back to Data.
+    fn structure_table(&self, idx: usize) -> Option<&dbcore::TableInfo> {
+        let tab = self.tabs.get(idx)?;
+        let source = tab
+            .edits
+            .source
+            .as_ref()
+            .or(tab.edits.pending_source.as_ref())?;
+        let conn = tab
+            .conn_id
+            .as_deref()
+            .and_then(|id| self.active_connections.iter().find(|c| c.config_id == id))?;
+        conn.schema.tables.iter().find(|t| {
+            t.name.eq_ignore_ascii_case(&source.table)
+                && match (&source.schema, &t.schema) {
+                    (Some(s), Some(ts)) => s.eq_ignore_ascii_case(ts),
+                    (None, _) => true,
+                    (Some(_), None) => false,
+                }
+        })
+    }
+
     /// Turn all staged edits into `UPDATE` statements and run them on the background runtime.
     /// Each changed row becomes one statement keyed by the source table's primary key.
     fn commit_edits(&mut self) {
@@ -1096,6 +1134,8 @@ impl DbGuiApp {
         }
         // A top panel after left/right carves the strip directly above the grid.
         self.filter_bar(ui_root);
+        // ...and a bottom panel here carves the Data/Structure switch directly below it.
+        self.view_mode_bar(ui_root);
         self.central_panel(ui_root, &mut actions);
         self.connection_dialog(&ctx, &mut actions);
         self.settings_dialog(&ctx, &mut actions);
@@ -1362,6 +1402,96 @@ mod tests {
         assert_eq!(app.tabs.len(), 1);
         assert_eq!(app.active_query_tab, 0);
         assert_eq!(app.tab().sql, ""); // reset to a blank scratch tab
+    }
+
+    /// `structure_table` resolves the tab's source table against its live connection's
+    /// schema (case-insensitively), and returns `None` when either side is missing.
+    #[test]
+    fn structure_table_resolves_source() {
+        let mut app = DbGuiApp::construct();
+        assert!(app.structure_table(0).is_none()); // no source, no connection
+
+        let db: std::sync::Arc<dyn dbcore::Database> = std::sync::Arc::new(DummyDb);
+        app.active_connections.push(ActiveConnection {
+            config_id: "c1".into(),
+            name: "one".into(),
+            db,
+            schema: fake_schema(3, 4),
+        });
+        app.tab_mut().conn_id = Some("c1".into());
+        assert!(app.structure_table(0).is_none()); // connected, but a plain query tab
+
+        app.tab_mut().edits.source = Some(EditSource {
+            schema: None,
+            table: "TABLE_1".into(), // matches case-insensitively
+            pk_cols: vec!["field_0".into()],
+        });
+        let info = app.structure_table(0).expect("source table should resolve");
+        assert_eq!(info.name, "table_1");
+        assert_eq!(info.columns.len(), 4);
+
+        // Connection drops → no schema to describe.
+        app.tab_mut().conn_id = None;
+        assert!(app.structure_table(0).is_none());
+    }
+
+    /// Render the Structure view headlessly (a table tab switched to Structure mode) and
+    /// capture ID clashes between its columns/indexes grids. Also checks the mode survives
+    /// drawing — `view_mode_bar` must not force it back to Data while the table resolves.
+    #[test]
+    fn probe_structure_view_id_clash() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::style::apply(&ctx);
+
+        let mut app = DbGuiApp::construct();
+        let db: std::sync::Arc<dyn dbcore::Database> = std::sync::Arc::new(DummyDb);
+        app.active_connections.push(ActiveConnection {
+            config_id: "c1".into(),
+            name: "one".into(),
+            db,
+            schema: fake_schema(3, 30),
+        });
+        {
+            let tab = app.tab_mut();
+            tab.conn_id = Some("c1".into());
+            tab.edits.source = Some(EditSource {
+                schema: None,
+                table: "table_1".into(),
+                pk_cols: vec!["field_0".into()],
+            });
+            tab.view = TabView::Structure;
+        }
+
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+        let mut clashes: Vec<String> = Vec::new();
+        for _ in 0..5 {
+            let events = vec![
+                egui::Event::PointerMoved(egui::pos2(500.0, 350.0)),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -20.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ];
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let out = ctx.run_ui(raw, |ui| app.draw(ui, None));
+            clashes.extend(collect_clash_text(&out.shapes));
+        }
+
+        assert!(app.tab().view == TabView::Structure);
+        clashes.sort();
+        clashes.dedup();
+        assert!(
+            clashes.is_empty(),
+            "ID clashes detected in structure view:\n{}",
+            clashes.join("\n")
+        );
     }
 
     /// Drive the full app layout headlessly while scrolling, and capture egui "ID clash"

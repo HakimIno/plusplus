@@ -1,4 +1,4 @@
-use super::{Action, Busy, DbGuiApp, QueryTab};
+use super::{Action, Busy, DbGuiApp, QueryTab, TabView};
 use crate::filter::{self, FilterEvent};
 use crate::grid::results_grid;
 use crate::icons;
@@ -295,6 +295,10 @@ impl DbGuiApp {
         // placeholder panel).
         let idx = self.active_query_tab;
         let tab = &mut self.tabs[idx];
+        // The selected row belongs to the data grid, which Structure mode hides.
+        if tab.view == TabView::Structure {
+            return;
+        }
         let row_idx = match (tab.result.as_ref(), tab.selected_row) {
             (Some(_), Some(disp)) if disp < tab.row_order.len() => tab.row_order[disp],
             _ => return,
@@ -628,7 +632,8 @@ impl DbGuiApp {
     /// Clear rebuilds the view.
     pub(super) fn filter_bar(&mut self, root: &mut egui::Ui) {
         let idx = self.active_query_tab;
-        if !self.tabs[idx].filter.visible {
+        // The filter applies to data rows; it has no meaning over the Structure view.
+        if !self.tabs[idx].filter.visible || self.tabs[idx].view == TabView::Structure {
             return;
         }
         let col_names: Vec<String> = match &self.tabs[idx].result {
@@ -655,8 +660,54 @@ impl DbGuiApp {
         }
     }
 
+    /// TablePlus-style Data / Structure switch directly below the grid. Only shown for
+    /// table tabs whose introspected info is available; everything else is forced back to
+    /// Data so a tab can't get stuck on an empty Structure view.
+    pub(super) fn view_mode_bar(&mut self, root: &mut egui::Ui) {
+        let idx = self.active_query_tab;
+        if self.structure_table(idx).is_none() {
+            self.tabs[idx].view = TabView::Data;
+            return;
+        }
+        egui::Panel::bottom("view_mode_bar")
+            .resizable(false)
+            .exact_size(30.0)
+            .frame(
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(6, 4))
+                    .fill(palette::PANEL()),
+            )
+            .show_separator_line(true)
+            .show_inside(root, |ui| {
+                ui.horizontal(|ui| {
+                    let view = &mut self.tabs[idx].view;
+                    for (mode, label) in
+                        [(TabView::Data, "Data"), (TabView::Structure, "Structure")]
+                    {
+                        if ui
+                            .selectable_label(*view == mode, egui::RichText::new(label).size(11.0))
+                            .clicked()
+                        {
+                            *view = mode;
+                        }
+                    }
+                });
+            });
+    }
+
     pub(super) fn central_panel(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
         let idx = self.active_query_tab;
+        // Structure mode replaces the whole grid with the table's introspected definition.
+        // `view_mode_bar` already forced the view back to Data when no table info exists,
+        // so the lookup here always succeeds in Structure mode.
+        if self.tabs[idx].view == TabView::Structure {
+            if let Some(info) = self.structure_table(idx).cloned() {
+                egui::CentralPanel::default().show_inside(root, |ui| {
+                    structure_view(ui, &info);
+                });
+                return;
+            }
+        }
         let editable = self.tabs[idx].edits.editable();
         let status_msg = &self.status_msg;
         let QueryTab {
@@ -886,4 +937,149 @@ impl DbGuiApp {
             actions.push(Action::CancelDialog);
         }
     }
+}
+
+/// The Structure view of a table tab: its introspected columns and indexes as two
+/// read-only grids, styled after the results grid (TablePlus's "Structure" mode).
+fn structure_view(ui: &mut egui::Ui, info: &dbcore::TableInfo) {
+    use egui_extras::{Column, TableBuilder};
+
+    let row_height = egui::TextStyle::Monospace.resolve(ui.style()).size + 8.0;
+    let header = |ui: &mut egui::Ui, title: &str| {
+        ui.add(
+            egui::Label::new(egui::RichText::new(title).strong())
+                .selectable(false),
+        );
+    };
+
+    egui::ScrollArea::vertical()
+        .id_salt("structure_scroll")
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            ui.add_space(6.0);
+            style::section_header(ui, "Columns");
+            ui.add_space(2.0);
+            TableBuilder::new(ui)
+                .id_salt("structure_columns")
+                .striped(true)
+                .resizable(true)
+                .vscroll(false)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .auto_shrink([false, true])
+                .column(Column::exact(30.0)) // row-number gutter
+                .column(Column::initial(220.0).at_least(60.0).clip(true))
+                .column(Column::initial(160.0).at_least(60.0).clip(true))
+                .column(Column::initial(90.0).at_least(60.0).clip(true))
+                .column(Column::remainder().at_least(60.0).clip(true))
+                .header(24.0, |mut h| {
+                    h.col(|ui| {
+                        ui.add_space(4.0);
+                        ui.weak("#");
+                    });
+                    for title in ["column_name", "data_type", "nullable", "key"] {
+                        h.col(|ui| header(ui, title));
+                    }
+                })
+                .body(|mut body| {
+                    for (i, col) in info.columns.iter().enumerate() {
+                        body.row(row_height, |mut row| {
+                            row.col(|ui| {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.add_space(4.0);
+                                        ui.weak(
+                                            egui::RichText::new(format!("{}", i + 1)).monospace(),
+                                        );
+                                    },
+                                );
+                            });
+                            row.col(|ui| {
+                                if col.primary_key {
+                                    icons::show_colored(
+                                        ui,
+                                        icons::key(),
+                                        13.0,
+                                        palette::ACCENT(),
+                                    );
+                                    ui.add_space(2.0);
+                                }
+                                ui.label(&col.name);
+                            });
+                            row.col(|ui| {
+                                ui.label(egui::RichText::new(&col.data_type).monospace());
+                            });
+                            row.col(|ui| {
+                                if col.nullable {
+                                    ui.label("YES");
+                                } else {
+                                    ui.colored_label(palette::TEXT_WEAK(), "NO");
+                                }
+                            });
+                            row.col(|ui| {
+                                if col.primary_key {
+                                    ui.colored_label(palette::ACCENT(), "PRIMARY");
+                                }
+                            });
+                        });
+                    }
+                });
+
+            if !info.indexes.is_empty() {
+                ui.add_space(12.0);
+                style::section_header(ui, "Indexes");
+                ui.add_space(2.0);
+                TableBuilder::new(ui)
+                    .id_salt("structure_indexes")
+                    .striped(true)
+                    .resizable(true)
+                    .vscroll(false)
+                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                    .auto_shrink([false, true])
+                    .column(Column::exact(30.0))
+                    .column(Column::initial(260.0).at_least(60.0).clip(true))
+                    .column(Column::initial(90.0).at_least(60.0).clip(true))
+                    .column(Column::remainder().at_least(60.0).clip(true))
+                    .header(24.0, |mut h| {
+                        h.col(|ui| {
+                            ui.add_space(4.0);
+                            ui.weak("#");
+                        });
+                        for title in ["index_name", "unique", "columns"] {
+                            h.col(|ui| header(ui, title));
+                        }
+                    })
+                    .body(|mut body| {
+                        for (i, idx) in info.indexes.iter().enumerate() {
+                            body.row(row_height, |mut row| {
+                                row.col(|ui| {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.add_space(4.0);
+                                            ui.weak(
+                                                egui::RichText::new(format!("{}", i + 1))
+                                                    .monospace(),
+                                            );
+                                        },
+                                    );
+                                });
+                                row.col(|ui| {
+                                    icons::show_weak(ui, icons::index(), 13.0);
+                                    ui.add_space(2.0);
+                                    ui.label(&idx.name);
+                                });
+                                row.col(|ui| {
+                                    if idx.unique {
+                                        ui.colored_label(palette::ACCENT(), "UNIQUE");
+                                    }
+                                });
+                                row.col(|ui| {
+                                    ui.label(idx.columns.join(", "));
+                                });
+                            });
+                        }
+                    });
+            }
+        });
 }

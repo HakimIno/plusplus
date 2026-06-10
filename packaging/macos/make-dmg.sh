@@ -48,6 +48,7 @@ PLIST
 # Ad-hoc sign so Gatekeeper treats it as a stable identity (no paid cert needed).
 if command -v codesign >/dev/null 2>&1; then
   echo "→ ad-hoc codesigning"
+  
   codesign --force --deep --sign - "$APP" 2>/dev/null || echo "  (codesign skipped)"
 fi
 
