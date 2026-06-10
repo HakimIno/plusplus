@@ -786,6 +786,17 @@ impl DbGuiApp {
                 self.tabs[idx].preview = false;
             }
             self.select_tab(idx);
+            // Result is cleared on disconnect; re-selecting the same table from the sidebar
+            // must re-run the preview query instead of leaving an empty grid.
+            if self.tabs[idx].result.is_none()
+                && self.tabs[idx].conn_id.as_deref().is_some_and(|cid| {
+                    self.active_connections
+                        .iter()
+                        .any(|c| c.config_id == cid)
+                })
+            {
+                self.start_query_for(idx);
+            }
             return;
         }
 
@@ -840,6 +851,24 @@ impl DbGuiApp {
     /// Drop a live connection from the pool (tabs bound to it become "not connected").
     fn disconnect_conn(&mut self, id: &str) {
         self.active_connections.retain(|c| c.config_id != id);
+        for tab in &mut self.tabs {
+            if tab.conn_id.as_deref() == Some(id) {
+                tab.result = None;
+                tab.row_order.clear();
+                tab.sort = None;
+                tab.selected_row = None;
+                tab.edits.clear();
+                tab.edits.pending_source = None;
+            }
+        }
+        if self.querying_tab_id.is_some_and(|qid| {
+            self.tabs.iter().any(|t| {
+                t.id == qid && t.conn_id.as_deref() == Some(id)
+            })
+        }) {
+            self.busy = Busy::Idle;
+            self.querying_tab_id = None;
+        }
         self.status_msg = "Disconnected".to_string();
         self.error = None;
     }
@@ -922,6 +951,15 @@ impl DbGuiApp {
                     let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) else {
                         continue;
                     };
+                    // A disconnect can race an in-flight query; ignore stale results.
+                    if tab.conn_id.as_deref().is_some_and(|id| {
+                        !self
+                            .active_connections
+                            .iter()
+                            .any(|c| c.config_id == id)
+                    }) {
+                        continue;
+                    }
                     match result {
                         Ok(res) => {
                             // Promote the in-flight source and start from a clean edit slate.
@@ -1815,6 +1853,68 @@ mod tests {
         assert_eq!(app.active().unwrap().config_id, "c1");
         app.tab_mut().conn_id = None;
         assert!(app.active().is_none());
+    }
+
+    /// Disconnect drops cached results for bound tabs so stale rows don't linger on screen.
+    #[test]
+    fn disconnect_clears_bound_tab_results() {
+        let mut app = DbGuiApp::construct();
+        let db: std::sync::Arc<dyn dbcore::Database> = std::sync::Arc::new(DummyDb);
+        app.active_connections.push(ActiveConnection {
+            config_id: "c1".into(),
+            name: "one".into(),
+            db,
+            schema: fake_schema(1, 1),
+        });
+        app.tab_mut().conn_id = Some("c1".into());
+        app.tab_mut().set_result(fake_result(4, 2));
+        app.tab_mut().edits.source = Some(crate::edit::EditSource {
+            schema: None,
+            table: "table_0".into(),
+            pk_cols: vec!["field_0".into()],
+        });
+
+        app.disconnect_conn("c1");
+
+        assert!(app.active().is_none());
+        assert!(app.tab().result.is_none());
+        assert!(app.tab().row_order.is_empty());
+        assert!(app.tab().edits.source.is_some()); // table identity kept for sidebar dedupe
+    }
+
+    /// Re-selecting an already-open table after reconnect must re-run its query.
+    #[test]
+    fn reopen_table_after_disconnect_starts_query() {
+        let src = crate::edit::EditSource {
+            schema: None,
+            table: "users".into(),
+            pk_cols: vec!["id".into()],
+        };
+        let mut app = DbGuiApp::construct();
+        let db: std::sync::Arc<dyn dbcore::Database> = std::sync::Arc::new(DummyDb);
+        app.active_connections.push(ActiveConnection {
+            config_id: "c1".into(),
+            name: "one".into(),
+            db,
+            schema: fake_schema(1, 1),
+        });
+        app.tab_mut().conn_id = Some("c1".into());
+        app.tab_mut().sql = "SELECT * FROM users".into();
+        app.tab_mut().set_result(fake_result(3, 2));
+        app.tab_mut().edits.source = Some(src.clone());
+
+        app.disconnect_conn("c1");
+        app.active_connections.push(ActiveConnection {
+            config_id: "c1".into(),
+            name: "one".into(),
+            db: std::sync::Arc::new(DummyDb),
+            schema: fake_schema(1, 1),
+        });
+
+        app.open_table("SELECT * FROM users".into(), src, false);
+
+        assert_eq!(app.querying_tab_id, Some(app.tab().id));
+        assert!(app.tab().result.is_none());
     }
 
     /// The Beautify action reformats the active tab's SQL in the bound connection's
