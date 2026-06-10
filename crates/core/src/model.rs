@@ -459,6 +459,246 @@ impl QueryResult {
     }
 }
 
+// ─── DDL types ───────────────────────────────────────────────────────────────
+
+/// Column definition for DDL operations (CREATE TABLE / ALTER TABLE ADD COLUMN).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ColumnDef {
+    pub name: String,
+    pub data_type: String,
+    pub nullable: bool,
+    pub primary_key: bool,
+    /// Optional DEFAULT expression rendered verbatim (e.g. `"'hello'"`, `"0"`, `"NOW()"`).
+    pub default: Option<String>,
+}
+
+/// Index definition for DDL operations.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct IndexDef {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
+}
+
+/// ON DELETE / ON UPDATE referential action for a foreign key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum FkAction {
+    #[default]
+    NoAction,
+    Cascade,
+    SetNull,
+    Restrict,
+}
+
+impl FkAction {
+    pub const ALL: &'static [FkAction] = &[
+        FkAction::NoAction,
+        FkAction::Cascade,
+        FkAction::SetNull,
+        FkAction::Restrict,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FkAction::NoAction => "NO ACTION",
+            FkAction::Cascade => "CASCADE",
+            FkAction::SetNull => "SET NULL",
+            FkAction::Restrict => "RESTRICT",
+        }
+    }
+}
+
+/// Foreign key constraint definition (used inside CREATE TABLE or as ADD CONSTRAINT).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ForeignKeyDef {
+    /// Constraint name — use an empty string to omit the `CONSTRAINT` clause.
+    pub name: String,
+    pub columns: Vec<String>,
+    pub ref_table: String,
+    pub ref_columns: Vec<String>,
+    pub on_delete: FkAction,
+}
+
+// ─── DDL builder helpers ─────────────────────────────────────────────────────
+
+fn ddl_table_ref(kind: DbKind, schema: Option<&str>, table: &str) -> String {
+    match schema {
+        Some(s) => format!("{}.{}", kind.quote_ident(s), kind.quote_ident(table)),
+        None => kind.quote_ident(table),
+    }
+}
+
+/// Render one column definition for use in CREATE TABLE.
+/// `inline_pk` emits `PRIMARY KEY` inline; set to `false` for multi-column PK tables
+/// (which use a trailing table-level `PRIMARY KEY (a, b)` clause instead).
+fn col_def_sql(kind: DbKind, col: &ColumnDef, inline_pk: bool) -> String {
+    let mut parts = vec![kind.quote_ident(&col.name), col.data_type.clone()];
+    if !col.nullable {
+        parts.push("NOT NULL".into());
+    }
+    if let Some(def) = &col.default {
+        let d = def.trim();
+        if !d.is_empty() {
+            parts.push(format!("DEFAULT {d}"));
+        }
+    }
+    if col.primary_key && inline_pk {
+        parts.push("PRIMARY KEY".into());
+    }
+    parts.join(" ")
+}
+
+fn fk_clause_sql(kind: DbKind, fk: &ForeignKeyDef) -> String {
+    let cols = fk.columns.iter().map(|c| kind.quote_ident(c)).collect::<Vec<_>>().join(", ");
+    let ref_t = kind.quote_ident(&fk.ref_table);
+    let ref_c = fk.ref_columns.iter().map(|c| kind.quote_ident(c)).collect::<Vec<_>>().join(", ");
+    let constraint = if fk.name.trim().is_empty() {
+        String::new()
+    } else {
+        format!("CONSTRAINT {} ", kind.quote_ident(fk.name.trim()))
+    };
+    format!(
+        "{constraint}FOREIGN KEY ({cols}) REFERENCES {ref_t} ({ref_c}) ON DELETE {}",
+        fk.on_delete.label()
+    )
+}
+
+// ─── DDL builders ────────────────────────────────────────────────────────────
+
+/// Build a `CREATE TABLE` statement with column definitions and optional foreign keys.
+pub fn build_create_table_sql(
+    kind: DbKind,
+    schema: Option<&str>,
+    table: &str,
+    columns: &[ColumnDef],
+    fks: &[ForeignKeyDef],
+) -> String {
+    let pk_count = columns.iter().filter(|c| c.primary_key).count();
+    let inline_pk = pk_count == 1;
+    let mut defs: Vec<String> = columns.iter().map(|c| col_def_sql(kind, c, inline_pk)).collect();
+    if pk_count > 1 {
+        let pk_cols = columns
+            .iter()
+            .filter(|c| c.primary_key)
+            .map(|c| kind.quote_ident(&c.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        defs.push(format!("PRIMARY KEY ({pk_cols})"));
+    }
+    for fk in fks {
+        defs.push(fk_clause_sql(kind, fk));
+    }
+    let body = defs.join(",\n    ");
+    let engine = match kind {
+        DbKind::MySql | DbKind::MariaDb => " ENGINE=InnoDB",
+        _ => "",
+    };
+    format!(
+        "CREATE TABLE {} (\n    {body}\n){engine};",
+        ddl_table_ref(kind, schema, table)
+    )
+}
+
+/// Build a `DROP TABLE` statement.
+pub fn build_drop_table_sql(kind: DbKind, schema: Option<&str>, table: &str) -> String {
+    format!("DROP TABLE {};", ddl_table_ref(kind, schema, table))
+}
+
+/// Build an `ALTER TABLE … ADD COLUMN` statement.
+pub fn build_add_column_sql(
+    kind: DbKind,
+    schema: Option<&str>,
+    table: &str,
+    col: &ColumnDef,
+) -> String {
+    format!(
+        "ALTER TABLE {} ADD COLUMN {};",
+        ddl_table_ref(kind, schema, table),
+        col_def_sql(kind, col, false)
+    )
+}
+
+/// Build an `ALTER TABLE … DROP COLUMN` statement.
+pub fn build_drop_column_sql(
+    kind: DbKind,
+    schema: Option<&str>,
+    table: &str,
+    col_name: &str,
+) -> String {
+    format!(
+        "ALTER TABLE {} DROP COLUMN {};",
+        ddl_table_ref(kind, schema, table),
+        kind.quote_ident(col_name)
+    )
+}
+
+/// Build an `ALTER TABLE … RENAME COLUMN` (or `sp_rename` for SQL Server).
+pub fn build_rename_column_sql(
+    kind: DbKind,
+    schema: Option<&str>,
+    table: &str,
+    old_name: &str,
+    new_name: &str,
+) -> String {
+    match kind {
+        DbKind::SqlServer => {
+            let qualified =
+                format!("{}.{}.{}", schema.unwrap_or("dbo"), table, old_name);
+            format!("EXEC sp_rename '{qualified}', '{new_name}', 'COLUMN';")
+        }
+        _ => format!(
+            "ALTER TABLE {} RENAME COLUMN {} TO {};",
+            ddl_table_ref(kind, schema, table),
+            kind.quote_ident(old_name),
+            kind.quote_ident(new_name)
+        ),
+    }
+}
+
+/// Build a `CREATE [UNIQUE] INDEX` statement (dialect-aware).
+pub fn build_create_index_sql(
+    kind: DbKind,
+    schema: Option<&str>,
+    table: &str,
+    idx: &IndexDef,
+) -> String {
+    let unique = if idx.unique { "UNIQUE " } else { "" };
+    let cols = idx
+        .columns
+        .iter()
+        .map(|c| kind.quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // MySQL/MariaDB don't support schema-qualified index names in CREATE INDEX.
+    let idx_ref = match kind {
+        DbKind::MySql | DbKind::MariaDb => kind.quote_ident(&idx.name),
+        _ => match schema {
+            Some(s) => format!("{}.{}", kind.quote_ident(s), kind.quote_ident(&idx.name)),
+            None => kind.quote_ident(&idx.name),
+        },
+    };
+    format!(
+        "CREATE {unique}INDEX {idx_ref} ON {} ({cols});",
+        ddl_table_ref(kind, schema, table)
+    )
+}
+
+/// Build a `DROP INDEX` statement (MySQL/SQL Server require `ON table`; others don't).
+pub fn build_drop_index_sql(
+    kind: DbKind,
+    schema: Option<&str>,
+    table: &str,
+    idx_name: &str,
+) -> String {
+    let q = kind.quote_ident(idx_name);
+    match kind {
+        DbKind::MySql | DbKind::MariaDb | DbKind::SqlServer => {
+            format!("DROP INDEX {q} ON {};", ddl_table_ref(kind, schema, table))
+        }
+        _ => format!("DROP INDEX {q};"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

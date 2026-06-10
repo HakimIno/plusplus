@@ -688,7 +688,19 @@ impl DbGuiApp {
             .show_separator_line(true)
             .show_inside(root, |ui| {
                 ui.add_space(8.0);
-                style::section_header(ui, "Schema");
+                ui.horizontal(|ui| {
+                    style::section_header(ui, "Schema");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let connected = self.active().is_some();
+                        let resp = icons::icon_button(ui, icons::plus(), "New Table");
+                        if resp.enabled() && resp.clicked() && connected {
+                            actions.push(Action::OpenNewTable);
+                        }
+                        if !connected {
+                            let _ = resp.on_disabled_hover_text("Connect to a database first");
+                        }
+                    });
+                });
                 style::icon_text_input(
                     ui,
                     &mut self.schema_filter,
@@ -858,12 +870,13 @@ impl DbGuiApp {
     /// TablePlus-style Data / Structure switch directly below the grid. Only shown for
     /// table tabs whose introspected info is available; everything else is forced back to
     /// Data so a tab can't get stuck on an empty Structure view.
-    pub(super) fn view_mode_bar(&mut self, root: &mut egui::Ui) {
+    pub(super) fn view_mode_bar(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
         let idx = self.active_query_tab;
         if self.structure_table(idx).is_none() {
             self.tabs[idx].view = TabView::Data;
             return;
         }
+        let table_info = self.structure_table(idx).cloned();
         egui::Panel::bottom("view_mode_bar")
             .resizable(false)
             .exact_size(30.0)
@@ -885,6 +898,14 @@ impl DbGuiApp {
                         {
                             *view = mode;
                         }
+                    }
+                    // "Edit Table" button — shown on the right side of the bar.
+                    if let Some(info) = table_info {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if icons::button(ui, icons::edit(), "Edit Table", true).clicked() {
+                                actions.push(Action::OpenEditTable(info));
+                            }
+                        });
                     }
                 });
             });
@@ -1325,6 +1346,184 @@ impl DbGuiApp {
             actions.push(Action::CancelDialog);
         }
     }
+
+    // ─── Schema Editor dialog ─────────────────────────────────────────────────
+
+    pub(super) fn schema_editor_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        actions: &mut Vec<Action>,
+    ) {
+        // Only shown when the editor is open but no DDL preview is pending.
+        if self.schema_editor.is_none() || self.schema_pending.is_some() {
+            return;
+        }
+
+        use crate::schema::{SchemaEditorMode, SchemaTab};
+        let editor = self.schema_editor.as_mut().unwrap();
+
+        let title = match editor.mode {
+            SchemaEditorMode::NewTable => "Create Table".to_string(),
+            SchemaEditorMode::EditTable => {
+                format!("Edit Table — {}", editor.table_name)
+            }
+        };
+
+        let mut open = true;
+        egui::Window::new(title)
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size([640.0, 500.0])
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                // Table name (only editable in NewTable mode; read-only in EditTable).
+                ui.horizontal(|ui| {
+                    ui.label("Table name:");
+                    let te = egui::TextEdit::singleline(&mut editor.table_name)
+                        .hint_text("my_table")
+                        .desired_width(200.0);
+                    ui.add_enabled(
+                        editor.mode == SchemaEditorMode::NewTable,
+                        te,
+                    );
+                    if !editor.schema_name.is_empty() || editor.mode == SchemaEditorMode::NewTable {
+                        ui.label("Schema:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut editor.schema_name)
+                                .hint_text("public")
+                                .desired_width(120.0),
+                        );
+                    }
+                });
+                ui.add_space(6.0);
+
+                // Tab selector: Columns | Indexes | Foreign Keys
+                ui.horizontal(|ui| {
+                    for (tab, label) in [
+                        (SchemaTab::Columns, "Columns"),
+                        (SchemaTab::Indexes, "Indexes"),
+                        (SchemaTab::ForeignKeys, "Foreign Keys"),
+                    ] {
+                        if ui
+                            .selectable_label(
+                                editor.active_tab == tab,
+                                egui::RichText::new(label).size(12.0),
+                            )
+                            .clicked()
+                        {
+                            editor.active_tab = tab;
+                        }
+                    }
+                });
+                ui.separator();
+                ui.add_space(4.0);
+
+                let available_h = ui.available_height() - 48.0;
+                egui::ScrollArea::vertical()
+                    .id_salt("schema_editor_scroll")
+                    .max_height(available_h.max(100.0))
+                    .show(ui, |ui| {
+                        match editor.active_tab {
+                            SchemaTab::Columns => {
+                                schema_columns_tab(ui, &mut editor.columns, editor.mode);
+                            }
+                            SchemaTab::Indexes => {
+                                schema_indexes_tab(ui, &mut editor.indexes);
+                            }
+                            SchemaTab::ForeignKeys => {
+                                schema_fk_tab(ui, &mut editor.fks);
+                            }
+                        }
+                    });
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if icons::primary_button(ui, icons::code(), "Preview SQL", true).clicked() {
+                        actions.push(Action::GenerateSchema);
+                    }
+                    ui.add_space(6.0);
+                    if icons::button(ui, icons::close(), "Cancel", true).clicked() {
+                        actions.push(Action::CancelSchema);
+                    }
+                });
+            });
+
+        if !open {
+            actions.push(Action::CancelSchema);
+        }
+    }
+
+    // ─── Schema DDL preview dialog ────────────────────────────────────────────
+
+    pub(super) fn schema_preview_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(stmts) = self.schema_pending.clone() else {
+            return;
+        };
+
+        let title = format!("Preview Migration — {} Statement(s)", stmts.len());
+        let mut open = true;
+        egui::Window::new(title)
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size([660.0, 460.0])
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "Review the generated DDL before applying. \
+                         All statements run as a single transaction.",
+                    )
+                    .color(palette::TEXT_WEAK()),
+                );
+                ui.add_space(8.0);
+
+                let font = egui::TextStyle::Monospace.resolve(ui.style());
+                egui::ScrollArea::vertical()
+                    .id_salt("schema_ddl_scroll")
+                    .max_height(320.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for (i, stmt) in stmts.iter().enumerate() {
+                            if i > 0 {
+                                ui.add_space(4.0);
+                                ui.separator();
+                                ui.add_space(4.0);
+                            }
+                            let job = crate::highlight::highlight_sql(stmt, font.clone());
+                            ui.label(job);
+                        }
+                    });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let can_act = self.busy == Busy::Idle;
+                    if icons::primary_button(ui, icons::save(), "Apply Migration", can_act)
+                        .on_hover_text("Execute all DDL statements in a single transaction")
+                        .clicked()
+                    {
+                        actions.push(Action::ApplySchema);
+                    }
+                    ui.add_space(6.0);
+                    if icons::button(ui, icons::close(), "Back", true).clicked() {
+                        actions.push(Action::CancelSchema);
+                    }
+                });
+            });
+
+        if !open {
+            actions.push(Action::CancelSchema);
+        }
+    }
 }
 
 /// The Structure view of a table tab: its introspected columns and indexes as two
@@ -1721,5 +1920,252 @@ fn details_value_box(
             edits.stage(row_idx, c, dbcore::Value::Text(date.to_string()), value);
             *date_pick = None;
         }
+    }
+}
+
+// ─── Schema editor tab helpers ────────────────────────────────────────────────
+
+fn schema_columns_tab(
+    ui: &mut egui::Ui,
+    columns: &mut Vec<crate::schema::ColumnDraft>,
+    mode: crate::schema::SchemaEditorMode,
+) {
+    use crate::schema::SchemaEditorMode;
+
+    let mut to_remove: Option<usize> = None;
+
+    for (i, col) in columns.iter_mut().enumerate() {
+        let row_color = if col.drop {
+            Some(palette::DANGER().linear_multiply(0.12))
+        } else if col.is_existing {
+            None
+        } else {
+            Some(palette::ACCENT().linear_multiply(0.10))
+        };
+
+        let frame = if let Some(c) = row_color {
+            egui::Frame::new().fill(c).inner_margin(egui::Margin::symmetric(4, 2))
+        } else {
+            egui::Frame::new().inner_margin(egui::Margin::symmetric(4, 2))
+        };
+
+        frame.show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.set_min_height(24.0);
+                // Name
+                ui.add_enabled(
+                    !col.drop,
+                    egui::TextEdit::singleline(&mut col.name)
+                        .hint_text("column_name")
+                        .desired_width(140.0),
+                );
+                // Type
+                ui.add_enabled(
+                    !col.drop,
+                    egui::TextEdit::singleline(&mut col.data_type)
+                        .hint_text("TEXT")
+                        .desired_width(100.0),
+                );
+                // Nullable
+                ui.add_enabled(!col.drop, egui::Checkbox::new(&mut col.nullable, "NULL"));
+                // PK
+                ui.add_enabled(!col.drop, egui::Checkbox::new(&mut col.primary_key, "PK"));
+                // Default
+                ui.add_enabled(
+                    !col.drop,
+                    egui::TextEdit::singleline(&mut col.default)
+                        .hint_text("default…")
+                        .desired_width(90.0),
+                );
+
+                // Drop / restore button
+                if col.is_existing {
+                    let (label, hover) = if col.drop {
+                        ("Restore", "Keep this column")
+                    } else {
+                        ("Drop", "Mark column for deletion")
+                    };
+                    if ui.small_button(label).on_hover_text(hover).clicked() {
+                        col.drop = !col.drop;
+                    }
+                } else if mode == SchemaEditorMode::EditTable {
+                    if ui.small_button("✕").on_hover_text("Remove new column").clicked() {
+                        to_remove = Some(i);
+                    }
+                } else {
+                    // NewTable mode — allow removing non-first rows
+                    if i > 0 && ui.small_button("✕").on_hover_text("Remove column").clicked() {
+                        to_remove = Some(i);
+                    }
+                }
+            });
+        });
+    }
+
+    if let Some(i) = to_remove {
+        columns.remove(i);
+    }
+
+    ui.add_space(4.0);
+    if ui.small_button("+ Add Column").clicked() {
+        columns.push(crate::schema::ColumnDraft::new_empty());
+    }
+}
+
+fn schema_indexes_tab(ui: &mut egui::Ui, indexes: &mut Vec<crate::schema::IndexDraft>) {
+    let mut to_remove: Option<usize> = None;
+
+    for (i, idx) in indexes.iter_mut().enumerate() {
+        let row_color = if idx.drop {
+            Some(palette::DANGER().linear_multiply(0.12))
+        } else if !idx.is_existing {
+            Some(palette::ACCENT().linear_multiply(0.10))
+        } else {
+            None
+        };
+
+        let frame = if let Some(c) = row_color {
+            egui::Frame::new().fill(c).inner_margin(egui::Margin::symmetric(4, 2))
+        } else {
+            egui::Frame::new().inner_margin(egui::Margin::symmetric(4, 2))
+        };
+
+        frame.show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.set_min_height(24.0);
+                ui.add_enabled(
+                    !idx.drop,
+                    egui::TextEdit::singleline(&mut idx.name)
+                        .hint_text("index_name")
+                        .desired_width(150.0),
+                );
+                ui.add_enabled(
+                    !idx.drop,
+                    egui::TextEdit::singleline(&mut idx.columns_raw)
+                        .hint_text("col1, col2")
+                        .desired_width(160.0),
+                );
+                ui.add_enabled(!idx.drop, egui::Checkbox::new(&mut idx.unique, "Unique"));
+
+                if idx.is_existing {
+                    let (label, hover) = if idx.drop {
+                        ("Restore", "Keep this index")
+                    } else {
+                        ("Drop", "Mark index for removal")
+                    };
+                    if ui.small_button(label).on_hover_text(hover).clicked() {
+                        idx.drop = !idx.drop;
+                    }
+                } else if ui.small_button("✕").on_hover_text("Remove index").clicked() {
+                    to_remove = Some(i);
+                }
+            });
+        });
+    }
+
+    if let Some(i) = to_remove {
+        indexes.remove(i);
+    }
+
+    ui.add_space(4.0);
+    if ui.small_button("+ Add Index").clicked() {
+        indexes.push(crate::schema::IndexDraft::new_empty());
+    }
+}
+
+fn schema_fk_tab(ui: &mut egui::Ui, fks: &mut Vec<crate::schema::FkDraft>) {
+    use dbcore::FkAction;
+
+    let mut to_remove: Option<usize> = None;
+
+    for (i, fk) in fks.iter_mut().enumerate() {
+        let row_color = if fk.drop {
+            Some(palette::DANGER().linear_multiply(0.12))
+        } else if !fk.is_existing {
+            Some(palette::ACCENT().linear_multiply(0.10))
+        } else {
+            None
+        };
+
+        let frame = if let Some(c) = row_color {
+            egui::Frame::new().fill(c).inner_margin(egui::Margin::symmetric(4, 2))
+        } else {
+            egui::Frame::new().inner_margin(egui::Margin::symmetric(4, 2))
+        };
+
+        frame.show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.label("Constraint:");
+                    ui.add_enabled(
+                        !fk.drop,
+                        egui::TextEdit::singleline(&mut fk.constraint_name)
+                            .hint_text("fk_name (optional)")
+                            .desired_width(160.0),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Columns:");
+                    ui.add_enabled(
+                        !fk.drop,
+                        egui::TextEdit::singleline(&mut fk.columns_raw)
+                            .hint_text("col1, col2")
+                            .desired_width(130.0),
+                    );
+                    ui.label("→");
+                    ui.add_enabled(
+                        !fk.drop,
+                        egui::TextEdit::singleline(&mut fk.ref_table)
+                            .hint_text("ref_table")
+                            .desired_width(110.0),
+                    );
+                    ui.label("(");
+                    ui.add_enabled(
+                        !fk.drop,
+                        egui::TextEdit::singleline(&mut fk.ref_columns_raw)
+                            .hint_text("ref_col")
+                            .desired_width(90.0),
+                    );
+                    ui.label(")");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("On Delete:");
+                    egui::ComboBox::from_id_salt(format!("fk_action_{i}"))
+                        .selected_text(fk.on_delete.label())
+                        .show_ui(ui, |ui| {
+                            for action in FkAction::ALL {
+                                ui.selectable_value(&mut fk.on_delete, *action, action.label());
+                            }
+                        });
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if fk.is_existing {
+                            let (label, hover) = if fk.drop {
+                                ("Restore", "Keep this FK")
+                            } else {
+                                ("Drop", "Remove FK constraint")
+                            };
+                            if ui.small_button(label).on_hover_text(hover).clicked() {
+                                fk.drop = !fk.drop;
+                            }
+                        } else if ui.small_button("✕").on_hover_text("Remove FK").clicked() {
+                            to_remove = Some(i);
+                        }
+                    });
+                });
+                ui.add_space(2.0);
+            });
+        });
+        ui.separator();
+    }
+
+    if let Some(i) = to_remove {
+        fks.remove(i);
+    }
+
+    ui.add_space(4.0);
+    if ui.small_button("+ Add Foreign Key").clicked() {
+        fks.push(crate::schema::FkDraft::new_empty());
     }
 }

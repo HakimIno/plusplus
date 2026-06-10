@@ -8,7 +8,9 @@
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 
-use dbcore::{ConnectionColor, ConnectionConfig, Database, DbKind, QueryResult, SchemaTree};
+use dbcore::{ConnectionColor, ConnectionConfig, Database, DbKind, QueryResult, SchemaTree, TableInfo};
+
+use crate::schema::SchemaEditor;
 
 mod panels;
 mod widgets;
@@ -42,6 +44,8 @@ enum AppMessage {
         tab_id: u64,
         result: Result<usize, String>,
     },
+    /// A DDL schema migration finished. `Ok` means success; carry a status message.
+    SchemaApplied(Result<String, String>),
 }
 
 /// What the background runtime is currently doing (drives the spinner / disables buttons).
@@ -374,6 +378,16 @@ enum Action {
     ConfirmEdits,
     /// User cancelled the preview dialog without committing.
     CancelEdits,
+    /// Open the schema editor to create a brand-new table.
+    OpenNewTable,
+    /// Open the schema editor to modify an existing table.
+    OpenEditTable(TableInfo),
+    /// Validate editor state and move to the DDL-preview dialog.
+    GenerateSchema,
+    /// User confirmed the DDL preview: execute the statements and re-introspect.
+    ApplySchema,
+    /// Close the schema editor / DDL preview without applying.
+    CancelSchema,
 }
 
 /// Drag-to-reorder state for the query-tab strip.
@@ -442,6 +456,10 @@ pub struct DbGuiApp {
     /// SQL statements staged for the commit-preview dialog. `None` = dialog closed;
     /// `Some(stmts)` = dialog open, waiting for the user to confirm or cancel.
     commit_pending: Option<Vec<String>>,
+    /// Active schema editor (for create/edit table). `None` = closed.
+    schema_editor: Option<SchemaEditor>,
+    /// DDL statements staged for the schema-preview dialog. `None` = preview closed.
+    schema_pending: Option<Vec<String>>,
 
     // --- layout ---
     show_connection_tabs: bool,
@@ -543,6 +561,8 @@ impl DbGuiApp {
             theme,
             beautify,
             commit_pending: None,
+            schema_editor: None,
+            schema_pending: None,
         }
     }
 
@@ -1016,6 +1036,45 @@ impl DbGuiApp {
                         Err(_) => {}
                     }
                 }
+                AppMessage::SchemaApplied(result) => {
+                    self.busy = Busy::Idle;
+                    match result {
+                        Ok(msg) => {
+                            self.status_msg = msg;
+                            self.error = None;
+                            self.schema_editor = None;
+                            self.schema_pending = None;
+                            // Re-introspect the active connection to refresh the sidebar tree.
+                            if let Some(conn_id) = self.tab().conn_id.clone() {
+                                if let Some(ac) = self
+                                    .active_connections
+                                    .iter()
+                                    .find(|c| c.config_id == conn_id)
+                                {
+                                    let db = ac.db.clone();
+                                    let name = ac.name.clone();
+                                    let tx = self.tx.clone();
+                                    self.rt.spawn(async move {
+                                        let result = db
+                                            .introspect()
+                                            .await
+                                            .map(|schema| (db, schema))
+                                            .map_err(|e| e.to_string());
+                                        let _ = tx.send(AppMessage::Connected {
+                                            conn_id,
+                                            name,
+                                            result,
+                                        });
+                                    });
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            self.error = Some(format!("Schema migration failed: {e}"));
+                            self.status_msg = "Schema migration failed".to_string();
+                        }
+                    }
+                }
             }
             ctx.request_repaint();
         }
@@ -1463,6 +1522,63 @@ impl DbGuiApp {
             Action::CancelEdits => {
                 self.commit_pending = None;
             }
+            Action::OpenNewTable => {
+                let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
+                let schema = self
+                    .active()
+                    .and_then(|a| a.schema.tables.first().and_then(|t| t.schema.as_deref()))
+                    .map(|s| s.to_string());
+                self.schema_editor =
+                    Some(SchemaEditor::new_table(kind, schema.as_deref()));
+                self.schema_pending = None;
+            }
+            Action::OpenEditTable(table) => {
+                let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
+                self.schema_editor = Some(SchemaEditor::edit_table(&table, kind));
+                self.schema_pending = None;
+            }
+            Action::GenerateSchema => {
+                let Some(editor) = &self.schema_editor else {
+                    return;
+                };
+                match editor.build_ddl() {
+                    Ok(stmts) => {
+                        self.schema_pending = Some(stmts);
+                        self.error = None;
+                    }
+                    Err(msg) => {
+                        self.error = Some(msg);
+                    }
+                }
+            }
+            Action::ApplySchema => {
+                let Some(stmts) = self.schema_pending.take() else {
+                    return;
+                };
+                let Some(db) = self.active().map(|a| a.db.clone()) else {
+                    return;
+                };
+                let n = stmts.len();
+                let tx = self.tx.clone();
+                self.busy = Busy::Querying;
+                self.error = None;
+                self.status_msg = format!("Applying {n} DDL statement(s)…");
+                self.rt.spawn(async move {
+                    let result = db
+                        .execute_transaction(&stmts)
+                        .await
+                        .map(|_| format!("Schema migration applied ({n} statement(s))"))
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(AppMessage::SchemaApplied(result));
+                });
+            }
+            Action::CancelSchema => {
+                if self.schema_pending.is_some() {
+                    self.schema_pending = None;
+                } else {
+                    self.schema_editor = None;
+                }
+            }
         }
     }
 
@@ -1682,11 +1798,13 @@ impl DbGuiApp {
         // A top panel after left/right carves the strip directly above the grid.
         self.filter_bar(ui_root);
         // ...and a bottom panel here carves the Data/Structure switch directly below it.
-        self.view_mode_bar(ui_root);
+        self.view_mode_bar(ui_root, &mut actions);
         self.central_panel(ui_root, &mut actions);
         self.connection_dialog(&ctx, &mut actions);
         self.settings_dialog(&ctx, &mut actions);
         self.commit_preview_dialog(&ctx, &mut actions);
+        self.schema_editor_dialog(&ctx, &mut actions);
+        self.schema_preview_dialog(&ctx, &mut actions);
 
         let structural = actions.iter().any(|a| {
             matches!(

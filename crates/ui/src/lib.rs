@@ -10,6 +10,7 @@ mod format;
 mod grid;
 mod highlight;
 mod icons;
+mod schema;
 mod style;
 mod theme;
 mod title_bar;
