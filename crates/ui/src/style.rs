@@ -260,6 +260,29 @@ pub fn text_input(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32) 
     )
 }
 
+/// Like [`text_input`], but with a leading icon painted inside the field (TablePlus-style).
+pub fn icon_text_input(
+    ui: &mut egui::Ui,
+    text: &mut String,
+    hint: &str,
+    icon: egui::ImageSource<'static>,
+    width: f32,
+) -> egui::Response {
+    const ICON: f32 = 14.0;
+    let tint = ui.visuals().weak_text_color();
+    let img = egui::Image::new(icon)
+        .fit_to_exact_size(egui::vec2(ICON, ICON))
+        .tint(tint);
+    ui.add_sized(
+        egui::vec2(width, CONTROL_H),
+        egui::TextEdit::singleline(text)
+            .hint_text(hint)
+            .prefix((img, " "))
+            .vertical_align(egui::Align::Center)
+            .margin(Margin::symmetric(6, 0)),
+    )
+}
+
 /// Single-line label that truncates with "…" when it doesn't fit the panel width.
 /// Pass `tooltip` to show the full text on hover (defaults to `text`).
 pub fn truncated_label(

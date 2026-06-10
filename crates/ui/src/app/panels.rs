@@ -483,11 +483,13 @@ impl DbGuiApp {
                 ui.add_space(6.0);
                 style::section_header(ui, "Details");
                 // Live field filter, TablePlus-style: typing narrows the stacked fields
-                // below by column name.
-                ui.add(
-                    egui::TextEdit::singleline(details_filter)
-                        .hint_text("Search for field…")
-                        .desired_width(f32::INFINITY),
+                // below by column name. Icon sits inside the field via `icon_text_input`.
+                style::icon_text_input(
+                    ui,
+                    details_filter,
+                    "Search for field…",
+                    icons::search(),
+                    ui.available_width(),
                 );
                 ui.add_space(4.0);
 
@@ -687,11 +689,13 @@ impl DbGuiApp {
             .show_inside(root, |ui| {
                 ui.add_space(8.0);
                 style::section_header(ui, "Schema");
-                ui.horizontal(|ui| {
-                    icons::show_weak(ui, icons::filter(), 15.0);
-                    let w = ui.available_width();
-                    style::text_input(ui, &mut self.schema_filter, "filter tables…", w);
-                });
+                style::icon_text_input(
+                    ui,
+                    &mut self.schema_filter,
+                    "filter tables…",
+                    icons::filter(),
+                    ui.available_width(),
+                );
                 ui.add_space(4.0);
 
                 egui::ScrollArea::vertical()
