@@ -710,6 +710,8 @@ impl DbGuiApp {
         }
         let editable = self.tabs[idx].edits.editable();
         let status_msg = &self.status_msg;
+        let tab_id = self.tabs[idx].id;
+        let loading = self.querying_tab_id == Some(tab_id);
         let QueryTab {
             result,
             row_order,
@@ -766,6 +768,9 @@ impl DbGuiApp {
             }
             Some(_) => {
                 style::empty_state(ui, icons::table(), "No columns", status_msg);
+            }
+            None if loading => {
+                style::loading_state(ui, status_msg);
             }
             None => {
                 style::empty_illustration(ui, icons::empty_results());

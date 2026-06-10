@@ -308,6 +308,20 @@ pub fn status_dot(ui: &mut egui::Ui, color: Color32) -> egui::Response {
     resp
 }
 
+/// A centred loading placeholder: spinner plus a short status line.
+pub fn loading_state(ui: &mut egui::Ui, message: &str) {
+    ui.add_space((ui.available_height() * 0.30).max(24.0));
+    ui.vertical_centered(|ui| {
+        ui.add(egui::Spinner::new().size(32.0));
+        ui.add_space(16.0);
+        ui.label(
+            egui::RichText::new(message)
+                .size(14.5)
+                .color(palette::TEXT_WEAK()),
+        );
+    });
+}
+
 /// A centred empty-state placeholder: a large faint glyph, a title, and a hint line.
 /// Used wherever a panel has nothing to show yet (no results, no selection, …).
 pub fn empty_state(ui: &mut egui::Ui, icon: egui::ImageSource<'static>, title: &str, hint: &str) {

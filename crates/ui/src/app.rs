@@ -256,6 +256,8 @@ pub struct DbGuiApp {
     tx: Sender<AppMessage>,
     rx: Receiver<AppMessage>,
     busy: Busy,
+    /// Tab id of the in-flight `SELECT` (cleared when [`AppMessage::Queried`] arrives).
+    querying_tab_id: Option<u64>,
 
     // --- connection state ---
     /// Pool of live connections (one per connected config), shared across tabs.
@@ -345,6 +347,7 @@ impl DbGuiApp {
             tx,
             rx,
             busy: Busy::Idle,
+            querying_tab_id: None,
             active_connections: Vec::new(),
             tabs: vec![default_tab],
             active_query_tab: 0,
@@ -636,6 +639,7 @@ impl DbGuiApp {
                 }
                 AppMessage::Queried { tab_id, result } => {
                     self.busy = Busy::Idle;
+                    self.querying_tab_id = None;
                     let is_active = self.tabs.get(self.active_query_tab).is_some_and(|t| t.id == tab_id);
                     let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) else {
                         continue;
@@ -740,6 +744,7 @@ impl DbGuiApp {
         };
         let tx = self.tx.clone();
         self.busy = Busy::Querying;
+        self.querying_tab_id = Some(tab_id);
         self.error = None;
         self.status_msg = "Running query…".to_string();
         self.rt.spawn(async move {
