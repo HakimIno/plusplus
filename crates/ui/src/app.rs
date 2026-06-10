@@ -293,6 +293,11 @@ pub struct DbGuiApp {
     editor: Option<ConnEditor>,
     /// Live drag-to-reorder state for a query tab (cleared on mouse release).
     tab_drag: Option<TabDrag>,
+    /// Details panel: live column-name filter (the "Search for field…" box).
+    details_filter: String,
+    /// Details panel: the (row, col) cell with an inline date picker open, opened from
+    /// the value box's actions menu.
+    details_date_pick: Option<(usize, usize)>,
     settings_open: bool,
     schema_filter: String,
     status_msg: String,
@@ -382,6 +387,8 @@ impl DbGuiApp {
             last_workspace_save: std::time::Instant::now(),
             editor: None,
             tab_drag: None,
+            details_filter: String::new(),
+            details_date_pick: None,
             settings_open: false,
             schema_filter: String::new(),
             status_msg: "Ready".to_string(),
@@ -1801,6 +1808,118 @@ mod tests {
             clashes.is_empty(),
             "ID clashes in typed Details panel:\n{}",
             clashes.join("\n")
+        );
+    }
+
+    /// Clicking a Details-panel value box must open the inline editor, give it focus, and
+    /// accept typed characters (regression: the editor opened but typing went nowhere).
+    #[test]
+    fn details_box_click_then_type() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::style::apply(&ctx);
+
+        let mut app = DbGuiApp::construct();
+        let result = QueryResult {
+            columns: vec![
+                ColumnMeta {
+                    name: "id".into(),
+                    type_name: "INTEGER".into(),
+                },
+                ColumnMeta {
+                    name: "name".into(),
+                    type_name: "TEXT".into(),
+                },
+            ],
+            rows: vec![vec![Value::Int(13), Value::Text("Coffee".into())]],
+            stats: QueryStats::default(),
+        };
+        {
+            let tab = app.tab_mut();
+            tab.set_result(result);
+            tab.selected_row = Some(0);
+            tab.edits.source = Some(crate::edit::EditSource {
+                schema: None,
+                table: "t".into(),
+                pk_cols: vec!["id".into()],
+            });
+        }
+
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+        let run = |app: &mut DbGuiApp, events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            ctx.run_ui(raw, |ui| app.draw(ui, None))
+        };
+
+        // Locate the "Coffee" value box and click it.
+        let out = run(&mut app, vec![]);
+        let pos = find_text_pos(&out.shapes, "Coffee").expect("value box not painted")
+            + egui::vec2(4.0, 4.0);
+        run(&mut app, vec![egui::Event::PointerMoved(pos)]);
+        run(
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        run(
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        // One frame for the editor to appear and request focus, then type.
+        run(&mut app, vec![]);
+        assert!(
+            app.tab().edits.is_active(0, 1),
+            "click should open the inline editor"
+        );
+        run(&mut app, vec![egui::Event::Text("X".into())]);
+        let buf = app.tab().edits.active.as_ref().unwrap().buf.clone();
+        assert!(
+            buf.contains('X'),
+            "typed text should reach the editor, buf = {buf:?}"
+        );
+
+        // The editor must survive idle frames (no spurious commit/cancel)…
+        for _ in 0..3 {
+            run(&mut app, vec![egui::Event::PointerMoved(pos)]);
+        }
+        assert!(
+            app.tab().edits.is_active(0, 1),
+            "editor should stay open across idle frames"
+        );
+        // …and a second click inside it (cursor placement) must not close it or kill focus.
+        for pressed in [true, false] {
+            run(
+                &mut app,
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                }],
+            );
+        }
+        run(&mut app, vec![egui::Event::Text("Y".into())]);
+        assert!(
+            app.tab().edits.is_active(0, 1),
+            "clicking inside the editor should not close it"
+        );
+        let buf = app.tab().edits.active.as_ref().unwrap().buf.clone();
+        assert!(
+            buf.contains('Y'),
+            "typing after an in-editor click should still work, buf = {buf:?}"
         );
     }
 

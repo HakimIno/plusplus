@@ -231,14 +231,27 @@ impl EditSource {
 }
 
 /// The cell currently being typed into (only ever one at a time, across grid and details).
+/// Where an edit was started from. The grid and the Details panel can both display the
+/// active cell; only the view that began the edit renders the text editor (two live
+/// editors over one buffer would fight over keyboard focus).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum EditOrigin {
+    Grid,
+    Details,
+}
+
 pub struct ActiveEdit {
     /// Index into `result.rows` (the *raw* row, not the display order).
     pub row: usize,
     pub col: usize,
     pub kind: EditorKind,
     pub buf: String,
-    /// Set when the editor first opens so the widget can grab keyboard focus once.
+    /// Set while the editor still needs keyboard focus; cleared once it actually has it.
+    /// (Kept set across frames — a one-shot request can be lost to a discarded egui pass,
+    /// leaving a visible editor that ignores typing.)
     pub focus: bool,
+    /// Which view opened this editor (that view renders it; the other shows a label).
+    pub origin: EditOrigin,
 }
 
 /// What [`render_editor`] decided this frame.
@@ -325,7 +338,8 @@ impl Edits {
     }
 
     /// Open an editor on `(row, col)`, seeding the buffer from the cell's current value.
-    pub fn begin(&mut self, row: usize, col: usize, current: &Value) {
+    /// `origin` is the view that should render the editor (grid or Details panel).
+    pub fn begin(&mut self, row: usize, col: usize, current: &Value, origin: EditOrigin) {
         let buf = match current {
             Value::Null => String::new(),
             other => other.display(),
@@ -336,7 +350,18 @@ impl Edits {
             kind: self.col_kind(col),
             buf,
             focus: true,
+            origin,
         });
+    }
+
+    /// Whether `(row, col)` is being edited *and* `origin` is the view that opened the
+    /// editor — i.e. the view that should render it.
+    pub fn is_active_from(&self, row: usize, col: usize, origin: EditOrigin) -> bool {
+        self.is_active(row, col)
+            && self
+                .active
+                .as_ref()
+                .is_some_and(|a| a.origin == origin)
     }
 
     /// Commit the active editor into the staged set, typing the input by its column kind. If
@@ -368,36 +393,63 @@ impl Edits {
     }
 }
 
+/// Horizontal inset for value text in the Details panel (display paint + editor must match).
+pub const DETAILS_VALUE_PAD_X: f32 = 8.0;
+
 /// Render the active text editor (numbers, dates, free text) and report what to do next.
 /// Invalid input (per the column kind) is shown in the danger colour and can't be committed
 /// by pressing Enter; clicking away from invalid input discards the edit. `fill`, when set,
-/// sizes the field to exactly that rect (used to fill a grid cell).
+/// sizes the field to exactly that rect (used to fill a grid cell or a Details value box).
+/// Details-panel editors are frameless — that panel paints the surrounding box itself so
+/// focus doesn't add a second border. Grid cells keep a normal input frame.
 pub fn render_editor(
     ui: &mut egui::Ui,
     active: &mut ActiveEdit,
     fill: Option<egui::Vec2>,
 ) -> EditOutcome {
-    // Slightly rounded corners so the field reads as an input box, not a thin strip.
-    {
-        let cr = egui::CornerRadius::same(3);
-        let w = &mut ui.visuals_mut().widgets;
-        w.inactive.corner_radius = cr;
-        w.hovered.corner_radius = cr;
-        w.active.corner_radius = cr;
-    }
-
     let valid = active.kind.is_valid(&active.buf);
-    let mut field = egui::TextEdit::singleline(&mut active.buf).hint_text(active.kind.hint());
+    let embedded = fill.is_some();
+    let mut field = egui::TextEdit::singleline(&mut active.buf)
+        .hint_text(active.kind.hint())
+        .id_salt((active.row, active.col, active.origin))
+        .vertical_align(egui::Align::Center);
     if !valid {
         field = field.text_color(palette::DANGER());
     }
+    if embedded && active.origin == EditOrigin::Details {
+        // Margin on the builder is ignored when a custom frame is set — use inner_margin
+        // on a frameless frame so text lines up with display mode (left + DETAILS_VALUE_PAD_X).
+        field = field
+            .horizontal_align(egui::Align::LEFT)
+            .vertical_align(egui::Align::Center)
+            .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(
+                DETAILS_VALUE_PAD_X.round() as i8,
+                0,
+            )));
+    } else {
+        let cr = egui::CornerRadius::same(3);
+        field = field.frame(
+            egui::Frame::new()
+                .fill(palette::CODE_BG())
+                .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                .corner_radius(cr)
+                .inner_margin(egui::Margin::symmetric(4, 0)),
+        );
+        if !embedded {
+            field = field.margin(egui::Margin::symmetric(6, 3));
+        }
+    }
     let resp = match fill {
-        Some(size) => ui.add_sized(size, field.margin(egui::vec2(4.0, 2.0))),
-        None => ui.add(field.desired_width(f32::INFINITY).margin(egui::vec2(4.0, 3.0))),
+        Some(size) => ui.add_sized(size, field),
+        None => ui.add(field.desired_width(f32::INFINITY)),
     };
-    if active.focus {
-        resp.request_focus();
+    // Keep requesting focus until the field actually has it. A one-shot request can be
+    // swallowed by a discarded egui pass (popup/tooltip sizing), which would leave a
+    // visible editor that silently ignores typing.
+    if resp.has_focus() {
         active.focus = false;
+    } else if active.focus {
+        resp.request_focus();
     }
 
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -483,7 +535,7 @@ mod tests {
             name: "age".into(),
             type_name: "INT".into(),
         }]);
-        e.begin(0, 0, &Value::Int(30));
+        e.begin(0, 0, &Value::Int(30), EditOrigin::Grid);
         // Type something invalid for an INT column.
         e.active.as_mut().unwrap().buf = "abc".into();
         // commit refuses: returns false, leaves the editor open, stages nothing.

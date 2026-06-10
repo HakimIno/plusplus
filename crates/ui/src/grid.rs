@@ -172,9 +172,11 @@ fn build_grid(
                         if dirty {
                             tint_cell(ui);
                         }
-                        if edits.is_active(r, c) {
+                        if edits.is_active_from(r, c, crate::edit::EditOrigin::Grid) {
                             // The cell under edit fills the whole cell; the editor is
                             // type-aware and validates numbers/dates before they can commit.
+                            // (An edit begun in the Details panel renders its editor there,
+                            // not here — two editors would fight over keyboard focus.)
                             if let Some(active) = edits.active.as_mut() {
                                 let size = ui.available_size();
                                 match crate::edit::render_editor(ui, active, Some(size)) {

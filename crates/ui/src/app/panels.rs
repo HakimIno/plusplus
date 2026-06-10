@@ -387,6 +387,9 @@ impl DbGuiApp {
             result, edits, ..
         } = tab;
         let res = result.as_ref().expect("row_idx implies a result");
+        // Disjoint field borrows alongside `tab` above.
+        let details_filter = &mut self.details_filter;
+        let details_date_pick = &mut self.details_date_pick;
 
         egui::Panel::right("details_panel")
             .resizable(true)
@@ -395,17 +398,27 @@ impl DbGuiApp {
             .show_inside(root, |ui| {
                 ui.add_space(6.0);
                 style::section_header(ui, "Details");
-                ui.separator();
+                // Live field filter, TablePlus-style: typing narrows the stacked fields
+                // below by column name.
+                ui.add(
+                    egui::TextEdit::singleline(details_filter)
+                        .hint_text("Search for field…")
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add_space(4.0);
 
-                // Stacked fields (name above value) rather than a 2-column Grid: the value
-                // is a full-width wrapped label, so it reflows when the panel is resized.
-                // `auto_shrink([false, _])` keeps the inner ui at the panel width so wrapping
-                // tracks the resize instead of the content's natural width.
+                // Stacked fields (name + type above an input-styled value box). The box is
+                // full-width, so it tracks the panel as it is resized.
+                // `auto_shrink([false, _])` keeps the inner ui at the panel width.
+                let query = details_filter.trim().to_lowercase();
                 egui::ScrollArea::vertical()
                     .id_salt("details_scroll")
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         for (c, col) in res.columns.iter().enumerate() {
+                            if !query.is_empty() && !col.name.to_lowercase().contains(&query) {
+                                continue;
+                            }
                             let kind = edits.col_kind(c);
                             ui.add_space(6.0);
                             // Header: column name on the left, a colour-coded type badge
@@ -418,23 +431,17 @@ impl DbGuiApp {
                                 );
                             });
                             let value = &res.rows[row_idx][c];
-
-                            if edits.is_active(row_idx, c) {
-                                let outcome = edits
-                                    .active
-                                    .as_mut()
-                                    .map(|active| crate::edit::render_editor(ui, active, None));
-                                match outcome {
-                                    Some(crate::edit::EditOutcome::Commit) => {
-                                        let _ = edits.commit_active(value);
-                                    }
-                                    Some(crate::edit::EditOutcome::Cancel) => edits.cancel_active(),
-                                    _ => {}
-                                }
-                            } else {
-                                details_value(ui, edits, kind, row_idx, c, value, editable);
-                            }
-                            ui.separator();
+                            details_value_box(
+                                ui,
+                                edits,
+                                kind,
+                                row_idx,
+                                c,
+                                value,
+                                editable,
+                                details_date_pick,
+                            );
+                            ui.add_space(4.0);
                         }
                     });
             });
@@ -801,7 +808,7 @@ impl DbGuiApp {
                 }
                 if let Some((r, c)) = resp.begin_edit {
                     if let Some(orig) = result.rows.get(r).and_then(|row| row.get(c)).cloned() {
-                        edits.begin(r, c, &orig);
+                        edits.begin(r, c, &orig, crate::edit::EditOrigin::Grid);
                     }
                 }
                 // A boolean cell flips in place rather than opening an editor.
@@ -1146,16 +1153,21 @@ fn kind_color(kind: crate::edit::EditorKind) -> egui::Color32 {
     }
 }
 
-/// Render one (non-actively-edited) value in the Details panel, type-aware:
+/// Render one Details-panel value as an input-styled box (TablePlus-look): a bordered
+/// full-width field showing the value, with a ⌄ actions menu at its right edge. While the
+/// cell is actively being edited the box is replaced by the validated text editor.
 ///
-/// - booleans show as a checkbox (clickable when editable, staging on toggle);
-/// - editable DATE columns get a calendar picker that stages the picked day directly,
-///   plus a pencil for typing the value instead;
-/// - numbers and date/times render monospace so digits align;
-/// - NULLs and byte blobs render faint; staged (unsaved) values render green.
-///
-/// Everything else keeps the double-click-to-edit text flow.
-fn details_value(
+/// Height of a Details-panel value box (display and edit modes share this).
+const DETAILS_VALUE_H: f32 = 26.0;
+
+/// Type-aware behaviour:
+/// - clicking the box starts editing (booleans toggle instead);
+/// - the ⌄ menu offers Copy plus, when editable: Edit, type-specific quick-sets
+///   (TRUE/FALSE, Today/Now, an inline calendar picker for DATE), Set NULL, and Revert;
+/// - numbers and date/times render monospace; NULL/bytes render faint; staged (unsaved)
+///   values render green with a green border until saved.
+#[allow(clippy::too_many_arguments)]
+fn details_value_box(
     ui: &mut egui::Ui,
     edits: &mut crate::edit::Edits,
     kind: crate::edit::EditorKind,
@@ -1163,86 +1175,216 @@ fn details_value(
     c: usize,
     value: &dbcore::Value,
     editable: bool,
+    date_pick: &mut Option<(usize, usize)>,
 ) {
     use crate::edit::EditorKind as K;
 
-    let staged = edits.staged(row_idx, c).cloned();
-    let shown = staged.clone().unwrap_or_else(|| value.clone());
-    let is_staged = staged.is_some();
-
-    // Booleans: a real checkbox. Read-only checkboxes still *look* right but are inert.
-    if kind == K::Bool && !shown.is_null() {
-        let mut b = crate::edit::as_bool(&shown);
-        let label = egui::RichText::new(if b { "TRUE" } else { "FALSE" }).color(if is_staged {
-            palette::SUCCESS()
-        } else {
-            palette::TEXT()
+    if edits.is_active_from(row_idx, c, crate::edit::EditOrigin::Details) {
+        // Keep the same painted box as display mode; only swap the inner label for a
+        // frameless editor so focus doesn't add a second border and resize the row.
+        let h = DETAILS_VALUE_H;
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), h),
+            egui::Sense::hover(),
+        );
+        if ui.is_rect_visible(rect) {
+            ui.painter().rect(
+                rect,
+                egui::CornerRadius::same(5),
+                palette::CODE_BG(),
+                egui::Stroke::new(1.0, palette::ACCENT()),
+                egui::StrokeKind::Inside,
+            );
+        }
+        let mut outcome = crate::edit::EditOutcome::Continue;
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+            ui.set_clip_rect(rect);
+            if let Some(active) = edits.active.as_mut() {
+                outcome = crate::edit::render_editor(ui, active, Some(rect.size()));
+            }
         });
-        let resp = ui.add_enabled(editable, egui::Checkbox::new(&mut b, label));
-        if resp.changed() {
-            edits.toggle_bool(row_idx, c, value);
+        match outcome {
+            crate::edit::EditOutcome::Commit => {
+                let _ = edits.commit_active(value);
+            }
+            crate::edit::EditOutcome::Cancel => edits.cancel_active(),
+            _ => {}
         }
         return;
     }
 
-    // Editable DATE columns: a calendar picker stages the picked day directly; the pencil
-    // switches to the validated text editor for typing a date instead.
-    if kind == K::Date && editable {
-        if let Ok(mut date) = shown.display().trim().parse::<jiff::civil::Date>() {
-            ui.horizontal(|ui| {
-                let salt = format!("details_date_{c}");
-                let resp = ui.scope(|ui| {
-                    if is_staged {
-                        ui.visuals_mut().override_text_color = Some(palette::SUCCESS());
-                    }
-                    ui.add(egui_extras::DatePickerButton::new(&mut date).id_salt(&salt))
-                });
-                if resp.inner.changed() {
-                    // `civil::Date` displays as YYYY-MM-DD, the form every backend accepts.
-                    edits.stage(row_idx, c, dbcore::Value::Text(date.to_string()), value);
-                }
-                if icons::icon_button(ui, icons::edit(), "Type a date").clicked() {
-                    edits.begin(row_idx, c, &shown);
-                }
-            });
-            return;
-        }
-        // Unparseable/NULL dates fall through to the plain label below.
+    let staged = edits.staged(row_idx, c).cloned();
+    let shown = staged.clone().unwrap_or_else(|| value.clone());
+    let is_staged = staged.is_some();
+    let can_edit = editable && !matches!(value, dbcore::Value::Bytes(_));
+
+    // --- the box: one allocation, a separate hit zone for the ⌄ at the right edge ---
+    let h = DETAILS_VALUE_H;
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), h),
+        egui::Sense::click(),
+    );
+    let chev_w = 20.0;
+    let chev_rect = egui::Rect::from_min_max(
+        egui::pos2(rect.right() - chev_w, rect.top()),
+        rect.max,
+    );
+    let chev_resp = ui.interact(chev_rect, resp.id.with("actions"), egui::Sense::click());
+
+    if ui.is_rect_visible(rect) {
+        let hovered = resp.hovered() || chev_resp.hovered();
+        let stroke_color = if is_staged {
+            palette::SUCCESS()
+        } else if hovered {
+            palette::BORDER_STRONG()
+        } else {
+            palette::BORDER()
+        };
+        ui.painter().rect(
+            rect,
+            egui::CornerRadius::same(5),
+            palette::CODE_BG(),
+            egui::Stroke::new(1.0, stroke_color),
+            egui::StrokeKind::Inside,
+        );
+
+        // Value text, single line, clipped before the chevron zone.
+        let text_color = if is_staged {
+            palette::SUCCESS()
+        } else if shown.is_null() || matches!(shown, dbcore::Value::Bytes(_)) {
+            palette::TEXT_FAINT()
+        } else {
+            palette::TEXT()
+        };
+        let font = if kind.monospace_value() && !shown.is_null() {
+            egui::TextStyle::Monospace.resolve(ui.style())
+        } else {
+            egui::TextStyle::Body.resolve(ui.style())
+        };
+        let display = if kind == K::Bool && !shown.is_null() {
+            if crate::edit::as_bool(&shown) { "TRUE".to_string() } else { "FALSE".to_string() }
+        } else {
+            shown.display()
+        };
+        let mut job = egui::text::LayoutJob::default();
+        job.append(
+            &display,
+            0.0,
+            egui::TextFormat {
+                font_id: font,
+                color: text_color,
+                italics: shown.is_null(),
+                ..Default::default()
+            },
+        );
+        let galley = ui.fonts_mut(|f| f.layout_job(job));
+        let text_clip = egui::Rect::from_min_max(
+            rect.min,
+            egui::pos2(chev_rect.left() - 2.0, rect.bottom()),
+        );
+        ui.painter().with_clip_rect(text_clip).galley(
+            egui::pos2(
+                rect.left() + crate::edit::DETAILS_VALUE_PAD_X,
+                rect.center().y - galley.size().y * 0.5,
+            ),
+            galley,
+            text_color,
+        );
+
+        // ⌄ glyph (slightly emphasised on hover).
+        let chev_color = if chev_resp.hovered() {
+            palette::TEXT()
+        } else {
+            palette::TEXT_WEAK()
+        };
+        let cc = chev_rect.center();
+        let r = 3.0;
+        let s = egui::Stroke::new(1.3, chev_color);
+        ui.painter()
+            .line_segment([cc + egui::vec2(-r, -r * 0.5), cc + egui::vec2(0.0, r * 0.5)], s);
+        ui.painter()
+            .line_segment([cc + egui::vec2(0.0, r * 0.5), cc + egui::vec2(r, -r * 0.5)], s);
     }
 
-    let color = if is_staged {
-        palette::SUCCESS()
-    } else if shown.is_null() || matches!(shown, dbcore::Value::Bytes(_)) {
-        palette::TEXT_FAINT()
-    } else {
-        palette::TEXT()
-    };
-    let mut text = if shown.is_null() {
-        egui::RichText::new("NULL").italics()
-    } else {
-        egui::RichText::new(shown.display())
-    };
-    if kind.monospace_value() && !shown.is_null() {
-        text = text.monospace();
+    // Click-to-edit, like a real input. Booleans toggle instead of opening an editor.
+    if can_edit {
+        let resp = resp.on_hover_cursor(egui::CursorIcon::Text);
+        if resp.clicked() {
+            if kind == K::Bool {
+                edits.toggle_bool(row_idx, c, value);
+            } else {
+                // Prefill from the staged value (if any) so editing continues from it.
+                edits.begin(row_idx, c, &shown, crate::edit::EditOrigin::Details);
+            }
+        }
     }
-    let resp = ui.add(
-        egui::Label::new(text.color(color))
-            .wrap()
-            .halign(egui::Align::LEFT)
-            .sense(egui::Sense::click()),
-    );
-    let can_edit = editable && !matches!(value, dbcore::Value::Bytes(_));
-    let resp = if can_edit {
-        resp.on_hover_text("Double-click to edit")
-    } else {
-        resp
-    };
-    if can_edit && resp.double_clicked() {
-        if kind == K::Bool {
-            // NULL booleans can't show a checkbox; double-click stages TRUE.
-            edits.toggle_bool(row_idx, c, value);
-        } else {
-            edits.begin(row_idx, c, value);
+
+    // The ⌄ actions menu: Copy always; mutating actions only when editable.
+    egui::Popup::menu(&chev_resp).show(|ui| {
+        ui.set_min_width(150.0);
+        if ui.button("Copy value").clicked() {
+            ui.ctx().copy_text(shown.as_text());
+        }
+        if can_edit {
+            if kind != K::Bool && ui.button("Edit").clicked() {
+                edits.begin(row_idx, c, &shown, crate::edit::EditOrigin::Details);
+            }
+            ui.separator();
+            match kind {
+                K::Bool => {
+                    if ui.button("Set TRUE").clicked() {
+                        edits.stage(row_idx, c, dbcore::Value::Bool(true), value);
+                    }
+                    if ui.button("Set FALSE").clicked() {
+                        edits.stage(row_idx, c, dbcore::Value::Bool(false), value);
+                    }
+                }
+                K::Date => {
+                    if ui.button("Pick date…").clicked() {
+                        *date_pick = Some((row_idx, c));
+                    }
+                    if ui.button("Today").clicked() {
+                        let today = jiff::Zoned::now().date().to_string();
+                        edits.stage(row_idx, c, dbcore::Value::Text(today), value);
+                    }
+                }
+                K::DateTime => {
+                    if ui.button("Now").clicked() {
+                        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                        edits.stage(row_idx, c, dbcore::Value::Text(now), value);
+                    }
+                }
+                _ => {}
+            }
+            if !shown.is_null() && ui.button("Set NULL").clicked() {
+                edits.stage(row_idx, c, dbcore::Value::Null, value);
+            }
+            if is_staged && ui.button("Revert").clicked() {
+                // Staging the original value clears the staged edit.
+                edits.stage(row_idx, c, value.clone(), value);
+            }
+        }
+    });
+
+    // Inline calendar opened from the menu: a plain widget below the box, so its own
+    // popup behaves normally (a calendar nested inside the menu would close with it).
+    if *date_pick == Some((row_idx, c)) {
+        let mut date = shown
+            .display()
+            .trim()
+            .parse::<jiff::civil::Date>()
+            .unwrap_or_else(|_| jiff::Zoned::now().date());
+        ui.add_space(2.0);
+        let salt = format!("details_date_{c}");
+        let picker = ui.add(egui_extras::DatePickerButton::new(&mut date).id_salt(&salt));
+        if picker.changed() {
+            edits.stage(row_idx, c, dbcore::Value::Text(date.to_string()), value);
+            *date_pick = None;
         }
     }
 }
