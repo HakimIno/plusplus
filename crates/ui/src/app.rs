@@ -368,6 +368,12 @@ enum Action {
         pin: bool,
     },
     SortBy(usize),
+    /// Build staged edits into SQL and open the preview dialog.
+    PreviewEdits,
+    /// User confirmed the preview: execute the statements transactionally.
+    ConfirmEdits,
+    /// User cancelled the preview dialog without committing.
+    CancelEdits,
 }
 
 /// Drag-to-reorder state for the query-tab strip.
@@ -433,6 +439,9 @@ pub struct DbGuiApp {
     schema_filter: String,
     status_msg: String,
     error: Option<String>,
+    /// SQL statements staged for the commit-preview dialog. `None` = dialog closed;
+    /// `Some(stmts)` = dialog open, waiting for the user to confirm or cancel.
+    commit_pending: Option<Vec<String>>,
 
     // --- layout ---
     show_connection_tabs: bool,
@@ -533,6 +542,7 @@ impl DbGuiApp {
             show_query_console: true,
             theme,
             beautify,
+            commit_pending: None,
         }
     }
 
@@ -1138,18 +1148,53 @@ impl DbGuiApp {
         })
     }
 
-    /// Turn all staged edits into `UPDATE` statements and run them on the background runtime.
-    /// Each changed row becomes one statement keyed by the source table's primary key.
+    /// Validate staged edits and build the SQL statements, storing them in
+    /// `commit_pending` to show the preview dialog. Nothing is executed yet.
     fn commit_edits(&mut self) {
+        if let Some(stmts) = self.build_commit_statements() {
+            self.commit_pending = Some(stmts);
+        }
+    }
+
+    /// Take the previewed statements and execute them as a single atomic transaction on
+    /// the background runtime. On success the grid reloads; on failure the error is shown.
+    fn confirm_edits(&mut self) {
+        let Some(stmts) = self.commit_pending.take() else {
+            return;
+        };
+        let db = match self.active() {
+            Some(active) => active.db.clone(),
+            None => return,
+        };
+        let idx = self.active_query_tab;
+        let tab_id = self.tabs[idx].id;
+        let n = stmts.len();
+        let tx = self.tx.clone();
+        self.busy = Busy::Querying;
+        self.error = None;
+        self.status_msg = format!("Saving {n} change(s)…");
+        self.rt.spawn(async move {
+            let result = db
+                .execute_transaction(&stmts)
+                .await
+                .map(|_| n)
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AppMessage::Committed { tab_id, result });
+        });
+    }
+
+    /// Validate staged edits and build UPDATE/DELETE/INSERT statements. Returns `None`
+    /// (and sets `self.error`) if validation fails or there is nothing to commit.
+    fn build_commit_statements(&mut self) -> Option<Vec<String>> {
         let idx = self.active_query_tab;
         // A cell still being edited with invalid (red) input blocks the whole save.
         if !self.tabs[idx].flush_active_edit() {
             self.error = Some("Fix the highlighted cell before saving.".into());
             self.status_msg = "Invalid value — not saved".to_string();
-            return;
+            return None;
         }
         if !self.tabs[idx].edits.has_pending() {
-            return;
+            return None;
         }
         // Defence in depth: every staged value must still match its column kind before we
         // build any SQL, so a malformed value can never reach the database.
@@ -1159,22 +1204,20 @@ impl DbGuiApp {
                     self.error =
                         Some("Cannot save: a cell holds a value invalid for its type.".into());
                     self.status_msg = "Invalid value — not saved".to_string();
-                    return;
+                    return None;
                 }
             }
         }
         let Some(source) = self.tabs[idx].edits.source.clone() else {
-            return;
+            return None;
         };
-        // Grab the dialect + a connection handle, then drop the `active()` borrow so we can
-        // freely touch `self` below.
-        let (kind, db) = match self.active() {
-            Some(active) => (active.db.kind(), active.db.clone()),
-            None => return,
+        // Grab the dialect, then drop the `active()` borrow so we can freely touch `self`.
+        let kind = match self.active() {
+            Some(active) => active.db.kind(),
+            None => return None,
         };
-        let tab_id = self.tabs[idx].id;
         let Some(result) = &self.tabs[idx].result else {
-            return;
+            return None;
         };
 
         // Resolve each primary-key column to its position in the result set.
@@ -1191,7 +1234,7 @@ impl DbGuiApp {
             .collect();
         let Some(pk_idx) = pk_idx else {
             self.error = Some("Cannot save: primary key columns are not in the result.".into());
-            return;
+            return None;
         };
 
         let cant_write = "Cannot save: a value can't be written (e.g. binary data).";
@@ -1227,7 +1270,7 @@ impl DbGuiApp {
                 Some(sql) => updates.push(sql),
                 None => {
                     self.error = Some(cant_write.into());
-                    return;
+                    return None;
                 }
             }
         }
@@ -1249,7 +1292,7 @@ impl DbGuiApp {
                 Some(sql) => deletes.push(sql),
                 None => {
                     self.error = Some(cant_write.into());
-                    return;
+                    return None;
                 }
             }
         }
@@ -1283,7 +1326,7 @@ impl DbGuiApp {
                         self.error =
                             Some(format!("Cannot add row: primary key \"{name}\" is required."));
                         self.status_msg = "Missing primary key — not saved".to_string();
-                        return;
+                        return None;
                     }
                 }
             }
@@ -1291,7 +1334,7 @@ impl DbGuiApp {
             if existing_pks.contains(&pk_tuple) || new_pks.contains(&pk_tuple) {
                 self.error = Some("Cannot add row: duplicate primary key.".into());
                 self.status_msg = "Duplicate primary key — not saved".to_string();
-                return;
+                return None;
             }
             new_pks.push(pk_tuple);
             // Build the INSERT from every entered cell (column name → value).
@@ -1310,7 +1353,7 @@ impl DbGuiApp {
                 Some(sql) => inserts.push(sql),
                 None => {
                     self.error = Some(cant_write.into());
-                    return;
+                    return None;
                 }
             }
         }
@@ -1319,24 +1362,7 @@ impl DbGuiApp {
         let mut statements = updates;
         statements.extend(deletes);
         statements.extend(inserts);
-        let n = statements.len();
-        let tx = self.tx.clone();
-        self.busy = Busy::Querying;
-        self.error = None;
-        self.status_msg = format!("Saving {n} change(s)…");
-        self.rt.spawn(async move {
-            let mut outcome = Ok(n);
-            for stmt in &statements {
-                if let Err(e) = db.execute(stmt).await {
-                    outcome = Err(e.to_string());
-                    break;
-                }
-            }
-            let _ = tx.send(AppMessage::Committed {
-                tab_id,
-                result: outcome,
-            });
-        });
+        Some(statements)
     }
 
     // --- action dispatch --------------------------------------------------
@@ -1432,6 +1458,11 @@ impl DbGuiApp {
             Action::BeautifySql => self.beautify_sql(),
             Action::OpenTable { sql, source, pin } => self.open_table(sql, source, pin),
             Action::SortBy(col) => self.tab_mut().apply_sort(col),
+            Action::PreviewEdits => self.commit_edits(),
+            Action::ConfirmEdits => self.confirm_edits(),
+            Action::CancelEdits => {
+                self.commit_pending = None;
+            }
         }
     }
 
@@ -1562,9 +1593,9 @@ impl DbGuiApp {
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter)) {
             actions.push(Action::RunQuery);
         }
-        // Cmd/Ctrl+S saves staged cell edits (TablePlus-style) as UPDATE statements.
+        // Cmd/Ctrl+S opens the SQL preview dialog for staged cell edits.
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
-            self.commit_edits();
+            actions.push(Action::PreviewEdits);
         }
         // Cmd/Ctrl+R reloads the current result (re-runs the tab's SQL), dropping any
         // unsaved cell edits — the reloaded result starts from a clean edit slate.
@@ -1655,6 +1686,7 @@ impl DbGuiApp {
         self.central_panel(ui_root, &mut actions);
         self.connection_dialog(&ctx, &mut actions);
         self.settings_dialog(&ctx, &mut actions);
+        self.commit_preview_dialog(&ctx, &mut actions);
 
         let structural = actions.iter().any(|a| {
             matches!(
@@ -1702,6 +1734,9 @@ mod tests {
             unreachable!()
         }
         async fn execute(&self, _sql: &str) -> dbcore::Result<QueryResult> {
+            unreachable!()
+        }
+        async fn execute_transaction(&self, _stmts: &[String]) -> dbcore::Result<usize> {
             unreachable!()
         }
     }

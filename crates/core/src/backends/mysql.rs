@@ -163,6 +163,18 @@ impl Database for MySqlDb {
             })
         }
     }
+
+    async fn execute_transaction(&self, stmts: &[String]) -> Result<usize> {
+        if stmts.is_empty() {
+            return Ok(0);
+        }
+        let mut tx = self.pool.begin().await?;
+        for stmt in stmts {
+            sqlx::query(AssertSqlSafe(stmt.as_str())).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(stmts.len())
+    }
 }
 
 fn column_meta(row: &MySqlRow) -> Vec<ColumnMeta> {

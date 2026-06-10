@@ -21,6 +21,11 @@ pub trait Database: Send + Sync {
     /// Execute an arbitrary SQL statement and return the result set. For DML statements
     /// the returned rows are empty and `stats.rows_affected` is populated instead.
     async fn execute(&self, sql: &str) -> Result<QueryResult>;
+
+    /// Execute a batch of DML statements as a single atomic transaction: either every
+    /// statement commits, or the first failure rolls back all preceding ones. Returns
+    /// the number of statements on success.
+    async fn execute_transaction(&self, stmts: &[String]) -> Result<usize>;
 }
 
 /// First keywords that mark a statement as row-returning, for the common SQL dialects.

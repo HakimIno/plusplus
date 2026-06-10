@@ -227,6 +227,35 @@ impl Database for MsSqlDb {
             })
         }
     }
+
+    async fn execute_transaction(&self, stmts: &[String]) -> Result<usize> {
+        if stmts.is_empty() {
+            return Ok(0);
+        }
+        let n = stmts.len();
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| CoreError::Pool(e.to_string()))?;
+        // SET XACT_ABORT ON: any runtime error automatically rolls back the transaction,
+        // leaving the connection in a clean state when returned to the pool.
+        conn.simple_query("SET XACT_ABORT ON; BEGIN TRANSACTION;")
+            .await?
+            .into_results()
+            .await?;
+        for stmt in stmts {
+            conn.simple_query(stmt.as_str())
+                .await?
+                .into_results()
+                .await?;
+        }
+        conn.simple_query("COMMIT TRANSACTION;")
+            .await?
+            .into_results()
+            .await?;
+        Ok(n)
+    }
 }
 
 /// Read a column as a string, treating decode failures and NULLs as the empty string.

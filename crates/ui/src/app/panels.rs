@@ -1032,6 +1032,75 @@ impl DbGuiApp {
         }
     }
 
+    /// Modal showing the SQL that will be executed, with Commit and Cancel buttons.
+    /// Opened by Cmd+S; the user reviews the statements before anything is sent to the DB.
+    pub(super) fn commit_preview_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(stmts) = self.commit_pending.clone() else {
+            return;
+        };
+
+        let title = format!("Review {} Change(s)", stmts.len());
+        let mut open = true;
+        egui::Window::new(title)
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size([640.0, 440.0])
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "These statements will run as a single transaction. \
+                         If any fails, all changes are rolled back.",
+                    )
+                    .color(palette::TEXT_WEAK()),
+                );
+                ui.add_space(8.0);
+
+                let font = egui::TextStyle::Monospace.resolve(ui.style());
+                egui::ScrollArea::vertical()
+                    .id_salt("commit_preview_scroll")
+                    .max_height(320.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for (i, stmt) in stmts.iter().enumerate() {
+                            if i > 0 {
+                                ui.add_space(4.0);
+                                ui.separator();
+                                ui.add_space(4.0);
+                            }
+                            let job = crate::highlight::highlight_sql(stmt, font.clone());
+                            ui.label(job);
+                        }
+                    });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let can_act = self.busy == Busy::Idle;
+                    if icons::primary_button(ui, icons::save(), "Commit", can_act)
+                        .on_hover_text("Execute all statements in a single transaction")
+                        .clicked()
+                    {
+                        actions.push(Action::ConfirmEdits);
+                    }
+                    ui.add_space(6.0);
+                    if icons::button(ui, icons::close(), "Cancel", true).clicked() {
+                        actions.push(Action::CancelEdits);
+                    }
+                });
+            });
+
+        if !open {
+            actions.push(Action::CancelEdits);
+        }
+    }
+
     pub(super) fn connection_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let Some(editor) = &mut self.editor else {
             return;
