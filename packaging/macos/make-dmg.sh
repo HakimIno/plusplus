@@ -2,7 +2,13 @@
 # Package the release binary into plusplus.app and a distributable .dmg.
 #
 # Usage: packaging/macos/make-dmg.sh   (run from anywhere; paths are resolved from the repo root)
-# Assumes `cargo build --release --bin plusplus` has already produced the binary.
+#
+# Prefers a universal (Intel + Apple Silicon) app: when both per-target release builds
+# exist they are lipo'd together. Build them with
+#   cargo build --release --bin plusplus --target x86_64-apple-darwin
+#   cargo build --release --bin plusplus --target aarch64-apple-darwin
+# With only a plain `cargo build --release --bin plusplus`, falls back to that
+# host-architecture binary.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -10,12 +16,24 @@ cd "$REPO_ROOT"
 
 APP_NAME="plusplus"
 VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
-BIN="target/release/${APP_NAME}"
 ICNS="crates/app/assets/icon/icon.icns"
 
 DIST="target/dist"
 APP="${DIST}/${APP_NAME}.app"
 DMG="${DIST}/${APP_NAME}-${VERSION}.dmg"
+
+X86_BIN="target/x86_64-apple-darwin/release/${APP_NAME}"
+ARM_BIN="target/aarch64-apple-darwin/release/${APP_NAME}"
+if [ -f "$X86_BIN" ] && [ -f "$ARM_BIN" ]; then
+  echo "→ lipo: universal binary (x86_64 + arm64)"
+  mkdir -p "$DIST"
+  BIN="${DIST}/${APP_NAME}-universal"
+  lipo -create "$X86_BIN" "$ARM_BIN" -output "$BIN"
+else
+  BIN="target/release/${APP_NAME}"
+  echo "→ note: building a ${APP_NAME}.app for this machine's architecture only;"
+  echo "  build both --target x86_64-apple-darwin and aarch64-apple-darwin for universal."
+fi
 
 [ -f "$BIN" ]  || { echo "missing $BIN — run: cargo build --release --bin ${APP_NAME}"; exit 1; }
 [ -f "$ICNS" ] || { echo "missing $ICNS — run: crates/app/assets/icon/build.sh"; exit 1; }

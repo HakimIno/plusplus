@@ -92,4 +92,11 @@ A small sample SQLite database with mixed Thai/English data ships at
 `examples/sample.sqlite` — add it as a SQLite connection to try the app without a server.
 
 On macOS, `packaging/macos/make-dmg.sh` packages a release build into `plusplus.app` and
-a styled drag-to-install `.dmg` (run `cargo build --release --bin plusplus` first).
+a styled drag-to-install `.dmg`. Build both targets first and it produces a universal
+(Intel + Apple Silicon) app:
+
+```bash
+cargo build --release --bin plusplus --target x86_64-apple-darwin
+cargo build --release --bin plusplus --target aarch64-apple-darwin
+packaging/macos/make-dmg.sh
+```
