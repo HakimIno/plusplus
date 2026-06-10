@@ -13,9 +13,11 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
+# shellcheck source=scripts/version.sh
+source "${REPO_ROOT}/scripts/version.sh"
 
 APP_NAME="plusplus"
-VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+VERSION="$(plusplus_read_version "$REPO_ROOT)"
 ICNS="crates/app/assets/icon/icon.icns"
 
 DIST="target/dist"

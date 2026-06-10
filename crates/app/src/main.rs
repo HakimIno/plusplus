@@ -68,7 +68,7 @@ fn main() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 820.0])
         .with_min_inner_size([800.0, 500.0])
-        .with_title("plusplus");
+        .with_title(format!("plusplus v{}", env!("CARGO_PKG_VERSION")));
 
     // Native macOS traffic lights/titlebar, with egui drawing into the titlebar space.
     // Note: eframe cannot put egui controls above AppKit hit-testing; this is best-effort.

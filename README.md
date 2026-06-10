@@ -89,19 +89,94 @@ Requires stable Rust (pinned via `rust-toolchain.toml`); SQLite is bundled, so t
 nothing else to install.
 
 ```bash
-cargo run --bin plusplus    # build & launch the GUI
+cargo run --bin plusplus    # build & launch the GUI (dev)
 cargo test --workspace      # data-layer and headless UI tests
 ```
 
 A small sample SQLite database with mixed Thai/English data ships at
 `examples/sample.sqlite` — add it as a SQLite connection to try the app without a server.
 
-On macOS, `packaging/macos/make-dmg.sh` packages a release build into `plusplus.app` and
-a styled drag-to-install `.dmg`. Build both targets first and it produces a universal
-(Intel + Apple Silicon) app:
+## Versioning
+
+The release version is defined once in the root `Cargo.toml`:
+
+```toml
+[workspace.package]
+version = "0.1.0"
+```
+
+Every release gets a matching **git tag** `vX.Y.Z` (e.g. `v0.1.0`) and a **DMG**
+`target/dist/plusplus-X.Y.Z.dmg`. Bump the version in `Cargo.toml`, then run
+`scripts/release.sh --tag` to build, package, and create the tag.
+
+## macOS release (build, install, remove)
+
+### Quick dev run
+
+```bash
+cargo run --bin plusplus
+```
+
+### Release build + `.app` + `.dmg`
+
+```bash
+# Host architecture only (fastest)
+scripts/release.sh
+
+# Universal binary (Intel + Apple Silicon) — slower, best for distribution
+scripts/release.sh --universal
+
+# Build + package + create git tag vX.Y.Z
+scripts/release.sh --tag
+
+# Build + package + replace the installed copy in /Applications
+scripts/release.sh --install
+```
+
+Outputs:
+
+| Artifact | Path |
+|---|---|
+| App bundle | `target/dist/plusplus.app` |
+| Installer DMG | `target/dist/plusplus-<version>.dmg` |
+
+### Install / replace / remove
+
+The install script **removes the old app first**, then copies the new build:
+
+```bash
+packaging/macos/install.sh      # replace /Applications/plusplus.app
+packaging/macos/uninstall.sh    # remove /Applications/plusplus.app
+```
+
+Or manually:
+
+```bash
+rm -rf /Applications/plusplus.app
+cp -R target/dist/plusplus.app /Applications/
+open -a plusplus
+```
+
+### Tag workflow (recommended)
+
+```bash
+# 1. Bump version in Cargo.toml (e.g. 0.1.0 → 0.2.0)
+# 2. Commit the bump
+git add Cargo.toml Cargo.lock
+git commit -m "Bump version to 0.2.0"
+
+# 3. Build, package, and tag
+scripts/release.sh --universal --tag
+
+# 4. Push the tag (when ready to publish)
+git push origin v0.2.0
+```
+
+Low-level steps (without the release script):
 
 ```bash
 cargo build --release --bin plusplus --target x86_64-apple-darwin
 cargo build --release --bin plusplus --target aarch64-apple-darwin
 packaging/macos/make-dmg.sh
+packaging/macos/install.sh
 ```
