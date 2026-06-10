@@ -20,7 +20,6 @@
   <path d="M236 147L253 170" stroke="#A8BCFF" stroke-width="4" stroke-linecap="round"/>
   <path d="M209 153L196 167" stroke="#A8BCFF" stroke-width="4" stroke-linecap="round"/>
 
-  <path d="M83 36V167" stroke="#5577EE" stroke-width="3" stroke-linecap="round"/>
   <path d="M84 38L236 157" stroke="#C5D3FF" stroke-width="10" stroke-linecap="round"/>
   <path d="M84 38L236 157" stroke="#EEF2FF" stroke-width="3" stroke-linecap="round" opacity="0.55"/>
   <g>
