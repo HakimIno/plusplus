@@ -256,10 +256,20 @@ impl DbGuiApp {
                     .id_salt("sql_scroll")
                     .auto_shrink(false)
                     .show(ui, |ui| {
+                        // Size the editor to fill the panel: a `TextEdit` only grows to its
+                        // `desired_rows` (or its content), so a fixed row count would leave the
+                        // dragged-open panel mostly empty. Derive the row count from the space the
+                        // scroll area gives us so the box tracks the resize; content longer than
+                        // that scrolls internally.
+                        let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
+                        // Leave room for the editor's own vertical margin so the widget doesn't
+                        // overflow the viewport by a few pixels and trigger a permanent scrollbar.
+                        let avail = ui.available_height() - 2.0 * ui.spacing().item_spacing.y;
+                        let rows = (avail / row_height).floor().max(5.0) as usize;
                         let resp = ui.add(
                             egui::TextEdit::multiline(&mut self.tab_mut().sql)
                                 .code_editor()
-                                .desired_rows(5)
+                                .desired_rows(rows)
                                 .desired_width(f32::INFINITY)
                                 .layouter(&mut layouter)
                                 .hint_text("Write SQL here, then press Run (Cmd/Ctrl+Enter)"),

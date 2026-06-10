@@ -1,6 +1,12 @@
 use crate::icons;
 use crate::style::palette;
 
+/// Shared footprint for every button in the top title bar (icon buttons and layout toggles)
+/// so they line up at a uniform size.
+const TOOLBAR_BUTTON_SIZE: egui::Vec2 = egui::vec2(26.0, 22.0);
+/// Breathing room between adjacent title-bar icon buttons.
+const TOOLBAR_ICON_GAP: f32 = 4.0;
+
 fn compact_connection_label(name: &str) -> String {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -212,8 +218,7 @@ pub(super) fn layout_toggle(
     side: LayoutSide,
     hover: &str,
 ) -> egui::Response {
-    let size = egui::vec2(22.0, 20.0);
-    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(TOOLBAR_BUTTON_SIZE, egui::Sense::click());
 
     let fill = if active {
         palette::SURFACE()
@@ -239,39 +244,48 @@ pub(super) fn layout_toggle(
             egui::StrokeKind::Outside,
         );
 
-        let icon = rect.shrink(4.0);
-        let bar_w = 3.0;
-        let gap = 1.5;
+        // VS Code-style layout glyph: thin outer frame + filled bar on one edge.
+        let icon = rect.shrink(5.0);
+        let bar_w = 2.5;
+        let gap = 1.0;
         let color = if active {
             palette::ACCENT()
         } else {
             palette::TEXT_WEAK()
         };
+        let frame = egui::Stroke::new(1.0, color);
+        ui.painter().rect_stroke(
+            icon,
+            egui::CornerRadius::same(2),
+            frame,
+            egui::StrokeKind::Inside,
+        );
 
         match side {
             LayoutSide::Connections => {
                 let left = egui::Rect::from_min_size(icon.min, egui::vec2(bar_w, icon.height()));
-                ui.painter().rect_filled(left, egui::CornerRadius::same(1), color);
+                ui.painter().rect_filled(left, egui::CornerRadius::ZERO, color);
             }
             LayoutSide::Schema => {
                 let left = egui::Rect::from_min_size(icon.min, egui::vec2(bar_w, icon.height()));
                 let mid = egui::Rect::from_min_size(
                     egui::pos2(icon.min.x + bar_w + gap, icon.min.y),
-                    egui::vec2(bar_w * 1.4, icon.height()),
+                    egui::vec2(icon.width() - bar_w - gap, icon.height()),
                 );
-                ui.painter().rect_filled(left, egui::CornerRadius::same(1), color);
-                ui.painter().rect_filled(mid, egui::CornerRadius::same(1), color);
+                ui.painter().rect_filled(left, egui::CornerRadius::ZERO, color);
+                ui.painter().rect_filled(mid, egui::CornerRadius::ZERO, color);
             }
             LayoutSide::Details => {
                 let right = egui::Rect::from_min_size(
                     egui::pos2(icon.max.x - bar_w, icon.min.y),
                     egui::vec2(bar_w, icon.height()),
                 );
-                ui.painter().rect_filled(right, egui::CornerRadius::same(1), color);
+                ui.painter().rect_filled(right, egui::CornerRadius::ZERO, color);
             }
         }
     }
 
+    ui.add_space(TOOLBAR_ICON_GAP);
     resp.on_hover_text(hover)
 }
 
@@ -287,17 +301,36 @@ pub(super) fn toolbar_icon_button(
     src: egui::ImageSource<'static>,
     hover: &str,
 ) -> egui::Response {
-    ui.add_sized(
-        egui::vec2(26.0, 22.0),
-        egui::Button::image(
-            egui::Image::new(src)
-                .fit_to_exact_size(egui::vec2(14.0, 14.0))
-                .tint(palette::TEXT_WEAK()),
-        )
-        .fill(egui::Color32::TRANSPARENT)
-        .stroke(egui::Stroke::NONE),
-    )
-    .on_hover_text(hover)
+    let (rect, resp) = ui.allocate_exact_size(TOOLBAR_BUTTON_SIZE, egui::Sense::click());
+
+    let fill = if resp.hovered() {
+        palette::SURFACE_HOVER()
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    let stroke = if resp.hovered() {
+        egui::Stroke::new(1.0, palette::BORDER())
+    } else {
+        egui::Stroke::NONE
+    };
+
+    if ui.is_rect_visible(rect) {
+        ui.painter().rect(
+            rect,
+            egui::CornerRadius::same(4),
+            fill,
+            stroke,
+            egui::StrokeKind::Outside,
+        );
+
+        let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(14.0, 14.0));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(icon_rect), |ui| {
+            icons::show_colored(ui, src, 14.0, palette::TEXT_WEAK());
+        });
+    }
+
+    ui.add_space(TOOLBAR_ICON_GAP);
+    resp.on_hover_text(hover)
 }
 
 /// Hairline separator between toolbar icon groups.

@@ -15,6 +15,55 @@ const SF_PRO_SEMIBOLD: &[u8] = include_bytes!("../assets/SF-Pro-Text-Semibold.ot
 const THAI_REGULAR: &[u8] = include_bytes!("../assets/Anuphan-Regular.ttf");
 const THAI_SEMIBOLD: &[u8] = include_bytes!("../assets/Anuphan-SemiBold.ttf");
 
+/// macOS: with `FullSizeContentView` + a transparent titlebar, AppKit still treats a
+/// mouse-down in the titlebar strip as a window drag, because the content view's default
+/// `mouseDownCanMoveWindow` answers YES. The drag then swallows the mouse-up, so egui
+/// buttons drawn into that strip never register a click.
+///
+/// Swap the content view's class for a runtime subclass whose `mouseDownCanMoveWindow`
+/// answers NO. Clicks in the titlebar strip then reach egui; window dragging stays
+/// explicit via `ViewportCommand::StartDrag` on the breadcrumb (which uses
+/// `performWindowDragWithEvent:` and is unaffected by this override).
+#[cfg(target_os = "macos")]
+fn fix_titlebar_click_through(cc: &eframe::CreationContext<'_>) {
+    use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
+    use objc2::sel;
+    use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+    use std::ffi::CString;
+
+    let Ok(handle) = cc.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+
+    extern "C-unwind" fn no(_this: &AnyObject, _sel: Sel) -> Bool {
+        Bool::NO
+    }
+
+    unsafe {
+        let view: &AnyObject = appkit.ns_view.cast::<AnyObject>().as_ref();
+        let superclass = view.class();
+        let Ok(name) = CString::new(format!("{}_NoTitlebarDrag", superclass.name().to_string_lossy()))
+        else {
+            return;
+        };
+        // Register once; reuse on subsequent windows.
+        let subclass = AnyClass::get(&name).unwrap_or_else(|| {
+            let mut builder = ClassBuilder::new(&name, superclass)
+                .expect("titlebar-drag subclass name already taken");
+            builder.add_method(
+                sel!(mouseDownCanMoveWindow),
+                no as extern "C-unwind" fn(_, _) -> _,
+            );
+            builder.register()
+        });
+        // No ivars added, so the instance size is unchanged and the swap is safe.
+        AnyObject::set_class(view, subclass);
+    }
+}
+
 fn main() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 820.0])
@@ -43,6 +92,8 @@ fn main() -> eframe::Result<()> {
         "plusplus",
         native_options,
         Box::new(|cc| {
+            #[cfg(target_os = "macos")]
+            fix_titlebar_click_through(cc);
             ui::install_fonts(
                 &cc.egui_ctx,
                 &ui::AppFonts {

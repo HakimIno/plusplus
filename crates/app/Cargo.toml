@@ -15,3 +15,8 @@ dbcore.workspace = true
 ui.workspace = true
 eframe.workspace = true
 egui.workspace = true
+
+# AppKit access to fix titlebar hit-testing (see `fix_titlebar_click_through` in main.rs).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+raw-window-handle = "0.6"

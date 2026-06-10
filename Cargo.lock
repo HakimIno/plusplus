@@ -2877,8 +2877,10 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "egui",
+ "objc2 0.6.4",
  "plusplus-core",
  "plusplus-ui",
+ "raw-window-handle",
 ]
 
 [[package]]

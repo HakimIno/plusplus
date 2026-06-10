@@ -2,7 +2,7 @@
 //!
 //! Helpers for the compact toolbar drawn into the native macOS titlebar space.
 
-use egui::{self, CornerRadius, Margin, Rect, Stroke, Ui, UiBuilder};
+use egui::{self, CornerRadius, Rect, Stroke, Ui, UiBuilder};
 
 use crate::style::palette;
 
@@ -10,7 +10,7 @@ use crate::style::palette;
 const MAC_TRAFFIC_LIGHTS_INSET: f32 = 78.0;
 
 /// Width reserved for the right-hand tool cluster.
-const RIGHT_TOOLS_WIDTH: f32 = 132.0;
+const RIGHT_TOOLS_WIDTH: f32 = 140.0;
 /// Width of the left-hand icon cluster (excluding traffic-light inset).
 const LEFT_TOOLS_WIDTH: f32 = 108.0;
 
@@ -85,37 +85,48 @@ pub fn columns(bar: Rect, chrome_inset: f32) -> BarColumns {
     }
 }
 
-/// Connection path bar — full width, left-aligned. Drag/double-click only here (not on icons).
+/// Compact connection path pill — full width, short height, visibly rounded on every corner.
+/// Drag/double-click only here (not on icons).
+const BREADCRUMB_HEIGHT: f32 = 22.0;
+
 pub fn breadcrumb(ui: &mut Ui, text: &str) -> egui::Response {
     let pill_w = ui.available_width().max(80.0);
     let font = egui::FontId::proportional(10.0);
+    let text_color = palette::TEXT_WEAK();
+    let radius = CornerRadius::same(6);
 
-    let frame = egui::Frame::new()
-        .fill(palette::SURFACE())
-        .stroke(Stroke::new(1.0, palette::BORDER()))
-        .corner_radius(CornerRadius::same(4))
-        .inner_margin(Margin::symmetric(10, 1));
-
-    let inner = frame.show(ui, |ui| {
-        ui.set_width(pill_w);
-        ui.set_max_width(pill_w);
-        ui.add(
-            egui::Label::new(egui::RichText::new(text).font(font).color(palette::TEXT_WEAK()))
-                .truncate()
-                .selectable(false),
-        )
-        .on_hover_text(text);
-    });
-
-    // Window chrome only on the path bar — keeps toolbar icon clicks from moving the window.
-    let chrome = ui.interact(
-        inner.response.rect,
-        inner.response.id.with("path_chrome"),
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(pill_w, BREADCRUMB_HEIGHT),
         egui::Sense::click_and_drag(),
     );
-    handle_chrome_response(ui, &chrome);
 
-    inner.response
+    if ui.is_rect_visible(rect) {
+        // Inside stroke stays within the clip rect so corner radii are not squared off.
+        ui.painter().rect(
+            rect,
+            radius,
+            palette::SURFACE(),
+            Stroke::new(1.0, palette::BORDER()),
+            egui::StrokeKind::Inside,
+        );
+
+        let text_rect = rect.shrink2(egui::vec2(10.0, 0.0));
+        ui.scope_builder(UiBuilder::new().max_rect(text_rect), |ui| {
+            ui.with_layout(
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(text).font(font).color(text_color))
+                            .truncate()
+                            .selectable(false),
+                    );
+                },
+            );
+        });
+    }
+
+    handle_chrome_response(ui, &response);
+    response.on_hover_text(text)
 }
 
 /// Run `add_contents` inside one title-bar column (clipped so widgets never bleed).
