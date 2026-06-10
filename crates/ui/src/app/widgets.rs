@@ -24,27 +24,44 @@ pub(super) fn connection_tab_item(
     name: &str,
     selected: bool,
     connected: bool,
+    drag_float_y: Option<f32>,
 ) -> egui::Response {
-    let size = egui::vec2(40.0, 36.0);
-    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    fn paint_database_glyph(painter: &egui::Painter, center: egui::Pos2, color: egui::Color32) {
+        let stroke = egui::Stroke::new(1.5, color);
+        let w = 12.0;
+        let h = 13.0;
+        let left = center.x - w * 0.5;
+        let right = center.x + w * 0.5;
+        let top = center.y - h * 0.5;
+        let mid = center.y;
+        let bottom = center.y + h * 0.5;
+        painter.line_segment(
+            [egui::pos2(left, top + 2.0), egui::pos2(left, bottom - 2.0)],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(right, top + 2.0),
+                egui::pos2(right, bottom - 2.0),
+            ],
+            stroke,
+        );
+        for y in [top + 2.0, mid, bottom - 2.0] {
+            painter.line_segment([egui::pos2(left, y), egui::pos2(right, y)], stroke);
+        }
+    }
 
-    let fill = if selected {
-        palette::SURFACE()
-    } else if resp.hovered() {
-        palette::SURFACE_HOVER()
-    } else {
-        egui::Color32::TRANSPARENT
-    };
-    let stroke = if selected {
-        egui::Stroke::new(1.0, palette::BORDER_STRONG())
-    } else if resp.hovered() {
-        egui::Stroke::new(1.0, palette::BORDER())
-    } else {
-        egui::Stroke::NONE
-    };
-
-    if ui.is_rect_visible(rect) {
-        ui.painter().rect(
+    fn paint_connection_chip(
+        painter: &egui::Painter,
+        rect: egui::Rect,
+        label: &std::sync::Arc<egui::Galley>,
+        fill: egui::Color32,
+        stroke: egui::Stroke,
+        icon_color: egui::Color32,
+        text_color: egui::Color32,
+        connected: bool,
+    ) {
+        painter.rect(
             rect,
             egui::CornerRadius::same(4),
             fill,
@@ -52,52 +69,103 @@ pub(super) fn connection_tab_item(
             egui::StrokeKind::Outside,
         );
         if connected {
-            ui.painter().circle_filled(
+            painter.circle_filled(
                 rect.left_top() + egui::vec2(5.0, 5.0),
                 2.0,
                 palette::SUCCESS(),
             );
         }
+        let content_rect = rect.shrink2(egui::vec2(3.0, 4.0));
+        paint_database_glyph(
+            painter,
+            egui::pos2(content_rect.center().x, content_rect.top() + 8.0),
+            icon_color,
+        );
+        let label_pos = egui::pos2(
+            content_rect.center().x - label.size().x * 0.5,
+            content_rect.top() + 18.0,
+        );
+        painter.galley(label_pos, label.clone(), text_color);
     }
 
-    let content_rect = rect.shrink2(egui::vec2(3.0, 4.0));
-    let icon_rect = egui::Rect::from_center_size(
-        egui::pos2(content_rect.center().x, content_rect.top() + 8.0),
-        egui::vec2(13.0, 13.0),
-    );
-    let label_rect = egui::Rect::from_min_size(
-        egui::pos2(content_rect.left(), content_rect.top() + 18.0),
-        egui::vec2(content_rect.width(), 11.0),
-    );
+    let size = egui::vec2(40.0, 36.0);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+    let dragging = drag_float_y.is_some();
 
-    ui.scope_builder(egui::UiBuilder::new().max_rect(icon_rect), |ui| {
-        icons::show_colored(
-            ui,
-            icons::database(),
-            13.0,
-            if selected {
-                palette::TEXT()
-            } else {
-                palette::TEXT_WEAK()
+    let fill = if selected {
+        palette::SURFACE()
+    } else if dragging {
+        palette::SURFACE()
+    } else if resp.hovered() {
+        palette::SURFACE_HOVER()
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    let stroke = if dragging {
+        egui::Stroke::new(1.0, palette::ACCENT())
+    } else if selected {
+        egui::Stroke::new(1.0, palette::BORDER_STRONG())
+    } else if resp.hovered() {
+        egui::Stroke::new(1.0, palette::BORDER())
+    } else {
+        egui::Stroke::NONE
+    };
+    let icon_color = if selected {
+        palette::TEXT()
+    } else {
+        palette::TEXT_WEAK()
+    };
+    let text_color = icon_color;
+    let label = ui
+        .painter()
+        .layout_job(egui::text::LayoutJob::single_section(
+            compact_connection_label(name),
+            egui::TextFormat {
+                font_id: egui::FontId::proportional(8.0),
+                color: text_color,
+                ..Default::default()
             },
-        );
-    });
-    ui.scope_builder(egui::UiBuilder::new().max_rect(label_rect), |ui| {
-        ui.centered_and_justified(|ui| {
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(compact_connection_label(name))
-                        .size(8.0)
-                        .color(if selected {
-                            palette::TEXT()
-                        } else {
-                            palette::TEXT_WEAK()
-                        }),
-                )
-                .selectable(false),
+        ));
+
+    if ui.is_rect_visible(rect) {
+        if let Some(float_y) = drag_float_y {
+            ui.painter().rect(
+                rect,
+                egui::CornerRadius::same(4),
+                palette::SURFACE_HOVER(),
+                egui::Stroke::new(1.0, palette::BORDER()),
+                egui::StrokeKind::Outside,
             );
-        });
-    });
+            let float_rect =
+                egui::Rect::from_min_size(egui::pos2(rect.left(), float_y), rect.size());
+            let float_painter = egui::Painter::new(
+                ui.ctx().clone(),
+                egui::LayerId::new(egui::Order::Tooltip, resp.id.with("float")),
+                egui::Rect::EVERYTHING,
+            );
+            paint_connection_chip(
+                &float_painter,
+                float_rect,
+                &label,
+                fill,
+                stroke,
+                icon_color,
+                text_color,
+                connected,
+            );
+        } else {
+            paint_connection_chip(
+                ui.painter(),
+                rect,
+                &label,
+                fill,
+                stroke,
+                icon_color,
+                text_color,
+                connected,
+            );
+        }
+    }
 
     resp
 }

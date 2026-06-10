@@ -2,7 +2,7 @@
 //!
 //! Helpers for the compact toolbar drawn into the native macOS titlebar space.
 
-use egui::{self, CornerRadius, Rect, Stroke, Ui, UiBuilder};
+use egui::{self, Color32, CornerRadius, Rect, Stroke, Ui, UiBuilder};
 
 use crate::style::palette;
 
@@ -30,9 +30,7 @@ pub fn traffic_lights_inset(ctx: &egui::Context, frame: Option<&eframe::Frame>) 
 }
 
 fn toggle_zoom(ui: &Ui) {
-    let maximized = ui
-        .ctx()
-        .input(|i| i.viewport().maximized.unwrap_or(false));
+    let maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
     ui.ctx()
         .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
 }
@@ -70,10 +68,7 @@ pub fn columns(bar: Rect, chrome_inset: f32) -> BarColumns {
     let left_w = chrome_inset + LEFT_TOOLS_WIDTH;
     let right_w = RIGHT_TOOLS_WIDTH;
     let left = Rect::from_min_max(bar.min, egui::pos2(bar.left() + left_w, bar.bottom()));
-    let right = Rect::from_min_max(
-        egui::pos2(bar.right() - right_w, bar.top()),
-        bar.max,
-    );
+    let right = Rect::from_min_max(egui::pos2(bar.right() - right_w, bar.top()), bar.max);
     let center = Rect::from_min_max(
         egui::pos2(left.right(), bar.top()),
         egui::pos2(right.left(), bar.bottom()),
@@ -89,7 +84,7 @@ pub fn columns(bar: Rect, chrome_inset: f32) -> BarColumns {
 /// Drag/double-click only here (not on icons).
 const BREADCRUMB_HEIGHT: f32 = 22.0;
 
-pub fn breadcrumb(ui: &mut Ui, text: &str) -> egui::Response {
+pub fn breadcrumb(ui: &mut Ui, text: &str, fill: Option<Color32>) -> egui::Response {
     let pill_w = ui.available_width().max(80.0);
     let font = egui::FontId::proportional(10.0);
     let text_color = palette::TEXT_WEAK();
@@ -105,23 +100,20 @@ pub fn breadcrumb(ui: &mut Ui, text: &str) -> egui::Response {
         ui.painter().rect(
             rect,
             radius,
-            palette::SURFACE(),
+            fill.unwrap_or_else(palette::SURFACE),
             Stroke::new(1.0, palette::BORDER()),
             egui::StrokeKind::Inside,
         );
 
         let text_rect = rect.shrink2(egui::vec2(10.0, 0.0));
         ui.scope_builder(UiBuilder::new().max_rect(text_rect), |ui| {
-            ui.with_layout(
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(text).font(font).color(text_color))
-                            .truncate()
-                            .selectable(false),
-                    );
-                },
-            );
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(text).font(font).color(text_color))
+                        .truncate()
+                        .selectable(false),
+                );
+            });
         });
     }
 

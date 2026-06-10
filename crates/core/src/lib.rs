@@ -21,8 +21,8 @@ use std::sync::Arc;
 pub use database::Database;
 pub use error::{CoreError, Result};
 pub use model::{
-    build_update_sql, simple_select_target, ColumnInfo, ColumnMeta, ConnectionConfig, DbKind,
-    IndexInfo, QueryResult, QueryStats, SchemaTree, TableInfo,
+    build_update_sql, simple_select_target, ColumnInfo, ColumnMeta, ConnectionColor,
+    ConnectionConfig, DbKind, IndexInfo, QueryResult, QueryStats, SchemaTree, TableInfo,
 };
 pub use value::Value;
 
@@ -188,7 +188,10 @@ mod tests {
             DbKind::Postgres,
             Some("public"),
             "users",
-            &[("name", &Value::Text("O'Brien".into())), ("age", &Value::Int(30))],
+            &[
+                ("name", &Value::Text("O'Brien".into())),
+                ("age", &Value::Int(30)),
+            ],
             &[("id", &Value::Int(7))],
         )
         .unwrap();

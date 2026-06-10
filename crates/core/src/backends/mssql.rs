@@ -1,4 +1,3 @@
-
 //! SQL Server backend, implemented on top of `tiberius` (a pure-Rust TDS driver).
 //!
 //! Unlike the other backends, this one can't ride on `sqlx`: sqlx dropped its MSSQL
@@ -266,12 +265,8 @@ fn decode(cell: &ColumnData<'static>) -> Value {
             .as_ref()
             .map(|s| Value::Text(s.to_string()))
             .unwrap_or(Value::Null),
-        ColumnData::Guid(v) => v
-            .map(|g| Value::Text(g.to_string()))
-            .unwrap_or(Value::Null),
-        ColumnData::Numeric(v) => v
-            .map(|n| Value::Text(n.to_string()))
-            .unwrap_or(Value::Null),
+        ColumnData::Guid(v) => v.map(|g| Value::Text(g.to_string())).unwrap_or(Value::Null),
+        ColumnData::Numeric(v) => v.map(|n| Value::Text(n.to_string())).unwrap_or(Value::Null),
         ColumnData::Xml(v) => v
             .as_ref()
             .map(|x| Value::Text(x.to_string()))

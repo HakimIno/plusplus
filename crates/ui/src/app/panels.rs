@@ -58,6 +58,27 @@ fn status_text_input(
     with_field_status(ui, status, |ui| style::text_input(ui, text, hint, width))
 }
 
+fn connection_color_to_egui(color: dbcore::ConnectionColor) -> egui::Color32 {
+    egui::Color32::from_rgb(color.r, color.g, color.b)
+}
+
+fn egui_to_connection_color(color: egui::Color32) -> dbcore::ConnectionColor {
+    dbcore::ConnectionColor::new(color.r(), color.g(), color.b())
+}
+
+fn mix_color(base: egui::Color32, accent: egui::Color32, accent_weight: f32) -> egui::Color32 {
+    let accent_weight = accent_weight.clamp(0.0, 1.0);
+    let base_weight = 1.0 - accent_weight;
+    let mix = |base: u8, accent: u8| {
+        (base as f32 * base_weight + accent as f32 * accent_weight).round() as u8
+    };
+    egui::Color32::from_rgb(
+        mix(base.r(), accent.r()),
+        mix(base.g(), accent.g()),
+        mix(base.b(), accent.b()),
+    )
+}
+
 impl DbGuiApp {
     pub(super) fn top_bar(
         &mut self,
@@ -67,6 +88,8 @@ impl DbGuiApp {
     ) {
         let chrome_inset = title_bar::traffic_lights_inset(root.ctx(), frame);
         let bar_height = title_bar::height(chrome_inset);
+        let marker_color = self.active_title_bar_color().map(connection_color_to_egui);
+        let breadcrumb_fill = marker_color.map(|color| mix_color(palette::SURFACE(), color, 0.34));
 
         egui::Panel::top("top_bar")
             .resizable(false)
@@ -125,7 +148,7 @@ impl DbGuiApp {
                         ui.available_size(),
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
-                            title_bar::breadcrumb(ui, &breadcrumb);
+                            title_bar::breadcrumb(ui, &breadcrumb, breadcrumb_fill);
                         },
                     );
                 });
@@ -518,6 +541,8 @@ impl DbGuiApp {
                             .id_salt("active_connection_tabs")
                             .show(ui, |ui| {
                                 let bound_id = self.tabs[self.active_query_tab].conn_id.clone();
+                                let mut rects = Vec::with_capacity(self.connections.len());
+                                let pointer_y = ui.ctx().pointer_interact_pos().map(|p| p.y);
                                 for (idx, conn) in self.connections.iter().enumerate() {
                                     let live = self
                                         .active_connections
@@ -525,10 +550,27 @@ impl DbGuiApp {
                                         .any(|active| active.config_id == conn.id);
                                     // Highlight the connection the active tab is bound to.
                                     let selected = bound_id.as_deref() == Some(conn.id.as_str());
+                                    let drag_float_y = match (&self.connection_drag, pointer_y) {
+                                        (Some(drag), Some(py)) if drag.id == conn.id => {
+                                            Some(py - drag.grab_y)
+                                        }
+                                        _ => None,
+                                    };
                                     let resp = super::widgets::connection_tab_item(
-                                        ui, &conn.name, selected, live,
+                                        ui,
+                                        &conn.name,
+                                        selected,
+                                        live,
+                                        drag_float_y,
                                     )
                                     .on_hover_text(conn.target_summary());
+                                    if resp.drag_started() {
+                                        self.connection_drag = Some(super::ConnectionDrag {
+                                            id: conn.id.clone(),
+                                            grab_y: pointer_y.unwrap_or(resp.rect.top())
+                                                - resp.rect.top(),
+                                        });
+                                    }
                                     if resp.clicked() {
                                         if live {
                                             actions.push(Action::BindConnection(idx));
@@ -569,8 +611,11 @@ impl DbGuiApp {
                                             ui.close();
                                         }
                                     });
+                                    rects.push(resp.rect);
                                     ui.add_space(2.0);
                                 }
+
+                                self.handle_connection_drag(ui, &rects, actions);
 
                                 if self.connections.is_empty() {
                                     ui.vertical_centered(|ui| {
@@ -581,6 +626,43 @@ impl DbGuiApp {
                     },
                 );
             });
+    }
+
+    /// While a saved connection is dragged, live-reorder it into the vertical slot under
+    /// the pointer. The persisted connection list order follows the visible order.
+    fn handle_connection_drag(
+        &mut self,
+        ui: &egui::Ui,
+        rects: &[egui::Rect],
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(drag) = self.connection_drag.clone() else {
+            return;
+        };
+        if !ui.input(|i| i.pointer.primary_down()) {
+            self.connection_drag = None;
+            return;
+        }
+        let Some(from) = self.connections.iter().position(|c| c.id == drag.id) else {
+            self.connection_drag = None;
+            return;
+        };
+        if from >= rects.len() {
+            return;
+        }
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        let Some(pointer) = ui.ctx().pointer_interact_pos() else {
+            return;
+        };
+        let float_center = pointer.y - drag.grab_y + rects[from].height() * 0.5;
+        let to = rects
+            .iter()
+            .enumerate()
+            .filter(|(i, r)| *i != from && float_center > r.center().y)
+            .count();
+        if to != from {
+            actions.push(Action::MoveConnection { from, to });
+        }
     }
 
     pub(super) fn left_panel(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -979,6 +1061,35 @@ impl DbGuiApp {
                             editor.config.port = editor.config.kind.default_port();
                             form_changed = true;
                         }
+                        ui.end_row();
+
+                        ui.label("Title bar color");
+                        ui.horizontal(|ui| {
+                            let mut color = editor
+                                .config
+                                .title_bar_color
+                                .map(connection_color_to_egui)
+                                .unwrap_or_else(palette::ACCENT);
+                            if egui::color_picker::color_edit_button_srgba(
+                                ui,
+                                &mut color,
+                                egui::color_picker::Alpha::Opaque,
+                            )
+                            .changed()
+                            {
+                                editor.config.title_bar_color =
+                                    Some(egui_to_connection_color(color));
+                                form_changed = true;
+                            }
+                            if editor.config.title_bar_color.is_none() {
+                                ui.label("Default");
+                            }
+                            if ui.button("Clear").clicked() {
+                                if editor.config.title_bar_color.take().is_some() {
+                                    form_changed = true;
+                                }
+                            }
+                        });
                         ui.end_row();
 
                         if editor.config.kind.is_server() {

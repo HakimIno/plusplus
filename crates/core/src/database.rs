@@ -67,7 +67,11 @@ fn skip_leading_noise(stmt: &str) -> &str {
         if let Some(rest) = s.strip_prefix('(') {
             s = rest.trim_start();
         } else if let Some(rest) = s.strip_prefix("--") {
-            s = rest.split_once('\n').map(|(_, r)| r).unwrap_or("").trim_start();
+            s = rest
+                .split_once('\n')
+                .map(|(_, r)| r)
+                .unwrap_or("")
+                .trim_start();
         } else if s.starts_with("/*") {
             s = skip_block_comment(s).trim_start();
         } else {
@@ -205,9 +209,13 @@ mod tests {
         assert!(returns_rows("SET NOCOUNT ON; SELECT * FROM t"));
         assert!(returns_rows("DECLARE @x INT = 1; SELECT @x"));
         // Trailing SELECT after DML still counts.
-        assert!(returns_rows("INSERT INTO t VALUES (1); SELECT SCOPE_IDENTITY()"));
+        assert!(returns_rows(
+            "INSERT INTO t VALUES (1); SELECT SCOPE_IDENTITY()"
+        ));
         // Pure DML/DDL batch: still routed to execute() so we report rows affected.
-        assert!(!returns_rows("INSERT INTO t VALUES (1); UPDATE t SET a = 2"));
+        assert!(!returns_rows(
+            "INSERT INTO t VALUES (1); UPDATE t SET a = 2"
+        ));
         assert!(!returns_rows("SET NOCOUNT ON; DELETE FROM t"));
     }
 
@@ -227,7 +235,9 @@ mod tests {
     fn keywords_inside_comments_are_ignored() {
         assert!(!returns_rows("-- SELECT 1\nINSERT INTO t VALUES (1)"));
         assert!(!returns_rows("/* SELECT 1 */ INSERT INTO t VALUES (1)"));
-        assert!(!returns_rows("/* a /* nested */ SELECT */ INSERT INTO t VALUES (1)"));
+        assert!(!returns_rows(
+            "/* a /* nested */ SELECT */ INSERT INTO t VALUES (1)"
+        ));
         // A comment before a real SELECT must not hide it.
         assert!(returns_rows("-- comment\nSELECT 1"));
     }

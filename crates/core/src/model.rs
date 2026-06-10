@@ -108,7 +108,13 @@ pub fn build_update_sql(
     };
     let set_clause = sets
         .iter()
-        .map(|(c, v)| Some(format!("{} = {}", kind.quote_ident(c), value_to_literal(v, kind)?)))
+        .map(|(c, v)| {
+            Some(format!(
+                "{} = {}",
+                kind.quote_ident(c),
+                value_to_literal(v, kind)?
+            ))
+        })
         .collect::<Option<Vec<_>>>()?
         .join(", ");
     let where_clause = keys
@@ -122,7 +128,9 @@ pub fn build_update_sql(
         })
         .collect::<Option<Vec<_>>>()?
         .join(" AND ");
-    Some(format!("UPDATE {table_ref} SET {set_clause} WHERE {where_clause};"))
+    Some(format!(
+        "UPDATE {table_ref} SET {set_clause} WHERE {where_clause};"
+    ))
 }
 
 /// Strip `kw` (case-insensitively) off the front of `s`, requiring a non-identifier
@@ -190,7 +198,9 @@ pub fn simple_select_target(sql: &str) -> Option<(Option<String>, String)> {
     let rest = strip_keyword(sql, "SELECT")?;
     let rest = match strip_keyword(rest, "TOP") {
         Some(after) => {
-            let digits = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+            let digits = after
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(after.len());
             if digits == 0 {
                 return None;
             }
@@ -249,6 +259,9 @@ pub struct ConnectionConfig {
     // --- file backends ---
     #[serde(default)]
     pub sqlite_path: String,
+    /// Optional user-chosen title bar color for visually marking important connections.
+    #[serde(default)]
+    pub title_bar_color: Option<ConnectionColor>,
 }
 
 impl ConnectionConfig {
@@ -263,6 +276,7 @@ impl ConnectionConfig {
             user: String::new(),
             database: String::new(),
             sqlite_path: String::new(),
+            title_bar_color: None,
         }
     }
 
@@ -277,6 +291,20 @@ impl ConnectionConfig {
             }
             DbKind::Sqlite => self.sqlite_path.clone(),
         }
+    }
+}
+
+/// Stored RGB color for per-connection UI markers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectionColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl ConnectionColor {
+    pub const fn new(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
     }
 }
 

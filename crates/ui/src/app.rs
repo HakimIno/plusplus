@@ -8,7 +8,7 @@
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 
-use dbcore::{ConnectionConfig, Database, DbKind, QueryResult, SchemaTree};
+use dbcore::{ConnectionColor, ConnectionConfig, Database, DbKind, QueryResult, SchemaTree};
 
 mod panels;
 mod widgets;
@@ -339,6 +339,11 @@ enum Action {
         from: usize,
         to: usize,
     },
+    /// Drag-to-reorder: move a saved connection to a new position.
+    MoveConnection {
+        from: usize,
+        to: usize,
+    },
     NewConnection,
     EditConnection(usize),
     DeleteConnection(usize),
@@ -369,6 +374,15 @@ struct TabDrag {
     /// Pointer x-offset from the chip's left edge at grab time, so the floating chip
     /// keeps the grab point under the cursor instead of snapping its centre there.
     grab_x: f32,
+}
+
+/// Drag-to-reorder state for the vertical saved-connection strip.
+#[derive(Clone)]
+struct ConnectionDrag {
+    /// Stable id of the connection being dragged.
+    id: String,
+    /// Pointer y-offset from the chip's top edge at grab time.
+    grab_y: f32,
 }
 
 pub struct DbGuiApp {
@@ -404,6 +418,8 @@ pub struct DbGuiApp {
     editor: Option<ConnEditor>,
     /// Live drag-to-reorder state for a query tab (cleared on mouse release).
     tab_drag: Option<TabDrag>,
+    /// Live drag-to-reorder state for a saved connection (cleared on mouse release).
+    connection_drag: Option<ConnectionDrag>,
     /// Details panel: live column-name filter (the "Search for field…" box).
     details_filter: String,
     /// Details panel: the (row, col) cell with an inline date picker open, opened from
@@ -499,6 +515,7 @@ impl DbGuiApp {
             last_workspace_save: std::time::Instant::now(),
             editor: None,
             tab_drag: None,
+            connection_drag: None,
             details_filter: String::new(),
             details_date_pick: None,
             settings_open: false,
@@ -629,6 +646,16 @@ impl DbGuiApp {
         self.active_connections.iter().find(|c| c.config_id == id)
     }
 
+    /// Saved config the active tab is bound to, regardless of live connection state.
+    fn active_connection_config(&self) -> Option<&ConnectionConfig> {
+        let id = self.tab().conn_id.as_deref()?;
+        self.connections.iter().find(|c| c.id == id)
+    }
+
+    fn active_title_bar_color(&self) -> Option<ConnectionColor> {
+        self.active_connection_config()?.title_bar_color
+    }
+
     // --- query-tab management ---------------------------------------------
 
     fn new_tab(&mut self) {
@@ -681,6 +708,18 @@ impl DbGuiApp {
             self.active_query_tab = idx;
         }
         self.workspace_dirty = true;
+    }
+
+    /// Move a saved connection to a new slot and persist the list order.
+    fn move_connection(&mut self, from: usize, to: usize) {
+        if from == to || from >= self.connections.len() || to >= self.connections.len() {
+            return;
+        }
+        let conn = self.connections.remove(from);
+        self.connections.insert(to, conn);
+        if let Err(e) = dbcore::config::save_connections(&self.connections) {
+            self.error = Some(e.to_string());
+        }
     }
 
     fn close_tab(&mut self, idx: usize) {
@@ -1176,6 +1215,7 @@ impl DbGuiApp {
                 self.select_tab(i);
             }
             Action::MoveTab { from, to } => self.move_tab(from, to),
+            Action::MoveConnection { from, to } => self.move_connection(from, to),
             Action::NewConnection => {
                 self.editor = Some(ConnEditor {
                     config: ConnectionConfig::new(DbKind::Postgres),
