@@ -735,6 +735,43 @@ impl DbGuiApp {
         });
     }
 
+    /// Work out whether the tab's SQL still reads one whole table, and if so build the
+    /// [`EditSource`] that makes its rows editable. Matches the table (case-insensitively)
+    /// against the bound connection's schema to pick up its primary key; an ambiguous bare
+    /// name (same table in several schemas) or a table without a PK stays read-only.
+    fn derive_edit_source(&self, idx: usize) -> Option<EditSource> {
+        let tab = self.tabs.get(idx)?;
+        let (schema, table) = dbcore::simple_select_target(&tab.sql)?;
+        let conn = tab
+            .conn_id
+            .as_deref()
+            .and_then(|id| self.active_connections.iter().find(|c| c.config_id == id))?;
+        let mut matches = conn.schema.tables.iter().filter(|t| {
+            t.name.eq_ignore_ascii_case(&table)
+                && schema.as_deref().map_or(true, |s| {
+                    t.schema.as_deref().is_some_and(|ts| ts.eq_ignore_ascii_case(s))
+                })
+        });
+        let info = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        let pk_cols: Vec<String> = info
+            .columns
+            .iter()
+            .filter(|c| c.primary_key)
+            .map(|c| c.name.clone())
+            .collect();
+        if pk_cols.is_empty() {
+            return None;
+        }
+        Some(EditSource {
+            schema: info.schema.clone(),
+            table: info.name.clone(),
+            pk_cols,
+        })
+    }
+
     /// Turn all staged edits into `UPDATE` statements and run them on the background runtime.
     /// Each changed row becomes one statement keyed by the source table's primary key.
     fn commit_edits(&mut self) {
@@ -921,9 +958,10 @@ impl DbGuiApp {
             }
             Action::RunQuery => {
                 let idx = self.active_query_tab;
-                // Re-running keeps the table source so the result stays editable. Typing your
-                // own SQL clears the source (see `query_console`), making it an ad-hoc query.
-                self.tabs[idx].edits.pending_source = self.tabs[idx].edits.source.clone();
+                // Editability is re-derived from the SQL itself on every run: any simple
+                // single-table `SELECT *` — including a hand-tuned LIMIT/WHERE/ORDER BY —
+                // stays editable; anything else runs as a read-only ad-hoc query.
+                self.tabs[idx].edits.pending_source = self.derive_edit_source(idx);
                 self.start_query_for(idx);
             }
             Action::OpenTable { sql, source, pin } => self.open_table(sql, source, pin),

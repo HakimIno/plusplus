@@ -125,6 +125,108 @@ pub fn build_update_sql(
     Some(format!("UPDATE {table_ref} SET {set_clause} WHERE {where_clause};"))
 }
 
+/// Strip `kw` (case-insensitively) off the front of `s`, requiring a non-identifier
+/// character after it so `FROMx` doesn't match `FROM`. Returns the trimmed remainder.
+fn strip_keyword<'a>(s: &'a str, kw: &str) -> Option<&'a str> {
+    let s = s.trim_start();
+    let head = s.get(..kw.len())?;
+    if !head.eq_ignore_ascii_case(kw) {
+        return None;
+    }
+    let rest = &s[kw.len()..];
+    if rest
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+    Some(rest.trim_start())
+}
+
+/// Parse one (possibly quoted) identifier off the front of `s`, returning it unquoted plus
+/// the remaining input. Supports `"x"` (ANSI), `` `x` `` (MySQL), `[x]` (SQL Server), and
+/// bare names; doubled closing quotes inside a quoted name un-double.
+fn parse_ident(s: &str) -> Option<(String, &str)> {
+    let s = s.trim_start();
+    let close = match s.chars().next()? {
+        '"' => '"',
+        '`' => '`',
+        '[' => ']',
+        c if c.is_alphanumeric() || c == '_' => {
+            let end = s
+                .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
+                .unwrap_or(s.len());
+            return Some((s[..end].to_string(), &s[end..]));
+        }
+        _ => return None,
+    };
+    let mut name = String::new();
+    let mut rest = &s[1..];
+    loop {
+        let pos = rest.find(close)?;
+        name.push_str(&rest[..pos]);
+        rest = &rest[pos + close.len_utf8()..];
+        if close != ']' && rest.starts_with(close) {
+            name.push(close);
+            rest = &rest[close.len_utf8()..];
+        } else {
+            return Some((name, rest));
+        }
+    }
+}
+
+/// If `sql` is a simple single-table read — `SELECT [TOP n] * FROM table`, optionally
+/// followed by `WHERE`/`ORDER BY`/`LIMIT`/`OFFSET`/`FETCH` — return the `(schema, table)`
+/// it reads. Rows of such a result map 1:1 onto table rows (and `*` guarantees the primary
+/// key is present), so the grid can stay editable no matter how the query was written:
+/// a hand-tuned `LIMIT 20000`, a `WHERE`, a sort. Joins, projections, aggregates, and
+/// multi-statement scripts return `None` (read-only).
+pub fn simple_select_target(sql: &str) -> Option<(Option<String>, String)> {
+    let sql = sql.trim().trim_end_matches(';').trim_end();
+    if sql.contains(';') {
+        return None; // multiple statements — don't try to reason about them
+    }
+    let rest = strip_keyword(sql, "SELECT")?;
+    let rest = match strip_keyword(rest, "TOP") {
+        Some(after) => {
+            let digits = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+            if digits == 0 {
+                return None;
+            }
+            after[digits..].trim_start()
+        }
+        None => rest,
+    };
+    let rest = rest.strip_prefix('*')?;
+    let rest = strip_keyword(rest, "FROM")?;
+    let (first, rest) = parse_ident(rest)?;
+    let (schema, table, rest) = match rest.strip_prefix('.') {
+        Some(r) => {
+            let (second, r) = parse_ident(r)?;
+            (Some(first), second, r)
+        }
+        None => (None, first, rest),
+    };
+    // Whatever follows the table must be a row-preserving clause; an alias, a comma, or a
+    // JOIN means result rows no longer map 1:1 to table rows.
+    let tail = rest.trim_start();
+    if !tail.is_empty() {
+        let next = tail
+            .split(|c: char| c.is_whitespace() || c == '(')
+            .next()
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        if !matches!(
+            next.as_str(),
+            "WHERE" | "ORDER" | "LIMIT" | "OFFSET" | "FETCH"
+        ) {
+            return None;
+        }
+    }
+    Some((schema, table))
+}
+
 /// A saved connection. Secret fields (passwords) are **never** stored here — they live in
 /// the OS keychain keyed by [`ConnectionConfig::id`]. Only non-secret fields are persisted
 /// to the JSON config file.
@@ -267,5 +369,55 @@ impl QueryResult {
 
     pub fn column_count(&self) -> usize {
         self.columns.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(sql: &str) -> Option<(Option<String>, String)> {
+        simple_select_target(sql)
+    }
+
+    #[test]
+    fn simple_select_target_accepts_single_table_reads() {
+        assert_eq!(target("SELECT * FROM users"), Some((None, "users".into())));
+        assert_eq!(
+            target("select * from users limit 20000;"),
+            Some((None, "users".into()))
+        );
+        assert_eq!(
+            target("SELECT * FROM \"public\".\"users\" LIMIT 100;"),
+            Some((Some("public".into()), "users".into()))
+        );
+        assert_eq!(
+            target("SELECT * FROM `db`.`orders` WHERE total > 10 ORDER BY id LIMIT 50"),
+            Some((Some("db".into()), "orders".into()))
+        );
+        assert_eq!(
+            target("SELECT TOP 100 * FROM [dbo].[Invoices];"),
+            Some((Some("dbo".into()), "Invoices".into()))
+        );
+        // Embedded doubled quotes un-double.
+        assert_eq!(
+            target(r#"SELECT * FROM "we""ird""#),
+            Some((None, "we\"ird".into()))
+        );
+    }
+
+    #[test]
+    fn simple_select_target_rejects_everything_else() {
+        // Projections lose the guarantee that the PK columns are present.
+        assert_eq!(target("SELECT id, name FROM users"), None);
+        // Joins/aliases/commas: rows no longer map 1:1 to table rows.
+        assert_eq!(target("SELECT * FROM a JOIN b ON a.id = b.id"), None);
+        assert_eq!(target("SELECT * FROM a, b"), None);
+        assert_eq!(target("SELECT * FROM users u WHERE u.id = 1"), None);
+        assert_eq!(target("SELECT * FROM (SELECT * FROM users) x"), None);
+        // Non-SELECT and multi-statement scripts.
+        assert_eq!(target("UPDATE users SET name = 'x'"), None);
+        assert_eq!(target("SELECT * FROM a; SELECT * FROM b"), None);
+        assert_eq!(target("SELECT * FROM users GROUP BY id"), None);
     }
 }

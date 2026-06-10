@@ -25,6 +25,9 @@ pub enum EditorKind {
     Text,
     Int,
     Float,
+    /// Arbitrary-precision numerics (DECIMAL/NUMERIC/MONEY): validated as a number but
+    /// carried as text so the exact digits the user typed reach the database.
+    Decimal,
     Bool,
     Date,
     Time,
@@ -34,7 +37,7 @@ pub enum EditorKind {
 impl EditorKind {
     /// Classify a backend type name (e.g. `"BIGINT"`, `"timestamp"`, `"bit"`). Order matters:
     /// `DATETIME`/`TIMESTAMP` must be matched before the bare `DATE`/`TIME` substrings, and
-    /// `DECIMAL`/`NUMERIC` deliberately stay [`EditorKind::Text`] to preserve exact precision.
+    /// `INTERVAL`/`POINT` before the `INT` substring they contain.
     pub fn classify(type_name: &str) -> EditorKind {
         let t = type_name.to_ascii_uppercase();
         if t.contains("BOOL") || t == "BIT" {
@@ -43,9 +46,14 @@ impl EditorKind {
             EditorKind::DateTime
         } else if t.contains("DATE") {
             EditorKind::Date
+        } else if t.contains("INTERVAL") {
+            EditorKind::Text
         } else if t.contains("TIME") {
             EditorKind::Time
         } else if t.contains("DECIMAL") || t.contains("NUMERIC") || t.contains("MONEY") {
+            EditorKind::Decimal
+        } else if t.contains("POINT") {
+            // POINT/MULTIPOINT contain "INT" but are spatial types; edit them as text.
             EditorKind::Text
         } else if t.contains("INT") || t.contains("SERIAL") {
             EditorKind::Int
@@ -67,20 +75,15 @@ impl EditorKind {
             EditorKind::Text => true,
             EditorKind::Int => s.parse::<i64>().is_ok(),
             EditorKind::Float => s.parse::<f64>().is_ok(),
+            // Finite numbers only ("inf"/"NaN" parse as f64 but aren't SQL numerics).
+            EditorKind::Decimal => s.parse::<f64>().is_ok_and(f64::is_finite),
             EditorKind::Bool => matches!(
                 s.to_ascii_lowercase().as_str(),
                 "true" | "false" | "0" | "1" | "t" | "f" | "yes" | "no"
             ),
             EditorKind::Date => NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok(),
-            EditorKind::Time => {
-                NaiveTime::parse_from_str(s, "%H:%M:%S").is_ok()
-                    || NaiveTime::parse_from_str(s, "%H:%M").is_ok()
-            }
-            EditorKind::DateTime => {
-                NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").is_ok()
-                    || NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").is_ok()
-                    || NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").is_ok()
-            }
+            EditorKind::Time => valid_time(s),
+            EditorKind::DateTime => valid_datetime(s),
         }
     }
 
@@ -92,11 +95,13 @@ impl EditorKind {
             (EditorKind::Text, _) => true,
             (EditorKind::Int, Value::Int(_)) => true,
             (EditorKind::Float, Value::Float(_) | Value::Int(_)) => true,
+            (EditorKind::Decimal, Value::Float(_) | Value::Int(_)) => true,
             (EditorKind::Bool, Value::Bool(_)) => true,
-            // Dates are carried as text; validate their string form.
-            (EditorKind::Date | EditorKind::Time | EditorKind::DateTime, Value::Text(s)) => {
-                self.is_valid(s)
-            }
+            // Dates and decimals are carried as text; validate their string form.
+            (
+                EditorKind::Date | EditorKind::Time | EditorKind::DateTime | EditorKind::Decimal,
+                Value::Text(s),
+            ) => self.is_valid(s),
             _ => false,
         }
     }
@@ -107,6 +112,7 @@ impl EditorKind {
             EditorKind::Text => "",
             EditorKind::Int => "123",
             EditorKind::Float => "1.5",
+            EditorKind::Decimal => "123.45",
             EditorKind::Bool => "true / false",
             EditorKind::Date => "YYYY-MM-DD",
             EditorKind::Time => "HH:MM:SS",
@@ -135,12 +141,61 @@ impl EditorKind {
                 "false" | "0" | "f" | "no" => Value::Bool(false),
                 _ => Value::Text(buf.to_string()),
             },
-            // Dates and free text are stored (and later quoted) as strings.
-            EditorKind::Date | EditorKind::Time | EditorKind::DateTime | EditorKind::Text => {
-                Value::Text(buf.to_string())
-            }
+            // Dates, decimals (exact digits preserved), and free text are stored (and later
+            // quoted) as strings.
+            EditorKind::Date
+            | EditorKind::Time
+            | EditorKind::DateTime
+            | EditorKind::Decimal
+            | EditorKind::Text => Value::Text(buf.to_string()),
         }
     }
+}
+
+/// Strip a trailing UTC-offset (`Z`, `+07`, `+07:00`, `-0500`) off a time string, so TIMETZ
+/// values like `11:08:39+07` validate. The `+`/`-` of an offset can only appear after the
+/// `HH:MM` part, which keeps date separators (`-`) untouched.
+fn strip_time_offset(s: &str) -> &str {
+    if let Some(base) = s.strip_suffix(['Z', 'z']) {
+        return base;
+    }
+    match s.rfind(['+', '-']) {
+        Some(pos)
+            if pos >= 5
+                && !s[pos + 1..].is_empty()
+                && s[pos + 1..].chars().all(|c| c.is_ascii_digit() || c == ':') =>
+        {
+            &s[..pos]
+        }
+        _ => s,
+    }
+}
+
+/// Accept the time shapes backends actually render — with or without fractional seconds,
+/// and with an optional trailing UTC offset (TIMETZ).
+fn valid_time(s: &str) -> bool {
+    let base = strip_time_offset(s);
+    NaiveTime::parse_from_str(base, "%H:%M:%S%.f").is_ok()
+        || NaiveTime::parse_from_str(base, "%H:%M").is_ok()
+}
+
+/// Accept the datetime shapes backends actually render: space- or `T`-separated, optional
+/// fractional seconds of any precision, and an optional UTC offset (TIMESTAMPTZ comes back
+/// as RFC 3339, psql-style output as `… 11:08:39.59+07`).
+fn valid_datetime(s: &str) -> bool {
+    const NAIVE: &[&str] = &[
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%d %H:%M",
+    ];
+    const ZONED: &[&str] = &["%Y-%m-%d %H:%M:%S%.f%#z", "%Y-%m-%dT%H:%M:%S%.f%#z"];
+    NAIVE
+        .iter()
+        .any(|f| NaiveDateTime::parse_from_str(s, f).is_ok())
+        || ZONED
+            .iter()
+            .any(|f| chrono::DateTime::parse_from_str(s, f).is_ok())
+        || chrono::DateTime::parse_from_rfc3339(s).is_ok()
 }
 
 /// Read the boolean sense of a cell value, for toggling.
@@ -372,9 +427,13 @@ mod tests {
         assert_eq!(EditorKind::classify("DATETIME2"), DateTime);
         assert_eq!(EditorKind::classify("date"), Date);
         assert_eq!(EditorKind::classify("time"), Time);
-        // DECIMAL stays text to keep precision; varchar/json are text.
-        assert_eq!(EditorKind::classify("decimal(10,2)"), Text);
+        // DECIMAL validates as a number but is carried as text to keep precision.
+        assert_eq!(EditorKind::classify("decimal(10,2)"), Decimal);
+        assert_eq!(EditorKind::classify("NUMERIC"), Decimal);
         assert_eq!(EditorKind::classify("varchar"), Text);
+        // INTERVAL and POINT contain "INT" but must not classify as integers.
+        assert_eq!(EditorKind::classify("interval"), Text);
+        assert_eq!(EditorKind::classify("point"), Text);
     }
 
     #[test]
@@ -383,11 +442,30 @@ mod tests {
         assert!(!EditorKind::Int.is_valid("4.2"));
         assert!(EditorKind::Float.is_valid("4.2"));
         assert!(!EditorKind::Float.is_valid("abc"));
+        assert!(EditorKind::Decimal.is_valid("1234567890.123456789"));
+        assert!(!EditorKind::Decimal.is_valid("abc"));
+        assert!(!EditorKind::Decimal.is_valid("inf"));
         assert!(EditorKind::Date.is_valid("2024-06-09"));
         assert!(!EditorKind::Date.is_valid("09/06/2024"));
         assert!(EditorKind::DateTime.is_valid("2024-06-09 13:45:00"));
         // Empty is always valid — it means NULL.
         assert!(EditorKind::Int.is_valid(""));
+    }
+
+    /// The exact strings the backends render must round-trip through the editor unchanged:
+    /// fractional seconds (Postgres TIMESTAMP), RFC 3339 (TIMESTAMPTZ), psql-style offsets.
+    #[test]
+    fn validation_accepts_backend_rendered_datetimes() {
+        assert!(EditorKind::DateTime.is_valid("2025-11-26 11:08:39.593333333"));
+        assert!(EditorKind::DateTime.is_valid("2025-11-26T11:08:39.593333333+00:00"));
+        assert!(EditorKind::DateTime.is_valid("2025-11-26T11:08:39Z"));
+        assert!(EditorKind::DateTime.is_valid("2025-12-03 16:24:55.166666666"));
+        assert!(EditorKind::DateTime.is_valid("2025-11-26 11:08:39.59+07"));
+        assert!(!EditorKind::DateTime.is_valid("2025-13-26 11:08:39"));
+        assert!(EditorKind::Time.is_valid("11:08:39.593333333"));
+        assert!(EditorKind::Time.is_valid("11:08:39+07"));
+        assert!(EditorKind::Time.is_valid("11:08:39.5-05:00"));
+        assert!(!EditorKind::Time.is_valid("25:00:00"));
     }
 
     #[test]

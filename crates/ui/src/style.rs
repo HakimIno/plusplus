@@ -329,11 +329,105 @@ pub fn empty_state(ui: &mut egui::Ui, icon: egui::ImageSource<'static>, title: &
     });
 }
 
-/// A centred decorative SVG placeholder without labels.
+/// A centred decorative placeholder without labels. The base art is a static SVG; fishing motion
+/// (swaying line, bobber, ice-hole ripples) is drawn on top because egui rasterizes SVGs once.
 pub fn empty_illustration(ui: &mut egui::Ui, image: egui::ImageSource<'static>) {
     ui.add_space((ui.available_height() * 0.24).max(18.0));
     ui.vertical_centered(|ui| {
         let width = ui.available_width().min(320.0);
-        ui.add(egui::Image::new(image).fit_to_exact_size(egui::vec2(width, width * 210.0 / 320.0)));
+        let height = width * 210.0 / 320.0;
+        let size = egui::vec2(width, height);
+        let (rect, _response) = ui.allocate_exact_size(size, egui::Sense::hover());
+
+        if ui.is_rect_visible(rect) {
+            egui::Image::new(image)
+                .fit_to_exact_size(size)
+                .paint_at(ui, rect);
+
+            let time = ui.input(|i| i.time) as f32;
+            let painter = ui.painter_at(rect);
+            let accent = palette::ACCENT();
+            let accent_hover = palette::ACCENT_HOVER();
+            let sx = |x: f32| rect.min.x + x / 320.0 * rect.width();
+            let sy = |y: f32| rect.min.y + y / 210.0 * rect.height();
+            let sr = |r: f32| r / 320.0 * rect.width();
+
+            // Gentle bob + occasional slow tug, like waiting for a bite.
+            let bob = (time * 1.5).sin();
+            let tug = (time * 0.38).sin().powi(2);
+            let line_drift = bob * 2.8 + tug * 4.5;
+            let sway = (time * 0.9).sin() * 1.2;
+
+            let rod_tip = egui::pos2(sx(84.0 + sway * 0.25), sy(38.0 + line_drift * 0.12));
+            let hole_surface = egui::pos2(sx(84.0), sy(172.0));
+            let bobber = egui::pos2(sx(84.0 + sway * 0.35), sy(158.0 + line_drift));
+
+            // Fishing line from rod tip down into the ice hole.
+            painter.line_segment(
+                [rod_tip, bobber],
+                Stroke::new(sr(1.6), accent),
+            );
+            painter.line_segment(
+                [bobber, hole_surface],
+                Stroke::new(sr(1.4), Color32::from_rgba_unmultiplied(
+                    accent.r(),
+                    accent.g(),
+                    accent.b(),
+                    170,
+                )),
+            );
+
+            // Bobber float.
+            painter.circle_filled(bobber, sr(3.4), accent_hover);
+            painter.circle_stroke(bobber, sr(3.4), Stroke::new(sr(0.8), accent));
+            painter.line_segment(
+                [
+                    egui::pos2(bobber.x - sr(2.8), bobber.y),
+                    egui::pos2(bobber.x + sr(2.8), bobber.y),
+                ],
+                Stroke::new(sr(0.9), Color32::WHITE),
+            );
+
+            // Ice-hole ripples when the bobber dips.
+            let ripple_boost = if bob < -0.55 { 1.35 } else { 1.0 };
+            for i in 0..3 {
+                let phase = (time * 0.75 * ripple_boost + i as f32 * 0.38).fract();
+                let ripple_r = sr(6.0 + phase * 24.0);
+                let alpha = ((1.0 - phase) * 0.34 * 255.0) as u8;
+                painter.circle_stroke(
+                    hole_surface,
+                    ripple_r,
+                    Stroke::new(
+                        sr(1.1),
+                        Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), alpha),
+                    ),
+                );
+            }
+
+            // Tiny splash marks when the line tugs.
+            if tug > 0.82 {
+                let splash = (tug - 0.82) / 0.18;
+                let splash_alpha = (splash * 0.55 * 255.0) as u8;
+                for (dx, dy) in [(-5.0_f32, -2.0), (5.0, -1.5), (0.0, -3.5)] {
+                    painter.circle_filled(
+                        egui::pos2(sx(84.0 + dx), sy(168.0 + dy)),
+                        sr(1.0 + splash),
+                        Color32::from_rgba_unmultiplied(accent_hover.r(), accent_hover.g(), accent_hover.b(), splash_alpha),
+                    );
+                }
+            }
+
+            // Soft glint on the sloth's glasses lenses.
+            let glint_alpha = (0.2 + 0.35 * (time * 1.8).sin().powi(2)) * 255.0;
+            for (x, y) in [(198.0_f32, 124.0), (203.0, 124.0)] {
+                painter.circle_filled(
+                    egui::pos2(sx(x), sy(y)),
+                    sr(1.6),
+                    Color32::from_rgba_unmultiplied(255, 255, 255, glint_alpha as u8),
+                );
+            }
+
+            ui.ctx().request_repaint();
+        }
     });
 }

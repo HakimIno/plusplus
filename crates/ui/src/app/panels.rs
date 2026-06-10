@@ -275,9 +275,10 @@ impl DbGuiApp {
                                 .hint_text("Write SQL here, then press Run (Cmd/Ctrl+Enter)"),
                         );
                         if resp.changed() {
-                            // Editing the SQL by hand means the result can no longer be mapped
-                            // back to one table, so it's no longer editable; and a previewed
-                            // tab becomes permanent (just like other editors).
+                            // Editing the SQL means the rows currently on screen may no longer
+                            // map back to one table, so they turn read-only; the next Run
+                            // re-derives editability from the new SQL (`derive_edit_source`).
+                            // A previewed tab becomes permanent (just like other editors).
                             let tab = self.tab_mut();
                             tab.edits.source = None;
                             tab.preview = false;
