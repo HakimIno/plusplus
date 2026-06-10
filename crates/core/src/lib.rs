@@ -21,8 +21,9 @@ use std::sync::Arc;
 pub use database::Database;
 pub use error::{CoreError, Result};
 pub use model::{
-    build_update_sql, simple_select_target, ColumnInfo, ColumnMeta, ConnectionColor,
-    ConnectionConfig, DbKind, IndexInfo, QueryResult, QueryStats, SchemaTree, TableInfo,
+    build_delete_sql, build_insert_sql, build_update_sql, simple_select_target, ColumnInfo,
+    ColumnMeta, ConnectionColor, ConnectionConfig, DbKind, IndexInfo, QueryResult, QueryStats,
+    SchemaTree, TableInfo,
 };
 pub use value::Value;
 

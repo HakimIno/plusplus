@@ -180,11 +180,15 @@ impl QueryTab {
         let Some(active) = self.edits.active.as_ref() else {
             return true;
         };
-        let original = self
-            .result
-            .as_ref()
-            .and_then(|r| r.rows.get(active.row).and_then(|row| row.get(active.col)))
-            .cloned();
+        // New (insert) rows have no stored value to diff against, so they commit against NULL.
+        let original = if crate::edit::is_new_row(active.row) {
+            Some(dbcore::Value::Null)
+        } else {
+            self.result
+                .as_ref()
+                .and_then(|r| r.rows.get(active.row).and_then(|row| row.get(active.col)))
+                .cloned()
+        };
         match original {
             Some(original) => self.edits.commit_active(&original),
             None => {
@@ -1150,8 +1154,16 @@ impl DbGuiApp {
             return;
         };
 
-        let mut statements = Vec::new();
+        let cant_write = "Cannot save: a value can't be written (e.g. binary data).";
+        let mut updates = Vec::new();
+        let mut deletes = Vec::new();
+        let mut inserts = Vec::new();
+
+        // --- UPDATEs: stored rows with staged cell edits (new rows handled below) ---
         for (&row, colmap) in &self.tabs[idx].edits.cells {
+            if crate::edit::is_new_row(row) || colmap.is_empty() {
+                continue;
+            }
             // Owned (name, value) pairs first, then borrow them for the builder.
             let sets: Vec<(String, dbcore::Value)> = colmap
                 .iter()
@@ -1172,17 +1184,101 @@ impl DbGuiApp {
                 &set_refs,
                 &key_refs,
             ) {
-                Some(sql) => statements.push(sql),
+                Some(sql) => updates.push(sql),
                 None => {
-                    self.error = Some(
-                        "Cannot save: a cell holds a value that can't be written ".to_string()
-                            + "(e.g. binary data).",
-                    );
+                    self.error = Some(cant_write.into());
                     return;
                 }
             }
         }
 
+        // --- DELETEs: rows marked for deletion, keyed by primary key ---
+        for &row in &self.tabs[idx].edits.deleted {
+            let keys: Vec<(String, dbcore::Value)> = pk_idx
+                .iter()
+                .map(|(name, idx)| (name.clone(), result.rows[row][*idx].clone()))
+                .collect();
+            let key_refs: Vec<(&str, &dbcore::Value)> =
+                keys.iter().map(|(c, v)| (c.as_str(), v)).collect();
+            match dbcore::build_delete_sql(
+                kind,
+                source.schema.as_deref(),
+                &source.table,
+                &key_refs,
+            ) {
+                Some(sql) => deletes.push(sql),
+                None => {
+                    self.error = Some(cant_write.into());
+                    return;
+                }
+            }
+        }
+
+        // --- INSERTs: new rows, with strict primary-key validation ---
+        // Existing PK tuples (excluding rows being deleted, whose keys are freed up) plus the
+        // new rows already accepted, so a new row can't duplicate a live primary key.
+        let existing_pks: Vec<Vec<dbcore::Value>> = (0..result.rows.len())
+            .filter(|r| !self.tabs[idx].edits.deleted.contains(r))
+            .map(|r| pk_idx.iter().map(|(_, i)| result.rows[r][*i].clone()).collect())
+            .collect();
+        let mut new_pks: Vec<Vec<dbcore::Value>> = Vec::new();
+        for j in 0..self.tabs[idx].edits.new_rows {
+            let id = crate::edit::NEW_ROW_BASE + j;
+            // Entered (column index, value) pairs; an untouched new row is skipped entirely.
+            let entered: Vec<(usize, dbcore::Value)> = self.tabs[idx]
+                .edits
+                .cells
+                .get(&id)
+                .map(|m| m.iter().map(|(&c, v)| (c, v.clone())).collect())
+                .unwrap_or_default();
+            if entered.is_empty() {
+                continue;
+            }
+            // Every primary-key column must be provided and non-NULL.
+            let mut pk_tuple = Vec::with_capacity(pk_idx.len());
+            for (name, i) in &pk_idx {
+                match entered.iter().find(|(c, _)| c == i).map(|(_, v)| v) {
+                    Some(v) if !v.is_null() => pk_tuple.push(v.clone()),
+                    _ => {
+                        self.error =
+                            Some(format!("Cannot add row: primary key \"{name}\" is required."));
+                        self.status_msg = "Missing primary key — not saved".to_string();
+                        return;
+                    }
+                }
+            }
+            // No duplicate primary keys (against live rows or other new rows).
+            if existing_pks.contains(&pk_tuple) || new_pks.contains(&pk_tuple) {
+                self.error = Some("Cannot add row: duplicate primary key.".into());
+                self.status_msg = "Duplicate primary key — not saved".to_string();
+                return;
+            }
+            new_pks.push(pk_tuple);
+            // Build the INSERT from every entered cell (column name → value).
+            let cols_owned: Vec<(String, dbcore::Value)> = entered
+                .iter()
+                .map(|(c, v)| (result.columns[*c].name.clone(), v.clone()))
+                .collect();
+            let col_refs: Vec<(&str, &dbcore::Value)> =
+                cols_owned.iter().map(|(c, v)| (c.as_str(), v)).collect();
+            match dbcore::build_insert_sql(
+                kind,
+                source.schema.as_deref(),
+                &source.table,
+                &col_refs,
+            ) {
+                Some(sql) => inserts.push(sql),
+                None => {
+                    self.error = Some(cant_write.into());
+                    return;
+                }
+            }
+        }
+
+        // Run order: UPDATE, then DELETE (frees keys), then INSERT (may reuse them).
+        let mut statements = updates;
+        statements.extend(deletes);
+        statements.extend(inserts);
         let n = statements.len();
         let tx = self.tx.clone();
         self.busy = Busy::Querying;
@@ -1446,6 +1542,30 @@ impl DbGuiApp {
             self.tab_mut().edits.clear();
             self.status_msg = "Discarded unsaved edits".to_string();
             self.error = None;
+        }
+        // Backspace/Delete on the selected row (when nothing is being typed) marks a stored
+        // row for deletion (red) or drops a pending new row. `focused()` is `Some` while any
+        // text field — a cell editor, the SQL console, the field filter — has focus, so this
+        // never steals a real backspace keystroke.
+        let typing = ctx.memory(|m| m.focused().is_some());
+        if !typing
+            && self.tab().edits.editable()
+            && self.tab().edits.active.is_none()
+            && ctx.input(|i| {
+                i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)
+            })
+        {
+            if let Some(disp) = self.tab().selected_row {
+                let order_len = self.tab().row_order.len();
+                if disp < order_len {
+                    let raw = self.tab().row_order[disp];
+                    self.tab_mut().edits.toggle_delete(raw);
+                } else {
+                    let new_id = crate::edit::NEW_ROW_BASE + (disp - order_len);
+                    self.tab_mut().edits.remove_new_row(new_id);
+                    self.tab_mut().selected_row = None;
+                }
+            }
         }
         // Cmd/Ctrl+I beautifies the active tab's SQL (TablePlus-style).
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::I)) {

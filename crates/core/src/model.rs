@@ -133,6 +133,65 @@ pub fn build_update_sql(
     ))
 }
 
+/// Build a single-row `DELETE` statement matched by the `keys` (typically primary-key
+/// columns). Returns `None` if any key value can't be rendered as a literal.
+pub fn build_delete_sql(
+    kind: DbKind,
+    schema: Option<&str>,
+    table: &str,
+    keys: &[(&str, &Value)],
+) -> Option<String> {
+    if keys.is_empty() {
+        return None;
+    }
+    let table_ref = match schema {
+        Some(s) => format!("{}.{}", kind.quote_ident(s), kind.quote_ident(table)),
+        None => kind.quote_ident(table),
+    };
+    let where_clause = keys
+        .iter()
+        .map(|(c, v)| {
+            Some(if v.is_null() {
+                format!("{} IS NULL", kind.quote_ident(c))
+            } else {
+                format!("{} = {}", kind.quote_ident(c), value_to_literal(v, kind)?)
+            })
+        })
+        .collect::<Option<Vec<_>>>()?
+        .join(" AND ");
+    Some(format!("DELETE FROM {table_ref} WHERE {where_clause};"))
+}
+
+/// Build a single-row `INSERT` statement from the given `cols` (column, value) pairs.
+/// Returns `None` if there are no columns or any value can't be rendered as a literal.
+pub fn build_insert_sql(
+    kind: DbKind,
+    schema: Option<&str>,
+    table: &str,
+    cols: &[(&str, &Value)],
+) -> Option<String> {
+    if cols.is_empty() {
+        return None;
+    }
+    let table_ref = match schema {
+        Some(s) => format!("{}.{}", kind.quote_ident(s), kind.quote_ident(table)),
+        None => kind.quote_ident(table),
+    };
+    let col_list = cols
+        .iter()
+        .map(|(c, _)| kind.quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let val_list = cols
+        .iter()
+        .map(|(_, v)| value_to_literal(v, kind))
+        .collect::<Option<Vec<_>>>()?
+        .join(", ");
+    Some(format!(
+        "INSERT INTO {table_ref} ({col_list}) VALUES ({val_list});"
+    ))
+}
+
 /// Strip `kw` (case-insensitively) off the front of `s`, requiring a non-identifier
 /// character after it so `FROMx` doesn't match `FROM`. Returns the trimmed remainder.
 fn strip_keyword<'a>(s: &'a str, kw: &str) -> Option<&'a str> {
@@ -447,5 +506,55 @@ mod tests {
         assert_eq!(target("UPDATE users SET name = 'x'"), None);
         assert_eq!(target("SELECT * FROM a; SELECT * FROM b"), None);
         assert_eq!(target("SELECT * FROM users GROUP BY id"), None);
+    }
+
+    #[test]
+    fn build_insert_quotes_and_escapes() {
+        let name = Value::Text("O'Brien".into());
+        let age = Value::Int(42);
+        let cols = [("name", &name), ("age", &age)];
+        assert_eq!(
+            build_insert_sql(DbKind::Postgres, Some("public"), "users", &cols),
+            Some(
+                "INSERT INTO \"public\".\"users\" (\"name\", \"age\") VALUES ('O''Brien', 42);"
+                    .to_string()
+            )
+        );
+        // MySQL uses backtick identifiers.
+        assert_eq!(
+            build_insert_sql(DbKind::MySql, None, "users", &cols),
+            Some("INSERT INTO `users` (`name`, `age`) VALUES ('O''Brien', 42);".to_string())
+        );
+        // No columns ⇒ nothing to insert.
+        assert_eq!(build_insert_sql(DbKind::Postgres, None, "users", &[]), None);
+        // Binary has no portable literal form.
+        let blob = Value::Bytes(vec![1, 2, 3]);
+        assert_eq!(
+            build_insert_sql(DbKind::Postgres, None, "t", &[("data", &blob)]),
+            None
+        );
+    }
+
+    #[test]
+    fn build_delete_targets_by_key() {
+        let id = Value::Int(7);
+        assert_eq!(
+            build_delete_sql(DbKind::Postgres, Some("public"), "users", &[("id", &id)]),
+            Some("DELETE FROM \"public\".\"users\" WHERE \"id\" = 7;".to_string())
+        );
+        // NULL keys compare with IS NULL, and composite keys AND together.
+        let null = Value::Null;
+        let tenant = Value::Int(3);
+        assert_eq!(
+            build_delete_sql(
+                DbKind::Postgres,
+                None,
+                "t",
+                &[("tenant", &tenant), ("note", &null)]
+            ),
+            Some("DELETE FROM \"t\" WHERE \"tenant\" = 3 AND \"note\" IS NULL;".to_string())
+        );
+        // No keys ⇒ refuse (never emit an unfiltered DELETE).
+        assert_eq!(build_delete_sql(DbKind::Postgres, None, "t", &[]), None);
     }
 }

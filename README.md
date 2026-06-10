@@ -31,10 +31,13 @@ resizable columns, click-to-sort headers, a TablePlus-style filter bar
 field by field.
 
 **Editing.** When a result maps cleanly back to one table (any simple
-`SELECT * FROM t …`), cells become editable in place with type-aware editors. Edits are
-*staged* — tinted green, not yet written — until **Cmd/Ctrl+S** turns them into primary-key
-`UPDATE`s and reloads the grid with what the database actually stored. Anything that
-can't be mapped back safely (joins, projections, aggregates) is simply read-only.
+`SELECT * FROM t …`), cells become editable in place with type-aware editors. You can also
+add and remove whole rows: double-click the trailing **＋** strip to add a new row (tinted
+green), and select a row and press **Backspace/Delete** to mark it for deletion (tinted
+red). Edits are *staged* — not yet written — until **Cmd/Ctrl+S** turns them into primary-key
+`UPDATE`s, `INSERT`s (rejected if a new row's primary key is missing or duplicates an
+existing one), and `DELETE`s, then reloads the grid with what the database actually stored.
+Anything that can't be mapped back safely (joins, projections, aggregates) is read-only.
 
 **Data / Structure views.** A table tab can switch between its rows (*Data*) and the
 table's definition (*Structure*): columns with types, nullability, and keys, plus its
@@ -45,7 +48,8 @@ runs.
 
 Everything important has a shortcut: **Cmd/Ctrl+Enter** runs, **Cmd/Ctrl+S** saves staged
 edits, **Cmd/Ctrl+R** reloads the result (dropping unsaved edits), **Esc** discards unsaved
-edits, **Cmd/Ctrl+T / W** opens and closes tabs, **Cmd/Ctrl+F** toggles the filter bar.
+edits, **Backspace/Delete** marks the selected row for deletion, **Cmd/Ctrl+T / W** opens
+and closes tabs, **Cmd/Ctrl+F** toggles the filter bar.
 
 ## How it's built
 

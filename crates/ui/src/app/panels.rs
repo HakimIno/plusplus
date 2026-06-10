@@ -912,12 +912,21 @@ impl DbGuiApp {
                 if let Some(row) = resp.selected {
                     *selected_row = Some(row);
                 }
+                // The value a cell edit is typed against: NULL for new (insert) rows, which
+                // have no stored value; the stored cell otherwise.
+                let original = |r: usize, c: usize| -> Option<dbcore::Value> {
+                    if crate::edit::is_new_row(r) {
+                        Some(dbcore::Value::Null)
+                    } else {
+                        result.rows.get(r).and_then(|row| row.get(c)).cloned()
+                    }
+                };
                 // Commit/cancel the open editor before opening a new one, so switching cells
                 // doesn't drop the in-progress edit. Values are typed against the stored cell.
                 if resp.commit_edit {
                     let cell = edits.active.as_ref().map(|a| (a.row, a.col));
                     if let Some((ar, ac)) = cell {
-                        match result.rows.get(ar).and_then(|row| row.get(ac)).cloned() {
+                        match original(ar, ac) {
                             Some(orig) => {
                                 let _ = edits.commit_active(&orig);
                             }
@@ -929,15 +938,24 @@ impl DbGuiApp {
                     edits.cancel_active();
                 }
                 if let Some((r, c)) = resp.begin_edit {
-                    if let Some(orig) = result.rows.get(r).and_then(|row| row.get(c)).cloned() {
-                        edits.begin(r, c, &orig, crate::edit::EditOrigin::Grid);
+                    // Continue editing from the staged value if present, else the original.
+                    let seed = edits
+                        .staged(r, c)
+                        .cloned()
+                        .or_else(|| original(r, c));
+                    if let Some(seed) = seed {
+                        edits.begin(r, c, &seed, crate::edit::EditOrigin::Grid);
                     }
                 }
                 // A boolean cell flips in place rather than opening an editor.
                 if let Some((r, c)) = resp.toggle {
-                    if let Some(orig) = result.rows.get(r).and_then(|row| row.get(c)).cloned() {
+                    if let Some(orig) = original(r, c) {
                         edits.toggle_bool(r, c, &orig);
                     }
+                }
+                // Double-clicking the trailing strip appends a new (insert) row.
+                if resp.add_row {
+                    edits.add_new_row();
                 }
             }
             Some(_) => {

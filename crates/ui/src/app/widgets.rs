@@ -347,17 +347,17 @@ pub(super) fn query_tab_item(
                 egui::StrokeKind::Outside,
             );
             // The chip itself follows the pointer on a foreground layer (above panel
-            // borders and neighbouring chips), Chrome/TablePlus-style.
+            // borders and neighbouring chips), Chrome/TablePlus-style. An `Area` is used
+            // (not `scope_builder`) so the floating chip never advances the tab strip's
+            // layout cursor — that would corrupt the neighbouring chips' rects and break
+            // the drag-to-reorder hit-testing.
             let float_rect =
                 egui::Rect::from_min_size(egui::pos2(float_x, rect.top()), rect.size());
-            ui.scope_builder(
-                egui::UiBuilder::new()
-                    .max_rect(float_rect)
-                    .layer_id(egui::LayerId::new(
-                        egui::Order::Tooltip,
-                        resp.id.with("float"),
-                    )),
-                |ui| {
+            egui::Area::new(resp.id.with("float"))
+                .order(egui::Order::Tooltip)
+                .fixed_pos(float_rect.min)
+                .show(ui.ctx(), |ui| {
+                    ui.set_min_size(float_rect.size());
                     paint_tab_chip(
                         ui,
                         ui.painter(),
@@ -371,8 +371,7 @@ pub(super) fn query_tab_item(
                         pad,
                         close_w,
                     );
-                },
-            );
+                });
         } else {
             paint_tab_chip(
                 ui,

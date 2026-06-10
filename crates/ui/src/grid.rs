@@ -27,6 +27,18 @@ pub struct GridResponse {
     pub commit_edit: bool,
     /// The open editor should be discarded (Escape pressed).
     pub cancel_edit: bool,
+    /// The trailing "add row" strip was double-clicked → append a new (insert) row.
+    pub add_row: bool,
+}
+
+/// What a body row at a given display index represents.
+enum RowKind {
+    /// A stored result row (value is the raw index into `result.rows`).
+    Stored(usize),
+    /// A new (insert) row being filled in (value is its [`crate::edit::NEW_ROW_BASE`] id).
+    New(usize),
+    /// The trailing affordance row that adds a new row when double-clicked.
+    Adder,
 }
 
 /// Render the result set. `order` maps display rows → indices into `result.rows`.
@@ -148,30 +160,77 @@ fn build_grid(
             }
         })
         .body(|body| {
-            body.rows(row_height, order.len(), |mut row| {
+            let new_rows = edits.new_rows;
+            // A trailing "add row" strip is shown only when the result is editable.
+            let adder = usize::from(editable);
+            let total = order.len() + new_rows + adder;
+            body.rows(row_height, total, |mut row| {
                 let disp = row.index();
-                let r = order[disp];
+                // Display index splits into: stored rows, then new rows, then the adder.
+                let kind = if disp < order.len() {
+                    RowKind::Stored(order[disp])
+                } else if disp < order.len() + new_rows {
+                    RowKind::New(crate::edit::NEW_ROW_BASE + (disp - order.len()))
+                } else {
+                    RowKind::Adder
+                };
+                let r = match kind {
+                    RowKind::Stored(r) | RowKind::New(r) => r,
+                    RowKind::Adder => usize::MAX,
+                };
+                let state = match kind {
+                    RowKind::Adder => crate::edit::RowState::Clean,
+                    _ => edits.row_state(r),
+                };
                 row.set_selected(selected == Some(disp));
-                // A row with staged (unsaved) edits is tinted green, TablePlus-style.
-                let dirty = edits.row_dirty(r);
 
-                // Row-number gutter.
+                // Row-number gutter: number for stored rows, a mark for new rows, a plus
+                // for the adder. Tinted green (edit/new) or red (delete) like the cells.
                 row.col(|ui| {
-                    if dirty {
-                        tint_cell(ui);
-                    }
+                    tint_row(ui, state);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(4.0);
-                        ui.weak(egui::RichText::new(format!("{}", disp + 1)).monospace());
+                        let label = match kind {
+                            RowKind::Stored(_) => format!("{}", disp + 1),
+                            RowKind::New(_) => "✱".to_string(),
+                            RowKind::Adder => "＋".to_string(),
+                        };
+                        ui.weak(egui::RichText::new(label).monospace());
                     });
                 });
 
-                for (c, value) in result.rows[r].iter().enumerate() {
+                // The adder strip: a faint prompt; a double-click anywhere appends a row.
+                if matches!(kind, RowKind::Adder) {
+                    let mut dbl = false;
+                    for c in 0..ncols {
+                        let (_, resp) = row.col(|ui| {
+                            if c == 0 {
+                                ui.add_space(4.0);
+                                ui.weak(
+                                    egui::RichText::new("Double-click to add a row")
+                                        .italics()
+                                        .color(palette::TEXT_FAINT()),
+                                );
+                            }
+                        });
+                        dbl |= resp.double_clicked();
+                    }
+                    if dbl {
+                        out.add_row = true;
+                    }
+                    return;
+                }
+
+                let null = Value::Null;
+                for c in 0..ncols {
+                    // The original/stored value behind this cell (NULL for new rows).
+                    let stored = match kind {
+                        RowKind::Stored(r) => &result.rows[r][c],
+                        _ => &null,
+                    };
                     let mut label_resp = None;
                     let (_, col_resp) = row.col(|ui| {
-                        if dirty {
-                            tint_cell(ui);
-                        }
+                        tint_row(ui, state);
                         if edits.is_active_from(r, c, crate::edit::EditOrigin::Grid) {
                             // The cell under edit fills the whole cell; the editor is
                             // type-aware and validates numbers/dates before they can commit.
@@ -188,17 +247,21 @@ fn build_grid(
                         } else {
                             // Show the staged value if present, else the stored one.
                             let staged = edits.staged(r, c);
-                            label_resp = Some(cell(ui, staged.unwrap_or(value), staged.is_some()));
+                            label_resp = Some(cell(ui, staged.unwrap_or(stored), staged.is_some()));
                         }
                     });
 
-                    // Double-click to edit (binary cells aren't editable). Booleans toggle
-                    // in place; everything else opens the inline editor. The label must
-                    // sense clicks (see `cell`) — plain labels only hover, so double-click
-                    // on the text itself would otherwise be ignored.
+                    // Double-click to edit (binary cells aren't editable; deleted rows are
+                    // on their way out). Booleans toggle in place; everything else opens the
+                    // inline editor. The label must sense clicks (see `cell`) — plain labels
+                    // only hover, so double-click on the text itself would otherwise be lost.
                     let dbl = col_resp.double_clicked()
                         || label_resp.is_some_and(|r| r.double_clicked());
-                    if editable && dbl && !matches!(value, Value::Bytes(_)) {
+                    if editable
+                        && dbl
+                        && state != crate::edit::RowState::Deleted
+                        && !matches!(stored, Value::Bytes(_))
+                    {
                         if edits.col_kind(c) == EditorKind::Bool {
                             out.toggle = Some((r, c));
                         } else {
@@ -214,10 +277,21 @@ fn build_grid(
         });
 }
 
-/// Paint a faint green wash over the current cell to flag an unsaved edit.
-fn tint_cell(ui: &egui::Ui) {
-    let s = palette::SUCCESS();
-    let tint = egui::Color32::from_rgba_unmultiplied(s.r(), s.g(), s.b(), 28);
+/// Paint a faint wash over the current cell to flag its pending state: green for edited or
+/// new rows (a pending write), red for rows marked for deletion. Clean rows are untouched.
+fn tint_row(ui: &egui::Ui, state: crate::edit::RowState) {
+    use crate::edit::RowState;
+    let tint = match state {
+        RowState::Clean => return,
+        RowState::Edited | RowState::New => {
+            let s = palette::SUCCESS();
+            egui::Color32::from_rgba_unmultiplied(s.r(), s.g(), s.b(), 28)
+        }
+        RowState::Deleted => {
+            let d = palette::DANGER();
+            egui::Color32::from_rgba_unmultiplied(d.r(), d.g(), d.b(), 32)
+        }
+    };
     ui.painter().rect_filled(ui.max_rect(), 0.0, tint);
 }
 

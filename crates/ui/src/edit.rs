@@ -264,6 +264,30 @@ pub enum EditOutcome {
     Cancel,
 }
 
+/// Row indices at or above this base address *new* (to-be-inserted) rows rather than rows
+/// in `result.rows`. Keeping new rows in the same `usize` address space as stored rows lets
+/// the staging map, the active editor, and the grid all stay `usize`-keyed; helpers below
+/// translate back to the new-row slot when needed.
+pub const NEW_ROW_BASE: usize = 1 << 48;
+
+/// Whether `row` addresses a new (insert) row rather than a stored result row.
+pub fn is_new_row(row: usize) -> bool {
+    row >= NEW_ROW_BASE
+}
+
+/// How a row should be painted / treated, derived from the pending edits on it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RowState {
+    /// No pending changes.
+    Clean,
+    /// A stored row with staged cell edits (will become an `UPDATE`).
+    Edited,
+    /// A stored row marked for deletion (will become a `DELETE`).
+    Deleted,
+    /// A brand-new row being filled in (will become an `INSERT`).
+    New,
+}
+
 /// All editing state for the current result.
 #[derive(Default)]
 pub struct Edits {
@@ -273,8 +297,14 @@ pub struct Edits {
     pub pending_source: Option<EditSource>,
     /// Per-column editor kind, indexed like `result.columns`.
     col_kinds: Vec<EditorKind>,
-    /// Staged changes: raw row index → column index → new value.
+    /// Staged changes: row index → column index → new value. Row indices below
+    /// [`NEW_ROW_BASE`] are stored rows (a diff against the original); indices at/above it
+    /// are new rows (the full set of entered cells).
     pub cells: HashMap<usize, HashMap<usize, Value>>,
+    /// Stored rows (raw indices) marked for deletion.
+    pub deleted: std::collections::HashSet<usize>,
+    /// Number of new rows; their ids are `NEW_ROW_BASE .. NEW_ROW_BASE + new_rows`.
+    pub new_rows: usize,
     /// The cell open in a text editor right now.
     pub active: Option<ActiveEdit>,
 }
@@ -286,11 +316,82 @@ impl Edits {
     }
 
     pub fn has_pending(&self) -> bool {
-        !self.cells.is_empty()
+        self.new_rows > 0
+            || !self.deleted.is_empty()
+            || self
+                .cells
+                .iter()
+                .any(|(row, m)| !is_new_row(*row) && !m.is_empty())
     }
 
     pub fn row_dirty(&self, row: usize) -> bool {
-        self.cells.contains_key(&row)
+        self.cells.get(&row).is_some_and(|m| !m.is_empty())
+    }
+
+    /// How `row` should be painted/treated given the pending edits on it.
+    pub fn row_state(&self, row: usize) -> RowState {
+        if is_new_row(row) {
+            RowState::New
+        } else if self.deleted.contains(&row) {
+            RowState::Deleted
+        } else if self.row_dirty(row) {
+            RowState::Edited
+        } else {
+            RowState::Clean
+        }
+    }
+
+    /// Toggle a stored row's deletion mark. Clears any staged cell edits on it (a deleted
+    /// row's edits are moot) and closes the editor if it sat on this row.
+    pub fn toggle_delete(&mut self, row: usize) {
+        if is_new_row(row) {
+            return;
+        }
+        if !self.deleted.insert(row) {
+            self.deleted.remove(&row);
+        } else {
+            self.cells.remove(&row);
+            if self.active.as_ref().is_some_and(|a| a.row == row) {
+                self.active = None;
+            }
+        }
+    }
+
+    /// Append a new (empty) insert row and return its id.
+    pub fn add_new_row(&mut self) -> usize {
+        let id = NEW_ROW_BASE + self.new_rows;
+        self.new_rows += 1;
+        self.cells.entry(id).or_default();
+        id
+    }
+
+    /// Remove the new row with the given id, renumbering the new rows above it so their ids
+    /// stay contiguous (and fixing the active editor if it pointed into them).
+    pub fn remove_new_row(&mut self, id: usize) {
+        if !is_new_row(id) {
+            return;
+        }
+        let j = id - NEW_ROW_BASE;
+        if j >= self.new_rows {
+            return;
+        }
+        self.cells.remove(&id);
+        for k in (j + 1)..self.new_rows {
+            if let Some(m) = self.cells.remove(&(NEW_ROW_BASE + k)) {
+                self.cells.insert(NEW_ROW_BASE + k - 1, m);
+            }
+        }
+        if let Some(a) = self.active.as_mut() {
+            if is_new_row(a.row) {
+                let aj = a.row - NEW_ROW_BASE;
+                if aj == j {
+                    self.active = None;
+                } else if aj > j {
+                    a.row -= 1;
+                }
+            }
+        }
+        self.new_rows -= 1;
     }
 
     /// Recompute the per-column editor kinds for a freshly loaded result.
@@ -389,6 +490,8 @@ impl Edits {
     /// Drop all staged edits and any open editor (e.g. after a successful save or a reload).
     pub fn clear(&mut self) {
         self.cells.clear();
+        self.deleted.clear();
+        self.new_rows = 0;
         self.active = None;
     }
 }
@@ -569,6 +672,46 @@ mod tests {
         // Toggling back to the original value clears the staged edit.
         e.toggle_bool(0, 0, &original);
         assert_eq!(e.staged(0, 0), None);
+        assert!(!e.has_pending());
+    }
+
+    #[test]
+    fn delete_mark_toggles_and_clears_edits() {
+        let mut e = Edits::default();
+        // A staged edit makes the row "Edited".
+        e.stage(2, 0, Value::Int(9), &Value::Int(8));
+        assert_eq!(e.row_state(2), RowState::Edited);
+        // Marking it for deletion wins and drops the edit.
+        e.toggle_delete(2);
+        assert_eq!(e.row_state(2), RowState::Deleted);
+        assert_eq!(e.staged(2, 0), None);
+        assert!(e.has_pending());
+        // Toggling again un-marks it.
+        e.toggle_delete(2);
+        assert_eq!(e.row_state(2), RowState::Clean);
+        assert!(!e.has_pending());
+    }
+
+    #[test]
+    fn new_rows_address_above_base_and_renumber_on_remove() {
+        let mut e = Edits::default();
+        let a = e.add_new_row();
+        let b = e.add_new_row();
+        assert_eq!(a, NEW_ROW_BASE);
+        assert_eq!(b, NEW_ROW_BASE + 1);
+        assert!(is_new_row(a) && is_new_row(b));
+        assert_eq!(e.row_state(a), RowState::New);
+        assert!(e.has_pending());
+
+        // Fill the second new row, then drop the first: the second slides down to `a`.
+        e.stage(b, 0, Value::Text("keep".into()), &Value::Null);
+        e.remove_new_row(a);
+        assert_eq!(e.new_rows, 1);
+        assert_eq!(e.staged(NEW_ROW_BASE, 0), Some(&Value::Text("keep".into())));
+
+        // Removing the last new row clears all pending state.
+        e.remove_new_row(NEW_ROW_BASE);
+        assert_eq!(e.new_rows, 0);
         assert!(!e.has_pending());
     }
 }
