@@ -1,10 +1,62 @@
-use super::{Action, Busy, DbGuiApp, QueryTab, TabView};
+use super::{Action, Busy, ConnField, ConnTestState, DbGuiApp, QueryTab, TabView};
 use crate::filter::{self, FilterEvent};
 use crate::grid::results_grid;
 use crate::icons;
 use crate::style::{self, palette};
 use crate::theme::ThemeId;
 use crate::title_bar;
+
+fn field_test_status(state: &ConnTestState, field: ConnField) -> Option<bool> {
+    match state {
+        ConnTestState::Success => Some(true),
+        ConnTestState::Failed { fields, .. } if fields.contains(&field) => Some(false),
+        _ => None,
+    }
+}
+
+fn with_field_status<R>(
+    ui: &mut egui::Ui,
+    status: Option<bool>,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.scope(|ui| {
+        if let Some(ok) = status {
+            let (stroke_color, fill_color) = if ok {
+                (
+                    egui::Color32::from_rgb(58, 178, 108),
+                    egui::Color32::from_rgba_unmultiplied(58, 178, 108, 42),
+                )
+            } else {
+                let danger = palette::DANGER();
+                (
+                    danger,
+                    egui::Color32::from_rgba_unmultiplied(danger.r(), danger.g(), danger.b(), 48),
+                )
+            };
+            let stroke = egui::Stroke::new(1.5, stroke_color);
+            let visuals = ui.visuals_mut();
+            visuals.extreme_bg_color = fill_color;
+            visuals.widgets.inactive.bg_fill = fill_color;
+            visuals.widgets.inactive.bg_stroke = stroke;
+            visuals.widgets.hovered.bg_fill = fill_color;
+            visuals.widgets.hovered.bg_stroke = stroke;
+            visuals.widgets.active.bg_fill = fill_color;
+            visuals.widgets.active.bg_stroke = stroke;
+        }
+        add(ui)
+    })
+    .inner
+}
+
+fn status_text_input(
+    ui: &mut egui::Ui,
+    text: &mut String,
+    hint: &str,
+    width: f32,
+    status: Option<bool>,
+) -> egui::Response {
+    with_field_status(ui, status, |ui| style::text_input(ui, text, hint, width))
+}
 
 impl DbGuiApp {
     pub(super) fn top_bar(
@@ -149,8 +201,7 @@ impl DbGuiApp {
                             // Rects collected per frame so the drag handler below can map
                             // the pointer to an insertion slot.
                             let mut rects = Vec::with_capacity(self.tabs.len());
-                            let pointer_x =
-                                ui.ctx().pointer_interact_pos().map(|p| p.x);
+                            let pointer_x = ui.ctx().pointer_interact_pos().map(|p| p.x);
                             for idx in 0..self.tabs.len() {
                                 let selected = idx == self.active_query_tab;
                                 let label = self.tab_label(idx);
@@ -164,7 +215,11 @@ impl DbGuiApp {
                                     _ => None,
                                 };
                                 let resp = super::widgets::query_tab_item(
-                                    ui, &label, selected, preview, drag_float_x,
+                                    ui,
+                                    &label,
+                                    selected,
+                                    preview,
+                                    drag_float_x,
                                 );
                                 if resp.close {
                                     actions.push(Action::CloseTab(idx));
@@ -242,9 +297,7 @@ impl DbGuiApp {
                 ui.add_space(4.0);
                 if let Some(err) = &self.error {
                     icons::show_colored(ui, icons::warning(), 13.0, palette::DANGER());
-                    ui.label(
-                        egui::RichText::new(err).size(11.0).color(palette::DANGER()),
-                    );
+                    ui.label(egui::RichText::new(err).size(11.0).color(palette::DANGER()));
                 } else {
                     if self.busy != Busy::Idle {
                         ui.add(egui::Spinner::new().size(11.0));
@@ -298,10 +351,8 @@ impl DbGuiApp {
                         ui.add_space(6.0);
                         // Beautify formats in the bound connection's dialect; with no live
                         // connection it still works, falling back to generic SQL.
-                        let dialect_label = self
-                            .active()
-                            .map(|a| a.db.kind().label())
-                            .unwrap_or("SQL");
+                        let dialect_label =
+                            self.active().map(|a| a.db.kind().label()).unwrap_or("SQL");
                         let has_sql = !self.tab().sql.trim().is_empty();
                         let resp = super::widgets::beautify_button(
                             ui,
@@ -383,9 +434,7 @@ impl DbGuiApp {
         };
         let editable = tab.edits.editable();
         // Split the borrow so the closure can hold the result immutably and edits mutably.
-        let QueryTab {
-            result, edits, ..
-        } = tab;
+        let QueryTab { result, edits, .. } = tab;
         let res = result.as_ref().expect("row_idx implies a result");
         // Disjoint field borrows alongside `tab` above.
         let details_filter = &mut self.details_filter;
@@ -468,8 +517,7 @@ impl DbGuiApp {
                         egui::ScrollArea::vertical()
                             .id_salt("active_connection_tabs")
                             .show(ui, |ui| {
-                                let bound_id =
-                                    self.tabs[self.active_query_tab].conn_id.clone();
+                                let bound_id = self.tabs[self.active_query_tab].conn_id.clone();
                                 for (idx, conn) in self.connections.iter().enumerate() {
                                     let live = self
                                         .active_connections
@@ -478,10 +526,7 @@ impl DbGuiApp {
                                     // Highlight the connection the active tab is bound to.
                                     let selected = bound_id.as_deref() == Some(conn.id.as_str());
                                     let resp = super::widgets::connection_tab_item(
-                                        ui,
-                                        &conn.name,
-                                        selected,
-                                        live,
+                                        ui, &conn.name, selected, live,
                                     )
                                     .on_hover_text(conn.target_summary());
                                     if resp.clicked() {
@@ -775,15 +820,8 @@ impl DbGuiApp {
         let sort = *sort;
         egui::CentralPanel::default().show_inside(root, |ui| match result.as_ref() {
             Some(result) if result.column_count() > 0 => {
-                let resp = results_grid(
-                    ui,
-                    result,
-                    row_order,
-                    sort,
-                    *selected_row,
-                    edits,
-                    editable,
-                );
+                let resp =
+                    results_grid(ui, result, row_order, sort, *selected_row, edits, editable);
                 if let Some(col) = resp.sort {
                     actions.push(Action::SortBy(col));
                 }
@@ -887,6 +925,8 @@ impl DbGuiApp {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
+                let test_state = editor.test_state.clone();
+                let mut form_changed = false;
                 egui::Grid::new("conn_form")
                     .num_columns(2)
                     .spacing([8.0, 8.0])
@@ -894,7 +934,14 @@ impl DbGuiApp {
                         let field_w = 240.0;
 
                         ui.label("Name");
-                        style::text_input(ui, &mut editor.config.name, "", field_w);
+                        form_changed |= status_text_input(
+                            ui,
+                            &mut editor.config.name,
+                            "",
+                            field_w,
+                            field_test_status(&test_state, ConnField::Name),
+                        )
+                        .changed();
                         ui.end_row();
 
                         ui.label("Type");
@@ -930,47 +977,85 @@ impl DbGuiApp {
                             });
                         if editor.config.kind != previous_kind {
                             editor.config.port = editor.config.kind.default_port();
+                            form_changed = true;
                         }
                         ui.end_row();
 
                         if editor.config.kind.is_server() {
                             ui.label("Host");
-                            style::text_input(ui, &mut editor.config.host, "", field_w);
+                            form_changed |= status_text_input(
+                                ui,
+                                &mut editor.config.host,
+                                "",
+                                field_w,
+                                field_test_status(&test_state, ConnField::Host),
+                            )
+                            .changed();
                             ui.end_row();
 
                             ui.label("Port");
-                            ui.add_sized(
-                                egui::vec2(80.0, style::CONTROL_H),
-                                egui::DragValue::new(&mut editor.config.port),
-                            );
+                            form_changed |= with_field_status(
+                                ui,
+                                field_test_status(&test_state, ConnField::Port),
+                                |ui| {
+                                    ui.add_sized(
+                                        egui::vec2(80.0, style::CONTROL_H),
+                                        egui::DragValue::new(&mut editor.config.port),
+                                    )
+                                },
+                            )
+                            .changed();
                             ui.end_row();
 
                             ui.label("User");
-                            style::text_input(ui, &mut editor.config.user, "", field_w);
+                            form_changed |= status_text_input(
+                                ui,
+                                &mut editor.config.user,
+                                "",
+                                field_w,
+                                field_test_status(&test_state, ConnField::User),
+                            )
+                            .changed();
                             ui.end_row();
 
                             ui.label("Password");
-                            ui.add_sized(
-                                egui::vec2(field_w, style::CONTROL_H),
-                                egui::TextEdit::singleline(&mut editor.password)
-                                    .password(true)
-                                    .vertical_align(egui::Align::Center)
-                                    .margin(egui::Margin::symmetric(6, 0)),
-                            );
+                            form_changed |= with_field_status(
+                                ui,
+                                field_test_status(&test_state, ConnField::Password),
+                                |ui| {
+                                    ui.add_sized(
+                                        egui::vec2(field_w, style::CONTROL_H),
+                                        egui::TextEdit::singleline(&mut editor.password)
+                                            .password(true)
+                                            .vertical_align(egui::Align::Center)
+                                            .margin(egui::Margin::symmetric(6, 0)),
+                                    )
+                                },
+                            )
+                            .changed();
                             ui.end_row();
 
                             ui.label("Database");
-                            style::text_input(ui, &mut editor.config.database, "", field_w);
+                            form_changed |= status_text_input(
+                                ui,
+                                &mut editor.config.database,
+                                "",
+                                field_w,
+                                field_test_status(&test_state, ConnField::Database),
+                            )
+                            .changed();
                             ui.end_row();
                         } else {
                             ui.label("File");
                             ui.horizontal(|ui| {
-                                style::text_input(
+                                form_changed |= status_text_input(
                                     ui,
                                     &mut editor.config.sqlite_path,
                                     "/path/to/database.sqlite",
                                     field_w,
-                                );
+                                    field_test_status(&test_state, ConnField::SqlitePath),
+                                )
+                                .changed();
                                 if ui.button("Browse…").clicked() {
                                     actions.push(Action::BrowseSqlitePath);
                                 }
@@ -980,8 +1065,33 @@ impl DbGuiApp {
                     });
 
                 ui.add_space(4.0);
+                match &editor.test_state {
+                    ConnTestState::Testing(_) => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Testing connection…");
+                        });
+                    }
+                    ConnTestState::Success => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(58, 178, 108),
+                            "Connection test succeeded",
+                        );
+                    }
+                    ConnTestState::Failed { message, .. } => {
+                        ui.colored_label(palette::DANGER(), message);
+                    }
+                    ConnTestState::Untested => {}
+                }
+                if form_changed && !matches!(editor.test_state, ConnTestState::Testing(_)) {
+                    editor.test_state = ConnTestState::Untested;
+                }
                 ui.separator();
                 ui.horizontal(|ui| {
+                    let testing = matches!(editor.test_state, ConnTestState::Testing(_));
+                    if icons::button(ui, icons::connect(), "Test", !testing).clicked() {
+                        actions.push(Action::TestConnection);
+                    }
                     if icons::button(ui, icons::save(), "Save", true).clicked() {
                         actions.push(Action::SaveConnection);
                     }
@@ -1003,10 +1113,7 @@ fn structure_view(ui: &mut egui::Ui, info: &dbcore::TableInfo) {
 
     let row_height = egui::TextStyle::Monospace.resolve(ui.style()).size + 8.0;
     let header = |ui: &mut egui::Ui, title: &str| {
-        ui.add(
-            egui::Label::new(egui::RichText::new(title).strong())
-                .selectable(false),
-        );
+        ui.add(egui::Label::new(egui::RichText::new(title).strong()).selectable(false));
     };
 
     egui::ScrollArea::vertical()
@@ -1053,12 +1160,7 @@ fn structure_view(ui: &mut egui::Ui, info: &dbcore::TableInfo) {
                             });
                             row.col(|ui| {
                                 if col.primary_key {
-                                    icons::show_colored(
-                                        ui,
-                                        icons::key(),
-                                        13.0,
-                                        palette::ACCENT(),
-                                    );
+                                    icons::show_colored(ui, icons::key(), 13.0, palette::ACCENT());
                                     ui.add_space(2.0);
                                 }
                                 ui.label(&col.name);
@@ -1183,10 +1285,8 @@ fn details_value_box(
         // Keep the same painted box as display mode; only swap the inner label for a
         // frameless editor so focus doesn't add a second border and resize the row.
         let h = DETAILS_VALUE_H;
-        let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), h),
-            egui::Sense::hover(),
-        );
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::hover());
         if ui.is_rect_visible(rect) {
             ui.painter().rect(
                 rect,
@@ -1202,12 +1302,13 @@ fn details_value_box(
                 .max_rect(rect)
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
             |ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-            ui.set_clip_rect(rect);
-            if let Some(active) = edits.active.as_mut() {
-                outcome = crate::edit::render_editor(ui, active, Some(rect.size()));
-            }
-        });
+                ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                ui.set_clip_rect(rect);
+                if let Some(active) = edits.active.as_mut() {
+                    outcome = crate::edit::render_editor(ui, active, Some(rect.size()));
+                }
+            },
+        );
         match outcome {
             crate::edit::EditOutcome::Commit => {
                 let _ = edits.commit_active(value);
@@ -1225,15 +1326,11 @@ fn details_value_box(
 
     // --- the box: one allocation, a separate hit zone for the ⌄ at the right edge ---
     let h = DETAILS_VALUE_H;
-    let (rect, resp) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), h),
-        egui::Sense::click(),
-    );
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::click());
     let chev_w = 20.0;
-    let chev_rect = egui::Rect::from_min_max(
-        egui::pos2(rect.right() - chev_w, rect.top()),
-        rect.max,
-    );
+    let chev_rect =
+        egui::Rect::from_min_max(egui::pos2(rect.right() - chev_w, rect.top()), rect.max);
     let chev_resp = ui.interact(chev_rect, resp.id.with("actions"), egui::Sense::click());
 
     if ui.is_rect_visible(rect) {
@@ -1267,7 +1364,11 @@ fn details_value_box(
             egui::TextStyle::Body.resolve(ui.style())
         };
         let display = if kind == K::Bool && !shown.is_null() {
-            if crate::edit::as_bool(&shown) { "TRUE".to_string() } else { "FALSE".to_string() }
+            if crate::edit::as_bool(&shown) {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }
         } else {
             shown.display()
         };
@@ -1283,10 +1384,8 @@ fn details_value_box(
             },
         );
         let galley = ui.fonts_mut(|f| f.layout_job(job));
-        let text_clip = egui::Rect::from_min_max(
-            rect.min,
-            egui::pos2(chev_rect.left() - 2.0, rect.bottom()),
-        );
+        let text_clip =
+            egui::Rect::from_min_max(rect.min, egui::pos2(chev_rect.left() - 2.0, rect.bottom()));
         ui.painter().with_clip_rect(text_clip).galley(
             egui::pos2(
                 rect.left() + crate::edit::DETAILS_VALUE_PAD_X,
@@ -1305,10 +1404,14 @@ fn details_value_box(
         let cc = chev_rect.center();
         let r = 3.0;
         let s = egui::Stroke::new(1.3, chev_color);
-        ui.painter()
-            .line_segment([cc + egui::vec2(-r, -r * 0.5), cc + egui::vec2(0.0, r * 0.5)], s);
-        ui.painter()
-            .line_segment([cc + egui::vec2(0.0, r * 0.5), cc + egui::vec2(r, -r * 0.5)], s);
+        ui.painter().line_segment(
+            [cc + egui::vec2(-r, -r * 0.5), cc + egui::vec2(0.0, r * 0.5)],
+            s,
+        );
+        ui.painter().line_segment(
+            [cc + egui::vec2(0.0, r * 0.5), cc + egui::vec2(r, -r * 0.5)],
+            s,
+        );
     }
 
     // Click-to-edit, like a real input. Booleans toggle instead of opening an editor.

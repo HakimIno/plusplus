@@ -25,6 +25,12 @@ enum AppMessage {
         name: String,
         result: Result<(Arc<dyn Database>, SchemaTree), String>,
     },
+    /// A connection test from the add/edit dialog finished.
+    ConnectionTested {
+        test_id: u64,
+        conn_id: String,
+        result: Result<(), String>,
+    },
     /// A query finished. `tab_id` routes the result back to the tab that started it, even
     /// if the user has since switched tabs.
     Queried {
@@ -202,6 +208,83 @@ fn result_status(res: &QueryResult) -> String {
     }
 }
 
+fn validate_connection_test_config(
+    cfg: &ConnectionConfig,
+) -> std::result::Result<(), (String, Vec<ConnField>)> {
+    let mut fields = Vec::new();
+    if cfg.name.trim().is_empty() {
+        fields.push(ConnField::Name);
+    }
+    if cfg.kind.is_server() {
+        if cfg.host.trim().is_empty() {
+            fields.push(ConnField::Host);
+        }
+        if cfg.port == 0 {
+            fields.push(ConnField::Port);
+        }
+        if cfg.user.trim().is_empty() {
+            fields.push(ConnField::User);
+        }
+        if cfg.database.trim().is_empty() {
+            fields.push(ConnField::Database);
+        }
+    } else if cfg.sqlite_path.trim().is_empty() {
+        fields.push(ConnField::SqlitePath);
+    }
+
+    if fields.is_empty() {
+        Ok(())
+    } else {
+        Err((
+            "Fill the highlighted field(s) before testing.".to_string(),
+            fields,
+        ))
+    }
+}
+
+fn infer_connection_error_fields(message: &str, kind: DbKind) -> Vec<ConnField> {
+    let msg = message.to_lowercase();
+    if !kind.is_server() {
+        return vec![ConnField::SqlitePath];
+    }
+    if msg.contains("password")
+        || msg.contains("authentication")
+        || msg.contains("login failed")
+        || msg.contains("access denied")
+        || msg.contains("role")
+    {
+        return vec![ConnField::User, ConnField::Password];
+    }
+    if msg.contains("database")
+        || msg.contains("unknown database")
+        || msg.contains("does not exist")
+        || msg.contains("cannot open database")
+    {
+        return vec![ConnField::Database];
+    }
+    if msg.contains("port") {
+        return vec![ConnField::Port];
+    }
+    if msg.contains("host")
+        || msg.contains("dns")
+        || msg.contains("name or service")
+        || msg.contains("nodename")
+        || msg.contains("connection refused")
+        || msg.contains("connection timed out")
+        || msg.contains("network")
+        || msg.contains("os error")
+    {
+        return vec![ConnField::Host, ConnField::Port];
+    }
+    vec![
+        ConnField::Host,
+        ConnField::Port,
+        ConnField::User,
+        ConnField::Password,
+        ConnField::Database,
+    ]
+}
+
 /// State for the add/edit-connection dialog.
 struct ConnEditor {
     config: ConnectionConfig,
@@ -209,6 +292,29 @@ struct ConnEditor {
     is_new: bool,
     /// Index in `connections` being edited (for an existing connection).
     edit_index: Option<usize>,
+    test_state: ConnTestState,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConnField {
+    Name,
+    Host,
+    Port,
+    User,
+    Password,
+    Database,
+    SqlitePath,
+}
+
+#[derive(Clone)]
+enum ConnTestState {
+    Untested,
+    Testing(u64),
+    Success,
+    Failed {
+        message: String,
+        fields: Vec<ConnField>,
+    },
 }
 
 /// Deferred UI actions. Collected from panel closures (which only borrow individual
@@ -229,10 +335,14 @@ enum Action {
     /// Pin a preview tab as permanent (double-click on the tab).
     PinTab(usize),
     /// Drag-to-reorder: move the tab at `from` so it sits at position `to`.
-    MoveTab { from: usize, to: usize },
+    MoveTab {
+        from: usize,
+        to: usize,
+    },
     NewConnection,
     EditConnection(usize),
     DeleteConnection(usize),
+    TestConnection,
     SaveConnection,
     CancelDialog,
     OpenSettings,
@@ -270,6 +380,7 @@ pub struct DbGuiApp {
     tx: Sender<AppMessage>,
     rx: Receiver<AppMessage>,
     busy: Busy,
+    next_connection_test_id: u64,
     /// Tab id of the in-flight `SELECT` (cleared when [`AppMessage::Queried`] arrives).
     querying_tab_id: Option<u64>,
 
@@ -378,6 +489,7 @@ impl DbGuiApp {
             tx,
             rx,
             busy: Busy::Idle,
+            next_connection_test_id: 1,
             querying_tab_id: None,
             active_connections: Vec::new(),
             tabs: vec![default_tab],
@@ -586,9 +698,7 @@ impl DbGuiApp {
             self.active_query_tab = 0;
         } else {
             self.tabs.remove(idx);
-            if self.active_query_tab > idx
-                || self.active_query_tab >= self.tabs.len()
-            {
+            if self.active_query_tab > idx || self.active_query_tab >= self.tabs.len() {
                 self.active_query_tab = self.active_query_tab.saturating_sub(1);
             }
         }
@@ -713,10 +823,43 @@ impl DbGuiApp {
                         }
                     }
                 }
+                AppMessage::ConnectionTested {
+                    test_id,
+                    conn_id,
+                    result,
+                } => {
+                    if let Some(editor) = &mut self.editor {
+                        if editor.config.id != conn_id {
+                            continue;
+                        }
+                        if !matches!(editor.test_state, ConnTestState::Testing(id) if id == test_id)
+                        {
+                            continue;
+                        }
+                        match result {
+                            Ok(()) => {
+                                editor.test_state = ConnTestState::Success;
+                                self.status_msg = "Connection test succeeded".to_string();
+                                self.error = None;
+                            }
+                            Err(e) => {
+                                editor.test_state = ConnTestState::Failed {
+                                    fields: infer_connection_error_fields(&e, editor.config.kind),
+                                    message: e.clone(),
+                                };
+                                self.status_msg = "Connection test failed".to_string();
+                                self.error = Some(format!("Connection test failed: {e}"));
+                            }
+                        }
+                    }
+                }
                 AppMessage::Queried { tab_id, result } => {
                     self.busy = Busy::Idle;
                     self.querying_tab_id = None;
-                    let is_active = self.tabs.get(self.active_query_tab).is_some_and(|t| t.id == tab_id);
+                    let is_active = self
+                        .tabs
+                        .get(self.active_query_tab)
+                        .is_some_and(|t| t.id == tab_id);
                     let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) else {
                         continue;
                     };
@@ -741,7 +884,10 @@ impl DbGuiApp {
                 }
                 AppMessage::Committed { tab_id, result } => {
                     self.busy = Busy::Idle;
-                    let is_active = self.tabs.get(self.active_query_tab).is_some_and(|t| t.id == tab_id);
+                    let is_active = self
+                        .tabs
+                        .get(self.active_query_tab)
+                        .is_some_and(|t| t.id == tab_id);
                     match result {
                         Ok(n) => {
                             if is_active {
@@ -801,7 +947,9 @@ impl DbGuiApp {
 
     /// Run the SQL of the tab at `idx` against its bound connection.
     fn start_query_for(&mut self, idx: usize) {
-        let Some(tab) = self.tabs.get(idx) else { return };
+        let Some(tab) = self.tabs.get(idx) else {
+            return;
+        };
         let sql = tab.sql.trim().to_string();
         if sql.is_empty() {
             return;
@@ -843,7 +991,9 @@ impl DbGuiApp {
         let mut matches = conn.schema.tables.iter().filter(|t| {
             t.name.eq_ignore_ascii_case(&table)
                 && schema.as_deref().map_or(true, |s| {
-                    t.schema.as_deref().is_some_and(|ts| ts.eq_ignore_ascii_case(s))
+                    t.schema
+                        .as_deref()
+                        .is_some_and(|ts| ts.eq_ignore_ascii_case(s))
                 })
         });
         let info = matches.next()?;
@@ -971,9 +1121,10 @@ impl DbGuiApp {
             ) {
                 Some(sql) => statements.push(sql),
                 None => {
-                    self.error = Some("Cannot save: a cell holds a value that can't be written "
-                        .to_string()
-                        + "(e.g. binary data).");
+                    self.error = Some(
+                        "Cannot save: a cell holds a value that can't be written ".to_string()
+                            + "(e.g. binary data).",
+                    );
                     return;
                 }
             }
@@ -1031,6 +1182,7 @@ impl DbGuiApp {
                     password: String::new(),
                     is_new: true,
                     edit_index: None,
+                    test_state: ConnTestState::Untested,
                 });
             }
             Action::EditConnection(i) => {
@@ -1044,6 +1196,7 @@ impl DbGuiApp {
                         password,
                         is_new: false,
                         edit_index: Some(i),
+                        test_state: ConnTestState::Untested,
                     });
                 }
             }
@@ -1065,6 +1218,7 @@ impl DbGuiApp {
                     self.workspace_dirty = true;
                 }
             }
+            Action::TestConnection => self.start_connection_test(),
             Action::SaveConnection => self.save_connection(),
             Action::CancelDialog => self.editor = None,
             Action::OpenSettings => self.settings_open = true,
@@ -1073,6 +1227,7 @@ impl DbGuiApp {
                 if let Some(path) = rfd::FileDialog::new().pick_file() {
                     if let Some(ed) = &mut self.editor {
                         ed.config.sqlite_path = path.to_string_lossy().into_owned();
+                        ed.test_state = ConnTestState::Untested;
                     }
                 }
             }
@@ -1088,6 +1243,43 @@ impl DbGuiApp {
             Action::OpenTable { sql, source, pin } => self.open_table(sql, source, pin),
             Action::SortBy(col) => self.tab_mut().apply_sort(col),
         }
+    }
+
+    fn start_connection_test(&mut self) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let cfg = editor.config.clone();
+        let password = if cfg.kind.is_server() {
+            Some(editor.password.clone())
+        } else {
+            None
+        };
+        if let Err((message, fields)) = validate_connection_test_config(&cfg) {
+            editor.test_state = ConnTestState::Failed { message, fields };
+            self.status_msg = "Connection test failed".to_string();
+            return;
+        }
+
+        let test_id = self.next_connection_test_id;
+        self.next_connection_test_id += 1;
+        editor.test_state = ConnTestState::Testing(test_id);
+        self.error = None;
+        self.status_msg = format!("Testing {}…", cfg.name);
+
+        let tx = self.tx.clone();
+        let conn_id = cfg.id.clone();
+        self.rt.spawn(async move {
+            let result = dbcore::connect(&cfg, password)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AppMessage::ConnectionTested {
+                test_id,
+                conn_id,
+                result,
+            });
+        });
     }
 
     fn save_connection(&mut self) {
@@ -1124,11 +1316,15 @@ impl DbGuiApp {
                     title: t.title.clone(),
                     conn_id: t.conn_id.clone(),
                     sql: t.sql.clone(),
-                    source: t.edits.source.as_ref().map(|s| dbcore::config::WorkspaceSource {
-                        schema: s.schema.clone(),
-                        table: s.table.clone(),
-                        pk_cols: s.pk_cols.clone(),
-                    }),
+                    source: t
+                        .edits
+                        .source
+                        .as_ref()
+                        .map(|s| dbcore::config::WorkspaceSource {
+                            schema: s.schema.clone(),
+                            table: s.table.clone(),
+                            pk_cols: s.pk_cols.clone(),
+                        }),
                 })
                 .collect(),
         }
@@ -1465,9 +1661,8 @@ mod tests {
         app.tab_mut().sql = "q2".into();
         app.select_tab(0);
 
-        let order = |app: &DbGuiApp| -> Vec<String> {
-            app.tabs.iter().map(|t| t.sql.clone()).collect()
-        };
+        let order =
+            |app: &DbGuiApp| -> Vec<String> { app.tabs.iter().map(|t| t.sql.clone()).collect() };
 
         // Drag the first tab to the end; the active tab (q0) follows its new position.
         app.move_tab(0, 2);
@@ -1605,7 +1800,7 @@ mod tests {
 
         let mut app = DbGuiApp::construct();
         app.tab_mut().sql.clear(); // make the single default tab a blank scratch tab
-        // First table reuses the blank scratch tab as a preview.
+                                   // First table reuses the blank scratch tab as a preview.
         app.open_table("q".into(), src("users"), false);
         assert_eq!(app.tabs.len(), 1);
         assert!(app.tab().preview);

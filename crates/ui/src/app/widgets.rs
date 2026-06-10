@@ -162,7 +162,11 @@ pub(super) fn query_tab_item(
 ) -> QueryTabResponse {
     let label: String = {
         let trimmed = title.trim();
-        let name = if trimmed.is_empty() { "Untitled" } else { trimmed };
+        let name = if trimmed.is_empty() {
+            "Untitled"
+        } else {
+            trimmed
+        };
         let mut s: String = name.chars().take(18).collect();
         if name.chars().count() > 18 {
             s.push('…');
@@ -177,15 +181,17 @@ pub(super) fn query_tab_item(
     } else {
         palette::TEXT_WEAK()
     };
-    let galley = ui.painter().layout_job(egui::text::LayoutJob::single_section(
-        label,
-        egui::TextFormat {
-            font_id: font,
-            color,
-            italics: preview,
-            ..Default::default()
-        },
-    ));
+    let galley = ui
+        .painter()
+        .layout_job(egui::text::LayoutJob::single_section(
+            label,
+            egui::TextFormat {
+                font_id: font,
+                color,
+                italics: preview,
+                ..Default::default()
+            },
+        ));
     let text_w = galley.size().x;
     let close_w = 14.0;
     let pad = 8.0;
@@ -337,7 +343,8 @@ pub(super) fn layout_toggle(
         match side {
             LayoutSide::Connections => {
                 let left = egui::Rect::from_min_size(icon.min, egui::vec2(bar_w, icon.height()));
-                ui.painter().rect_filled(left, egui::CornerRadius::ZERO, color);
+                ui.painter()
+                    .rect_filled(left, egui::CornerRadius::ZERO, color);
             }
             LayoutSide::Schema => {
                 let left = egui::Rect::from_min_size(icon.min, egui::vec2(bar_w, icon.height()));
@@ -345,15 +352,18 @@ pub(super) fn layout_toggle(
                     egui::pos2(icon.min.x + bar_w + gap, icon.min.y),
                     egui::vec2(icon.width() - bar_w - gap, icon.height()),
                 );
-                ui.painter().rect_filled(left, egui::CornerRadius::ZERO, color);
-                ui.painter().rect_filled(mid, egui::CornerRadius::ZERO, color);
+                ui.painter()
+                    .rect_filled(left, egui::CornerRadius::ZERO, color);
+                ui.painter()
+                    .rect_filled(mid, egui::CornerRadius::ZERO, color);
             }
             LayoutSide::Details => {
                 let right = egui::Rect::from_min_size(
                     egui::pos2(icon.max.x - bar_w, icon.min.y),
                     egui::vec2(bar_w, icon.height()),
                 );
-                ui.painter().rect_filled(right, egui::CornerRadius::ZERO, color);
+                ui.painter()
+                    .rect_filled(right, egui::CornerRadius::ZERO, color);
             }
         }
     }
@@ -471,8 +481,16 @@ pub(super) fn beautify_button(
         egui::pos2(rect.min.x + main_w, rect.min.y),
         egui::vec2(chevron_w, h),
     );
-    let main_resp = ui.interact(main_rect, ui.id().with("beautify_main"), egui::Sense::click());
-    let chev_resp = ui.interact(chev_rect, ui.id().with("beautify_menu"), egui::Sense::click());
+    let main_resp = ui.interact(
+        main_rect,
+        ui.id().with("beautify_main"),
+        egui::Sense::click(),
+    );
+    let chev_resp = ui.interact(
+        chev_rect,
+        ui.id().with("beautify_menu"),
+        egui::Sense::click(),
+    );
 
     if ui.is_rect_visible(rect) {
         let radius = egui::CornerRadius::same(5);
@@ -524,10 +542,14 @@ pub(super) fn beautify_button(
         let c = chev_rect.center();
         let r = 3.0;
         let stroke = egui::Stroke::new(1.3, palette::TEXT_WEAK());
-        ui.painter()
-            .line_segment([c + egui::vec2(-r, -r * 0.5), c + egui::vec2(0.0, r * 0.5)], stroke);
-        ui.painter()
-            .line_segment([c + egui::vec2(0.0, r * 0.5), c + egui::vec2(r, -r * 0.5)], stroke);
+        ui.painter().line_segment(
+            [c + egui::vec2(-r, -r * 0.5), c + egui::vec2(0.0, r * 0.5)],
+            stroke,
+        );
+        ui.painter().line_segment(
+            [c + egui::vec2(0.0, r * 0.5), c + egui::vec2(r, -r * 0.5)],
+            stroke,
+        );
     }
 
     if enabled {
