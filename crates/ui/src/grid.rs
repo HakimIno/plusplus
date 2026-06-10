@@ -167,7 +167,8 @@ fn build_grid(
                 });
 
                 for (c, value) in result.rows[r].iter().enumerate() {
-                    let (_, resp) = row.col(|ui| {
+                    let mut label_resp = None;
+                    let (_, col_resp) = row.col(|ui| {
                         if dirty {
                             tint_cell(ui);
                         }
@@ -185,13 +186,17 @@ fn build_grid(
                         } else {
                             // Show the staged value if present, else the stored one.
                             let staged = edits.staged(r, c);
-                            cell(ui, staged.unwrap_or(value), staged.is_some());
+                            label_resp = Some(cell(ui, staged.unwrap_or(value), staged.is_some()));
                         }
                     });
 
                     // Double-click to edit (binary cells aren't editable). Booleans toggle
-                    // in place; everything else opens the inline editor.
-                    if editable && resp.double_clicked() && !matches!(value, Value::Bytes(_)) {
+                    // in place; everything else opens the inline editor. The label must
+                    // sense clicks (see `cell`) — plain labels only hover, so double-click
+                    // on the text itself would otherwise be ignored.
+                    let dbl = col_resp.double_clicked()
+                        || label_resp.is_some_and(|r| r.double_clicked());
+                    if editable && dbl && !matches!(value, Value::Bytes(_)) {
                         if edits.col_kind(c) == EditorKind::Bool {
                             out.toggle = Some((r, c));
                         } else {
@@ -306,24 +311,28 @@ mod tests {
 
 /// Render a single cell, dimming NULLs and monospacing numbers. A `staged` value (an edit
 /// not yet saved) is drawn in the success colour so it stands out from stored data.
-fn cell(ui: &mut egui::Ui, value: &Value, staged: bool) {
-    if staged {
+fn cell(ui: &mut egui::Ui, value: &Value, staged: bool) -> egui::Response {
+    let (text, color) = if staged {
         let text = match value {
             Value::Null => egui::RichText::new("NULL").italics(),
             other => egui::RichText::new(other.display()),
         };
-        ui.colored_label(palette::SUCCESS(), text);
-        return;
-    }
-    match value {
-        Value::Null => {
-            ui.colored_label(palette::TEXT_FAINT(), egui::RichText::new("NULL").italics());
+        (text, palette::SUCCESS())
+    } else {
+        match value {
+            Value::Null => (
+                egui::RichText::new("NULL").italics(),
+                palette::TEXT_FAINT(),
+            ),
+            Value::Int(_) | Value::Float(_) => (
+                egui::RichText::new(value.display()).monospace(),
+                palette::TEXT(),
+            ),
+            other => (egui::RichText::new(other.display()), palette::TEXT()),
         }
-        Value::Int(_) | Value::Float(_) => {
-            ui.label(egui::RichText::new(value.display()).monospace());
-        }
-        other => {
-            ui.label(other.display());
-        }
-    }
+    };
+    ui.add(
+        egui::Label::new(text.color(color))
+            .sense(egui::Sense::click()),
+    )
 }

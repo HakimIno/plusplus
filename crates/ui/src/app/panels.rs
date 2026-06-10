@@ -146,12 +146,25 @@ impl DbGuiApp {
                     .id_salt("query_tab_scroll")
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
+                            // Rects collected per frame so the drag handler below can map
+                            // the pointer to an insertion slot.
+                            let mut rects = Vec::with_capacity(self.tabs.len());
+                            let pointer_x =
+                                ui.ctx().pointer_interact_pos().map(|p| p.x);
                             for idx in 0..self.tabs.len() {
                                 let selected = idx == self.active_query_tab;
                                 let label = self.tab_label(idx);
                                 let preview = self.tabs[idx].preview;
+                                // While this tab is dragged, its chip floats with its
+                                // left edge tracking the pointer (minus the grab offset).
+                                let drag_float_x = match (self.tab_drag, pointer_x) {
+                                    (Some(drag), Some(px)) if drag.id == self.tabs[idx].id => {
+                                        Some(px - drag.grab_x)
+                                    }
+                                    _ => None,
+                                };
                                 let resp = super::widgets::query_tab_item(
-                                    ui, &label, selected, preview,
+                                    ui, &label, selected, preview, drag_float_x,
                                 );
                                 if resp.close {
                                     actions.push(Action::CloseTab(idx));
@@ -159,9 +172,21 @@ impl DbGuiApp {
                                     actions.push(Action::PinTab(idx));
                                 } else if resp.clicked {
                                     actions.push(Action::SelectTab(idx));
+                                } else if resp.drag_started {
+                                    // Grabbing a tab selects it (TablePlus-style) and
+                                    // starts the reorder, tracked by stable id so the
+                                    // grab survives the index changing mid-drag.
+                                    self.tab_drag = Some(super::TabDrag {
+                                        id: self.tabs[idx].id,
+                                        grab_x: pointer_x.unwrap_or(resp.rect.left())
+                                            - resp.rect.left(),
+                                    });
+                                    actions.push(Action::SelectTab(idx));
                                 }
+                                rects.push(resp.rect);
                                 ui.add_space(2.0);
                             }
+                            self.handle_tab_drag(ui, &rects, actions);
                             if super::widgets::toolbar_icon_button(
                                 ui,
                                 icons::plus(),
@@ -174,6 +199,39 @@ impl DbGuiApp {
                         });
                     });
             });
+    }
+
+    /// While a query tab is being dragged, live-reorder it into the slot under its
+    /// floating chip (the strip re-lays-out next frame, so the swap is immediately
+    /// visible). The drag ends when the primary button is released.
+    fn handle_tab_drag(&mut self, ui: &egui::Ui, rects: &[egui::Rect], actions: &mut Vec<Action>) {
+        let Some(drag) = self.tab_drag else { return };
+        if !ui.input(|i| i.pointer.primary_down()) {
+            self.tab_drag = None;
+            return;
+        }
+        let Some(from) = self.tabs.iter().position(|t| t.id == drag.id) else {
+            // The dragged tab vanished (e.g. closed via shortcut mid-drag).
+            self.tab_drag = None;
+            return;
+        };
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        let Some(pointer) = ui.ctx().pointer_interact_pos() else {
+            return;
+        };
+        // Insertion slot = how many *other* chips sit (by centre) left of the floating
+        // chip's centre. Using the floating chip — not the bare pointer — makes the swap
+        // fire exactly when the dragged tab visually overlaps a neighbour past its
+        // midpoint, Chrome-style, regardless of where inside the tab it was grabbed.
+        let float_center = pointer.x - drag.grab_x + rects[from].width() * 0.5;
+        let to = rects
+            .iter()
+            .enumerate()
+            .filter(|(i, r)| *i != from && float_center > r.center().x)
+            .count();
+        if to != from {
+            actions.push(Action::MoveTab { from, to });
+        }
     }
 
     /// Thin status strip pinned to the very bottom edge: row count / selection / errors.
@@ -348,13 +406,15 @@ impl DbGuiApp {
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         for (c, col) in res.columns.iter().enumerate() {
+                            let kind = edits.col_kind(c);
                             ui.add_space(6.0);
+                            // Header: column name on the left, a colour-coded type badge
+                            // pinned to the right edge so types scan as a column.
                             ui.horizontal(|ui| {
                                 ui.strong(&col.name);
-                                ui.weak(
-                                    egui::RichText::new(&col.type_name)
-                                        .small()
-                                        .color(palette::TEXT_FAINT()),
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| style::type_badge(ui, &col.type_name, kind_color(kind)),
                                 );
                             });
                             let value = &res.rows[row_idx][c];
@@ -372,42 +432,7 @@ impl DbGuiApp {
                                     _ => {}
                                 }
                             } else {
-                                let staged = edits.staged(row_idx, c);
-                                let shown = staged.unwrap_or(value);
-                                let color = if staged.is_some() {
-                                    palette::SUCCESS()
-                                } else if shown.is_null() {
-                                    palette::TEXT_FAINT()
-                                } else {
-                                    palette::TEXT()
-                                };
-                                let text = if shown.is_null() {
-                                    egui::RichText::new("NULL").italics()
-                                } else {
-                                    egui::RichText::new(shown.display())
-                                };
-                                let resp = ui.add(
-                                    egui::Label::new(text.color(color))
-                                        .wrap()
-                                        .halign(egui::Align::LEFT)
-                                        .sense(egui::Sense::click()),
-                                );
-                                let resp = if editable && !matches!(value, dbcore::Value::Bytes(_))
-                                {
-                                    resp.on_hover_text("Double-click to edit")
-                                } else {
-                                    resp
-                                };
-                                if editable
-                                    && resp.double_clicked()
-                                    && !matches!(value, dbcore::Value::Bytes(_))
-                                {
-                                    if edits.col_kind(c) == crate::edit::EditorKind::Bool {
-                                        edits.toggle_bool(row_idx, c, value);
-                                    } else {
-                                        edits.begin(row_idx, c, value);
-                                    }
-                                }
+                                details_value(ui, edits, kind, row_idx, c, value, editable);
                             }
                             ui.separator();
                         }
@@ -1107,4 +1132,117 @@ fn structure_view(ui: &mut egui::Ui, info: &dbcore::TableInfo) {
                     });
             }
         });
+}
+
+/// Semantic colour for a column's editor kind, used by the Details panel's type badges:
+/// numbers amber, booleans green, dates/times blue, free text neutral.
+fn kind_color(kind: crate::edit::EditorKind) -> egui::Color32 {
+    use crate::edit::EditorKind as K;
+    match kind {
+        K::Int | K::Float | K::Decimal => palette::WARNING(),
+        K::Bool => palette::SUCCESS(),
+        K::Date | K::Time | K::DateTime => palette::ACCENT(),
+        K::Text => palette::TEXT_FAINT(),
+    }
+}
+
+/// Render one (non-actively-edited) value in the Details panel, type-aware:
+///
+/// - booleans show as a checkbox (clickable when editable, staging on toggle);
+/// - editable DATE columns get a calendar picker that stages the picked day directly,
+///   plus a pencil for typing the value instead;
+/// - numbers and date/times render monospace so digits align;
+/// - NULLs and byte blobs render faint; staged (unsaved) values render green.
+///
+/// Everything else keeps the double-click-to-edit text flow.
+fn details_value(
+    ui: &mut egui::Ui,
+    edits: &mut crate::edit::Edits,
+    kind: crate::edit::EditorKind,
+    row_idx: usize,
+    c: usize,
+    value: &dbcore::Value,
+    editable: bool,
+) {
+    use crate::edit::EditorKind as K;
+
+    let staged = edits.staged(row_idx, c).cloned();
+    let shown = staged.clone().unwrap_or_else(|| value.clone());
+    let is_staged = staged.is_some();
+
+    // Booleans: a real checkbox. Read-only checkboxes still *look* right but are inert.
+    if kind == K::Bool && !shown.is_null() {
+        let mut b = crate::edit::as_bool(&shown);
+        let label = egui::RichText::new(if b { "TRUE" } else { "FALSE" }).color(if is_staged {
+            palette::SUCCESS()
+        } else {
+            palette::TEXT()
+        });
+        let resp = ui.add_enabled(editable, egui::Checkbox::new(&mut b, label));
+        if resp.changed() {
+            edits.toggle_bool(row_idx, c, value);
+        }
+        return;
+    }
+
+    // Editable DATE columns: a calendar picker stages the picked day directly; the pencil
+    // switches to the validated text editor for typing a date instead.
+    if kind == K::Date && editable {
+        if let Ok(mut date) = shown.display().trim().parse::<jiff::civil::Date>() {
+            ui.horizontal(|ui| {
+                let salt = format!("details_date_{c}");
+                let resp = ui.scope(|ui| {
+                    if is_staged {
+                        ui.visuals_mut().override_text_color = Some(palette::SUCCESS());
+                    }
+                    ui.add(egui_extras::DatePickerButton::new(&mut date).id_salt(&salt))
+                });
+                if resp.inner.changed() {
+                    // `civil::Date` displays as YYYY-MM-DD, the form every backend accepts.
+                    edits.stage(row_idx, c, dbcore::Value::Text(date.to_string()), value);
+                }
+                if icons::icon_button(ui, icons::edit(), "Type a date").clicked() {
+                    edits.begin(row_idx, c, &shown);
+                }
+            });
+            return;
+        }
+        // Unparseable/NULL dates fall through to the plain label below.
+    }
+
+    let color = if is_staged {
+        palette::SUCCESS()
+    } else if shown.is_null() || matches!(shown, dbcore::Value::Bytes(_)) {
+        palette::TEXT_FAINT()
+    } else {
+        palette::TEXT()
+    };
+    let mut text = if shown.is_null() {
+        egui::RichText::new("NULL").italics()
+    } else {
+        egui::RichText::new(shown.display())
+    };
+    if kind.monospace_value() && !shown.is_null() {
+        text = text.monospace();
+    }
+    let resp = ui.add(
+        egui::Label::new(text.color(color))
+            .wrap()
+            .halign(egui::Align::LEFT)
+            .sense(egui::Sense::click()),
+    );
+    let can_edit = editable && !matches!(value, dbcore::Value::Bytes(_));
+    let resp = if can_edit {
+        resp.on_hover_text("Double-click to edit")
+    } else {
+        resp
+    };
+    if can_edit && resp.double_clicked() {
+        if kind == K::Bool {
+            // NULL booleans can't show a checkbox; double-click stages TRUE.
+            edits.toggle_bool(row_idx, c, value);
+        } else {
+            edits.begin(row_idx, c, value);
+        }
+    }
 }

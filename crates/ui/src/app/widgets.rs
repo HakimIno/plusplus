@@ -110,16 +110,55 @@ pub(super) struct QueryTabResponse {
     pub pinned: bool,
     /// The × close affordance was clicked.
     pub close: bool,
+    /// A drag on the tab body just crossed egui's drag threshold (start reordering).
+    pub drag_started: bool,
+    /// The chip's rect this frame, so the drag handler can map the pointer to a slot.
+    pub rect: egui::Rect,
+}
+
+/// Paint one tab chip (background pill, title, × glyph) into `painter` at `rect`. Shared
+/// by the in-strip chip and its pointer-following twin during drag-to-reorder.
+#[allow(clippy::too_many_arguments)]
+fn paint_tab_chip(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    galley: &std::sync::Arc<egui::Galley>,
+    fill: egui::Color32,
+    stroke: egui::Stroke,
+    text_color: egui::Color32,
+    close_color: egui::Color32,
+    pad: f32,
+    close_w: f32,
+) {
+    painter.rect(
+        rect,
+        egui::CornerRadius::same(4),
+        fill,
+        stroke,
+        egui::StrokeKind::Outside,
+    );
+    let pos = egui::pos2(rect.left() + pad, rect.center().y - galley.size().y * 0.5);
+    painter.galley(pos, galley.clone(), text_color);
+    let c = egui::pos2(rect.right() - pad - close_w * 0.5, rect.center().y);
+    let r = 3.5;
+    let s = egui::Stroke::new(1.3, close_color);
+    painter.line_segment([c + egui::vec2(-r, -r), c + egui::vec2(r, r)], s);
+    painter.line_segment([c + egui::vec2(r, -r), c + egui::vec2(-r, r)], s);
 }
 
 /// A horizontal query-tab chip: title + a × close button. Mirrors the visual language of
 /// [`connection_tab_item`] but laid out left-to-right for the tab strip above the editor.
 /// `preview` tabs render in italics (transient, like other editors' preview tabs).
+///
+/// `drag_float_x` is set while this tab is being drag-reordered: the slot renders as an
+/// empty placeholder and the chip itself is painted on a foreground layer with its left
+/// edge at that x, following the pointer (same technique as egui's drag-and-drop demo).
 pub(super) fn query_tab_item(
     ui: &mut egui::Ui,
     title: &str,
     selected: bool,
     preview: bool,
+    drag_float_x: Option<f32>,
 ) -> QueryTabResponse {
     let label: String = {
         let trimmed = title.trim();
@@ -130,6 +169,7 @@ pub(super) fn query_tab_item(
         }
         s
     };
+    let dragging = drag_float_x.is_some();
 
     let font = egui::TextStyle::Body.resolve(ui.style());
     let color = if selected {
@@ -150,36 +190,10 @@ pub(super) fn query_tab_item(
     let close_w = 14.0;
     let pad = 8.0;
     let size = egui::vec2(text_w + close_w + pad * 2.0 + 4.0, 26.0);
-    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
-
-    let fill = if selected {
-        palette::SURFACE()
-    } else if resp.hovered() {
-        palette::SURFACE_HOVER()
-    } else {
-        egui::Color32::TRANSPARENT
-    };
-    let stroke = if selected {
-        egui::Stroke::new(1.0, palette::BORDER_STRONG())
-    } else if resp.hovered() {
-        egui::Stroke::new(1.0, palette::BORDER())
-    } else {
-        egui::Stroke::NONE
-    };
-    if ui.is_rect_visible(rect) {
-        ui.painter().rect(
-            rect,
-            egui::CornerRadius::same(4),
-            fill,
-            stroke,
-            egui::StrokeKind::Outside,
-        );
-        let pos = egui::pos2(rect.left() + pad, rect.center().y - galley.size().y * 0.5);
-        ui.painter().galley(pos, galley, color);
-    }
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
 
     // The × hit area sits at the right edge; its own hover/click is tested separately so a
-    // click there closes rather than selects.
+    // click there closes rather than selects. Inert while the tab floats mid-drag.
     let close_rect = egui::Rect::from_center_size(
         egui::pos2(rect.right() - pad - close_w * 0.5, rect.center().y),
         egui::vec2(close_w, close_w),
@@ -187,27 +201,86 @@ pub(super) fn query_tab_item(
     let close_resp = ui.interact(
         close_rect,
         resp.id.with("close"),
-        egui::Sense::click(),
-    );
-    if ui.is_rect_visible(close_rect) {
-        let color = if close_resp.hovered() {
-            palette::DANGER()
+        if dragging {
+            egui::Sense::hover()
         } else {
-            palette::TEXT_FAINT()
-        };
-        let c = close_rect.center();
-        let r = 3.5;
-        let s = egui::Stroke::new(1.3, color);
-        ui.painter()
-            .line_segment([c + egui::vec2(-r, -r), c + egui::vec2(r, r)], s);
-        ui.painter()
-            .line_segment([c + egui::vec2(r, -r), c + egui::vec2(-r, r)], s);
+            egui::Sense::click()
+        },
+    );
+
+    let fill = if selected || dragging {
+        palette::SURFACE()
+    } else if resp.hovered() {
+        palette::SURFACE_HOVER()
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    let stroke = if dragging {
+        egui::Stroke::new(1.0, palette::ACCENT())
+    } else if selected {
+        egui::Stroke::new(1.0, palette::BORDER_STRONG())
+    } else if resp.hovered() {
+        egui::Stroke::new(1.0, palette::BORDER())
+    } else {
+        egui::Stroke::NONE
+    };
+    let close_color = if close_resp.hovered() && !dragging {
+        palette::DANGER()
+    } else {
+        palette::TEXT_FAINT()
+    };
+
+    if ui.is_rect_visible(rect) {
+        if let Some(float_x) = drag_float_x {
+            // Empty-slot placeholder marking where the tab will land.
+            ui.painter().rect(
+                rect,
+                egui::CornerRadius::same(4),
+                palette::SURFACE_HOVER(),
+                egui::Stroke::new(1.0, palette::BORDER()),
+                egui::StrokeKind::Outside,
+            );
+            // The chip itself follows the pointer on a foreground layer (above panel
+            // borders and neighbouring chips), Chrome/TablePlus-style.
+            let float_rect =
+                egui::Rect::from_min_size(egui::pos2(float_x, rect.top()), rect.size());
+            let float_painter = egui::Painter::new(
+                ui.ctx().clone(),
+                egui::LayerId::new(egui::Order::Tooltip, resp.id.with("float")),
+                egui::Rect::EVERYTHING,
+            );
+            paint_tab_chip(
+                &float_painter,
+                float_rect,
+                &galley,
+                fill,
+                stroke,
+                color,
+                close_color,
+                pad,
+                close_w,
+            );
+        } else {
+            paint_tab_chip(
+                ui.painter(),
+                rect,
+                &galley,
+                fill,
+                stroke,
+                color,
+                close_color,
+                pad,
+                close_w,
+            );
+        }
     }
 
     QueryTabResponse {
         clicked: resp.clicked() && !close_resp.hovered(),
         pinned: resp.double_clicked() && !close_resp.hovered(),
-        close: close_resp.clicked(),
+        close: close_resp.clicked() && !dragging,
+        drag_started: resp.drag_started() && !close_resp.hovered(),
+        rect,
     }
 }
 

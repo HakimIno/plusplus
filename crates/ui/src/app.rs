@@ -228,6 +228,8 @@ enum Action {
     CloseTab(usize),
     /// Pin a preview tab as permanent (double-click on the tab).
     PinTab(usize),
+    /// Drag-to-reorder: move the tab at `from` so it sits at position `to`.
+    MoveTab { from: usize, to: usize },
     NewConnection,
     EditConnection(usize),
     DeleteConnection(usize),
@@ -247,6 +249,16 @@ enum Action {
         pin: bool,
     },
     SortBy(usize),
+}
+
+/// Drag-to-reorder state for the query-tab strip.
+#[derive(Clone, Copy)]
+struct TabDrag {
+    /// Stable id of the tab being dragged (ids survive the index changing mid-drag).
+    id: u64,
+    /// Pointer x-offset from the chip's left edge at grab time, so the floating chip
+    /// keeps the grab point under the cursor instead of snapping its centre there.
+    grab_x: f32,
 }
 
 pub struct DbGuiApp {
@@ -279,6 +291,8 @@ pub struct DbGuiApp {
 
     // --- transient UI state ---
     editor: Option<ConnEditor>,
+    /// Live drag-to-reorder state for a query tab (cleared on mouse release).
+    tab_drag: Option<TabDrag>,
     settings_open: bool,
     schema_filter: String,
     status_msg: String,
@@ -367,6 +381,7 @@ impl DbGuiApp {
             workspace_dirty: false,
             last_workspace_save: std::time::Instant::now(),
             editor: None,
+            tab_drag: None,
             settings_open: false,
             schema_filter: String::new(),
             status_msg: "Ready".to_string(),
@@ -531,6 +546,21 @@ impl DbGuiApp {
             None => "Ready".to_string(),
         };
         self.error = None;
+        self.workspace_dirty = true;
+    }
+
+    /// Move the tab at `from` so it sits at position `to` (drag-to-reorder). The active
+    /// tab stays the same logical tab — only its position changes.
+    fn move_tab(&mut self, from: usize, to: usize) {
+        if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
+            return;
+        }
+        let active_id = self.tab().id;
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        if let Some(idx) = self.tabs.iter().position(|t| t.id == active_id) {
+            self.active_query_tab = idx;
+        }
         self.workspace_dirty = true;
     }
 
@@ -987,6 +1017,7 @@ impl DbGuiApp {
                 }
                 self.select_tab(i);
             }
+            Action::MoveTab { from, to } => self.move_tab(from, to),
             Action::NewConnection => {
                 self.editor = Some(ConnEditor {
                     config: ConnectionConfig::new(DbKind::Postgres),
@@ -1414,6 +1445,133 @@ mod tests {
         assert!(!app.workspace_dirty);
     }
 
+    /// Drag-to-reorder: `move_tab` moves a tab to its target slot in both directions,
+    /// keeps the active tab the same logical tab, and ignores out-of-range moves.
+    #[test]
+    fn move_tab_reorders_and_tracks_active() {
+        let mut app = DbGuiApp::construct();
+        // Three tabs with recognisable SQL; ids 0, 1, 2.
+        app.tab_mut().sql = "q0".into();
+        app.new_tab();
+        app.tab_mut().sql = "q1".into();
+        app.new_tab();
+        app.tab_mut().sql = "q2".into();
+        app.select_tab(0);
+
+        let order = |app: &DbGuiApp| -> Vec<String> {
+            app.tabs.iter().map(|t| t.sql.clone()).collect()
+        };
+
+        // Drag the first tab to the end; the active tab (q0) follows its new position.
+        app.move_tab(0, 2);
+        assert_eq!(order(&app), ["q1", "q2", "q0"]);
+        assert_eq!(app.active_query_tab, 2);
+        assert_eq!(app.tab().sql, "q0");
+
+        // Drag a tab leftwards; the active tab keeps pointing at q0.
+        app.move_tab(1, 0);
+        assert_eq!(order(&app), ["q2", "q1", "q0"]);
+        assert_eq!(app.tab().sql, "q0");
+
+        // No-op and out-of-range moves change nothing.
+        app.move_tab(1, 1);
+        app.move_tab(5, 0);
+        app.move_tab(0, 5);
+        assert_eq!(order(&app), ["q2", "q1", "q0"]);
+    }
+
+    /// Find the painted position of the first text run containing `needle`.
+    fn find_text_pos(shapes: &[egui::epaint::ClippedShape], needle: &str) -> Option<egui::Pos2> {
+        fn walk(shape: &egui::epaint::Shape, needle: &str, out: &mut Option<egui::Pos2>) {
+            match shape {
+                egui::epaint::Shape::Text(t) => {
+                    if out.is_none() && t.galley.text().contains(needle) {
+                        *out = Some(t.pos);
+                    }
+                }
+                egui::epaint::Shape::Vec(v) => {
+                    for s in v {
+                        walk(s, needle, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = None;
+        for s in shapes {
+            walk(&s.shape, needle, &mut out);
+        }
+        out
+    }
+
+    /// End-to-end drag-to-reorder: simulate a real pointer press → move → release over
+    /// the tab strip and assert the tab order actually changes.
+    #[test]
+    fn drag_reorders_tabs_headlessly() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::style::apply(&ctx);
+
+        let mut app = DbGuiApp::construct();
+        app.tab_mut().sql = "q0".into();
+        app.new_tab();
+        app.tab_mut().sql = "q1".into();
+        app.new_tab();
+        app.tab_mut().sql = "q2".into();
+        app.select_tab(0);
+
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+        let run = |app: &mut DbGuiApp, events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            ctx.run_ui(raw, |ui| app.draw(ui, None))
+        };
+
+        // Lay out once and locate the first and last chips by their painted labels.
+        let out = run(&mut app, vec![]);
+        let q1 = find_text_pos(&out.shapes, "Query 1").expect("Query 1 chip not painted");
+        let q3 = find_text_pos(&out.shapes, "Query 3").expect("Query 3 chip not painted");
+        // Grab inside the label (text pos is its top-left), clear of the × hit area.
+        let start = q1 + egui::vec2(4.0, 6.0);
+        let end = egui::pos2(q3.x + 80.0, start.y);
+
+        run(&mut app, vec![egui::Event::PointerMoved(start)]);
+        run(
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        // Drag rightwards in steps, well past egui's is-this-a-drag threshold.
+        let steps = 8;
+        for i in 1..=steps {
+            let t = i as f32 / steps as f32;
+            let pos = start + (end - start) * t;
+            run(&mut app, vec![egui::Event::PointerMoved(pos)]);
+        }
+        run(
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        run(&mut app, vec![]); // settle frame: drag state clears
+
+        let order: Vec<&str> = app.tabs.iter().map(|t| t.sql.as_str()).collect();
+        assert_eq!(order, ["q1", "q2", "q0"], "drag did not reorder the tabs");
+        assert_eq!(app.tab().sql, "q0", "dragged tab should stay active");
+        assert!(app.tab_drag.is_none(), "drag state should clear on release");
+    }
+
     /// Switching tabs swaps the active result; per-tab state stays independent.
     #[test]
     fn tabs_keep_independent_state() {
@@ -1565,6 +1723,83 @@ mod tests {
         assert!(
             clashes.is_empty(),
             "ID clashes detected in structure view:\n{}",
+            clashes.join("\n")
+        );
+    }
+
+    /// Drive the Details panel headlessly with one column per editor kind, editable, so
+    /// the type-aware widgets (type badges, boolean checkbox, date picker) all render.
+    /// Catches panics and ID clashes in the per-column widgets (e.g. the per-column
+    /// date-picker salts).
+    #[test]
+    fn probe_details_panel_typed_columns() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::style::apply(&ctx);
+
+        let mut app = DbGuiApp::construct();
+        let columns = [
+            ("id", "INTEGER"),
+            ("price", "DECIMAL(10,2)"),
+            ("ratio", "REAL"),
+            ("active", "BOOLEAN"),
+            ("born", "DATE"),
+            ("seen", "TIMESTAMP"),
+            ("name", "TEXT"),
+        ];
+        let result = QueryResult {
+            columns: columns
+                .iter()
+                .map(|(n, t)| ColumnMeta {
+                    name: (*n).into(),
+                    type_name: (*t).into(),
+                })
+                .collect(),
+            rows: vec![
+                vec![
+                    Value::Int(1),
+                    Value::Text("19.99".into()),
+                    Value::Float(0.5),
+                    Value::Bool(true),
+                    Value::Text("2024-05-01".into()),
+                    Value::Text("2024-05-01 10:30:00".into()),
+                    Value::Text("ปลาทู".into()),
+                ],
+                // A NULL-heavy row exercises the NULL fallbacks of every kind.
+                vec![Value::Null; 7],
+            ],
+            stats: QueryStats::default(),
+        };
+        {
+            let tab = app.tab_mut();
+            tab.set_result(result);
+            tab.selected_row = Some(0);
+            tab.edits.source = Some(crate::edit::EditSource {
+                schema: None,
+                table: "t".into(),
+                pk_cols: vec!["id".into()],
+            });
+        }
+
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+        let mut clashes: Vec<String> = Vec::new();
+        for row in [Some(0), Some(1)] {
+            app.tab_mut().selected_row = row;
+            for _ in 0..3 {
+                let raw = egui::RawInput {
+                    screen_rect: Some(screen),
+                    events: vec![egui::Event::PointerMoved(egui::pos2(880.0, 300.0))],
+                    ..Default::default()
+                };
+                let out = ctx.run_ui(raw, |ui| app.draw(ui, None));
+                clashes.extend(collect_clash_text(&out.shapes));
+            }
+        }
+        clashes.sort();
+        clashes.dedup();
+        assert!(
+            clashes.is_empty(),
+            "ID clashes in typed Details panel:\n{}",
             clashes.join("\n")
         );
     }

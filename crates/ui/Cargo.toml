@@ -25,3 +25,5 @@ arboard.workspace = true
 chrono.workspace = true
 # Token-based SQL beautifier behind the editor's Beautify (Cmd/Ctrl+I) action.
 sqlformat.workspace = true
+# Date type consumed by egui_extras' DatePickerButton (the Details panel date picker).
+jiff.workspace = true

@@ -297,6 +297,30 @@ pub fn section_header(ui: &mut egui::Ui, text: &str) {
     ui.add_space(3.0);
 }
 
+/// A small rounded type tag (INTEGER, DATE, …) tinted with a semantic colour, used by the
+/// Details panel so a column's kind is readable at a glance.
+pub fn type_badge(ui: &mut egui::Ui, text: &str, color: Color32) {
+    let galley = ui.painter().layout_no_wrap(
+        text.to_uppercase(),
+        FontId::new(9.0, FontFamily::Proportional),
+        color,
+    );
+    let pad = egui::vec2(5.0, 2.0);
+    let (rect, _) =
+        ui.allocate_exact_size(galley.size() + pad * 2.0, egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let tint = |a: u8| Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a);
+        ui.painter().rect(
+            rect,
+            egui::CornerRadius::same(3),
+            tint(22),
+            egui::Stroke::new(1.0, tint(64)),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().galley(rect.min + pad, galley, color);
+    }
+}
+
 /// A small filled status dot (connected = green, idle = faint), vertically centred so it
 /// sits neatly inline before a label.
 #[allow(dead_code)]

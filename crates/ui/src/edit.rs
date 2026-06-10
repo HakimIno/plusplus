@@ -64,6 +64,12 @@ impl EditorKind {
         }
     }
 
+    /// Whether values of this kind read best in a fixed-width font (numbers and temporals,
+    /// where digit alignment matters).
+    pub fn monospace_value(self) -> bool {
+        !matches!(self, EditorKind::Text | EditorKind::Bool)
+    }
+
     /// Whether `s` is a valid value for this kind. An empty string is always valid — it means
     /// "set NULL". Used to block staging malformed numbers/dates.
     pub fn is_valid(self, s: &str) -> bool {
@@ -198,8 +204,8 @@ fn valid_datetime(s: &str) -> bool {
         || chrono::DateTime::parse_from_rfc3339(s).is_ok()
 }
 
-/// Read the boolean sense of a cell value, for toggling.
-fn as_bool(value: &Value) -> bool {
+/// Read the boolean sense of a cell value, for toggling and checkbox display.
+pub(crate) fn as_bool(value: &Value) -> bool {
     match value {
         Value::Bool(b) => *b,
         Value::Int(i) => *i != 0,
@@ -298,7 +304,9 @@ impl Edits {
     }
 
     /// Stage `new` for `(row, col)`, or clear the staged edit if it equals `original`.
-    fn stage(&mut self, row: usize, col: usize, new: Value, original: &Value) {
+    /// Public so type-aware widgets (the Details panel's date picker and checkboxes) can
+    /// stage a value directly, without going through a text editor.
+    pub fn stage(&mut self, row: usize, col: usize, new: Value, original: &Value) {
         let entry = self.cells.entry(row).or_default();
         if &new == original {
             entry.remove(&col);
