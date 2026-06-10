@@ -2,6 +2,7 @@
 //! They are rendered via `egui_extras`' SVG image loader and tinted to the current theme
 //! text colour, so they stay crisp at any size and adapt to light/dark themes.
 
+use dbcore::ConnectionIcon;
 use egui::{include_image, ImageSource};
 
 /// Default on-canvas size for an icon, in points.
@@ -28,6 +29,10 @@ icon_fns! {
     trash      => "../assets/icons/trash.svg",
     database   => "../assets/icons/streamline-plump-color--database.svg",
     table      => "../assets/icons/streamline-plump-color--table-flat.svg",
+    conn_cloud => "../assets/icons/streamline-plump-color--cloud-data-transfer-flat.svg",
+    conn_storage => "../assets/icons/streamline-plump-color--hard-drive-2-flat.svg",
+    conn_star  => "../assets/icons/streamline-plump-color--star-circle-flat.svg",
+    conn_treasure => "../assets/icons/streamline-plump-color--treasure-chest-flat.svg",
     code       => "../assets/icons/code.svg",
     column     => "../assets/icons/column.svg",
     key        => "../assets/icons/key.svg",
@@ -52,6 +57,73 @@ fn image(
     egui::Image::new(src)
         .fit_to_exact_size(egui::vec2(size, size))
         .tint(tint)
+}
+
+/// Map a persisted connection icon to its embedded SVG.
+pub fn connection_icon(icon: ConnectionIcon) -> ImageSource<'static> {
+    match icon {
+        ConnectionIcon::Database => database(),
+        ConnectionIcon::Table => table(),
+        ConnectionIcon::Cloud => conn_cloud(),
+        ConnectionIcon::Storage => conn_storage(),
+        ConnectionIcon::Star => conn_star(),
+        ConnectionIcon::Treasure => conn_treasure(),
+    }
+}
+
+/// Connection picker icons are full-colour Streamline assets — never theme-tinted.
+pub fn connection_icon_is_colored(_icon: ConnectionIcon) -> bool {
+    true
+}
+
+/// Paint a connection sidebar icon at `rect`.
+pub fn paint_connection_icon(
+    ui: &egui::Ui,
+    icon: ConnectionIcon,
+    rect: egui::Rect,
+    tint: egui::Color32,
+) {
+    let img = egui::Image::new(connection_icon(icon)).fit_to_exact_size(rect.size());
+    if connection_icon_is_colored(icon) {
+        img.paint_at(ui, rect);
+    } else {
+        img.tint(tint).paint_at(ui, rect);
+    }
+}
+
+/// Compact picker tile for the connection dialog.
+pub fn connection_icon_picker_button(
+    ui: &mut egui::Ui,
+    icon: ConnectionIcon,
+    selected: bool,
+    size: f32,
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        if selected {
+            ui.painter().rect_stroke(
+                rect,
+                egui::CornerRadius::same(4),
+                egui::Stroke::new(1.5, crate::style::palette::ACCENT()),
+                egui::StrokeKind::Outside,
+            );
+        } else if resp.hovered() {
+            ui.painter().rect_stroke(
+                rect,
+                egui::CornerRadius::same(4),
+                egui::Stroke::new(1.0, crate::style::palette::BORDER()),
+                egui::StrokeKind::Outside,
+            );
+        }
+        let icon_rect = rect.shrink(5.0);
+        let tint = if selected {
+            crate::style::palette::TEXT()
+        } else {
+            crate::style::palette::TEXT_WEAK()
+        };
+        paint_connection_icon(ui, icon, icon_rect, tint);
+    }
+    resp.on_hover_text(icon.label())
 }
 
 /// Render a decorative inline icon (no interaction), tinted to the normal text colour.

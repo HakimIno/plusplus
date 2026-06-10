@@ -573,6 +573,7 @@ impl DbGuiApp {
                                     let resp = super::widgets::connection_tab_item(
                                         ui,
                                         &conn.name,
+                                        conn.icon,
                                         selected,
                                         live,
                                         drag_float_y,
@@ -1155,6 +1156,20 @@ impl DbGuiApp {
                             field_test_status(&test_state, ConnField::Name),
                         )
                         .changed();
+                        ui.end_row();
+
+                        ui.label("Icon");
+                        ui.horizontal(|ui| {
+                            for icon in dbcore::ConnectionIcon::ALL {
+                                let selected = editor.config.icon == icon;
+                                let resp =
+                                    icons::connection_icon_picker_button(ui, icon, selected, 32.0);
+                                if resp.clicked() {
+                                    editor.config.icon = icon;
+                                    form_changed = true;
+                                }
+                            }
+                        });
                         ui.end_row();
 
                         ui.label("Type");

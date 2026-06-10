@@ -24,7 +24,8 @@ pub use model::{
     build_add_column_sql, build_create_index_sql, build_create_table_sql, build_delete_sql,
     build_drop_column_sql, build_drop_index_sql, build_drop_table_sql, build_insert_sql,
     build_rename_column_sql, build_update_sql, simple_select_target, ColumnDef, ColumnInfo,
-    ColumnMeta, ConnectionColor, ConnectionConfig, DbKind, FkAction, ForeignKeyDef, IndexDef,
+    ColumnMeta, ConnectionColor, ConnectionConfig, ConnectionIcon, DbKind, FkAction, ForeignKeyDef,
+    IndexDef,
     IndexInfo, QueryResult, QueryStats, SchemaTree, TableInfo,
 };
 pub use value::Value;

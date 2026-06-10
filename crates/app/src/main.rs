@@ -64,11 +64,16 @@ fn fix_titlebar_click_through(cc: &eframe::CreationContext<'_>) {
     }
 }
 
+const APP_ICON: &[u8] = include_bytes!("../assets/icon/png/icon-256.png");
+
 fn main() -> eframe::Result<()> {
+    let icon = eframe::icon_data::from_png_bytes(APP_ICON).expect("valid app icon PNG");
+
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 820.0])
         .with_min_inner_size([800.0, 500.0])
-        .with_title(format!("plusplus v{}", env!("CARGO_PKG_VERSION")));
+        .with_title(format!("plusplus v{}", env!("CARGO_PKG_VERSION")))
+        .with_icon(icon);
 
     // Native macOS traffic lights/titlebar, with egui drawing into the titlebar space.
     // Note: eframe cannot put egui controls above AppKit hit-testing; this is best-effort.

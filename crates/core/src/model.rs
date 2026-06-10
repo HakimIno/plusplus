@@ -296,6 +296,45 @@ pub fn simple_select_target(sql: &str) -> Option<(Option<String>, String)> {
     Some((schema, table))
 }
 
+/// User-chosen glyph for a connection in the sidebar. Persisted with the connection config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionIcon {
+    #[default]
+    Database,
+    Table,
+    #[serde(alias = "code")]
+    Cloud,
+    #[serde(alias = "settings")]
+    Storage,
+    #[serde(alias = "connect")]
+    Star,
+    #[serde(alias = "key")]
+    Treasure,
+}
+
+impl ConnectionIcon {
+    pub const ALL: [ConnectionIcon; 6] = [
+        ConnectionIcon::Database,
+        ConnectionIcon::Table,
+        ConnectionIcon::Cloud,
+        ConnectionIcon::Storage,
+        ConnectionIcon::Star,
+        ConnectionIcon::Treasure,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ConnectionIcon::Database => "Database",
+            ConnectionIcon::Table => "Table",
+            ConnectionIcon::Cloud => "Cloud",
+            ConnectionIcon::Storage => "Local disk",
+            ConnectionIcon::Star => "Favorite",
+            ConnectionIcon::Treasure => "Treasure",
+        }
+    }
+}
+
 /// A saved connection. Secret fields (passwords) are **never** stored here — they live in
 /// the OS keychain keyed by [`ConnectionConfig::id`]. Only non-secret fields are persisted
 /// to the JSON config file.
@@ -321,6 +360,9 @@ pub struct ConnectionConfig {
     /// Optional user-chosen title bar color for visually marking important connections.
     #[serde(default)]
     pub title_bar_color: Option<ConnectionColor>,
+    /// Sidebar icon for this connection.
+    #[serde(default)]
+    pub icon: ConnectionIcon,
 }
 
 impl ConnectionConfig {
@@ -336,6 +378,7 @@ impl ConnectionConfig {
             database: String::new(),
             sqlite_path: String::new(),
             title_bar_color: None,
+            icon: ConnectionIcon::default(),
         }
     }
 

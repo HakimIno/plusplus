@@ -1,3 +1,5 @@
+use dbcore::ConnectionIcon;
+
 use crate::icons;
 use crate::style::palette;
 
@@ -22,38 +24,18 @@ fn compact_connection_label(name: &str) -> String {
 pub(super) fn connection_tab_item(
     ui: &mut egui::Ui,
     name: &str,
+    icon: ConnectionIcon,
     selected: bool,
     connected: bool,
     drag_float_y: Option<f32>,
 ) -> egui::Response {
-    fn paint_database_glyph(painter: &egui::Painter, center: egui::Pos2, color: egui::Color32) {
-        let stroke = egui::Stroke::new(1.5, color);
-        let w = 12.0;
-        let h = 13.0;
-        let left = center.x - w * 0.5;
-        let right = center.x + w * 0.5;
-        let top = center.y - h * 0.5;
-        let mid = center.y;
-        let bottom = center.y + h * 0.5;
-        painter.line_segment(
-            [egui::pos2(left, top + 2.0), egui::pos2(left, bottom - 2.0)],
-            stroke,
-        );
-        painter.line_segment(
-            [
-                egui::pos2(right, top + 2.0),
-                egui::pos2(right, bottom - 2.0),
-            ],
-            stroke,
-        );
-        for y in [top + 2.0, mid, bottom - 2.0] {
-            painter.line_segment([egui::pos2(left, y), egui::pos2(right, y)], stroke);
-        }
-    }
+    const CONN_ICON_SIZE: f32 = 16.0;
 
     fn paint_connection_chip(
+        ui: &egui::Ui,
         painter: &egui::Painter,
         rect: egui::Rect,
+        icon: ConnectionIcon,
         label: &std::sync::Arc<egui::Galley>,
         fill: egui::Color32,
         stroke: egui::Stroke,
@@ -76,11 +58,11 @@ pub(super) fn connection_tab_item(
             );
         }
         let content_rect = rect.shrink2(egui::vec2(3.0, 4.0));
-        paint_database_glyph(
-            painter,
+        let icon_rect = egui::Rect::from_center_size(
             egui::pos2(content_rect.center().x, content_rect.top() + 8.0),
-            icon_color,
+            egui::vec2(CONN_ICON_SIZE, CONN_ICON_SIZE),
         );
+        icons::paint_connection_icon(ui, icon, icon_rect, icon_color);
         let label_pos = egui::pos2(
             content_rect.center().x - label.size().x * 0.5,
             content_rect.top() + 18.0,
@@ -144,8 +126,10 @@ pub(super) fn connection_tab_item(
                 egui::Rect::EVERYTHING,
             );
             paint_connection_chip(
+                ui,
                 &float_painter,
                 float_rect,
+                icon,
                 &label,
                 fill,
                 stroke,
@@ -155,8 +139,10 @@ pub(super) fn connection_tab_item(
             );
         } else {
             paint_connection_chip(
+                ui,
                 ui.painter(),
                 rect,
+                icon,
                 &label,
                 fill,
                 stroke,
