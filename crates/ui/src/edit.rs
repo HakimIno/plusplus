@@ -427,11 +427,18 @@ pub fn render_editor(
                 0,
             )));
     } else {
+        // Invalid input gets a danger-coloured border (not just red text) so the editor
+        // reads as "blocked" at a glance.
+        let border = if valid {
+            palette::BORDER()
+        } else {
+            palette::DANGER()
+        };
         let cr = egui::CornerRadius::same(3);
         field = field.frame(
             egui::Frame::new()
                 .fill(palette::CODE_BG())
-                .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                .stroke(egui::Stroke::new(1.0, border))
                 .corner_radius(cr)
                 .inner_margin(egui::Margin::symmetric(4, 0)),
         );

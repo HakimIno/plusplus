@@ -228,6 +228,7 @@ impl DbGuiApp {
                             for idx in 0..self.tabs.len() {
                                 let selected = idx == self.active_query_tab;
                                 let label = self.tab_label(idx);
+                                let kind = self.tab_kind(idx);
                                 let preview = self.tabs[idx].preview;
                                 // While this tab is dragged, its chip floats with its
                                 // left edge tracking the pointer (minus the grab offset).
@@ -240,6 +241,7 @@ impl DbGuiApp {
                                 let resp = super::widgets::query_tab_item(
                                     ui,
                                     &label,
+                                    kind,
                                     selected,
                                     preview,
                                     drag_float_x,
@@ -1398,12 +1400,23 @@ fn details_value_box(
         let h = DETAILS_VALUE_H;
         let (rect, _) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::hover());
+        // Border turns red while the typed value is invalid for the column, matching the
+        // red text — clear feedback that the edit can't be committed yet.
+        let valid = edits
+            .active
+            .as_ref()
+            .map_or(true, |a| a.kind.is_valid(&a.buf));
+        let border = if valid {
+            palette::ACCENT()
+        } else {
+            palette::DANGER()
+        };
         if ui.is_rect_visible(rect) {
             ui.painter().rect(
                 rect,
                 egui::CornerRadius::same(5),
                 palette::CODE_BG(),
-                egui::Stroke::new(1.0, palette::ACCENT()),
+                egui::Stroke::new(1.0, border),
                 egui::StrokeKind::Inside,
             );
         }

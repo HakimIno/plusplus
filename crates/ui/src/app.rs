@@ -681,6 +681,20 @@ impl DbGuiApp {
         }
     }
 
+    /// Icon kind for the tab strip: table tabs carry a sidebar table name; the rest are
+    /// plain query editors.
+    fn tab_kind(&self, idx: usize) -> widgets::QueryTabKind {
+        if self
+            .tabs
+            .get(idx)
+            .is_some_and(|t| !t.title.trim().is_empty())
+        {
+            widgets::QueryTabKind::Table
+        } else {
+            widgets::QueryTabKind::Query
+        }
+    }
+
     fn select_tab(&mut self, idx: usize) {
         if idx >= self.tabs.len() {
             return;
@@ -1415,6 +1429,23 @@ impl DbGuiApp {
         // Cmd/Ctrl+S saves staged cell edits (TablePlus-style) as UPDATE statements.
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
             self.commit_edits();
+        }
+        // Cmd/Ctrl+R reloads the current result (re-runs the tab's SQL), dropping any
+        // unsaved cell edits — the reloaded result starts from a clean edit slate.
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::R)) {
+            actions.push(Action::RunQuery);
+        }
+        // Esc discards unsaved cell edits (revert to the stored values) when no cell editor
+        // is open — the open-editor case is handled inside `render_editor` (cancel that
+        // cell only). Skipped while the filter bar is up, which uses Esc to close itself.
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape))
+            && self.tab().edits.active.is_none()
+            && self.tab().edits.has_pending()
+            && !self.tab().filter.visible
+        {
+            self.tab_mut().edits.clear();
+            self.status_msg = "Discarded unsaved edits".to_string();
+            self.error = None;
         }
         // Cmd/Ctrl+I beautifies the active tab's SQL (TablePlus-style).
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::I)) {

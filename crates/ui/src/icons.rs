@@ -28,6 +28,7 @@ icon_fns! {
     trash      => "../assets/icons/trash.svg",
     database   => "../assets/icons/database.svg",
     table      => "../assets/icons/table.svg",
+    code       => "../assets/icons/code.svg",
     column     => "../assets/icons/column.svg",
     key        => "../assets/icons/key.svg",
     index      => "../assets/icons/index.svg",

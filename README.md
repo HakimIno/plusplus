@@ -44,6 +44,7 @@ indexes — straight from the introspected schema, no extra queries.
 runs.
 
 Everything important has a shortcut: **Cmd/Ctrl+Enter** runs, **Cmd/Ctrl+S** saves staged
+edits, **Cmd/Ctrl+R** reloads the result (dropping unsaved edits), **Esc** discards unsaved
 edits, **Cmd/Ctrl+T / W** opens and closes tabs, **Cmd/Ctrl+F** toggles the filter bar.
 
 ## How it's built

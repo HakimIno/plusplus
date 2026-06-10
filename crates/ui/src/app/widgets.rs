@@ -184,12 +184,24 @@ pub(super) struct QueryTabResponse {
     pub rect: egui::Rect,
 }
 
-/// Paint one tab chip (background pill, title, × glyph) into `painter` at `rect`. Shared
-/// by the in-strip chip and its pointer-following twin during drag-to-reorder.
+/// Whether a query-tab chip represents a plain SQL editor or a table opened from the schema.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum QueryTabKind {
+    Query,
+    Table,
+}
+
+const TAB_ICON_SIZE: f32 = 12.0;
+const TAB_ICON_GAP: f32 = 4.0;
+
+/// Paint one tab chip (background pill, kind icon, title, × glyph). Shared by the in-strip
+/// chip and its pointer-following twin during drag-to-reorder.
 #[allow(clippy::too_many_arguments)]
 fn paint_tab_chip(
+    ui: &egui::Ui,
     painter: &egui::Painter,
     rect: egui::Rect,
+    kind: QueryTabKind,
     galley: &std::sync::Arc<egui::Galley>,
     fill: egui::Color32,
     stroke: egui::Stroke,
@@ -205,7 +217,23 @@ fn paint_tab_chip(
         stroke,
         egui::StrokeKind::Outside,
     );
-    let pos = egui::pos2(rect.left() + pad, rect.center().y - galley.size().y * 0.5);
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(
+            rect.left() + pad + TAB_ICON_SIZE * 0.5,
+            rect.center().y,
+        ),
+        egui::vec2(TAB_ICON_SIZE, TAB_ICON_SIZE),
+    );
+    let icon_src = match kind {
+        QueryTabKind::Table => icons::table(),
+        QueryTabKind::Query => icons::code(),
+    };
+    egui::Image::new(icon_src)
+        .fit_to_exact_size(icon_rect.size())
+        .tint(text_color)
+        .paint_at(ui, icon_rect);
+    let text_x = rect.left() + pad + TAB_ICON_SIZE + TAB_ICON_GAP;
+    let pos = egui::pos2(text_x, rect.center().y - galley.size().y * 0.5);
     painter.galley(pos, galley.clone(), text_color);
     let c = egui::pos2(rect.right() - pad - close_w * 0.5, rect.center().y);
     let r = 3.5;
@@ -224,6 +252,7 @@ fn paint_tab_chip(
 pub(super) fn query_tab_item(
     ui: &mut egui::Ui,
     title: &str,
+    kind: QueryTabKind,
     selected: bool,
     preview: bool,
     drag_float_x: Option<f32>,
@@ -263,7 +292,10 @@ pub(super) fn query_tab_item(
     let text_w = galley.size().x;
     let close_w = 14.0;
     let pad = 8.0;
-    let size = egui::vec2(text_w + close_w + pad * 2.0 + 4.0, 26.0);
+    let size = egui::vec2(
+        pad + TAB_ICON_SIZE + TAB_ICON_GAP + text_w + 4.0 + close_w + pad,
+        26.0,
+    );
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
 
     // The × hit area sits at the right edge; its own hover/click is tested separately so a
@@ -318,26 +350,35 @@ pub(super) fn query_tab_item(
             // borders and neighbouring chips), Chrome/TablePlus-style.
             let float_rect =
                 egui::Rect::from_min_size(egui::pos2(float_x, rect.top()), rect.size());
-            let float_painter = egui::Painter::new(
-                ui.ctx().clone(),
-                egui::LayerId::new(egui::Order::Tooltip, resp.id.with("float")),
-                egui::Rect::EVERYTHING,
-            );
-            paint_tab_chip(
-                &float_painter,
-                float_rect,
-                &galley,
-                fill,
-                stroke,
-                color,
-                close_color,
-                pad,
-                close_w,
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(float_rect)
+                    .layer_id(egui::LayerId::new(
+                        egui::Order::Tooltip,
+                        resp.id.with("float"),
+                    )),
+                |ui| {
+                    paint_tab_chip(
+                        ui,
+                        ui.painter(),
+                        float_rect,
+                        kind,
+                        &galley,
+                        fill,
+                        stroke,
+                        color,
+                        close_color,
+                        pad,
+                        close_w,
+                    );
+                },
             );
         } else {
             paint_tab_chip(
+                ui,
                 ui.painter(),
                 rect,
+                kind,
                 &galley,
                 fill,
                 stroke,
