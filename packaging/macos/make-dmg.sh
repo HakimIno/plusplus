@@ -17,7 +17,7 @@ cd "$REPO_ROOT"
 source "${REPO_ROOT}/scripts/version.sh"
 
 APP_NAME="plusplus"
-VERSION="$(plusplus_read_version "$REPO_ROOT)"
+VERSION="$(plusplus_read_version "$REPO_ROOT")"
 ICNS="crates/app/assets/icon/icon.icns"
 
 DIST="target/dist"
@@ -109,7 +109,7 @@ tell application "Finder"
     set current view of container window to icon view
     set toolbar visible of container window to false
     set statusbar visible of container window to false
-    -- 660x400 content area; matches the background picture's design.
+    -- 660x400 content area; matches the background picture design.
     set the bounds of container window to {200, 120, 860, 548}
     set opts to the icon view options of container window
     set arrangement of opts to not arranged
@@ -118,7 +118,7 @@ tell application "Finder"
     try
       set background picture of opts to file ".background:background.tiff"
     end try
-    -- The two slots the background's arrow bridges.
+    -- The two slots the background arrow bridges.
     set position of item "${APP_NAME}.app" of container window to {165, 185}
     set position of item "Applications" of container window to {495, 185}
     close
