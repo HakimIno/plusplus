@@ -60,6 +60,12 @@ pub struct Settings {
     /// Stable key of the selected theme (see `ui`'s `ThemeId`). `None` = use the default.
     #[serde(default)]
     pub theme: Option<String>,
+    /// SQL beautifier: convert reserved keywords to ALL CAPS. `None` = the default (on).
+    #[serde(default)]
+    pub beautify_uppercase: Option<bool>,
+    /// SQL beautifier: indent width in spaces. `None` = the default (2).
+    #[serde(default)]
+    pub beautify_indent: Option<u8>,
 }
 
 /// Load app settings. A missing or unreadable file yields defaults — settings are a

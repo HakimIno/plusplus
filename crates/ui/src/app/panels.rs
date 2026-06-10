@@ -237,6 +237,26 @@ impl DbGuiApp {
                         {
                             actions.push(Action::RunQuery);
                         }
+                        ui.add_space(6.0);
+                        // Beautify formats in the bound connection's dialect; with no live
+                        // connection it still works, falling back to generic SQL.
+                        let dialect_label = self
+                            .active()
+                            .map(|a| a.db.kind().label())
+                            .unwrap_or("SQL");
+                        let has_sql = !self.tab().sql.trim().is_empty();
+                        let resp = super::widgets::beautify_button(
+                            ui,
+                            &mut self.beautify,
+                            has_sql,
+                            dialect_label,
+                        );
+                        if resp.clicked {
+                            actions.push(Action::BeautifySql);
+                        }
+                        if resp.prefs_changed {
+                            self.persist_settings();
+                        }
                     });
                 });
                 ui.add_space(6.0);

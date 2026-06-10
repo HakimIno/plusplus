@@ -333,6 +333,163 @@ pub(super) fn toolbar_icon_button(
     resp.on_hover_text(hover)
 }
 
+/// Outcome of the Beautify split button.
+pub(super) struct BeautifyResponse {
+    /// The main segment was clicked: format the active tab's SQL.
+    pub clicked: bool,
+    /// A preference in the dropdown changed: persist settings.
+    pub prefs_changed: bool,
+}
+
+/// The query console's "Beautify ⌘I ⌄" split button (TablePlus-style): the main segment
+/// reformats the SQL in the active connection's dialect, the chevron opens formatting
+/// preferences. Painted as one pill with an internal hairline so the two hit areas read
+/// as a single control.
+pub(super) fn beautify_button(
+    ui: &mut egui::Ui,
+    prefs: &mut crate::format::BeautifyPrefs,
+    enabled: bool,
+    dialect_label: &str,
+) -> BeautifyResponse {
+    let mut out = BeautifyResponse {
+        clicked: false,
+        prefs_changed: false,
+    };
+
+    // Platform-aware shortcut hint ("⌘I" on macOS, "Ctrl+I" elsewhere).
+    let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::I);
+    let hint = ui.ctx().format_shortcut(&shortcut);
+
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let text_color = if enabled {
+        palette::TEXT()
+    } else {
+        palette::TEXT_FAINT()
+    };
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        "Beautify",
+        0.0,
+        egui::TextFormat {
+            font_id: font.clone(),
+            color: text_color,
+            ..Default::default()
+        },
+    );
+    job.append(
+        &hint,
+        6.0,
+        egui::TextFormat {
+            font_id: font,
+            color: palette::TEXT_FAINT(),
+            ..Default::default()
+        },
+    );
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+
+    // One allocation, two interaction zones: the label segment and the chevron segment.
+    let pad_x = 9.0;
+    let chevron_w = 19.0;
+    let h = 22.0;
+    let main_w = galley.size().x + pad_x * 2.0;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(main_w + chevron_w, h), egui::Sense::hover());
+    let main_rect = egui::Rect::from_min_size(rect.min, egui::vec2(main_w, h));
+    let chev_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.min.x + main_w, rect.min.y),
+        egui::vec2(chevron_w, h),
+    );
+    let main_resp = ui.interact(main_rect, ui.id().with("beautify_main"), egui::Sense::click());
+    let chev_resp = ui.interact(chev_rect, ui.id().with("beautify_menu"), egui::Sense::click());
+
+    if ui.is_rect_visible(rect) {
+        let radius = egui::CornerRadius::same(5);
+        ui.painter().rect(
+            rect,
+            radius,
+            palette::SURFACE(),
+            egui::Stroke::new(1.0, palette::BORDER()),
+            egui::StrokeKind::Outside,
+        );
+        // Per-segment hover wash, rounded only on its outer corners so it stays inside
+        // the pill silhouette.
+        if enabled && main_resp.hovered() {
+            ui.painter().rect_filled(
+                main_rect,
+                egui::CornerRadius {
+                    nw: 5,
+                    sw: 5,
+                    ne: 0,
+                    se: 0,
+                },
+                palette::SURFACE_HOVER(),
+            );
+        }
+        if chev_resp.hovered() {
+            ui.painter().rect_filled(
+                chev_rect,
+                egui::CornerRadius {
+                    nw: 0,
+                    sw: 0,
+                    ne: 5,
+                    se: 5,
+                },
+                palette::SURFACE_HOVER(),
+            );
+        }
+        // Hairline between the two segments.
+        ui.painter().vline(
+            chev_rect.left(),
+            rect.top() + 5.0..=rect.bottom() - 5.0,
+            egui::Stroke::new(1.0, palette::BORDER()),
+        );
+        let text_pos = egui::pos2(
+            main_rect.left() + pad_x,
+            main_rect.center().y - galley.size().y * 0.5,
+        );
+        ui.painter().galley(text_pos, galley, text_color);
+        // Chevron glyph: a small "v".
+        let c = chev_rect.center();
+        let r = 3.0;
+        let stroke = egui::Stroke::new(1.3, palette::TEXT_WEAK());
+        ui.painter()
+            .line_segment([c + egui::vec2(-r, -r * 0.5), c + egui::vec2(0.0, r * 0.5)], stroke);
+        ui.painter()
+            .line_segment([c + egui::vec2(0.0, r * 0.5), c + egui::vec2(r, -r * 0.5)], stroke);
+    }
+
+    if enabled {
+        out.clicked = main_resp.clicked();
+        main_resp.on_hover_text(format!("Format the query for {dialect_label}"));
+    }
+
+    // The chevron stays active even with empty SQL so preferences remain reachable.
+    egui::Popup::menu(&chev_resp)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_min_width(170.0);
+            ui.label(
+                egui::RichText::new(format!("Format for {dialect_label}"))
+                    .small()
+                    .color(palette::TEXT_FAINT()),
+            );
+            ui.separator();
+            if ui
+                .checkbox(&mut prefs.uppercase, "Uppercase keywords")
+                .changed()
+            {
+                out.prefs_changed = true;
+            }
+            ui.separator();
+            for (width, label) in [(2u8, "Indent: 2 spaces"), (4u8, "Indent: 4 spaces")] {
+                if ui.radio_value(&mut prefs.indent, width, label).changed() {
+                    out.prefs_changed = true;
+                }
+            }
+        });
+
+    out
+}
+
 /// Hairline separator between toolbar icon groups.
 pub(super) fn toolbar_sep(ui: &mut egui::Ui) {
     let h = 14.0;

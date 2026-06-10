@@ -237,6 +237,8 @@ enum Action {
     CloseSettings,
     BrowseSqlitePath,
     RunQuery,
+    /// Reformat the active tab's SQL in its connection's dialect (Beautify, Cmd/Ctrl+I).
+    BeautifySql,
     /// Open a table's rows from the sidebar. `source` makes the result editable. `pin` opens
     /// it as a permanent tab (double-click) rather than the reusable italic preview tab.
     OpenTable {
@@ -290,6 +292,8 @@ pub struct DbGuiApp {
     // --- preferences ---
     /// Currently selected colour theme (persisted to settings.json).
     theme: ThemeId,
+    /// SQL beautifier preferences (persisted to settings.json).
+    beautify: crate::format::BeautifyPrefs,
 }
 
 impl DbGuiApp {
@@ -323,12 +327,20 @@ impl DbGuiApp {
         let connections = dbcore::config::load_connections().unwrap_or_default();
 
         // Restore the saved theme (falling back to the default), and make it active.
-        let theme = dbcore::config::load_settings()
+        let settings = dbcore::config::load_settings();
+        let theme = settings
             .theme
             .as_deref()
             .and_then(ThemeId::from_key)
             .unwrap_or(ThemeId::DEFAULT);
         crate::theme::set_current(theme);
+        let beautify_defaults = crate::format::BeautifyPrefs::default();
+        let beautify = crate::format::BeautifyPrefs {
+            uppercase: settings
+                .beautify_uppercase
+                .unwrap_or(beautify_defaults.uppercase),
+            indent: settings.beautify_indent.unwrap_or(beautify_defaults.indent),
+        };
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -363,6 +375,7 @@ impl DbGuiApp {
             show_schema_panel: true,
             show_details_panel: true,
             theme,
+            beautify,
         }
     }
 
@@ -442,11 +455,37 @@ impl DbGuiApp {
         self.theme = id;
         crate::theme::set_current(id);
         crate::style::apply(ctx);
+        self.persist_settings();
+    }
+
+    /// Flush all settings.json-backed preferences (theme, beautifier) to disk.
+    fn persist_settings(&mut self) {
         let settings = dbcore::config::Settings {
-            theme: Some(id.key().to_string()),
+            theme: Some(self.theme.key().to_string()),
+            beautify_uppercase: Some(self.beautify.uppercase),
+            beautify_indent: Some(self.beautify.indent),
         };
         if let Err(e) = dbcore::config::save_settings(&settings) {
-            self.error = Some(format!("Could not save theme: {e}"));
+            self.error = Some(format!("Could not save settings: {e}"));
+        }
+    }
+
+    /// Reformat the active tab's SQL in the dialect of its live connection (generic SQL
+    /// when disconnected). Token-preserving, so the query's meaning never changes.
+    fn beautify_sql(&mut self) {
+        let kind = self.active().map(|a| a.db.kind());
+        let prefs = self.beautify;
+        let tab = self.tab_mut();
+        if tab.sql.trim().is_empty() {
+            return;
+        }
+        let pretty = crate::format::beautify(&tab.sql, kind, prefs);
+        if pretty != tab.sql {
+            tab.sql = pretty;
+            // Only whitespace/keyword-case changed, so the result grid still matches the
+            // SQL — staged edits and editability are deliberately left untouched.
+            self.workspace_dirty = true;
+            self.status_msg = "Query beautified".to_string();
         }
     }
 
@@ -1007,6 +1046,7 @@ impl DbGuiApp {
                 self.tabs[idx].edits.pending_source = self.derive_edit_source(idx);
                 self.start_query_for(idx);
             }
+            Action::BeautifySql => self.beautify_sql(),
             Action::OpenTable { sql, source, pin } => self.open_table(sql, source, pin),
             Action::SortBy(col) => self.tab_mut().apply_sort(col),
         }
@@ -1101,6 +1141,10 @@ impl DbGuiApp {
         // Cmd/Ctrl+S saves staged cell edits (TablePlus-style) as UPDATE statements.
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
             self.commit_edits();
+        }
+        // Cmd/Ctrl+I beautifies the active tab's SQL (TablePlus-style).
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::I)) {
+            actions.push(Action::BeautifySql);
         }
         // Cmd/Ctrl+T opens a new query tab; Cmd/Ctrl+W closes the active one.
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::T)) {
@@ -1342,6 +1386,32 @@ mod tests {
         assert_eq!(app.active().unwrap().config_id, "c1");
         app.tab_mut().conn_id = None;
         assert!(app.active().is_none());
+    }
+
+    /// The Beautify action reformats the active tab's SQL in the bound connection's
+    /// dialect, marks the workspace dirty, and leaves staged-edit state untouched.
+    #[test]
+    fn beautify_reformats_active_tab() {
+        let mut app = DbGuiApp::construct();
+        app.tab_mut().sql = "select id, name from users where id = 1".into();
+        app.workspace_dirty = false;
+        app.beautify_sql();
+        assert_eq!(
+            app.tab().sql,
+            "SELECT\n  id,\n  name\nFROM\n  users\nWHERE\n  id = 1"
+        );
+        assert!(app.workspace_dirty);
+
+        // Already-formatted SQL is a no-op: no dirty flag, no status churn.
+        app.workspace_dirty = false;
+        app.beautify_sql();
+        assert!(!app.workspace_dirty);
+
+        // Empty SQL never panics or dirties anything.
+        app.tab_mut().sql = "   ".into();
+        app.beautify_sql();
+        assert_eq!(app.tab().sql, "   ");
+        assert!(!app.workspace_dirty);
     }
 
     /// Switching tabs swaps the active result; per-tab state stays independent.

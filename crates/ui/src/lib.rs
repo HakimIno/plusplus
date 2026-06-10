@@ -6,6 +6,7 @@
 mod app;
 mod edit;
 mod filter;
+mod format;
 mod grid;
 mod highlight;
 mod icons;
