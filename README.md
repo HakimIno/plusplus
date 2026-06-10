@@ -1,104 +1,95 @@
 # plusplus
 
-A native, cross-platform database GUI written entirely in Rust — TablePlus in spirit, with
-a fast, virtualized data grid at its core. Browse schemas, run SQL, and (from Phase 2)
-analyze result sets with descriptive statistics, grouping, and charts.
+A native database GUI written entirely in Rust, in the spirit of TablePlus. One window
+for everything: browse a database's schema, run SQL, inspect and edit the results — fast,
+keyboard-friendly, and without ever blocking the UI on the network.
 
-First-class Thai support: a Thai-capable font (Noto Sans Thai) is embedded and used as a
-fallback everywhere, and all cell/column content is UTF-8 with no truncation.
+It speaks **PostgreSQL**, **MySQL / MariaDB**, **SQL Server**, and **SQLite** through one
+backend abstraction, so every feature works the same way against any of them.
 
-## Status
+Thai text is a first-class citizen: a Thai-capable font (Noto Sans Thai) is embedded as a
+fallback everywhere, and all content is UTF-8 end to end.
 
-**Phase 1 (this build) is complete and runnable:**
+## What it does
 
-- Connection manager: add / edit / save / delete connections. Non-secret fields persist to a
-  JSON config; **passwords are stored in the OS keychain, never in plaintext**.
-- Connect to **PostgreSQL**, **MySQL / MariaDB**, and **SQLite**.
-- Left panel schema browser: database → tables → columns (with PK / nullability / type) and
-  indexes. Filter tables by name.
-- SQL editor with a **Run** button and **Cmd/Ctrl+Enter** shortcut.
-- Virtualized results grid (`egui_extras::TableBuilder`) that stays smooth at 100k+ rows:
-  resizable columns, click-to-sort headers, horizontal + vertical scroll.
-- Row count and query time in the status bar; SQL errors shown cleanly without crashing.
-- Non-blocking I/O: queries run on a `tokio` runtime and stream back over a channel, so the
-  UI stays interactive (spinner while busy).
+**Connections.** Saved connections live in a JSON config, while passwords go to the OS
+keychain — never to disk in plaintext. Live connections are pooled and shared, so several
+tabs can work against the same database at once.
 
-## Architecture
+**Schema browsing.** Connecting introspects the whole database into a sidebar tree:
+tables, columns (type, nullability, primary key), and indexes, filterable by name. A
+single click previews a table's rows; a double click opens it as a permanent tab.
 
-A Cargo workspace keeps the data/analysis logic decoupled from the GUI and unit-testable
-without a window:
+**Query tabs.** Each tab is an independent SQL editor (with syntax highlighting) bound to
+its own connection, with its own result, sort, filter, and edit state. Table previews
+reuse one italic *preview* tab so casual browsing doesn't pile up tabs. The open tabs —
+their SQL, connection, and source table — persist across restarts.
+
+**The grid.** Results render in a virtualized grid that stays smooth past 100k rows:
+resizable columns, click-to-sort headers, a TablePlus-style filter bar
+(column / operator / value conditions), and a details panel showing the selected row
+field by field.
+
+**Editing.** When a result maps cleanly back to one table (any simple
+`SELECT * FROM t …`), cells become editable in place with type-aware editors. Edits are
+*staged* — tinted green, not yet written — until **Cmd/Ctrl+S** turns them into primary-key
+`UPDATE`s and reloads the grid with what the database actually stored. Anything that
+can't be mapped back safely (joins, projections, aggregates) is simply read-only.
+
+**Data / Structure views.** A table tab can switch between its rows (*Data*) and the
+table's definition (*Structure*): columns with types, nullability, and keys, plus its
+indexes — straight from the introspected schema, no extra queries.
+
+**Themes.** Three built-in color themes (Carbon, Midnight, Daylight), persisted across
+runs.
+
+Everything important has a shortcut: **Cmd/Ctrl+Enter** runs, **Cmd/Ctrl+S** saves staged
+edits, **Cmd/Ctrl+T / W** opens and closes tabs, **Cmd/Ctrl+F** toggles the filter bar.
+
+## How it's built
+
+A Cargo workspace separates the data layer from the GUI, so the interesting logic is
+unit-testable without opening a window:
 
 ```
-plusplus/
-  Cargo.toml            # workspace + pinned dependency versions
-  crates/
-    core/               # DB abstraction: connections, schema introspection, query execution
-    analysis/           # (Phase 2) Polars: result set -> DataFrame -> stats/aggregations
-    ui/                 # egui views, widgets, app state
-    app/                # eframe entry point; embeds the Thai font, wires it all together
+crates/
+  core/      # backend abstraction: connections, introspection, query execution
+  analysis/  # placeholder for Polars-based result analysis (stats, group-by, charts)
+  ui/        # egui views, widgets, app state
+  app/       # eframe entry point; embeds the Thai font, wires it all together
 ```
 
-Key design points:
+The design rests on a few ideas:
 
-- **`Database` trait** (`core::Database`) abstracts over backends: `kind`, `introspect`,
-  `execute`. Implemented for PostgreSQL, MySQL / MariaDB, and SQLite. The rest of the app
-  only ever holds an `Arc<dyn Database>`, so new SQL backends are added as one backend
-  module plus one match arm in `core::connect`.
-- **Backend-agnostic rows**: every backend decodes its native types into a common
-  `core::Value` enum (`Null`/`Bool`/`Int`/`Float`/`Text`/`Bytes`), so the UI and analysis
-  layers never depend on a specific driver.
-- **No blocking on the UI thread**: `update` collects deferred `Action`s from panel closures
-  and applies them with full `&mut self`, sidestepping egui borrow conflicts; database work
-  is spawned on tokio and returned via `std::sync::mpsc`.
-- The internal crate is imported as **`dbcore`** (not `core`) so it doesn't shadow Rust's
-  std `core` crate in dependents.
+- **One trait, many backends.** `core::Database` (`kind` / `introspect` / `execute`) is
+  all the app knows about a database; each backend decodes its native types into a common
+  `Value` enum. Adding a backend means one module plus one match arm — the UI doesn't
+  change.
+- **The UI thread never waits.** Database work runs on a `tokio` runtime and reports back
+  over a channel that the UI drains each frame; a tab id routes every result to the tab
+  that asked for it, even if the user has moved on.
+- **Editing is safety-first.** Editability is *derived from the SQL itself* on every run,
+  values are validated against their column types before any statement is built, and
+  generated `UPDATE`s are keyed strictly by primary key.
+- The internal crate is imported as `dbcore` (not `core`) so it doesn't shadow Rust's
+  std `core`.
 
-## Build & Run
+Built on `eframe`/`egui` + `egui_extras` for the GUI, `sqlx` and `tiberius` for the
+databases, `tokio` for async, and `keyring` for secrets. Versions are pinned in the root
+`Cargo.toml`.
 
-Requires a recent stable Rust (≥ 1.94; pinned via `rust-toolchain.toml`). SQLite is bundled
-(no system library needed).
+## Running it
+
+Requires stable Rust (pinned via `rust-toolchain.toml`); SQLite is bundled, so there's
+nothing else to install.
 
 ```bash
-# build everything
-cargo build
-
-# run the GUI
-cargo run -p plusplus-app      # or: cargo run --bin plusplus
-
-# run the (GUI-free) data-layer tests
-cargo test -p plusplus-core
+cargo run --bin plusplus    # build & launch the GUI
+cargo test --workspace      # data-layer and headless UI tests
 ```
 
-### Try it with the sample database
+A small sample SQLite database with mixed Thai/English data ships at
+`examples/sample.sqlite` — add it as a SQLite connection to try the app without a server.
 
-A small SQLite database with mixed Thai/English data lives at `examples/sample.sqlite`
-(`customers`, `orders`). In the app:
-
-1. Click **➕** next to *Connections*.
-2. Set **Type** = SQLite, **Browse…** to `examples/sample.sqlite`, give it a name, **Save**.
-3. Click the connection to connect — the schema tree populates on the left.
-4. Double-click a table to preview its rows, or run e.g.
-   `SELECT city, COUNT(*) FROM customers GROUP BY city;`
-5. Click a column header to sort. Thai text renders in headers, cells, and the editor.
-
-### Connecting to PostgreSQL, MySQL, or MariaDB
-
-Use the connection dialog (host / port / user / password / database). The password is saved
-to your OS keychain under the service `plusplus`.
-
-## Tech stack
-
-GUI `eframe`/`egui` + `egui_extras` · async `tokio` · DB `sqlx` (postgres + mysql + sqlite) ·
-secrets `keyring` · file dialogs `rfd` · clipboard `arboard` · errors `thiserror`/`anyhow`.
-Versions are pinned in the root `Cargo.toml`. (`polars` and `egui_plot` arrive in Phase 2.)
-
-## What Phase 2 will add
-
-- Load the current result set into a Polars `DataFrame`.
-- A **Stats** tab: per-column descriptive statistics (count, nulls, min/max/mean/median,
-  distinct count) with correct numeric/text/date handling.
-- A **group-by / aggregate** builder (count/sum/avg/min/max).
-- **Charts** via `egui_plot`: bar, line, and a histogram for a chosen numeric column.
-
-Phase 3 then brings multiple query tabs, persisted query history, CSV/JSON export, in-cell
-editing with previewed `UPDATE`s (opt-in commit), and grid keyboard navigation + copy.
+On macOS, `packaging/macos/make-dmg.sh` packages a release build into `plusplus.app` and
+a styled drag-to-install `.dmg` (run `cargo build --release --bin plusplus` first).

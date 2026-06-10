@@ -48,18 +48,74 @@ PLIST
 # Ad-hoc sign so Gatekeeper treats it as a stable identity (no paid cert needed).
 if command -v codesign >/dev/null 2>&1; then
   echo "→ ad-hoc codesigning"
-  
   codesign --force --deep --sign - "$APP" 2>/dev/null || echo "  (codesign skipped)"
 fi
 
-echo "→ building ${DMG}"
+# --- styled installer DMG ----------------------------------------------------
+# Built in two steps: a read-write image first, so Finder (via AppleScript) can
+# lay out the window — background picture, icon view, icon positions — which it
+# persists into the volume's .DS_Store; then compressed into the final UDZO.
+BACKGROUND="packaging/macos/assets/background.tiff"
+VOL_NAME="${APP_NAME}"
+
+echo "→ staging volume"
 rm -f "$DMG"
 STAGE="$(mktemp -d)"
 cp -R "$APP" "${STAGE}/"
 ln -s /Applications "${STAGE}/Applications"      # drag-to-install target
-hdiutil create -volname "${APP_NAME} ${VERSION}" \
-  -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+if [ -f "$BACKGROUND" ]; then
+  mkdir "${STAGE}/.background"
+  cp "$BACKGROUND" "${STAGE}/.background/background.tiff"
+fi
+cp "$ICNS" "${STAGE}/.VolumeIcon.icns"           # disk icon while mounted
+
+RW_DMG="${DIST}/${APP_NAME}-rw.dmg"
+rm -f "$RW_DMG"
+hdiutil create -volname "$VOL_NAME" -srcfolder "$STAGE" -ov \
+  -format UDRW -fs HFS+ "$RW_DMG" >/dev/null
 rm -rf "$STAGE"
+
+echo "→ styling installer window"
+MOUNT="/Volumes/${VOL_NAME}"
+# A stale volume with the same name would make Finder script the wrong window.
+hdiutil detach "$MOUNT" >/dev/null 2>&1 || true
+hdiutil attach "$RW_DMG" -mountpoint "$MOUNT" >/dev/null
+SetFile -a C "$MOUNT" 2>/dev/null || true        # honour .VolumeIcon.icns
+
+osascript <<OSA
+tell application "Finder"
+  tell disk "${VOL_NAME}"
+    open
+    set current view of container window to icon view
+    set toolbar visible of container window to false
+    set statusbar visible of container window to false
+    -- 660x400 content area; matches the background picture's design.
+    set the bounds of container window to {200, 120, 860, 548}
+    set opts to the icon view options of container window
+    set arrangement of opts to not arranged
+    set icon size of opts to 110
+    set text size of opts to 13
+    try
+      set background picture of opts to file ".background:background.tiff"
+    end try
+    -- The two slots the background's arrow bridges.
+    set position of item "${APP_NAME}.app" of container window to {165, 185}
+    set position of item "Applications" of container window to {495, 185}
+    close
+    open
+    delay 1
+    close
+  end tell
+end tell
+OSA
+
+# Give Finder a moment to flush .DS_Store before unmounting.
+sync
+hdiutil detach "$MOUNT" >/dev/null
+
+echo "→ compressing ${DMG}"
+hdiutil convert "$RW_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG" >/dev/null
+rm -f "$RW_DMG"
 
 echo "✓ done"
 echo "  app: ${APP}"
