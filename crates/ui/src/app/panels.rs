@@ -919,7 +919,7 @@ impl DbGuiApp {
         egui::CentralPanel::default().show_inside(root, |ui| match result.as_ref() {
             Some(result) if result.column_count() > 0 => {
                 let resp =
-                    results_grid(ui, result, row_order, sort, *selected_row, edits, editable);
+                    results_grid(ui, result, row_order, sort, *selected_row, edits, editable, tab_id);
                 if let Some(col) = resp.sort {
                     actions.push(Action::SortBy(col));
                 }
@@ -967,9 +967,16 @@ impl DbGuiApp {
                         edits.toggle_bool(r, c, &orig);
                     }
                 }
-                // Double-clicking empty table space appends a new (insert) row.
+                // Double-clicking empty table space appends a new (insert) row, selects it,
+                // and opens an editor on the first text-editable column right away.
                 if resp.add_row {
-                    edits.add_new_row();
+                    let new_id = edits.add_new_row();
+                    *selected_row = Some(row_order.len() + edits.new_rows - 1);
+                    let first_col = (0..result.column_count())
+                        .find(|&c| edits.col_kind(c) != crate::edit::EditorKind::Bool);
+                    if let Some(c) = first_col {
+                        edits.begin(new_id, c, &dbcore::Value::Null, crate::edit::EditOrigin::Grid);
+                    }
                 }
             }
             Some(_) => {

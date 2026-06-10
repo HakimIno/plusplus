@@ -40,7 +40,8 @@ enum RowKind {
 }
 
 /// Render the result set. `order` maps display rows → indices into `result.rows`.
-/// `selected` is the currently selected display row.
+/// `selected` is the currently selected display row. `grid_id` must be unique per tab so
+/// egui's per-widget click-time memory doesn't bleed between tabs.
 #[allow(clippy::too_many_arguments)]
 pub fn results_grid(
     ui: &mut egui::Ui,
@@ -50,6 +51,7 @@ pub fn results_grid(
     selected: Option<usize>,
     edits: &mut Edits,
     editable: bool,
+    grid_id: u64,
 ) -> GridResponse {
     let mut out = GridResponse::default();
     let ncols = result.columns.len();
@@ -76,16 +78,17 @@ pub fn results_grid(
     if desired_total <= ui.available_width() {
         build_grid(
             ui, result, order, sort, selected, edits, editable, gutter_w, row_height, &mut out,
+            grid_id,
         );
     } else {
         egui::ScrollArea::horizontal()
-            .id_salt("results_hscroll")
+            .id_salt(("results_hscroll", grid_id))
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.set_width(desired_total);
                 build_grid(
                     ui, result, order, sort, selected, edits, editable, gutter_w, row_height,
-                    &mut out,
+                    &mut out, grid_id,
                 );
             });
     }
@@ -108,13 +111,15 @@ fn build_grid(
     gutter_w: f32,
     row_height: f32,
     out: &mut GridResponse,
+    grid_id: u64,
 ) {
     let ncols = result.columns.len();
     let mut builder = TableBuilder::new(ui)
         // A stable, unique id keeps the table's internal scroll/resize/row ids consistent
         // across frames — this is what prevents egui's "ID clash" outline from flickering
         // while scrolling fast (egui's own warning advises giving tables a unique id_salt).
-        .id_salt("results_grid")
+        // grid_id is per-tab so widgets across tabs never share egui click-time memory.
+        .id_salt(("results_grid", grid_id))
         // Cells must sense clicks for row selection (`row.response().clicked()`) to work;
         // the default is hover-only.
         .sense(egui::Sense::click())
@@ -178,8 +183,10 @@ fn build_grid(
                 row.set_selected(selected == Some(disp));
 
                 // Row-number gutter: number for stored rows, a mark for new rows. Tinted
-                // green (edit/new) or red (delete) like the cells.
-                row.col(|ui| {
+                // green (edit/new) or red (delete) like the cells. Double-clicking the gutter
+                // is a common way to start editing a row, so we treat it the same as
+                // double-clicking the first data cell.
+                let (_, gutter_resp) = row.col(|ui| {
                     tint_row(ui, state);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(4.0);
@@ -190,6 +197,13 @@ fn build_grid(
                         ui.weak(egui::RichText::new(label).monospace());
                     });
                 });
+                if editable && gutter_resp.double_clicked() && state != crate::edit::RowState::Deleted {
+                    let first_editable = (0..ncols)
+                        .find(|&c| edits.col_kind(c) != EditorKind::Bool);
+                    if let Some(c) = first_editable {
+                        out.begin_edit = Some((r, c));
+                    }
+                }
 
                 let null = Value::Null;
                 for c in 0..ncols {
@@ -201,6 +215,13 @@ fn build_grid(
                     let mut label_resp = None;
                     let (_, col_resp) = row.col(|ui| {
                         tint_row(ui, state);
+                        // Skip text layout, HashMap lookups, and widget allocation for
+                        // columns outside the visible horizontal viewport. The cell rect is
+                        // still allocated by egui_extras (needed for column sizing), but
+                        // we avoid all the per-cell work for invisible columns.
+                        if !ui.is_rect_visible(ui.max_rect()) {
+                            return;
+                        }
                         if edits.is_active_from(r, c, crate::edit::EditOrigin::Grid) {
                             // The cell under edit fills the whole cell; the editor is
                             // type-aware and validates numbers/dates before they can commit.
@@ -247,9 +268,9 @@ fn build_grid(
         });
 }
 
-/// Reserve the blank space under the table rows as an invisible add-row target. This keeps
-/// the grid visually clean while still allowing "double-click anywhere in the empty table
-/// area" to create a row.
+/// Reserve the blank space under the table rows as an invisible add-row target. When rows
+/// fill the entire panel there is no natural empty space, so a thin fixed zone is kept at
+/// the bottom regardless — this ensures a new row can always be created by double-clicking.
 fn capture_empty_table_double_click(
     ui: &mut egui::Ui,
     table_rect: egui::Rect,
@@ -261,20 +282,30 @@ fn capture_empty_table_double_click(
     if !editable {
         return;
     }
-    let empty_top = table_rect.top() + 24.0 + rendered_rows as f32 * row_height;
-    if empty_top >= table_rect.bottom() {
+    // When rows don't fill the panel, use the empty space below them. When they do, keep a
+    // 24 px fallback zone at the bottom so the user can always double-click to add a row.
+    const ADD_ROW_ZONE: f32 = 24.0;
+    // egui_extras positions each row at row_height + item_spacing.y intervals (see
+    // TableBody::rows), so content_bottom must use the same stride or the zone will overlap
+    // the last row and trigger add_row when the user double-clicks its bottom portion.
+    let row_step = row_height + ui.spacing().item_spacing.y;
+    let content_bottom = table_rect.top() + 24.0 + rendered_rows as f32 * row_step;
+    let zone_top = content_bottom.min(table_rect.bottom() - ADD_ROW_ZONE);
+    if zone_top >= table_rect.bottom() {
         return;
     }
-    let empty_rect = egui::Rect::from_min_max(
-        egui::pos2(table_rect.left(), empty_top),
+    let zone_rect = egui::Rect::from_min_max(
+        egui::pos2(table_rect.left(), zone_top),
         egui::pos2(table_rect.right(), table_rect.bottom()),
     );
     let resp = ui.interact(
-        empty_rect,
+        zone_rect,
         ui.id().with("results_grid_empty_add_row"),
         egui::Sense::click(),
     );
-    if resp.double_clicked() {
+    // When the fallback zone overlaps the last visible row, skip add_row if the user
+    // actually double-clicked a data cell (begin_edit / toggle already set).
+    if resp.double_clicked() && out.begin_edit.is_none() && out.toggle.is_none() {
         out.add_row = true;
     }
 }
@@ -373,7 +404,7 @@ mod tests {
             let mut edits = Edits::default();
             let out = ctx.run_ui(raw, |ui| {
                 egui::CentralPanel::default().show_inside(ui, |ui| {
-                    let _ = results_grid(ui, &result, &order, None, None, &mut edits, false);
+                    let _ = results_grid(ui, &result, &order, None, None, &mut edits, false, 0);
                 });
             });
             collect_clash_text(&out.shapes, &mut clashes);
