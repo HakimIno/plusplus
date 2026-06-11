@@ -29,6 +29,9 @@ pub struct GridResponse {
     pub cancel_edit: bool,
     /// Empty table space was double-clicked → append a new (insert) row.
     pub add_row: bool,
+    /// Any cell was double-clicked this frame (even non-editable ones like Bytes/deleted).
+    /// Used to suppress add_row when the fallback zone overlaps the last visible row.
+    cell_dbl_clicked: bool,
 }
 
 /// What a body row at a given display index represents.
@@ -92,7 +95,7 @@ pub fn results_grid(
                 );
             });
     }
-    capture_empty_table_double_click(ui, table_rect, rendered_rows, row_height, editable, &mut out);
+    capture_empty_table_double_click(ui, table_rect, rendered_rows, row_height, editable, grid_id, &mut out);
 
     out
 }
@@ -248,6 +251,9 @@ fn build_grid(
                     // only hover, so double-click on the text itself would otherwise be lost.
                     let dbl = col_resp.double_clicked()
                         || label_resp.is_some_and(|r| r.double_clicked());
+                    if dbl {
+                        out.cell_dbl_clicked = true;
+                    }
                     if editable
                         && dbl
                         && state != crate::edit::RowState::Deleted
@@ -277,6 +283,7 @@ fn capture_empty_table_double_click(
     rendered_rows: usize,
     row_height: f32,
     editable: bool,
+    grid_id: u64,
     out: &mut GridResponse,
 ) {
     if !editable {
@@ -298,14 +305,20 @@ fn capture_empty_table_double_click(
         egui::pos2(table_rect.left(), zone_top),
         egui::pos2(table_rect.right(), table_rect.bottom()),
     );
+    // grid_id is included so the click-time memory is per-tab, matching the table's own id_salt.
     let resp = ui.interact(
         zone_rect,
-        ui.id().with("results_grid_empty_add_row"),
+        egui::Id::new(("results_grid_empty_add_row", grid_id)),
         egui::Sense::click(),
     );
-    // When the fallback zone overlaps the last visible row, skip add_row if the user
-    // actually double-clicked a data cell (begin_edit / toggle already set).
-    if resp.double_clicked() && out.begin_edit.is_none() && out.toggle.is_none() {
+    // Suppress add_row when the fallback zone overlaps the last visible row and the user
+    // actually double-clicked any cell — including Bytes or deleted-row cells that don't set
+    // begin_edit/toggle but still represent a deliberate click on an existing row.
+    if resp.double_clicked()
+        && out.begin_edit.is_none()
+        && out.toggle.is_none()
+        && !out.cell_dbl_clicked
+    {
         out.add_row = true;
     }
 }

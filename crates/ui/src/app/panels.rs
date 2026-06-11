@@ -609,8 +609,16 @@ impl DbGuiApp {
                                             ui.close();
                                         }
                                         if live && !databases.is_empty() {
-                                            ui.menu_button(
-                                                egui::RichText::new("  Switch Database  ▶"),
+                                            let tint = ui.visuals().widgets.inactive.fg_stroke.color;
+                                            let db_img = egui::Image::new(icons::database())
+                                                .fit_to_exact_size(egui::vec2(icons::SIZE, icons::SIZE))
+                                                .tint(tint);
+                                            let btn = egui::Button::image_and_text(db_img, "Switch Database")
+                                                .right_text("⏵");
+                                            #[allow(deprecated)]
+                                            egui::menu::menu_custom_button(
+                                                ui,
+                                                btn,
                                                 |ui| {
                                                     ui.set_min_width(160.0);
                                                     egui::ScrollArea::vertical()
@@ -1569,10 +1577,13 @@ impl DbGuiApp {
             .show(ctx, |ui| {
                 // Table name (only editable in NewTable mode; read-only in EditTable).
                 ui.horizontal(|ui| {
+                    let pad = egui::Margin::symmetric(10, 5);
                     ui.label("Table name:");
                     let te = egui::TextEdit::singleline(&mut editor.table_name)
                         .hint_text("my_table")
-                        .desired_width(200.0);
+                        .desired_width(200.0)
+                        .vertical_align(egui::Align::Center)
+                        .margin(pad);
                     ui.add_enabled(
                         editor.mode == SchemaEditorMode::NewTable,
                         te,
@@ -1582,7 +1593,9 @@ impl DbGuiApp {
                         ui.add(
                             egui::TextEdit::singleline(&mut editor.schema_name)
                                 .hint_text("public")
-                                .desired_width(120.0),
+                                .desired_width(120.0)
+                                .vertical_align(egui::Align::Center)
+                                .margin(pad),
                         );
                     }
                 });
@@ -1616,7 +1629,7 @@ impl DbGuiApp {
                     .show(ui, |ui| {
                         match editor.active_tab {
                             SchemaTab::Columns => {
-                                schema_columns_tab(ui, &mut editor.columns, editor.mode);
+                                schema_columns_tab(ui, &mut editor.columns, editor.mode, editor.db_kind);
                             }
                             SchemaTab::Indexes => {
                                 schema_indexes_tab(ui, &mut editor.indexes);
@@ -2115,14 +2128,116 @@ fn details_value_box(
 
 // ─── Schema editor tab helpers ────────────────────────────────────────────────
 
+/// Rounded-square checkbox styled with the accent colour — a filled square with a bold
+/// white tick when checked, an empty bordered square when unchecked.
+/// Clicking either the box or the label toggles the value.
+fn schema_checkbox(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    checked: &mut bool,
+    label: &str,
+) -> egui::Response {
+    const SIZE: f32 = 16.0;
+    const R: egui::CornerRadius = egui::CornerRadius::same(4);
+
+    let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
+    let (rect, mut resp) = ui.allocate_exact_size(egui::vec2(SIZE, SIZE), sense);
+
+    let label_resp = ui.add(
+        egui::Label::new(
+            egui::RichText::new(label)
+                .size(11.5)
+                .color(if enabled { palette::TEXT_WEAK() } else { palette::TEXT_FAINT() }),
+        )
+        .sense(sense),
+    );
+
+    if enabled && (resp.clicked() || label_resp.clicked()) {
+        *checked = !*checked;
+        resp.mark_changed();
+    }
+
+    if ui.is_rect_visible(rect) {
+        let accent = palette::ACCENT();
+        let painter = ui.painter();
+        if *checked {
+            let fill = if enabled { accent } else { accent.linear_multiply(0.4) };
+            painter.rect_filled(rect, R, fill);
+            // Bold tick: two line segments
+            let p = rect.min;
+            let s = rect.size();
+            let stroke = egui::Stroke::new(2.2, egui::Color32::WHITE);
+            painter.line_segment(
+                [
+                    egui::pos2(p.x + s.x * 0.19, p.y + s.y * 0.52),
+                    egui::pos2(p.x + s.x * 0.42, p.y + s.y * 0.76),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(p.x + s.x * 0.42, p.y + s.y * 0.76),
+                    egui::pos2(p.x + s.x * 0.81, p.y + s.y * 0.25),
+                ],
+                stroke,
+            );
+        } else {
+            let (fill, border) = if resp.hovered() && enabled {
+                (
+                    accent.linear_multiply(0.10),
+                    egui::Stroke::new(1.5, accent.linear_multiply(0.65)),
+                )
+            } else {
+                (
+                    egui::Color32::TRANSPARENT,
+                    egui::Stroke::new(1.5, palette::BORDER_STRONG()),
+                )
+            };
+            painter.rect(rect, R, fill, border, egui::StrokeKind::Inside);
+        }
+    }
+
+    resp
+}
+
+/// Common column types per database, offered in the Type dropdown. The current value is
+/// always shown even if it isn't in this list (e.g. an exotic type on an existing column).
+fn db_type_options(kind: dbcore::DbKind) -> &'static [&'static str] {
+    use dbcore::DbKind;
+    match kind {
+        DbKind::Postgres => &[
+            "TEXT", "VARCHAR(255)", "INTEGER", "BIGINT", "SERIAL", "BIGSERIAL",
+            "NUMERIC", "REAL", "DOUBLE PRECISION", "BOOLEAN", "DATE", "TIME",
+            "TIMESTAMP", "TIMESTAMPTZ", "UUID", "JSONB", "BYTEA",
+        ],
+        DbKind::MySql | DbKind::MariaDb => &[
+            "VARCHAR(255)", "TEXT", "INT", "BIGINT", "TINYINT", "DECIMAL(10,2)",
+            "FLOAT", "DOUBLE", "BOOLEAN", "DATE", "DATETIME", "TIMESTAMP", "TIME",
+            "JSON", "BLOB",
+        ],
+        DbKind::SqlServer => &[
+            "NVARCHAR(255)", "NVARCHAR(MAX)", "INT", "BIGINT", "BIT",
+            "DECIMAL(18,2)", "FLOAT", "REAL", "DATE", "DATETIME2", "TIME",
+            "UNIQUEIDENTIFIER", "VARBINARY(MAX)",
+        ],
+        DbKind::Sqlite => &[
+            "TEXT", "INTEGER", "REAL", "NUMERIC", "BLOB", "BOOLEAN", "DATE",
+            "DATETIME",
+        ],
+    }
+}
+
 fn schema_columns_tab(
     ui: &mut egui::Ui,
     columns: &mut Vec<crate::schema::ColumnDraft>,
     mode: crate::schema::SchemaEditorMode,
+    db_kind: dbcore::DbKind,
 ) {
     use crate::schema::SchemaEditorMode;
 
     let mut to_remove: Option<usize> = None;
+    // Rows sit flush against each other — the frames' own inner margin is enough.
+    ui.spacing_mut().item_spacing.y = 0.0;
 
     for (i, col) in columns.iter_mut().enumerate() {
         let row_color = if col.drop {
@@ -2133,39 +2248,52 @@ fn schema_columns_tab(
             Some(palette::ACCENT().linear_multiply(0.10))
         };
 
-        let frame = if let Some(c) = row_color {
-            egui::Frame::new().fill(c).inner_margin(egui::Margin::symmetric(4, 2))
-        } else {
-            egui::Frame::new().inner_margin(egui::Margin::symmetric(4, 2))
-        };
+        let frame = egui::Frame::new()
+            .fill(row_color.unwrap_or(egui::Color32::TRANSPARENT))
+            .inner_margin(egui::Margin::symmetric(4, 3));
 
         frame.show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.set_min_height(24.0);
+                // A singleline TextEdit's height is font height + its own vertical margin —
+                // this margin is the only reliable height knob, so pad vertically here.
+                let pad = egui::Margin::symmetric(10, 5);
                 // Name
                 ui.add_enabled(
                     !col.drop,
                     egui::TextEdit::singleline(&mut col.name)
                         .hint_text("column_name")
-                        .desired_width(140.0),
+                        .desired_width(140.0)
+                        .vertical_align(egui::Align::Center)
+                        .margin(pad),
                 );
-                // Type
-                ui.add_enabled(
-                    !col.drop,
-                    egui::TextEdit::singleline(&mut col.data_type)
-                        .hint_text("TEXT")
-                        .desired_width(100.0),
-                );
+                // Type — a dropdown of common types for this database. The combo is sized
+                // up to match the padded text inputs beside it.
+                ui.add_enabled_ui(!col.drop, |ui| {
+                    ui.spacing_mut().interact_size.y = 27.0;
+                    egui::ComboBox::from_id_salt(("schema_col_type", i))
+                        .selected_text(if col.data_type.is_empty() { "TEXT" } else { &col.data_type })
+                        .width(130.0)
+                        .show_ui(ui, |ui| {
+                            for ty in db_type_options(db_kind) {
+                                ui.selectable_value(&mut col.data_type, ty.to_string(), *ty);
+                            }
+                        });
+                });
+                ui.add_space(2.0);
                 // Nullable
-                ui.add_enabled(!col.drop, egui::Checkbox::new(&mut col.nullable, "NULL"));
+                schema_checkbox(ui, !col.drop, &mut col.nullable, "NULL");
+                ui.add_space(2.0);
                 // PK
-                ui.add_enabled(!col.drop, egui::Checkbox::new(&mut col.primary_key, "PK"));
+                schema_checkbox(ui, !col.drop, &mut col.primary_key, "PK");
+                ui.add_space(2.0);
                 // Default
                 ui.add_enabled(
                     !col.drop,
                     egui::TextEdit::singleline(&mut col.default)
                         .hint_text("default…")
-                        .desired_width(90.0),
+                        .desired_width(90.0)
+                        .vertical_align(egui::Align::Center)
+                        .margin(pad),
                 );
 
                 // Drop / restore button
@@ -2183,7 +2311,6 @@ fn schema_columns_tab(
                         to_remove = Some(i);
                     }
                 } else {
-                    // NewTable mode — allow removing non-first rows
                     if i > 0 && ui.small_button("✕").on_hover_text("Remove column").clicked() {
                         to_remove = Some(i);
                     }
@@ -2204,6 +2331,7 @@ fn schema_columns_tab(
 
 fn schema_indexes_tab(ui: &mut egui::Ui, indexes: &mut Vec<crate::schema::IndexDraft>) {
     let mut to_remove: Option<usize> = None;
+    ui.spacing_mut().item_spacing.y = 0.0;
 
     for (i, idx) in indexes.iter_mut().enumerate() {
         let row_color = if idx.drop {
@@ -2214,28 +2342,31 @@ fn schema_indexes_tab(ui: &mut egui::Ui, indexes: &mut Vec<crate::schema::IndexD
             None
         };
 
-        let frame = if let Some(c) = row_color {
-            egui::Frame::new().fill(c).inner_margin(egui::Margin::symmetric(4, 2))
-        } else {
-            egui::Frame::new().inner_margin(egui::Margin::symmetric(4, 2))
-        };
+        let frame = egui::Frame::new()
+            .fill(row_color.unwrap_or(egui::Color32::TRANSPARENT))
+            .inner_margin(egui::Margin::symmetric(4, 3));
 
         frame.show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.set_min_height(24.0);
+                let pad = egui::Margin::symmetric(10, 5);
                 ui.add_enabled(
                     !idx.drop,
                     egui::TextEdit::singleline(&mut idx.name)
                         .hint_text("index_name")
-                        .desired_width(150.0),
+                        .desired_width(150.0)
+                        .vertical_align(egui::Align::Center)
+                        .margin(pad),
                 );
                 ui.add_enabled(
                     !idx.drop,
                     egui::TextEdit::singleline(&mut idx.columns_raw)
                         .hint_text("col1, col2")
-                        .desired_width(160.0),
+                        .desired_width(160.0)
+                        .vertical_align(egui::Align::Center)
+                        .margin(pad),
                 );
-                ui.add_enabled(!idx.drop, egui::Checkbox::new(&mut idx.unique, "Unique"));
+                ui.add_space(2.0);
+                schema_checkbox(ui, !idx.drop, &mut idx.unique, "Unique");
 
                 if idx.is_existing {
                     let (label, hover) = if idx.drop {
