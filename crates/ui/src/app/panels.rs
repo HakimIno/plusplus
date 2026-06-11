@@ -425,37 +425,54 @@ impl DbGuiApp {
         egui::Panel::bottom("status_bar").show_inside(root, |ui| {
             ui.add_space(2.0);
             ui.horizontal(|ui| {
-                ui.add_space(4.0);
-                if let Some(err) = &self.error {
-                    icons::show_colored(ui, icons::warning(), 13.0, palette::DANGER());
-                    ui.label(egui::RichText::new(err).size(11.0).color(palette::DANGER()));
-                } else {
-                    if self.busy != Busy::Idle {
-                        ui.add(egui::Spinner::new().size(11.0));
+                let version = format!("v{}", crate::update::CURRENT_VERSION);
+                ui.allocate_ui_with_layout(
+                    egui::vec2((ui.available_width() - 44.0).max(0.0), ui.available_height()),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
                         ui.add_space(4.0);
-                    }
-                    icons::show_weak(ui, icons::table(), 12.0);
-                    ui.label(
-                        egui::RichText::new(&self.status_msg)
-                            .size(11.0)
-                            .color(palette::TEXT_WEAK()),
-                    );
-                    let tab = self.tab();
-                    if let Some(res) = &tab.result {
-                        if tab.filter.is_active() && tab.row_order.len() != res.row_count() {
-                            ui.colored_label(palette::TEXT_FAINT(), "·");
-                            icons::show_colored(ui, icons::filter(), 13.0, palette::ACCENT());
-                            ui.colored_label(
-                                palette::ACCENT(),
-                                format!("{} of {} rows", tab.row_order.len(), res.row_count()),
+                        if let Some(err) = &self.error {
+                            icons::show_colored(ui, icons::warning(), 13.0, palette::DANGER());
+                            ui.label(
+                                egui::RichText::new(err).size(11.0).color(palette::DANGER()),
                             );
+                        } else {
+                            if self.busy != Busy::Idle {
+                                ui.add(egui::Spinner::new().size(11.0));
+                                ui.add_space(4.0);
+                            }
+                            icons::show_weak(ui, icons::table(), 12.0);
+                            ui.label(
+                                egui::RichText::new(&self.status_msg)
+                                    .size(11.0)
+                                    .color(palette::TEXT_WEAK()),
+                            );
+                            let tab = self.tab();
+                            if let Some(res) = &tab.result {
+                                if tab.filter.is_active()
+                                    && tab.row_order.len() != res.row_count()
+                                {
+                                    ui.colored_label(palette::TEXT_FAINT(), "·");
+                                    icons::show_colored(ui, icons::filter(), 13.0, palette::ACCENT());
+                                    ui.colored_label(
+                                        palette::ACCENT(),
+                                        format!("{} of {} rows", tab.row_order.len(), res.row_count()),
+                                    );
+                                }
+                            }
+                            if let (Some(sel), true) = (tab.selected_row, tab.result.is_some()) {
+                                ui.colored_label(palette::TEXT_FAINT(), "·");
+                                ui.colored_label(palette::TEXT_WEAK(), format!("row {}", sel + 1));
+                            }
                         }
-                    }
-                    if let (Some(sel), true) = (tab.selected_row, tab.result.is_some()) {
-                        ui.colored_label(palette::TEXT_FAINT(), "·");
-                        ui.colored_label(palette::TEXT_WEAK(), format!("row {}", sel + 1));
-                    }
-                }
+                    },
+                );
+                ui.label(
+                    egui::RichText::new(version)
+                        .size(11.0)
+                        .color(palette::TEXT_FAINT()),
+                );
+                ui.add_space(8.0);
             });
             ui.add_space(3.0);
         });
