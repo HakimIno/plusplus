@@ -33,6 +33,10 @@ pub enum CoreError {
     /// A connection config was malformed (missing host, bad path, ...).
     #[error("invalid connection: {0}")]
     InvalidConfig(String),
+
+    /// Establishing or operating the SSH tunnel failed (connect, auth, forward, ...).
+    #[error("ssh tunnel error: {0}")]
+    Ssh(String),
 }
 
 /// Convenience alias used throughout the crate.

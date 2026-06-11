@@ -19,6 +19,16 @@ certificate, falling back to the system trust store, plus a client certificate a
 for mutual TLS (PostgreSQL and MySQL/MariaDB). Live connections are pooled and shared,
 so several tabs can work against the same database at once.
 
+A connection can be marked **production**: destructive statements (`UPDATE`, `DELETE`,
+`DROP`, `TRUNCATE`, `ALTER`) are then held in a confirmation dialog before they run —
+with an extra callout when an `UPDATE`/`DELETE` has no `WHERE` clause at all.
+
+Server connections can also ride an **SSH tunnel**: the app authenticates to a bastion
+host (password or private key, with the secret in the OS keychain), forwards a loopback
+port through it, and the database driver connects through that — no exposed DB port
+needed. One bastion session multiplexes all of a connection's pooled channels, and it
+tears down with the connection.
+
 **Schema browsing.** Connecting introspects the whole database into a sidebar tree:
 tables, columns (type, nullability, primary key), and indexes, filterable by name. A
 single click previews a table's rows; a double click opens it as a permanent tab.

@@ -36,3 +36,24 @@ pub fn delete_password(connection_id: &str) -> Result<()> {
         Err(e) => Err(CoreError::Keyring(e.to_string())),
     }
 }
+
+/// The SSH credential (bastion password, or key passphrase) lives in its own keychain
+/// entry beside the database password, keyed by a suffixed account name.
+fn ssh_account(connection_id: &str) -> String {
+    format!("{connection_id}.ssh")
+}
+
+/// Store (or replace) the SSH password / key passphrase for a connection.
+pub fn set_ssh_secret(connection_id: &str, secret: &str) -> Result<()> {
+    set_password(&ssh_account(connection_id), secret)
+}
+
+/// Fetch the stored SSH password / key passphrase, if any.
+pub fn get_ssh_secret(connection_id: &str) -> Result<Option<String>> {
+    get_password(&ssh_account(connection_id))
+}
+
+/// Delete the stored SSH credential. A missing entry is treated as success.
+pub fn delete_ssh_secret(connection_id: &str) -> Result<()> {
+    delete_password(&ssh_account(connection_id))
+}

@@ -21,6 +21,8 @@ futures-util.workspace = true
 tiberius.workspace = true
 bb8.workspace = true
 bb8-tiberius.workspace = true
+# SSH tunnel for connecting through a bastion host.
+russh.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

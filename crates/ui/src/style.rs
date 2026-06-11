@@ -111,7 +111,7 @@ pub fn apply(ctx: &egui::Context) {
     style.text_styles = [
         (
             TextStyle::Heading,
-            FontId::new(15.0, FontFamily::Name(crate::HEADING_FAMILY.into())),
+            FontId::new(12.5, FontFamily::Name(crate::HEADING_FAMILY.into())),
         ),
         (TextStyle::Body, FontId::new(12.5, FontFamily::Proportional)),
         (
@@ -138,7 +138,8 @@ pub fn apply(ctx: &egui::Context) {
     // Buttons and combo boxes adopt the shared control height from here.
     s.interact_size.y = CONTROL_H;
     s.combo_width = 0.0; // let combos size to their content/width hint, not a min
-    s.window_margin = Margin::same(12);
+    // Tighter vertical padding keeps dialog title bars compact.
+    s.window_margin = Margin::symmetric(12, 4);
     s.scroll.bar_width = 8.0;
     s.scroll.bar_inner_margin = 2.0;
 
@@ -330,6 +331,63 @@ pub fn section_header(ui: &mut egui::Ui, text: &str) {
     );
     ui.add(egui::Label::new(job).selectable(false));
     ui.add_space(3.0);
+}
+
+/// Centered modal window — shared baseline for Settings, connection editor, previews, etc.
+pub fn dialog_window(title: impl Into<egui::WidgetText>) -> egui::Window<'static> {
+    egui::Window::new(title)
+        .collapsible(false)
+        .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+}
+
+/// Compact window chrome: less vertical padding in the title band than the default frame.
+pub fn dialog_frame(ctx: &egui::Context) -> egui::Frame {
+    let style = ctx.global_style();
+    egui::Frame::window(&style).inner_margin(Margin::symmetric(12, 4))
+}
+
+/// Action bar at the bottom of modal dialogs — mirrors the window title band (fill, rule, height).
+pub fn dialog_footer(ui: &mut egui::Ui, add_buttons: impl FnOnce(&mut egui::Ui)) {
+    let t = crate::theme::current();
+    let margin = ui.style().spacing.window_margin;
+    let bar_h = CONTROL_H + margin.topf() + margin.bottomf();
+    let bleed_x = margin.leftf() + margin.rightf();
+
+    ui.add_space(8.0);
+
+    // Size to the body content already laid out above — not `available_rect_before_wrap()`,
+    // which spans to `max_rect` and forces the window to stretch full-width.
+    let body_w = ui.min_rect().width();
+    let (row_rect, _) =
+        ui.allocate_exact_size(egui::vec2(body_w, bar_h), egui::Sense::hover());
+
+    // Bleed into window padding for paint only; layout width stays at `body_w`.
+    let paint_rect = egui::Rect::from_min_size(
+        row_rect.min - egui::vec2(margin.leftf(), 0.0),
+        egui::vec2(row_rect.width() + bleed_x, row_rect.height() + margin.bottomf()),
+    );
+    if ui.is_rect_visible(paint_rect) {
+        let mut round = ui.style().visuals.window_corner_radius;
+        round.nw = 0;
+        round.ne = 0;
+        ui.painter()
+            .rect_filled(paint_rect, round, t.base);
+        ui.painter().hline(
+            paint_rect.x_range(),
+            paint_rect.top(),
+            Stroke::new(1.0, t.border),
+        );
+    }
+
+    ui.scope_builder(egui::UiBuilder::new().max_rect(row_rect), |ui| {
+        ui.with_layout(
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                add_buttons(ui);
+            },
+        );
+    });
 }
 
 /// Header-band fill + bottom rule for [`egui_extras::Table`] columns.

@@ -32,7 +32,8 @@ egui_extras = { version = "0.34", features = ["datepicker", "svg"] }
 egui_plot = "0.34"
 
 # --- async runtime ---
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+# net + io-util back the SSH tunnel's local listener and byte pump.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 
 # --- database access ---
 sqlx = { version = "0.9", default-features = false, features = [
@@ -55,6 +56,11 @@ sqlx = { version = "0.9", default-features = false, features = [
 tiberius = { version = "0.12", default-features = false, features = ["tds73", "rustls", "chrono"] }
 bb8 = "0.9"
 bb8-tiberius = "0.16"
+
+# --- SSH tunnel (connect to a database through a bastion host) ---
+# Pure-Rust SSH on tokio. The `ring` backend (instead of the default aws-lc-rs) keeps the
+# whole tree on the single ring crypto stack that rustls/tiberius/sqlx already use.
+russh = { version = "0.54", default-features = false, features = ["flate2", "ring", "rsa"] }
 
 # --- data analysis ---
 polars = { version = "0.54", default-features = false, features = ["lazy", "describe", "dtype-full"] }

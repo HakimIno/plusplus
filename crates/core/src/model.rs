@@ -696,6 +696,21 @@ pub struct ConnectionConfig {
     /// Path to the PEM private key matching `ssl_client_cert`. Empty means none.
     #[serde(default)]
     pub ssl_client_key: String,
+    // --- SSH tunnel (server backends) ---
+    /// Reach the database through an SSH bastion instead of connecting directly.
+    /// `host`/`port` above then name the database as seen *from the bastion*.
+    #[serde(default)]
+    pub ssh_enabled: bool,
+    #[serde(default)]
+    pub ssh_host: String,
+    #[serde(default = "default_ssh_port")]
+    pub ssh_port: u16,
+    #[serde(default)]
+    pub ssh_user: String,
+    /// Path to a private key file for the bastion. Empty means password authentication.
+    /// The key passphrase / SSH password lives in the keychain, never here.
+    #[serde(default)]
+    pub ssh_key_path: String,
     // --- file backends ---
     #[serde(default)]
     pub sqlite_path: String,
@@ -705,6 +720,10 @@ pub struct ConnectionConfig {
     /// Sidebar icon for this connection.
     #[serde(default)]
     pub icon: ConnectionIcon,
+    /// Marks a production database: destructive queries (UPDATE/DELETE/DROP/TRUNCATE/ALTER)
+    /// must be confirmed in a dialog before they run.
+    #[serde(default)]
+    pub production: bool,
 }
 
 impl ConnectionConfig {
@@ -722,9 +741,15 @@ impl ConnectionConfig {
             ssl_ca_cert: String::new(),
             ssl_client_cert: String::new(),
             ssl_client_key: String::new(),
+            ssh_enabled: false,
+            ssh_host: String::new(),
+            ssh_port: default_ssh_port(),
+            ssh_user: String::new(),
+            ssh_key_path: String::new(),
             sqlite_path: String::new(),
             title_bar_color: None,
             icon: ConnectionIcon::default(),
+            production: false,
         }
     }
 
@@ -754,6 +779,10 @@ impl ConnectionColor {
     pub const fn new(r: u8, g: u8, b: u8) -> Self {
         Self { r, g, b }
     }
+}
+
+fn default_ssh_port() -> u16 {
+    22
 }
 
 /// Generate a process-unique, time-ordered id without pulling in a uuid dependency.

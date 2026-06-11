@@ -220,6 +220,9 @@ mod tests {
         assert!(cfg.ssl_ca_cert.is_empty());
         assert!(cfg.ssl_client_cert.is_empty());
         assert!(cfg.ssl_client_key.is_empty());
+        assert!(!cfg.ssh_enabled);
+        assert_eq!(cfg.ssh_port, 22);
+        assert!(cfg.ssh_host.is_empty() && cfg.ssh_user.is_empty() && cfg.ssh_key_path.is_empty());
     }
 
     /// Missing/empty fields fall back to defaults (forward-compatible with older files).

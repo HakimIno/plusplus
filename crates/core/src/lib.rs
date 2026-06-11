@@ -13,7 +13,9 @@ pub mod config;
 pub mod database;
 pub mod error;
 pub mod model;
+pub mod safety;
 pub mod secrets;
+pub mod tunnel;
 pub mod value;
 
 use std::sync::Arc;
@@ -34,10 +36,35 @@ use backends::{mssql::MsSqlDb, mysql::MySqlDb, postgres::PostgresDb, sqlite::Sql
 
 /// Connect to the database described by `cfg`, returning a shareable handle.
 ///
-/// `password` is the secret fetched from the OS keychain by the caller (or `None` for
-/// passwordless / file-based connections). Adding a new backend means adding a match arm
-/// here and an implementation in [`backends`] — no UI changes required.
+/// `password` and `ssh_secret` are the secrets fetched from the OS keychain by the
+/// caller (or `None` for passwordless / file-based connections). With `ssh_enabled`,
+/// an SSH tunnel to the bastion is opened first and the backend connects through it;
+/// the tunnel lives exactly as long as the returned handle. Adding a new backend means
+/// adding a match arm to [`connect_direct`] and an implementation in [`backends`].
 pub async fn connect(
+    cfg: &ConnectionConfig,
+    password: Option<String>,
+    ssh_secret: Option<String>,
+) -> Result<Arc<dyn Database>> {
+    if cfg.ssh_enabled && cfg.kind.is_server() {
+        let tun = tunnel::SshTunnel::open(cfg, ssh_secret.as_deref()).await?;
+        // The driver dials the tunnel's loopback end instead of the real host. Note for
+        // TLS: verify-full then checks the certificate against the *original* hostname
+        // only if the driver pins it — with a tunnel, prefer verify-ca.
+        let mut local = cfg.clone();
+        local.host = "127.0.0.1".to_string();
+        local.port = tun.local_port;
+        let inner = connect_direct(&local, password).await?;
+        return Ok(Arc::new(Tunneled {
+            inner,
+            _tunnel: tun,
+        }));
+    }
+    connect_direct(cfg, password).await
+}
+
+/// Connect straight to `cfg.host:cfg.port` (or the SQLite file) with no tunnel.
+async fn connect_direct(
     cfg: &ConnectionConfig,
     password: Option<String>,
 ) -> Result<Arc<dyn Database>> {
@@ -51,6 +78,32 @@ pub async fn connect(
             }
             Ok(Arc::new(SqliteDb::connect(cfg).await?))
         }
+    }
+}
+
+/// A backend riding an SSH tunnel: delegates everything and keeps the tunnel alive for
+/// as long as the connection itself.
+struct Tunneled {
+    inner: Arc<dyn Database>,
+    _tunnel: tunnel::SshTunnel,
+}
+
+#[async_trait::async_trait]
+impl Database for Tunneled {
+    fn kind(&self) -> DbKind {
+        self.inner.kind()
+    }
+    async fn introspect(&self) -> Result<model::SchemaTree> {
+        self.inner.introspect().await
+    }
+    async fn execute_capped(&self, sql: &str, max_rows: usize) -> Result<QueryResult> {
+        self.inner.execute_capped(sql, max_rows).await
+    }
+    async fn execute_transaction(&self, stmts: &[String]) -> Result<usize> {
+        self.inner.execute_transaction(stmts).await
+    }
+    async fn list_databases(&self) -> Result<Vec<String>> {
+        self.inner.list_databases().await
     }
 }
 
@@ -81,7 +134,7 @@ mod tests {
         let path = temp_db_path();
         let mut cfg = ConnectionConfig::new(DbKind::Sqlite);
         cfg.sqlite_path = path.to_string_lossy().into_owned();
-        let db = connect(&cfg, None).await.expect("connect temp sqlite");
+        let db = connect(&cfg, None, None).await.expect("connect temp sqlite");
         (db, TempDbGuard(path))
     }
 

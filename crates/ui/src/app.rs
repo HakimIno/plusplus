@@ -80,7 +80,7 @@ enum AppMessage {
 }
 
 /// What the background runtime is currently doing (drives the spinner / disables buttons).
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Busy {
     Idle,
     Connecting,
@@ -355,6 +355,8 @@ fn infer_connection_error_fields(message: &str, kind: DbKind) -> Vec<ConnField> 
 struct ConnEditor {
     config: ConnectionConfig,
     password: String,
+    /// SSH password or key passphrase; kept out of `config` like the DB password.
+    ssh_password: String,
     is_new: bool,
     /// Index in `connections` being edited (for an existing connection).
     edit_index: Option<usize>,
@@ -428,6 +430,7 @@ enum Action {
     BrowseSslCaCert,
     BrowseSslClientCert,
     BrowseSslClientKey,
+    BrowseSshKey,
     RunQuery,
     /// Reformat the active tab's SQL in its connection's dialect (Beautify, Cmd/Ctrl+I).
     BeautifySql,
@@ -450,6 +453,10 @@ enum Action {
     ConfirmEdits,
     /// User cancelled the preview dialog without committing.
     CancelEdits,
+    /// User confirmed running destructive SQL on a production connection.
+    ConfirmDangerQuery,
+    /// User backed out of the production-confirmation dialog.
+    CancelDangerQuery,
     /// Open the schema editor to create a brand-new table.
     OpenNewTable,
     /// Open the schema editor to modify an existing table.
@@ -550,6 +557,9 @@ pub struct DbGuiApp {
     /// DDL statements staged for the schema-preview dialog. `None` = preview closed.
     /// (The schema editor itself lives on each [`QueryTab`].)
     schema_pending: Option<Vec<String>>,
+    /// Destructive statements found when running a query against a production
+    /// connection, held for the confirmation dialog. `None` = dialog closed.
+    danger_pending: Option<Vec<dbcore::safety::DangerousStatement>>,
 
     // --- layout ---
     show_connection_tabs: bool,
@@ -668,6 +678,7 @@ impl DbGuiApp {
             beautify,
             commit_pending: None,
             schema_pending: None,
+            danger_pending: None,
             show_welcome,
             update: crate::update::UpdatePhase::Idle,
             update_dialog_open: false,
@@ -1382,6 +1393,11 @@ impl DbGuiApp {
         } else {
             None
         };
+        let ssh_secret = if cfg.ssh_enabled && cfg.kind.is_server() {
+            dbcore::secrets::get_ssh_secret(&cfg.id).ok().flatten()
+        } else {
+            None
+        };
         let tx = self.tx.clone();
         let id = cfg.id.clone();
         let name = cfg.name.clone();
@@ -1391,7 +1407,7 @@ impl DbGuiApp {
         self.rt.spawn(async move {
             let mut databases = Vec::new();
             let result = async {
-                let db = dbcore::connect(&cfg, password).await?;
+                let db = dbcore::connect(&cfg, password, ssh_secret).await?;
                 let schema = db.introspect().await?;
                 databases = db.list_databases().await.unwrap_or_default();
                 Ok::<_, dbcore::CoreError>((db, schema))
@@ -1405,6 +1421,18 @@ impl DbGuiApp {
                 result,
             });
         });
+    }
+
+    /// Is the tab at `idx` bound to a connection whose saved config is marked production?
+    fn tab_connection_is_production(&self, idx: usize) -> bool {
+        self.tabs
+            .get(idx)
+            .and_then(|tab| tab.conn_id.as_deref())
+            .is_some_and(|id| {
+                self.connections
+                    .iter()
+                    .any(|c| c.id == id && c.production)
+            })
     }
 
     /// Run the SQL of the tab at `idx` against its bound connection.
@@ -1826,6 +1854,7 @@ impl DbGuiApp {
                 self.editor = Some(ConnEditor {
                     config: ConnectionConfig::new(DbKind::Postgres),
                     password: String::new(),
+                    ssh_password: String::new(),
                     is_new: true,
                     edit_index: None,
                     test_state: ConnTestState::Untested,
@@ -1837,9 +1866,14 @@ impl DbGuiApp {
                         .ok()
                         .flatten()
                         .unwrap_or_default();
+                    let ssh_password = dbcore::secrets::get_ssh_secret(&cfg.id)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default();
                     self.editor = Some(ConnEditor {
                         config: cfg,
                         password,
+                        ssh_password,
                         is_new: false,
                         edit_index: Some(i),
                         test_state: ConnTestState::Untested,
@@ -1850,6 +1884,7 @@ impl DbGuiApp {
                 if i < self.connections.len() {
                     let cfg = self.connections.remove(i);
                     let _ = dbcore::secrets::delete_password(&cfg.id);
+                    let _ = dbcore::secrets::delete_ssh_secret(&cfg.id);
                     if let Err(e) = dbcore::config::save_connections(&self.connections) {
                         self.error = Some(e.to_string());
                     }
@@ -1899,14 +1934,37 @@ impl DbGuiApp {
             Action::BrowseSslClientKey => {
                 self.browse_pem_into(&["pem", "key"], |cfg| &mut cfg.ssl_client_key)
             }
+            // No extension filter: SSH keys (id_ed25519, id_rsa, ...) usually have none.
+            Action::BrowseSshKey => {
+                if let Some(path) = rfd::FileDialog::new().pick_file() {
+                    if let Some(ed) = &mut self.editor {
+                        ed.config.ssh_key_path = path.to_string_lossy().into_owned();
+                        ed.test_state = ConnTestState::Untested;
+                    }
+                }
+            }
             Action::RunQuery => {
                 let idx = self.active_query_tab;
                 // Editability is re-derived from the SQL itself on every run: any simple
                 // single-table `SELECT *` — including a hand-tuned LIMIT/WHERE/ORDER BY —
                 // stays editable; anything else runs as a read-only ad-hoc query.
                 self.tabs[idx].edits.pending_source = self.derive_edit_source(idx);
+                // A production connection holds destructive SQL for confirmation first.
+                if self.tab_connection_is_production(idx) {
+                    let found = dbcore::safety::dangerous_statements(&self.tabs[idx].sql);
+                    if !found.is_empty() {
+                        self.danger_pending = Some(found);
+                        return;
+                    }
+                }
                 self.start_query_for(idx);
             }
+            Action::ConfirmDangerQuery => {
+                if self.danger_pending.take().is_some() {
+                    self.start_query_for(self.active_query_tab);
+                }
+            }
+            Action::CancelDangerQuery => self.danger_pending = None,
             Action::BeautifySql => self.beautify_sql(),
             Action::OpenTable { sql, source, pin } => self.open_table(sql, source, pin),
             Action::SortBy(col) => self.tab_mut().apply_sort(col),
@@ -2032,6 +2090,11 @@ impl DbGuiApp {
         } else {
             None
         };
+        let ssh_secret = if cfg.ssh_enabled && cfg.kind.is_server() {
+            Some(editor.ssh_password.clone())
+        } else {
+            None
+        };
         if let Err((message, fields)) = validate_connection_test_config(&cfg) {
             editor.test_state = ConnTestState::Failed { message, fields };
             self.status_msg = "Connection test failed".to_string();
@@ -2047,7 +2110,7 @@ impl DbGuiApp {
         let tx = self.tx.clone();
         let conn_id = cfg.id.clone();
         self.rt.spawn(async move {
-            let result = dbcore::connect(&cfg, password)
+            let result = dbcore::connect(&cfg, password, ssh_secret)
                 .await
                 .map(|_| ())
                 .map_err(|e| e.to_string());
@@ -2066,6 +2129,12 @@ impl DbGuiApp {
         if cfg.kind.is_server() && !ed.password.is_empty() {
             if let Err(e) = dbcore::secrets::set_password(&cfg.id, &ed.password) {
                 self.error = Some(format!("Could not store password: {e}"));
+            }
+        }
+        // Same for the SSH password / key passphrase, in its own keychain entry.
+        if cfg.kind.is_server() && cfg.ssh_enabled && !ed.ssh_password.is_empty() {
+            if let Err(e) = dbcore::secrets::set_ssh_secret(&cfg.id, &ed.ssh_password) {
+                self.error = Some(format!("Could not store SSH password: {e}"));
             }
         }
         match ed.edit_index {
@@ -2253,6 +2322,7 @@ impl DbGuiApp {
         self.connection_dialog(&ctx, &mut actions);
         self.settings_dialog(&ctx, &mut actions);
         self.commit_preview_dialog(&ctx, &mut actions);
+        self.danger_confirm_dialog(&ctx, &mut actions);
         self.schema_preview_dialog(&ctx, &mut actions);
         self.update_dialog(&ctx, &mut actions);
 
@@ -2363,6 +2433,60 @@ mod tests {
             stats: QueryStats::default(),
             truncated: false,
         }
+    }
+
+    /// Destructive SQL on a production connection is held for confirmation; cancelling
+    /// drops it, confirming runs it. Safe SQL runs straight through.
+    #[test]
+    fn production_connection_gates_destructive_queries() {
+        let mut app = DbGuiApp::construct();
+        // construct() loads the user's saved connections; drop them so the test only
+        // sees its own.
+        app.connections.clear();
+        let mut cfg = dbcore::ConnectionConfig::new(dbcore::DbKind::Sqlite);
+        cfg.id = "c1".into();
+        cfg.production = true;
+        app.connections.push(cfg);
+        app.active_connections.push(ActiveConnection {
+            config_id: "c1".into(),
+            name: "prod".into(),
+            db: std::sync::Arc::new(DummyDb),
+            databases: Vec::new(),
+            schema: fake_schema(1, 1),
+        });
+        app.tab_mut().conn_id = Some("c1".into());
+
+        // A plain SELECT is not destructive: it runs without confirmation.
+        app.tab_mut().sql = "SELECT * FROM table_0".into();
+        app.apply_action(Action::RunQuery);
+        assert!(app.danger_pending.is_none());
+        assert_eq!(app.busy, Busy::Querying);
+        app.busy = Busy::Idle;
+
+        // Destructive SQL is intercepted: dialog state set, nothing executed.
+        app.tab_mut().sql = "DELETE FROM table_0".into();
+        app.apply_action(Action::RunQuery);
+        let pending = app.danger_pending.as_ref().expect("query held back");
+        assert!(pending[0].missing_where);
+        assert_eq!(app.busy, Busy::Idle);
+
+        // Cancel drops it without running.
+        app.apply_action(Action::CancelDangerQuery);
+        assert!(app.danger_pending.is_none());
+        assert_eq!(app.busy, Busy::Idle);
+
+        // Confirm actually starts the query.
+        app.apply_action(Action::RunQuery);
+        app.apply_action(Action::ConfirmDangerQuery);
+        assert!(app.danger_pending.is_none());
+        assert_eq!(app.busy, Busy::Querying);
+
+        // On a non-production connection the same SQL runs without confirmation.
+        app.busy = Busy::Idle;
+        app.connections[0].production = false;
+        app.apply_action(Action::RunQuery);
+        assert!(app.danger_pending.is_none());
+        assert_eq!(app.busy, Busy::Querying);
     }
 
     /// The pager rewrites the tab's LIMIT/OFFSET in place and never runs past a known end.

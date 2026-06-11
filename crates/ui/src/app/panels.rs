@@ -1502,11 +1502,10 @@ impl DbGuiApp {
             _ => return,
         };
 
-        egui::Window::new(title)
+        style::dialog_window(title)
             .open(&mut open)
-            .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(style::dialog_frame(ctx))
             .show(ctx, |ui| {
                 ui.set_min_width(360.0);
                 if !version.is_empty() {
@@ -1541,8 +1540,7 @@ impl DbGuiApp {
                     ui.add_space(8.0);
                 }
 
-                ui.separator();
-                ui.horizontal(|ui| {
+                style::dialog_footer(ui, |ui| {
                     if ready {
                         if icons::primary_button(ui, icons::save(), "Install & Restart", true)
                             .clicked()
@@ -1598,11 +1596,10 @@ impl DbGuiApp {
         let mut close = false;
         let mut chosen = self.theme;
 
-        egui::Window::new("Settings")
+        style::dialog_window("Settings")
             .open(&mut open)
-            .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(style::dialog_frame(ctx))
             .show(ctx, |ui| {
                 ui.set_min_width(260.0);
                 style::section_header(ui, "Appearance");
@@ -1613,9 +1610,7 @@ impl DbGuiApp {
                     ui.radio_value(&mut chosen, id, id.label());
                 }
 
-                ui.add_space(8.0);
-                ui.separator();
-                ui.horizontal(|ui| {
+                style::dialog_footer(ui, |ui| {
                     if icons::button(ui, icons::close(), "Close", true).clicked() {
                         close = true;
                     }
@@ -1643,12 +1638,11 @@ impl DbGuiApp {
 
         let title = format!("Review {} Change(s)", stmts.len());
         let mut open = true;
-        egui::Window::new(title)
+        style::dialog_window(title)
             .open(&mut open)
-            .collapsible(false)
             .resizable(true)
             .default_size([640.0, 440.0])
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(style::dialog_frame(ctx))
             .show(ctx, |ui| {
                 ui.label(
                     egui::RichText::new(
@@ -1676,10 +1670,7 @@ impl DbGuiApp {
                         }
                     });
 
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
+                style::dialog_footer(ui, |ui| {
                     let can_act = self.busy == Busy::Idle;
                     if icons::primary_button(ui, icons::save(), "Commit", can_act)
                         .on_hover_text("Execute all statements in a single transaction")
@@ -1687,7 +1678,6 @@ impl DbGuiApp {
                     {
                         actions.push(Action::ConfirmEdits);
                     }
-                    ui.add_space(6.0);
                     if icons::button(ui, icons::close(), "Cancel", true).clicked() {
                         actions.push(Action::CancelEdits);
                     }
@@ -1696,6 +1686,85 @@ impl DbGuiApp {
 
         if !open {
             actions.push(Action::CancelEdits);
+        }
+    }
+
+    /// Modal listing the destructive statements about to hit a production connection,
+    /// with Run and Cancel buttons. Opened by Run when the tab's connection is marked
+    /// production and the batch contains UPDATE/DELETE/DROP/TRUNCATE/ALTER.
+    pub(super) fn danger_confirm_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(stmts) = self.danger_pending.clone() else {
+            return;
+        };
+
+        let title = format!("Production: {} Destructive Statement(s)", stmts.len());
+        let mut open = true;
+        style::dialog_window(title)
+            .open(&mut open)
+            .resizable(true)
+            .default_size([640.0, 440.0])
+            .frame(style::dialog_frame(ctx))
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "This connection is marked as production. \
+                         Review the statements below before running them.",
+                    )
+                    .color(palette::DANGER()),
+                );
+                ui.add_space(8.0);
+
+                let font = egui::TextStyle::Monospace.resolve(ui.style());
+                egui::ScrollArea::vertical()
+                    .id_salt("danger_confirm_scroll")
+                    .max_height(320.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for (i, stmt) in stmts.iter().enumerate() {
+                            if i > 0 {
+                                ui.add_space(4.0);
+                                ui.separator();
+                                ui.add_space(4.0);
+                            }
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(stmt.kind.label())
+                                        .strong()
+                                        .color(palette::DANGER()),
+                                );
+                                if stmt.missing_where {
+                                    ui.label(
+                                        egui::RichText::new("no WHERE — affects every row")
+                                            .strong()
+                                            .color(palette::DANGER()),
+                                    );
+                                }
+                            });
+                            let job = crate::highlight::highlight_sql(&stmt.sql, font.clone());
+                            ui.label(job);
+                        }
+                    });
+
+                style::dialog_footer(ui, |ui| {
+                    let can_act = self.busy == Busy::Idle;
+                    if icons::primary_button(ui, icons::connect(), "Run", can_act)
+                        .on_hover_text("Execute against the production connection")
+                        .clicked()
+                    {
+                        actions.push(Action::ConfirmDangerQuery);
+                    }
+                    if icons::button(ui, icons::close(), "Cancel", true).clicked() {
+                        actions.push(Action::CancelDangerQuery);
+                    }
+                });
+            });
+
+        if !open {
+            actions.push(Action::CancelDangerQuery);
         }
     }
 
@@ -1709,11 +1778,10 @@ impl DbGuiApp {
             "Edit Connection"
         };
         let mut open = true;
-        egui::Window::new(title)
+        style::dialog_window(title)
             .open(&mut open)
-            .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(style::dialog_frame(ctx))
             .show(ctx, |ui| {
                 let test_state = editor.test_state.clone();
                 let mut form_changed = false;
@@ -1812,6 +1880,19 @@ impl DbGuiApp {
                                 }
                             }
                         });
+                        ui.end_row();
+
+                        ui.label("Production");
+                        form_changed |= ui
+                            .checkbox(
+                                &mut editor.config.production,
+                                "Confirm destructive queries",
+                            )
+                            .on_hover_text(
+                                "UPDATE, DELETE, DROP, TRUNCATE, and ALTER must be \
+                                 confirmed in a dialog before they run",
+                            )
+                            .changed();
                         ui.end_row();
 
                         if editor.config.kind.is_server() {
@@ -1948,6 +2029,84 @@ impl DbGuiApp {
                                 });
                                 ui.end_row();
                             }
+
+                            ui.label("SSH tunnel");
+                            form_changed |= ui
+                                .checkbox(
+                                    &mut editor.config.ssh_enabled,
+                                    "Connect through a bastion host",
+                                )
+                                .on_hover_text(
+                                    "Host and port above are then resolved from the \
+                                     bastion, not from this machine",
+                                )
+                                .changed();
+                            ui.end_row();
+
+                            if editor.config.ssh_enabled {
+                                ui.label("SSH host");
+                                form_changed |= status_text_input(
+                                    ui,
+                                    &mut editor.config.ssh_host,
+                                    "bastion.example.com",
+                                    field_w,
+                                    None,
+                                )
+                                .changed();
+                                ui.end_row();
+
+                                ui.label("SSH port");
+                                form_changed |= ui
+                                    .add_sized(
+                                        egui::vec2(80.0, style::CONTROL_H),
+                                        egui::DragValue::new(&mut editor.config.ssh_port),
+                                    )
+                                    .changed();
+                                ui.end_row();
+
+                                ui.label("SSH user");
+                                form_changed |= status_text_input(
+                                    ui,
+                                    &mut editor.config.ssh_user,
+                                    "",
+                                    field_w,
+                                    None,
+                                )
+                                .changed();
+                                ui.end_row();
+
+                                ui.label("SSH key");
+                                ui.horizontal(|ui| {
+                                    form_changed |= status_text_input(
+                                        ui,
+                                        &mut editor.config.ssh_key_path,
+                                        "None — use password",
+                                        field_w,
+                                        None,
+                                    )
+                                    .changed();
+                                    if ui.button("Browse…").clicked() {
+                                        actions.push(Action::BrowseSshKey);
+                                    }
+                                });
+                                ui.end_row();
+
+                                ui.label(if editor.config.ssh_key_path.trim().is_empty() {
+                                    "SSH password"
+                                } else {
+                                    "Key passphrase"
+                                });
+                                form_changed |= ui
+                                    .add_sized(
+                                        egui::vec2(field_w, style::CONTROL_H),
+                                        egui::TextEdit::singleline(&mut editor.ssh_password)
+                                            .password(true)
+                                            .vertical_align(egui::Align::Center)
+                                            .margin(egui::Margin::symmetric(6, 0)),
+                                    )
+                                    .changed();
+                                ui.end_row();
+                            }
                         } else {
                             ui.label("File");
                             ui.horizontal(|ui| {
@@ -1989,8 +2148,7 @@ impl DbGuiApp {
                 if form_changed && !matches!(editor.test_state, ConnTestState::Testing(_)) {
                     editor.test_state = ConnTestState::Untested;
                 }
-                ui.separator();
-                ui.horizontal(|ui| {
+                style::dialog_footer(ui, |ui| {
                     let testing = matches!(editor.test_state, ConnTestState::Testing(_));
                     if icons::button(ui, icons::connect(), "Test", !testing).clicked() {
                         actions.push(Action::TestConnection);
@@ -2116,12 +2274,11 @@ impl DbGuiApp {
 
         let title = format!("Preview Migration — {} Statement(s)", stmts.len());
         let mut open = true;
-        egui::Window::new(title)
+        style::dialog_window(title)
             .open(&mut open)
-            .collapsible(false)
             .resizable(true)
             .default_size([660.0, 460.0])
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(style::dialog_frame(ctx))
             .show(ctx, |ui| {
                 ui.label(
                     egui::RichText::new(
@@ -2149,10 +2306,7 @@ impl DbGuiApp {
                         }
                     });
 
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
+                style::dialog_footer(ui, |ui| {
                     let can_act = self.busy == Busy::Idle;
                     if icons::primary_button(ui, icons::save(), "Apply Migration", can_act)
                         .on_hover_text("Execute all DDL statements in a single transaction")
@@ -2160,7 +2314,6 @@ impl DbGuiApp {
                     {
                         actions.push(Action::ApplySchema);
                     }
-                    ui.add_space(6.0);
                     if icons::button(ui, icons::close(), "Back", true).clicked() {
                         actions.push(Action::CancelSchema);
                     }

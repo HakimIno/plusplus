@@ -82,7 +82,7 @@ fn statement_returns_rows(stmt: &str, keywords: &[&str]) -> bool {
 
 /// Strip leading whitespace, line/block comments, and `(` from a statement so the next token
 /// is its first real keyword.
-fn skip_leading_noise(stmt: &str) -> &str {
+pub(crate) fn skip_leading_noise(stmt: &str) -> &str {
     let mut s = stmt.trim_start();
     loop {
         if let Some(rest) = s.strip_prefix('(') {
