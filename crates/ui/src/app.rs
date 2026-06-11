@@ -64,6 +64,19 @@ enum AppMessage {
         tab_id: u64,
         result: Result<String, String>,
     },
+    /// Background GitHub Releases check finished.
+    UpdateChecked {
+        result: Result<Option<crate::update::UpdateOffer>, String>,
+    },
+    /// DMG download progress (bytes received, total if known).
+    UpdateProgress {
+        downloaded: u64,
+        total: Option<u64>,
+    },
+    /// DMG download finished.
+    UpdateDownloaded {
+        result: Result<(crate::update::UpdateOffer, std::path::PathBuf), String>,
+    },
 }
 
 /// What the background runtime is currently doing (drives the spinner / disables buttons).
@@ -385,6 +398,9 @@ enum Action {
     NewTab,
     SelectTab(usize),
     CloseTab(usize),
+    CloseOtherTabs(usize),
+    CloseTabsToRight(usize),
+    CloseAllTabs,
     /// Pin a preview tab as permanent (double-click on the tab).
     PinTab(usize),
     /// Drag-to-reorder: move the tab at `from` so it sits at position `to`.
@@ -444,6 +460,15 @@ enum Action {
     ApplySchema,
     /// Close the schema editor / DDL preview without applying.
     CancelSchema,
+    /// Open the in-app update dialog.
+    OpenUpdateDialog,
+    CloseUpdateDialog,
+    /// Dismiss the current update offer for this session.
+    DismissUpdate,
+    /// Download the offered release DMG.
+    DownloadUpdate,
+    /// Replace the installed app and relaunch (macOS).
+    InstallUpdate,
 }
 
 /// Where the pager should jump.
@@ -541,6 +566,14 @@ pub struct DbGuiApp {
     // --- first-run ---
     /// Show the welcome screen (true only on first launch; cleared when user clicks "Get Started").
     show_welcome: bool,
+
+    // --- in-app updates (macOS) ---
+    update: crate::update::UpdatePhase,
+    update_dialog_open: bool,
+    /// Version the user dismissed; hide the tab-bar badge until a newer one appears.
+    update_dismissed: Option<String>,
+    /// Set when the updater should close the window after scheduling install.
+    pending_quit: bool,
 }
 
 impl DbGuiApp {
@@ -550,6 +583,9 @@ impl DbGuiApp {
         // Restore the saved workspace (open tabs + their SQL/connection binding). Kept out of
         // `construct` so tests get a deterministic single-tab app independent of disk state.
         app.restore_workspace();
+
+        #[cfg(target_os = "macos")]
+        app.start_update_check();
 
         // Theme + SVG icon loader (Iconoir icons are embedded SVGs).
         crate::style::apply(&cc.egui_ctx);
@@ -633,7 +669,62 @@ impl DbGuiApp {
             commit_pending: None,
             schema_pending: None,
             show_welcome,
+            update: crate::update::UpdatePhase::Idle,
+            update_dialog_open: false,
+            update_dismissed: None,
+            pending_quit: false,
         }
+    }
+
+    /// Whether the tab bar should show the update badge.
+    fn update_badge_visible(&self) -> bool {
+        match &self.update {
+            crate::update::UpdatePhase::Available(offer)
+            | crate::update::UpdatePhase::Ready { offer, .. } => {
+                self.update_dismissed.as_deref() != Some(offer.version.as_str())
+            }
+            crate::update::UpdatePhase::Downloading { .. } => true,
+            _ => false,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn start_update_check(&mut self) {
+        if !matches!(self.update, crate::update::UpdatePhase::Idle) {
+            return;
+        }
+        self.update = crate::update::UpdatePhase::Checking;
+        let tx = self.tx.clone();
+        self.rt.spawn(async move {
+            let result = crate::update::check_for_update().await;
+            let _ = tx.send(AppMessage::UpdateChecked { result });
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    fn start_update_download(&mut self) {
+        let offer = match &self.update {
+            crate::update::UpdatePhase::Available(o) => o.clone(),
+            crate::update::UpdatePhase::Ready { offer, .. } => offer.clone(),
+            _ => return,
+        };
+        self.update = crate::update::UpdatePhase::Downloading {
+            offer: offer.clone(),
+            progress: 0.0,
+        };
+        let tx = self.tx.clone();
+        self.rt.spawn(async move {
+            let result = crate::update::download_update(&offer, |downloaded, total| {
+                let _ = tx.send(AppMessage::UpdateProgress {
+                    downloaded,
+                    total,
+                });
+            })
+            .await
+            .map(|path| (offer, path))
+            .map_err(|e| e.to_string());
+            let _ = tx.send(AppMessage::UpdateDownloaded { result });
+        });
     }
 
     fn tab(&self) -> &QueryTab {
@@ -848,20 +939,55 @@ impl DbGuiApp {
             return;
         }
         if self.tabs.len() == 1 {
-            // Always keep at least one tab: reset the last one to a blank scratch tab,
-            // preserving its connection binding.
-            let id = self.next_tab_id;
-            self.next_tab_id += 1;
-            let conn_id = self.tabs[0].conn_id.clone();
-            self.tabs[0] = QueryTab::new(id, String::new());
-            self.tabs[0].conn_id = conn_id;
-            self.active_query_tab = 0;
+            self.reset_to_single_tab(self.tabs[0].conn_id.clone());
         } else {
             self.tabs.remove(idx);
             if self.active_query_tab > idx || self.active_query_tab >= self.tabs.len() {
                 self.active_query_tab = self.active_query_tab.saturating_sub(1);
             }
         }
+        self.error = None;
+        self.workspace_dirty = true;
+    }
+
+    /// Replace all tabs with one blank scratch tab (keeps the given connection binding).
+    fn reset_to_single_tab(&mut self, conn_id: Option<String>) {
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let mut tab = QueryTab::new(id, String::new());
+        tab.conn_id = conn_id;
+        self.tabs = vec![tab];
+        self.active_query_tab = 0;
+        self.status_msg = "Ready".to_string();
+    }
+
+    fn close_other_tabs(&mut self, keep_idx: usize) {
+        if keep_idx >= self.tabs.len() || self.tabs.len() <= 1 {
+            return;
+        }
+        let kept_id = self.tabs[keep_idx].id;
+        self.tabs.retain(|t| t.id == kept_id);
+        self.active_query_tab = 0;
+        self.error = None;
+        self.status_msg = "Ready".to_string();
+        self.workspace_dirty = true;
+    }
+
+    fn close_tabs_to_right(&mut self, idx: usize) {
+        if idx >= self.tabs.len() || idx + 1 >= self.tabs.len() {
+            return;
+        }
+        self.tabs.truncate(idx + 1);
+        if self.active_query_tab > idx {
+            self.active_query_tab = idx;
+        }
+        self.error = None;
+        self.workspace_dirty = true;
+    }
+
+    fn close_all_tabs(&mut self) {
+        let conn_id = self.tab().conn_id.clone();
+        self.reset_to_single_tab(conn_id);
         self.error = None;
         self.workspace_dirty = true;
     }
@@ -1162,6 +1288,50 @@ impl DbGuiApp {
                         Err(_) => {}
                     }
                 }
+                AppMessage::UpdateChecked { result } => match result {
+                    Ok(Some(offer)) => {
+                        self.update = crate::update::UpdatePhase::Available(offer);
+                    }
+                    Ok(None) => {
+                        self.update = crate::update::UpdatePhase::Idle;
+                    }
+                    Err(e) => {
+                        self.update = crate::update::UpdatePhase::Failed(e);
+                    }
+                },
+                AppMessage::UpdateProgress { downloaded, total } => {
+                    if let crate::update::UpdatePhase::Downloading { progress, .. } =
+                        &mut self.update
+                    {
+                        *progress = match total {
+                            Some(total) if total > 0 => downloaded as f32 / total as f32,
+                            _ => 0.0,
+                        };
+                    }
+                }
+                AppMessage::UpdateDownloaded { result } => match result {
+                    Ok((offer, dmg_path)) => {
+                        self.update = crate::update::UpdatePhase::Ready { offer, dmg_path };
+                        self.status_msg = "Update downloaded — ready to install".to_string();
+                        self.error = None;
+                    }
+                    Err(e) => {
+                        // Keep the offer so the user can retry without re-checking GitHub.
+                        let offer = match std::mem::take(&mut self.update) {
+                            crate::update::UpdatePhase::Downloading { offer, .. } => Some(offer),
+                            other => {
+                                self.update = other;
+                                None
+                            }
+                        };
+                        if let Some(offer) = offer {
+                            self.update = crate::update::UpdatePhase::Available(offer);
+                        } else {
+                            self.update = crate::update::UpdatePhase::Failed(e.clone());
+                        }
+                        self.error = Some(e);
+                    }
+                },
                 AppMessage::SchemaApplied { tab_id, result } => {
                     self.busy = Busy::Idle;
                     match result {
@@ -1653,6 +1823,9 @@ impl DbGuiApp {
             Action::NewTab => self.new_tab(),
             Action::SelectTab(i) => self.select_tab(i),
             Action::CloseTab(i) => self.close_tab(i),
+            Action::CloseOtherTabs(i) => self.close_other_tabs(i),
+            Action::CloseTabsToRight(i) => self.close_tabs_to_right(i),
+            Action::CloseAllTabs => self.close_all_tabs(),
             Action::PinTab(i) => {
                 if let Some(tab) = self.tabs.get_mut(i) {
                     tab.preview = false;
@@ -1812,6 +1985,31 @@ impl DbGuiApp {
                     self.schema_pending = None;
                 } else {
                     self.tab_mut().schema_editor = None;
+                }
+            }
+            Action::OpenUpdateDialog => self.update_dialog_open = true,
+            Action::CloseUpdateDialog => self.update_dialog_open = false,
+            Action::DismissUpdate => {
+                if let Some(version) = match &self.update {
+                    crate::update::UpdatePhase::Available(o) => Some(o.version.clone()),
+                    crate::update::UpdatePhase::Ready { offer, .. } => Some(offer.version.clone()),
+                    _ => None,
+                } {
+                    self.update_dismissed = Some(version);
+                }
+                self.update_dialog_open = false;
+            }
+            Action::DownloadUpdate => {
+                #[cfg(target_os = "macos")]
+                self.start_update_download();
+            }
+            Action::InstallUpdate => {
+                #[cfg(target_os = "macos")]
+                if let crate::update::UpdatePhase::Ready { dmg_path, .. } = &self.update {
+                    match crate::update::schedule_install_and_quit(dmg_path) {
+                        Ok(()) => self.pending_quit = true,
+                        Err(e) => self.error = Some(e),
+                    }
                 }
             }
         }
@@ -2068,12 +2266,16 @@ impl DbGuiApp {
         self.settings_dialog(&ctx, &mut actions);
         self.commit_preview_dialog(&ctx, &mut actions);
         self.schema_preview_dialog(&ctx, &mut actions);
+        self.update_dialog(&ctx, &mut actions);
 
         let structural = actions.iter().any(|a| {
             matches!(
                 a,
                 Action::NewTab
                     | Action::CloseTab(_)
+                    | Action::CloseOtherTabs(_)
+                    | Action::CloseTabsToRight(_)
+                    | Action::CloseAllTabs
                     | Action::SelectTab(_)
                     | Action::Connect(_)
                     | Action::BindConnection(_)
@@ -2085,6 +2287,10 @@ impl DbGuiApp {
             self.apply_action(action);
         }
 
+        if self.pending_quit {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
         // Persist the workspace: immediately after structural changes, otherwise on a throttle
         // (so typing SQL into a tab is eventually saved without writing every frame).
         self.maybe_save_workspace(structural);
@@ -2093,7 +2299,7 @@ impl DbGuiApp {
         }
 
         // Keep animating the spinner while background work is in flight.
-        if self.busy != Busy::Idle {
+        if self.busy != Busy::Idle || self.update.is_busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(80));
         }
     }

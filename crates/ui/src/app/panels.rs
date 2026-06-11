@@ -240,10 +240,11 @@ impl DbGuiApp {
             )
             .show_separator_line(true)
             .show_inside(root, |ui| {
-                egui::ScrollArea::horizontal()
-                    .id_salt("query_tab_scroll")
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
+                ui.horizontal(|ui| {
+                    egui::ScrollArea::horizontal()
+                        .id_salt("query_tab_scroll")
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
                             // Rects collected per frame so the drag handler below can map
                             // the pointer to an insertion slot.
                             let mut rects = Vec::with_capacity(self.tabs.len());
@@ -269,6 +270,48 @@ impl DbGuiApp {
                                     preview,
                                     drag_float_x,
                                 );
+                                let tab_count = self.tabs.len();
+                                let can_close_others = tab_count > 1;
+                                let can_close_right = idx + 1 < tab_count;
+                                resp.response.context_menu(|ui| {
+                                    ui.set_min_width(200.0);
+                                    if ui.button("Close Tab").clicked() {
+                                        actions.push(Action::CloseTab(idx));
+                                        ui.close();
+                                    }
+                                    if ui
+                                        .add_enabled(
+                                            can_close_others,
+                                            egui::Button::new("Close Other Tabs"),
+                                        )
+                                        .clicked()
+                                    {
+                                        actions.push(Action::CloseOtherTabs(idx));
+                                        ui.close();
+                                    }
+                                    if ui
+                                        .add_enabled(
+                                            can_close_right,
+                                            egui::Button::new("Close Tabs to the Right"),
+                                        )
+                                        .clicked()
+                                    {
+                                        actions.push(Action::CloseTabsToRight(idx));
+                                        ui.close();
+                                    }
+                                    if ui.button("Close All Tabs").clicked() {
+                                        actions.push(Action::CloseAllTabs);
+                                        ui.close();
+                                    }
+                                    if preview {
+                                        ui.separator();
+                                        if icons::button(ui, icons::save(), "Pin Tab", true).clicked()
+                                        {
+                                            actions.push(Action::PinTab(idx));
+                                            ui.close();
+                                        }
+                                    }
+                                });
                                 if resp.close {
                                     actions.push(Action::CloseTab(idx));
                                 } else if resp.pinned {
@@ -299,9 +342,49 @@ impl DbGuiApp {
                             {
                                 actions.push(Action::NewTab);
                             }
+                            });
                         });
-                    });
+                    self.update_tab_bar_button(ui, actions);
+                });
             });
+    }
+
+    /// Fixed right-hand control on the query tab strip when a newer release is available.
+    fn update_tab_bar_button(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        if !self.update_badge_visible() {
+            return;
+        }
+
+        let (label, tooltip, busy) = match &self.update {
+            crate::update::UpdatePhase::Downloading { offer, progress } => (
+                if *progress > 0.0 {
+                    format!("Updating… {}%", (*progress * 100.0).round() as u32)
+                } else {
+                    format!("Updating v{}…", offer.version)
+                },
+                "Downloading the new version",
+                true,
+            ),
+            crate::update::UpdatePhase::Ready { offer, .. } => (
+                format!("Install v{}", offer.version),
+                "Replace the installed app and relaunch",
+                false,
+            ),
+            crate::update::UpdatePhase::Available(offer) => (
+                format!("Update v{}", offer.version),
+                "A new version is available",
+                false,
+            ),
+            _ => return,
+        };
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_space(4.0);
+            let resp = super::widgets::update_badge_button(ui, &label, busy).on_hover_text(tooltip);
+            if resp.clicked() && !busy {
+                actions.push(Action::OpenUpdateDialog);
+            }
+        });
     }
 
     /// While a query tab is being dragged, live-reorder it into the slot under its
@@ -1321,6 +1404,145 @@ impl DbGuiApp {
                     actions.push(Action::DismissWelcome);
                 }
             });
+    }
+
+    pub(super) fn update_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        if !self.update_dialog_open {
+            return;
+        }
+
+        let current = crate::update::CURRENT_VERSION;
+        let mut open = true;
+        let mut close = false;
+        let mut dismiss = false;
+        let mut download = false;
+        let mut install = false;
+
+        let (title, version, notes, progress, ready, failed, downloading) = match &self.update {
+            crate::update::UpdatePhase::Available(offer) => (
+                "Update available",
+                offer.version.clone(),
+                offer.notes.clone(),
+                None,
+                false,
+                None,
+                false,
+            ),
+            crate::update::UpdatePhase::Downloading { offer, progress } => (
+                "Downloading update",
+                offer.version.clone(),
+                offer.notes.clone(),
+                Some(*progress),
+                false,
+                None,
+                true,
+            ),
+            crate::update::UpdatePhase::Ready { offer, .. } => (
+                "Ready to install",
+                offer.version.clone(),
+                offer.notes.clone(),
+                Some(1.0),
+                true,
+                None,
+                false,
+            ),
+            crate::update::UpdatePhase::Failed(msg) => (
+                "Update failed",
+                String::new(),
+                String::new(),
+                None,
+                false,
+                Some(msg.clone()),
+                false,
+            ),
+            _ => return,
+        };
+
+        egui::Window::new(title)
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_min_width(360.0);
+                if !version.is_empty() {
+                    ui.label(
+                        egui::RichText::new(format!("plusplus v{version}"))
+                            .strong()
+                            .size(16.0),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("Current version: v{current}"))
+                            .color(palette::TEXT_WEAK()),
+                    );
+                }
+                ui.add_space(8.0);
+
+                if let Some(p) = progress {
+                    ui.add(egui::ProgressBar::new(p).show_percentage());
+                    ui.add_space(8.0);
+                }
+
+                if let Some(err) = &failed {
+                    ui.colored_label(palette::DANGER(), err);
+                    ui.add_space(8.0);
+                } else if !notes.trim().is_empty() {
+                    style::section_header(ui, "Release notes");
+                    egui::ScrollArea::vertical()
+                        .id_salt("update_notes_scroll")
+                        .max_height(180.0)
+                        .show(ui, |ui| {
+                            ui.label(notes.trim());
+                        });
+                    ui.add_space(8.0);
+                }
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ready {
+                        if icons::primary_button(ui, icons::save(), "Install & Restart", true)
+                            .clicked()
+                        {
+                            install = true;
+                        }
+                    } else if downloading {
+                        ui.add_enabled(false, egui::Button::new("Downloading…"));
+                    } else if failed.is_some() {
+                        if icons::button(ui, icons::play(), "Retry download", true).clicked() {
+                            download = true;
+                        }
+                    } else if icons::primary_button(
+                        ui,
+                        icons::play(),
+                        "Download update",
+                        true,
+                    )
+                    .clicked()
+                    {
+                        download = true;
+                    }
+
+                    if icons::button(ui, icons::close(), "Later", true).clicked() {
+                        dismiss = true;
+                    }
+                    if icons::button(ui, icons::close(), "Close", true).clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if install {
+            actions.push(Action::InstallUpdate);
+        }
+        if download {
+            actions.push(Action::DownloadUpdate);
+        }
+        if dismiss {
+            actions.push(Action::DismissUpdate);
+        }
+        if !open || close {
+            actions.push(Action::CloseUpdateDialog);
+        }
     }
 
     pub(super) fn settings_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {

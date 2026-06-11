@@ -19,6 +19,10 @@ eframe.workspace = true
 egui.workspace = true
 egui_extras.workspace = true
 tokio.workspace = true
+reqwest.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 rfd.workspace = true
 arboard.workspace = true
 # Used to validate edited date/time cells against the expected format before staging them.

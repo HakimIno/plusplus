@@ -121,6 +121,23 @@ Every release gets a matching **git tag** `vX.Y.Z` (e.g. `v0.1.0`) and a **DMG**
 `target/dist/plusplus-X.Y.Z.dmg`. Bump the version in `Cargo.toml`, then run
 `scripts/release.sh --tag` to build, package, and create the tag.
 
+### In-app updates (macOS)
+
+Installed copies check [GitHub Releases](https://github.com/HakimIno/plusplus/releases)
+on launch. When a newer `plusplus-X.Y.Z.dmg` is published, a pill button appears on the
+query tab bar (**Update vX.Y.Z**). The app downloads the DMG, replaces
+`/Applications/plusplus.app`, and relaunches — no manual reinstall.
+
+Publish an update:
+
+```bash
+# bump version in Cargo.toml, commit, then:
+git push origin v0.2.0   # triggers .github/workflows/release.yml
+```
+
+Or build locally and attach the DMG to a GitHub Release manually. The release must include
+an asset named `plusplus-<version>.dmg` (produced by `scripts/release.sh`).
+
 ## macOS release (build, install, remove)
 
 ### Quick dev run

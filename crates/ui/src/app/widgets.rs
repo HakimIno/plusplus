@@ -168,6 +168,8 @@ pub(super) struct QueryTabResponse {
     pub drag_started: bool,
     /// The chip's rect this frame, so the drag handler can map the pointer to a slot.
     pub rect: egui::Rect,
+    /// Full egui response for context menus and secondary interactions.
+    pub response: egui::Response,
 }
 
 /// Whether a query-tab chip represents a plain SQL editor or a table opened from the schema.
@@ -381,6 +383,7 @@ pub(super) fn query_tab_item(
         close: close_resp.clicked() && !dragging,
         drag_started: resp.drag_started() && !close_resp.hovered(),
         rect,
+        response: resp,
     }
 }
 
@@ -480,6 +483,19 @@ pub(super) enum LayoutSide {
     Schema,
     Details,
     Query,
+}
+
+/// Accent pill shown on the query tab bar when a newer release is available.
+pub(super) fn update_badge_button(ui: &mut egui::Ui, label: &str, busy: bool) -> egui::Response {
+    let text = egui::RichText::new(label)
+        .color(palette::ON_ACCENT())
+        .strong()
+        .size(11.0);
+    let btn = egui::Button::new(text)
+        .fill(palette::ACCENT())
+        .stroke(egui::Stroke::new(1.0, palette::ACCENT_HOVER()))
+        .min_size(egui::vec2(0.0, 22.0));
+    ui.add_enabled(!busy, btn)
 }
 
 pub(super) fn toolbar_icon_button(

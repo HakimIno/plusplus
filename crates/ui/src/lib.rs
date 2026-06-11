@@ -14,6 +14,7 @@ mod schema;
 mod style;
 mod theme;
 mod title_bar;
+mod update;
 
 pub use app::DbGuiApp;
 

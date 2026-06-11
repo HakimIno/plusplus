@@ -1,0 +1,30 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Add Apple targets
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
+      - name: Build universal .app + .dmg
+        run: scripts/release.sh --universal
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/dist/plusplus-*.dmg
+          generate_release_notes: true
