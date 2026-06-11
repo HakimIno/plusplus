@@ -337,9 +337,8 @@ impl DbGuiApp {
         }
     }
 
-    /// Thin status strip pinned to the very bottom edge: row count / selection / errors on
-    /// the left, the server-side pager for paged table tabs on the right.
-    pub(super) fn status_bar(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
+    /// Thin status strip pinned to the very bottom edge: row count / selection / errors.
+    pub(super) fn status_bar(&mut self, root: &mut egui::Ui) {
         egui::Panel::bottom("status_bar").show_inside(root, |ui| {
             ui.add_space(2.0);
             ui.horizontal(|ui| {
@@ -373,15 +372,14 @@ impl DbGuiApp {
                         ui.colored_label(palette::TEXT_FAINT(), "·");
                         ui.colored_label(palette::TEXT_WEAK(), format!("row {}", sel + 1));
                     }
-                    self.pager(ui, actions);
                 }
             });
             ui.add_space(3.0);
         });
     }
 
-    /// Server-side pager, right-aligned in the status bar. Shown only for table tabs whose
-    /// SQL is a paged simple read (`LIMIT n …` / `TOP n`) — exactly the queries
+    /// Server-side pager, right-aligned in the view-mode bar. Shown only for table tabs
+    /// whose SQL is a paged simple read (`LIMIT n …` / `TOP n`) — exactly the queries
     /// [`dbcore::with_page_window`] can rewrite. Page flips re-run against the server, so a
     /// million-row table is browsed one page at a time instead of being fetched whole.
     fn pager(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -989,8 +987,12 @@ impl DbGuiApp {
     /// Clear rebuilds the view.
     pub(super) fn filter_bar(&mut self, root: &mut egui::Ui) {
         let idx = self.active_query_tab;
-        // The filter applies to data rows; it has no meaning over the Structure view.
-        if !self.tabs[idx].filter.visible || self.tabs[idx].view == TabView::Structure {
+        // The filter applies to data rows; it has no meaning over the Structure view or
+        // while the schema editor occupies the central panel.
+        if !self.tabs[idx].filter.visible
+            || self.tabs[idx].view == TabView::Structure
+            || self.tabs[idx].schema_editor.is_some()
+        {
             return;
         }
         let col_names: Vec<String> = match &self.tabs[idx].result {
@@ -1038,31 +1040,54 @@ impl DbGuiApp {
             .show_separator_line(true)
             .show_inside(root, |ui| {
                 ui.horizontal(|ui| {
-                    let view = &mut self.tabs[idx].view;
-                    for (mode, label) in
-                        [(TabView::Data, "Data"), (TabView::Structure, "Structure")]
+                    // While the schema editor owns the central panel, neither data mode is
+                    // current; clicking one closes the editor and switches back.
+                    let editing = self.tabs[idx].schema_editor.is_some();
                     {
-                        if ui
-                            .selectable_label(*view == mode, egui::RichText::new(label).size(11.0))
-                            .clicked()
+                        let view = &mut self.tabs[idx].view;
+                        for (mode, label) in
+                            [(TabView::Data, "Data"), (TabView::Structure, "Structure")]
                         {
-                            *view = mode;
+                            if ui
+                                .selectable_label(
+                                    !editing && *view == mode,
+                                    egui::RichText::new(label).size(11.0),
+                                )
+                                .clicked()
+                            {
+                                *view = mode;
+                                if editing {
+                                    actions.push(Action::CancelSchema);
+                                }
+                            }
                         }
                     }
-                    // "Edit Table" button — shown on the right side of the bar.
+                    // "Edit Table" sits with Data/Structure as a third mode: it swaps the
+                    // central panel for the schema editor rather than opening a dialog.
                     if let Some(info) = table_info {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if icons::button(ui, icons::edit(), "Edit Table", true).clicked() {
-                                actions.push(Action::OpenEditTable(info));
-                            }
-                        });
+                        if ui
+                            .selectable_label(editing, egui::RichText::new("Edit Table").size(11.0))
+                            .clicked()
+                            && !editing
+                        {
+                            actions.push(Action::OpenEditTable(info));
+                        }
                     }
+                    // The server-side pager lives on the right, directly under the grid.
+                    self.pager(ui, actions);
                 });
             });
     }
 
     pub(super) fn central_panel(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
         let idx = self.active_query_tab;
+        // The schema editor takes over the central panel (like Data/Structure) while open.
+        if self.tabs[idx].schema_editor.is_some() {
+            egui::CentralPanel::default().show_inside(root, |ui| {
+                self.schema_editor_view(ui, actions);
+            });
+            return;
+        }
         // Structure mode replaces the whole grid with the table's introspected definition.
         // `view_mode_bar` already forced the view back to Data when no table info exists,
         // so the lookup here always succeeds in Structure mode.
@@ -1719,18 +1744,15 @@ impl DbGuiApp {
 
     // ─── Schema Editor dialog ─────────────────────────────────────────────────
 
-    pub(super) fn schema_editor_dialog(
-        &mut self,
-        ctx: &egui::Context,
-        actions: &mut Vec<Action>,
-    ) {
-        // Only shown when the editor is open but no DDL preview is pending.
-        if self.schema_editor.is_none() || self.schema_pending.is_some() {
-            return;
-        }
-
+    /// The schema editor (Create/Edit Table), rendered inline in the central panel —
+    /// it takes the grid's place like the Data/Structure views rather than floating as
+    /// a dialog. Only the DDL preview remains a modal (it's a confirm step).
+    fn schema_editor_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         use crate::schema::{SchemaEditorMode, SchemaTab};
-        let editor = self.schema_editor.as_mut().unwrap();
+        let idx = self.active_query_tab;
+        let Some(editor) = self.tabs[idx].schema_editor.as_mut() else {
+            return;
+        };
 
         let title = match editor.mode {
             SchemaEditorMode::NewTable => "Create Table".to_string(),
@@ -1739,96 +1761,80 @@ impl DbGuiApp {
             }
         };
 
-        let mut open = true;
-        egui::Window::new(title)
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(true)
-            .default_size([640.0, 500.0])
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                // Table name (only editable in NewTable mode; read-only in EditTable).
-                ui.horizontal(|ui| {
-                    let pad = egui::Margin::symmetric(10, 5);
-                    ui.label("Table name:");
-                    let te = egui::TextEdit::singleline(&mut editor.table_name)
-                        .hint_text("my_table")
-                        .desired_width(200.0)
-                        .vertical_align(egui::Align::Center)
-                        .margin(pad);
-                    ui.add_enabled(
-                        editor.mode == SchemaEditorMode::NewTable,
-                        te,
-                    );
-                    if !editor.schema_name.is_empty() || editor.mode == SchemaEditorMode::NewTable {
-                        ui.label("Schema:");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut editor.schema_name)
-                                .hint_text("public")
-                                .desired_width(120.0)
-                                .vertical_align(egui::Align::Center)
-                                .margin(pad),
-                        );
-                    }
-                });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            style::section_header(ui, &title);
+            // Action buttons on the right of the header, where the eye lands first.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if icons::primary_button(ui, icons::code(), "Preview SQL", true).clicked() {
+                    actions.push(Action::GenerateSchema);
+                }
                 ui.add_space(6.0);
-
-                // Tab selector: Columns | Indexes | Foreign Keys
-                ui.horizontal(|ui| {
-                    for (tab, label) in [
-                        (SchemaTab::Columns, "Columns"),
-                        (SchemaTab::Indexes, "Indexes"),
-                        (SchemaTab::ForeignKeys, "Foreign Keys"),
-                    ] {
-                        if ui
-                            .selectable_label(
-                                editor.active_tab == tab,
-                                egui::RichText::new(label).size(12.0),
-                            )
-                            .clicked()
-                        {
-                            editor.active_tab = tab;
-                        }
-                    }
-                });
-                ui.separator();
-                ui.add_space(4.0);
-
-                let available_h = ui.available_height() - 48.0;
-                egui::ScrollArea::vertical()
-                    .id_salt("schema_editor_scroll")
-                    .max_height(available_h.max(100.0))
-                    .show(ui, |ui| {
-                        match editor.active_tab {
-                            SchemaTab::Columns => {
-                                schema_columns_tab(ui, &mut editor.columns, editor.mode, editor.db_kind);
-                            }
-                            SchemaTab::Indexes => {
-                                schema_indexes_tab(ui, &mut editor.indexes);
-                            }
-                            SchemaTab::ForeignKeys => {
-                                schema_fk_tab(ui, &mut editor.fks);
-                            }
-                        }
-                    });
-
-                ui.add_space(6.0);
-                ui.separator();
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    if icons::primary_button(ui, icons::code(), "Preview SQL", true).clicked() {
-                        actions.push(Action::GenerateSchema);
-                    }
-                    ui.add_space(6.0);
-                    if icons::button(ui, icons::close(), "Cancel", true).clicked() {
-                        actions.push(Action::CancelSchema);
-                    }
-                });
+                if icons::button(ui, icons::close(), "Cancel", true).clicked() {
+                    actions.push(Action::CancelSchema);
+                }
             });
+        });
+        ui.add_space(6.0);
 
-        if !open {
-            actions.push(Action::CancelSchema);
-        }
+        // Table name (only editable in NewTable mode; read-only in EditTable).
+        ui.horizontal(|ui| {
+            let pad = egui::Margin::symmetric(10, 5);
+            ui.label("Table name:");
+            let te = egui::TextEdit::singleline(&mut editor.table_name)
+                .hint_text("my_table")
+                .desired_width(200.0)
+                .vertical_align(egui::Align::Center)
+                .margin(pad);
+            ui.add_enabled(editor.mode == SchemaEditorMode::NewTable, te);
+            if !editor.schema_name.is_empty() || editor.mode == SchemaEditorMode::NewTable {
+                ui.label("Schema:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut editor.schema_name)
+                        .hint_text("public")
+                        .desired_width(120.0)
+                        .vertical_align(egui::Align::Center)
+                        .margin(pad),
+                );
+            }
+        });
+        ui.add_space(6.0);
+
+        // Tab selector: Columns | Indexes | Foreign Keys
+        ui.horizontal(|ui| {
+            for (tab, label) in [
+                (SchemaTab::Columns, "Columns"),
+                (SchemaTab::Indexes, "Indexes"),
+                (SchemaTab::ForeignKeys, "Foreign Keys"),
+            ] {
+                if ui
+                    .selectable_label(
+                        editor.active_tab == tab,
+                        egui::RichText::new(label).size(12.0),
+                    )
+                    .clicked()
+                {
+                    editor.active_tab = tab;
+                }
+            }
+        });
+        ui.separator();
+        ui.add_space(4.0);
+
+        egui::ScrollArea::vertical()
+            .id_salt("schema_editor_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| match editor.active_tab {
+                SchemaTab::Columns => {
+                    schema_columns_tab(ui, &mut editor.columns, editor.mode, editor.db_kind);
+                }
+                SchemaTab::Indexes => {
+                    schema_indexes_tab(ui, &mut editor.indexes);
+                }
+                SchemaTab::ForeignKeys => {
+                    schema_fk_tab(ui, &mut editor.fks);
+                }
+            });
     }
 
     // ─── Schema DDL preview dialog ────────────────────────────────────────────

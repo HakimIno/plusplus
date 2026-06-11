@@ -59,7 +59,11 @@ enum AppMessage {
         result: Result<u64, String>,
     },
     /// A DDL schema migration finished. `Ok` means success; carry a status message.
-    SchemaApplied(Result<String, String>),
+    /// `tab_id` is the tab whose schema editor initiated it (to close that editor).
+    SchemaApplied {
+        tab_id: u64,
+        result: Result<String, String>,
+    },
 }
 
 /// What the background runtime is currently doing (drives the spinner / disables buttons).
@@ -122,6 +126,10 @@ struct QueryTab {
     /// Total rows the tab's query matches server-side (ignoring LIMIT/OFFSET), counted in
     /// the background for paged table tabs. `None` while unknown / not a table tab.
     total_rows: Option<u64>,
+    /// Open schema editor (Create/Edit Table) shown in the central panel. Per-tab, so
+    /// switching tabs or opening another table never leaves a stale editor on screen —
+    /// and in-progress edits survive a tab switch.
+    schema_editor: Option<SchemaEditor>,
 }
 
 impl QueryTab {
@@ -140,6 +148,7 @@ impl QueryTab {
             filter: FilterState::default(),
             view: TabView::default(),
             total_rows: None,
+            schema_editor: None,
         }
     }
 
@@ -513,9 +522,8 @@ pub struct DbGuiApp {
     /// SQL statements staged for the commit-preview dialog. `None` = dialog closed;
     /// `Some(stmts)` = dialog open, waiting for the user to confirm or cancel.
     commit_pending: Option<Vec<String>>,
-    /// Active schema editor (for create/edit table). `None` = closed.
-    schema_editor: Option<SchemaEditor>,
     /// DDL statements staged for the schema-preview dialog. `None` = preview closed.
+    /// (The schema editor itself lives on each [`QueryTab`].)
     schema_pending: Option<Vec<String>>,
 
     // --- layout ---
@@ -623,7 +631,6 @@ impl DbGuiApp {
             theme,
             beautify,
             commit_pending: None,
-            schema_editor: None,
             schema_pending: None,
             show_welcome,
         }
@@ -953,6 +960,8 @@ impl DbGuiApp {
                 tab.selected_row = None;
                 tab.edits.clear();
                 tab.edits.pending_source = None;
+                // A schema editor against a dropped connection is stale; close it.
+                tab.schema_editor = None;
             }
         }
         if self.querying_tab_id.is_some_and(|qid| {
@@ -1153,16 +1162,24 @@ impl DbGuiApp {
                         Err(_) => {}
                     }
                 }
-                AppMessage::SchemaApplied(result) => {
+                AppMessage::SchemaApplied { tab_id, result } => {
                     self.busy = Busy::Idle;
                     match result {
                         Ok(msg) => {
                             self.status_msg = msg;
                             self.error = None;
-                            self.schema_editor = None;
                             self.schema_pending = None;
-                            // Re-introspect the active connection to refresh the sidebar tree.
-                            if let Some(conn_id) = self.tab().conn_id.clone() {
+                            // Close the editor on the tab that applied the migration (the
+                            // user may have switched tabs while it ran).
+                            let source_tab = self.tabs.iter_mut().find(|t| t.id == tab_id);
+                            let conn_id = source_tab.map(|tab| {
+                                tab.schema_editor = None;
+                                tab.conn_id.clone()
+                            });
+                            // Re-introspect that tab's connection to refresh the sidebar tree.
+                            if let Some(conn_id) =
+                                conn_id.flatten().or_else(|| self.tab().conn_id.clone())
+                            {
                                 if let Some(ac) = self
                                     .active_connections
                                     .iter()
@@ -1745,17 +1762,17 @@ impl DbGuiApp {
                     .active()
                     .and_then(|a| a.schema.tables.first().and_then(|t| t.schema.as_deref()))
                     .map(|s| s.to_string());
-                self.schema_editor =
+                self.tab_mut().schema_editor =
                     Some(SchemaEditor::new_table(kind, schema.as_deref()));
                 self.schema_pending = None;
             }
             Action::OpenEditTable(table) => {
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
-                self.schema_editor = Some(SchemaEditor::edit_table(&table, kind));
+                self.tab_mut().schema_editor = Some(SchemaEditor::edit_table(&table, kind));
                 self.schema_pending = None;
             }
             Action::GenerateSchema => {
-                let Some(editor) = &self.schema_editor else {
+                let Some(editor) = &self.tab().schema_editor else {
                     return;
                 };
                 match editor.build_ddl() {
@@ -1776,6 +1793,7 @@ impl DbGuiApp {
                     return;
                 };
                 let n = stmts.len();
+                let tab_id = self.tab().id;
                 let tx = self.tx.clone();
                 self.busy = Busy::Querying;
                 self.error = None;
@@ -1786,14 +1804,14 @@ impl DbGuiApp {
                         .await
                         .map(|_| format!("Schema migration applied ({n} statement(s))"))
                         .map_err(|e| e.to_string());
-                    let _ = tx.send(AppMessage::SchemaApplied(result));
+                    let _ = tx.send(AppMessage::SchemaApplied { tab_id, result });
                 });
             }
             Action::CancelSchema => {
                 if self.schema_pending.is_some() {
                     self.schema_pending = None;
                 } else {
-                    self.schema_editor = None;
+                    self.tab_mut().schema_editor = None;
                 }
             }
         }
@@ -2028,7 +2046,7 @@ impl DbGuiApp {
         // bordering the central area (nothing on top of it) for a clean, smooth drag.
         self.top_bar(ui_root, frame, &mut actions);
         self.query_tab_bar(ui_root, &mut actions);
-        self.status_bar(ui_root, &mut actions);
+        self.status_bar(ui_root);
         if self.show_query_console {
             self.query_console(ui_root, &mut actions);
         }
@@ -2049,7 +2067,6 @@ impl DbGuiApp {
         self.connection_dialog(&ctx, &mut actions);
         self.settings_dialog(&ctx, &mut actions);
         self.commit_preview_dialog(&ctx, &mut actions);
-        self.schema_editor_dialog(&ctx, &mut actions);
         self.schema_preview_dialog(&ctx, &mut actions);
 
         let structural = actions.iter().any(|a| {
@@ -2677,6 +2694,113 @@ mod tests {
             "ID clashes detected in structure view:\n{}",
             clashes.join("\n")
         );
+    }
+
+    /// Render the inline schema editor headlessly (Edit Table now occupies the central
+    /// panel instead of a dialog) across its three tabs, catching panics and ID clashes.
+    /// Also checks it stays open across frames and closes via CancelSchema.
+    #[test]
+    fn probe_inline_schema_editor() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::style::apply(&ctx);
+
+        let mut app = DbGuiApp::construct();
+        let db: std::sync::Arc<dyn dbcore::Database> = std::sync::Arc::new(DummyDb);
+        app.active_connections.push(ActiveConnection {
+            config_id: "c1".into(),
+            name: "one".into(),
+            db,
+            databases: Vec::new(),
+            schema: fake_schema(2, 6),
+        });
+        {
+            let tab = app.tab_mut();
+            tab.conn_id = Some("c1".into());
+            tab.edits.source = Some(EditSource {
+                schema: None,
+                table: "table_0".into(),
+                pk_cols: vec!["field_0".into()],
+            });
+        }
+        let info = app.structure_table(0).cloned().expect("table resolves");
+        app.apply_action(Action::OpenEditTable(info));
+        assert!(app.tab().schema_editor.is_some());
+
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+        let mut clashes: Vec<String> = Vec::new();
+        let tabs = [
+            crate::schema::SchemaTab::Columns,
+            crate::schema::SchemaTab::Indexes,
+            crate::schema::SchemaTab::ForeignKeys,
+        ];
+        for tab in tabs {
+            app.tab_mut().schema_editor.as_mut().unwrap().active_tab = tab;
+            for _ in 0..3 {
+                let raw = egui::RawInput {
+                    screen_rect: Some(screen),
+                    events: vec![egui::Event::PointerMoved(egui::pos2(500.0, 350.0))],
+                    ..Default::default()
+                };
+                let out = ctx.run_ui(raw, |ui| app.draw(ui, None));
+                clashes.extend(collect_clash_text(&out.shapes));
+            }
+            assert!(app.tab().schema_editor.is_some(), "editor must survive drawing");
+        }
+        clashes.sort();
+        clashes.dedup();
+        assert!(
+            clashes.is_empty(),
+            "ID clashes in inline schema editor:\n{}",
+            clashes.join("\n")
+        );
+
+        // Cancel returns the central panel to the grid views.
+        app.apply_action(Action::CancelSchema);
+        assert!(app.tab().schema_editor.is_none());
+    }
+
+    /// Regression: the schema editor must not linger when another table is opened — it
+    /// belongs to the tab it was opened on, and comes back when switching back.
+    #[test]
+    fn schema_editor_is_per_tab() {
+        let mut app = DbGuiApp::construct();
+        let db: std::sync::Arc<dyn dbcore::Database> = std::sync::Arc::new(DummyDb);
+        app.active_connections.push(ActiveConnection {
+            config_id: "c1".into(),
+            name: "one".into(),
+            db,
+            databases: Vec::new(),
+            schema: fake_schema(2, 3),
+        });
+        {
+            let tab = app.tab_mut();
+            tab.conn_id = Some("c1".into());
+            tab.edits.source = Some(EditSource {
+                schema: None,
+                table: "table_0".into(),
+                pk_cols: vec!["field_0".into()],
+            });
+        }
+        let info = app.structure_table(0).cloned().expect("table resolves");
+        app.apply_action(Action::OpenEditTable(info));
+        assert!(app.tab().schema_editor.is_some());
+
+        // Open a different table from the sidebar: lands on a fresh tab with no editor.
+        app.apply_action(Action::OpenTable {
+            sql: "SELECT * FROM table_1 LIMIT 100;".into(),
+            source: EditSource {
+                schema: None,
+                table: "table_1".into(),
+                pk_cols: vec!["field_0".into()],
+            },
+            pin: false,
+        });
+        assert!(app.tab().schema_editor.is_none(), "editor must not follow to a new table");
+
+        // ...but the original tab still holds its in-progress editor.
+        app.apply_action(Action::SelectTab(0));
+        assert!(app.tab().schema_editor.is_some());
     }
 
     /// Drive the Details panel headlessly with one column per editor kind, editable, so
