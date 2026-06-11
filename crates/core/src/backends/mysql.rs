@@ -148,17 +148,26 @@ impl Database for MySqlDb {
         })
     }
 
-    async fn execute(&self, sql: &str) -> Result<QueryResult> {
+    async fn execute_capped(&self, sql: &str, max_rows: usize) -> Result<QueryResult> {
+        use futures_util::TryStreamExt;
         let start = Instant::now();
         if returns_rows(sql) {
-            let rows = sqlx::query(AssertSqlSafe(sql.to_string()))
-                .fetch_all(&self.pool)
-                .await?;
-            let columns = rows.first().map(column_meta).unwrap_or_default();
-            let data = rows
-                .iter()
-                .map(|row| (0..columns.len()).map(|i| decode(row, i)).collect())
-                .collect();
+            // Stream rows instead of fetch_all: a SELECT over a huge table materializes at
+            // most `max_rows` rows; dropping the stream early cancels the rest of the fetch.
+            let mut stream = sqlx::query(AssertSqlSafe(sql.to_string())).fetch(&self.pool);
+            let mut columns: Vec<ColumnMeta> = Vec::new();
+            let mut data: Vec<Vec<Value>> = Vec::new();
+            let mut truncated = false;
+            while let Some(row) = stream.try_next().await? {
+                if columns.is_empty() {
+                    columns = column_meta(&row);
+                }
+                if data.len() >= max_rows {
+                    truncated = true;
+                    break;
+                }
+                data.push((0..columns.len()).map(|i| decode(&row, i)).collect());
+            }
             Ok(QueryResult {
                 columns,
                 rows: data,
@@ -166,6 +175,7 @@ impl Database for MySqlDb {
                     elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
                     rows_affected: None,
                 },
+                truncated,
             })
         } else {
             let res = sqlx::query(AssertSqlSafe(sql.to_string()))
@@ -178,6 +188,7 @@ impl Database for MySqlDb {
                     elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
                     rows_affected: Some(res.rows_affected()),
                 },
+                truncated: false,
             })
         }
     }

@@ -1,10 +1,23 @@
-use super::{Action, Busy, ConnField, ConnTestState, DbGuiApp, QueryTab, TabView};
+use super::{Action, Busy, ConnField, ConnTestState, DbGuiApp, PageNav, QueryTab, TabView};
 use crate::filter::{self, FilterEvent};
 use crate::grid::results_grid;
 use crate::icons;
 use crate::style::{self, palette};
 use crate::theme::ThemeId;
 use crate::title_bar;
+
+/// Group a number's digits with commas (`1234567` → `"1,234,567"`) for the pager.
+fn group_digits(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
 
 fn field_test_status(state: &ConnTestState, field: ConnField) -> Option<bool> {
     match state {
@@ -324,8 +337,9 @@ impl DbGuiApp {
         }
     }
 
-    /// Thin status strip pinned to the very bottom edge: row count / selection / errors.
-    pub(super) fn status_bar(&mut self, root: &mut egui::Ui) {
+    /// Thin status strip pinned to the very bottom edge: row count / selection / errors on
+    /// the left, the server-side pager for paged table tabs on the right.
+    pub(super) fn status_bar(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
         egui::Panel::bottom("status_bar").show_inside(root, |ui| {
             ui.add_space(2.0);
             ui.horizontal(|ui| {
@@ -359,9 +373,97 @@ impl DbGuiApp {
                         ui.colored_label(palette::TEXT_FAINT(), "·");
                         ui.colored_label(palette::TEXT_WEAK(), format!("row {}", sel + 1));
                     }
+                    self.pager(ui, actions);
                 }
             });
             ui.add_space(3.0);
+        });
+    }
+
+    /// Server-side pager, right-aligned in the status bar. Shown only for table tabs whose
+    /// SQL is a paged simple read (`LIMIT n …` / `TOP n`) — exactly the queries
+    /// [`dbcore::with_page_window`] can rewrite. Page flips re-run against the server, so a
+    /// million-row table is browsed one page at a time instead of being fetched whole.
+    fn pager(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let tab = self.tab();
+        if tab.result.is_none()
+            || (tab.edits.source.is_none() && tab.edits.pending_source.is_none())
+        {
+            return;
+        }
+        let Some(win) = dbcore::parse_page_window(&tab.sql) else {
+            return;
+        };
+        let Some(limit) = win.limit.filter(|&l| l > 0) else {
+            return;
+        };
+        let shown = tab.result.as_ref().map_or(0, |r| r.row_count() as u64);
+        let total = tab.total_rows;
+        let idle = self.busy == Busy::Idle;
+        let at_start = win.offset == 0;
+        let has_more = match total {
+            Some(t) => win.offset + shown < t,
+            // Unknown total: a full page means there's probably another one.
+            None => shown == limit,
+        };
+
+        // Right-to-left, so the first widget lands at the right edge:
+        // … ⏮ ◀ "1–100 of 1,234,567" ▶ ⏭ · size ▾
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_space(4.0);
+            egui::ComboBox::from_id_salt("pager_size")
+                .width(70.0)
+                .selected_text(egui::RichText::new(format!("{limit} / page")).size(11.0))
+                .show_ui(ui, |ui| {
+                    for n in [100u64, 500, 1_000, 5_000, 10_000] {
+                        if ui
+                            .selectable_label(limit == n, group_digits(n))
+                            .clicked()
+                            && idle
+                        {
+                            actions.push(Action::SetPageSize(n));
+                        }
+                    }
+                });
+
+            let nav_btn = |ui: &mut egui::Ui, glyph: &str, enabled: bool, hint: &str| {
+                ui.add_enabled(
+                    enabled && idle,
+                    egui::Button::new(egui::RichText::new(glyph).size(11.0)),
+                )
+                .on_hover_text(hint.to_string())
+                .clicked()
+            };
+            if nav_btn(ui, "⏭", has_more && total.is_some(), "Last page") {
+                actions.push(Action::Page(PageNav::Last));
+            }
+            if nav_btn(ui, "▶", has_more, "Next page") {
+                actions.push(Action::Page(PageNav::Next));
+            }
+            let range = if shown == 0 {
+                "0".to_string()
+            } else {
+                format!(
+                    "{}–{}",
+                    group_digits(win.offset + 1),
+                    group_digits(win.offset + shown)
+                )
+            };
+            let of = match total {
+                Some(t) => format!(" of {}", group_digits(t)),
+                None => " of ?".to_string(),
+            };
+            ui.label(
+                egui::RichText::new(format!("{range}{of}"))
+                    .size(11.0)
+                    .color(palette::TEXT_WEAK()),
+            );
+            if nav_btn(ui, "◀", !at_start, "Previous page") {
+                actions.push(Action::Page(PageNav::Prev));
+            }
+            if nav_btn(ui, "⏮", !at_start, "First page") {
+                actions.push(Action::Page(PageNav::First));
+            }
         });
     }
 

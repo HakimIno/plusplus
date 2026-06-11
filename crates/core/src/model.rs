@@ -302,6 +302,284 @@ pub fn simple_select_target(sql: &str) -> Option<(Option<String>, String)> {
     Some((schema, table))
 }
 
+// ─── Server-side paging ──────────────────────────────────────────────────────
+//
+// Table tabs page through big tables server-side instead of fetching everything: the pager
+// rewrites the tab's paging clauses (`LIMIT/OFFSET`, `TOP`, `OFFSET … FETCH`) in place and
+// re-runs, so the SQL editor always shows exactly what ran. All helpers below only operate
+// on queries [`simple_select_target`] accepts — for anything more complex they return
+// `None` and the pager stays hidden.
+
+/// The paging window of a simple single-table SELECT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageWindow {
+    /// Rows per page (`LIMIT n`, `TOP n`, or `FETCH NEXT n ROWS ONLY`). `None` = unbounded.
+    pub limit: Option<u64>,
+    /// Rows skipped before the page starts (`OFFSET n`). 0 when absent.
+    pub offset: u64,
+}
+
+/// Byte offsets of every top-level, whole-word, case-insensitive occurrence of `kw`,
+/// skipping string literals, quoted identifiers, and comments.
+fn keyword_positions(sql: &str, kw: &str) -> Vec<usize> {
+    let bytes = sql.as_bytes();
+    let n = bytes.len();
+    let k = kw.len();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    // Whether the previous byte could continue an identifier (so `xlimit`/`'a'limit`
+    // never match). Quoted regions count as identifier-enders only across whitespace.
+    let mut prev_ident = false;
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+    while i < n {
+        match bytes[i] {
+            quote @ (b'\'' | b'"' | b'`') => {
+                i += 1;
+                while i < n {
+                    if bytes[i] == quote {
+                        if i + 1 < n && bytes[i + 1] == quote {
+                            i += 2;
+                            continue;
+                        }
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                prev_ident = true; // a keyword can't butt right up against a quote
+            }
+            b'[' => {
+                i += 1;
+                while i < n {
+                    if bytes[i] == b']' {
+                        if i + 1 < n && bytes[i + 1] == b']' {
+                            i += 2;
+                            continue;
+                        }
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                prev_ident = true;
+            }
+            b'-' if i + 1 < n && bytes[i + 1] == b'-' => {
+                while i < n && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                prev_ident = false;
+            }
+            b'/' if i + 1 < n && bytes[i + 1] == b'*' => {
+                i += 2;
+                let mut depth = 1u32;
+                while i < n && depth > 0 {
+                    if bytes[i] == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
+                        depth += 1;
+                        i += 2;
+                    } else if bytes[i] == b'*' && i + 1 < n && bytes[i + 1] == b'/' {
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                prev_ident = false;
+            }
+            b => {
+                if is_ident(b)
+                    && !prev_ident
+                    && i + k <= n
+                    && sql[i..i + k].eq_ignore_ascii_case(kw)
+                    && !bytes.get(i + k).copied().is_some_and(is_ident)
+                {
+                    out.push(i);
+                    i += k;
+                    prev_ident = true;
+                    continue;
+                }
+                prev_ident = is_ident(b);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Parse the leading unsigned integer of `s` (after whitespace), if any.
+fn leading_u64(s: &str) -> Option<u64> {
+    let s = s.trim_start();
+    let end = s
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(s.len());
+    s[..end].parse().ok()
+}
+
+/// If the whole of `s` parses as a sequence of paging clauses, return `(limit, offset)`.
+///
+/// Grammar (any order, MySQL's `LIMIT offset, count` included):
+///   `LIMIT n [, m]` · `LIMIT n OFFSET m` · `OFFSET n [ROW|ROWS]` ·
+///   `FETCH FIRST|NEXT n ROW|ROWS ONLY`
+///
+/// Requiring the *entire* tail to match keeps an unquoted column that happens to be named
+/// `offset`/`fetch` inside a WHERE clause from being mistaken for a paging clause.
+fn parse_paging_tail(s: &str) -> Option<(Option<u64>, u64)> {
+    let mut toks: Vec<String> = Vec::new();
+    for word in s.split_whitespace() {
+        // Commas may be glued to numbers (`LIMIT 10,20`); make them their own token.
+        let mut rest = word;
+        while let Some(pos) = rest.find(',') {
+            if pos > 0 {
+                toks.push(rest[..pos].to_string());
+            }
+            toks.push(",".to_string());
+            rest = &rest[pos + 1..];
+        }
+        if !rest.is_empty() {
+            toks.push(rest.to_string());
+        }
+    }
+    if toks.is_empty() {
+        return None;
+    }
+    let mut limit = None;
+    let mut offset = 0u64;
+    let mut i = 0usize;
+    let up = |t: Option<&String>| t.map(|t| t.to_ascii_uppercase()).unwrap_or_default();
+    while i < toks.len() {
+        match up(toks.get(i)).as_str() {
+            "LIMIT" => {
+                let a: u64 = toks.get(i + 1)?.parse().ok()?;
+                if toks.get(i + 2).map(String::as_str) == Some(",") {
+                    // MySQL `LIMIT offset, count`.
+                    offset = a;
+                    limit = Some(toks.get(i + 3)?.parse().ok()?);
+                    i += 4;
+                } else {
+                    limit = Some(a);
+                    i += 2;
+                }
+            }
+            "OFFSET" => {
+                offset = toks.get(i + 1)?.parse().ok()?;
+                i += 2;
+                if matches!(up(toks.get(i)).as_str(), "ROW" | "ROWS") {
+                    i += 1;
+                }
+            }
+            "FETCH" => {
+                if !matches!(up(toks.get(i + 1)).as_str(), "FIRST" | "NEXT") {
+                    return None;
+                }
+                limit = Some(toks.get(i + 2)?.parse().ok()?);
+                if !matches!(up(toks.get(i + 3)).as_str(), "ROW" | "ROWS") {
+                    return None;
+                }
+                if up(toks.get(i + 4)).as_str() != "ONLY" {
+                    return None;
+                }
+                i += 5;
+            }
+            _ => return None,
+        }
+    }
+    Some((limit, offset))
+}
+
+/// Locate the trailing paging clauses of `sql` (already `;`-trimmed). Returns the byte
+/// index where they start (== `sql.len()` when there are none) plus the parsed window.
+fn trailing_paging(sql: &str) -> (usize, Option<u64>, u64) {
+    let mut candidates: Vec<usize> = ["LIMIT", "OFFSET", "FETCH"]
+        .iter()
+        .flat_map(|kw| keyword_positions(sql, kw))
+        .collect();
+    candidates.sort_unstable();
+    for pos in candidates {
+        if let Some((limit, offset)) = parse_paging_tail(&sql[pos..]) {
+            return (pos, limit, offset);
+        }
+    }
+    (sql.len(), None, 0)
+}
+
+/// The paging window of `sql`, if it's a simple single-table read (per
+/// [`simple_select_target`]). A query with no LIMIT/TOP/FETCH comes back as
+/// `PageWindow { limit: None, offset }`.
+pub fn parse_page_window(sql: &str) -> Option<PageWindow> {
+    simple_select_target(sql)?;
+    let sql = sql.trim().trim_end_matches(';').trim_end();
+    // SQL Server's `TOP n` sits right after SELECT.
+    let top = strip_keyword(sql, "SELECT")
+        .and_then(|rest| strip_keyword(rest, "TOP"))
+        .and_then(leading_u64);
+    let (_, limit, offset) = trailing_paging(sql);
+    Some(PageWindow {
+        limit: limit.or(top),
+        offset,
+    })
+}
+
+/// Rewrite the paging clauses of a simple single-table SELECT so it returns `limit` rows
+/// starting at `offset`, in `kind`'s dialect. WHERE and ORDER BY are preserved verbatim.
+/// Returns `None` when `sql` isn't a simple single-table read.
+pub fn with_page_window(kind: DbKind, sql: &str, limit: u64, offset: u64) -> Option<String> {
+    simple_select_target(sql)?;
+    let sql = sql.trim().trim_end_matches(';').trim_end();
+
+    // Strip an existing `TOP n` (always directly after SELECT) and any trailing paging
+    // clauses, leaving `SELECT * FROM t [WHERE …] [ORDER BY …]`.
+    let mut base = sql.to_string();
+    if let Some(after_select) = strip_keyword(sql, "SELECT") {
+        if let Some(after_top) = strip_keyword(after_select, "TOP") {
+            let digits = after_top
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(after_top.len());
+            if digits > 0 {
+                let rest = after_top[digits..].trim_start();
+                base = format!("SELECT {rest}");
+            }
+        }
+    }
+    let (cut, _, _) = trailing_paging(&base);
+    base.truncate(cut);
+    let base = base.trim_end();
+
+    Some(match kind {
+        DbKind::SqlServer => {
+            if keyword_positions(base, "ORDER").is_empty() {
+                if offset == 0 {
+                    // No ORDER BY to hang OFFSET…FETCH on; plain TOP keeps page one simple.
+                    let rest = strip_keyword(base, "SELECT").unwrap_or(base);
+                    format!("SELECT TOP {limit} {rest};")
+                } else {
+                    format!(
+                        "{base} ORDER BY (SELECT NULL) OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY;"
+                    )
+                }
+            } else {
+                format!("{base} OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY;")
+            }
+        }
+        _ if offset == 0 => format!("{base} LIMIT {limit};"),
+        _ => format!("{base} LIMIT {limit} OFFSET {offset};"),
+    })
+}
+
+/// `SELECT COUNT(*)` over the same table and WHERE clause as `sql`, ignoring its ORDER BY
+/// and paging — the total the pager shows. `None` when `sql` isn't a simple read.
+pub fn build_count_sql(sql: &str) -> Option<String> {
+    simple_select_target(sql)?;
+    let sql = sql.trim().trim_end_matches(';').trim_end();
+    let (cut, _, _) = trailing_paging(sql);
+    let body = &sql[..cut];
+    let from = *keyword_positions(body, "FROM").first()?;
+    let end = keyword_positions(body, "ORDER")
+        .first()
+        .copied()
+        .unwrap_or(body.len());
+    let from_clause = body[from..end].trim_end();
+    Some(format!("SELECT COUNT(*) {from_clause};"))
+}
+
 /// User-chosen glyph for a connection in the sidebar. Persisted with the connection config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -558,6 +836,8 @@ pub struct QueryResult {
     pub columns: Vec<ColumnMeta>,
     pub rows: Vec<Vec<Value>>,
     pub stats: QueryStats,
+    /// The fetch stopped at the caller's row cap; the server had more rows to give.
+    pub truncated: bool,
 }
 
 impl QueryResult {
@@ -857,6 +1137,94 @@ mod tests {
         assert_eq!(target("UPDATE users SET name = 'x'"), None);
         assert_eq!(target("SELECT * FROM a; SELECT * FROM b"), None);
         assert_eq!(target("SELECT * FROM users GROUP BY id"), None);
+    }
+
+    #[test]
+    fn parse_page_window_reads_every_dialect() {
+        let win = |sql: &str| parse_page_window(sql).unwrap();
+        assert_eq!(
+            win("SELECT * FROM t"),
+            PageWindow { limit: None, offset: 0 }
+        );
+        assert_eq!(
+            win("SELECT * FROM t LIMIT 100;"),
+            PageWindow { limit: Some(100), offset: 0 }
+        );
+        assert_eq!(
+            win("SELECT * FROM t LIMIT 100 OFFSET 300"),
+            PageWindow { limit: Some(100), offset: 300 }
+        );
+        // MySQL's comma form puts the offset first.
+        assert_eq!(
+            win("SELECT * FROM t LIMIT 300, 100"),
+            PageWindow { limit: Some(100), offset: 300 }
+        );
+        assert_eq!(
+            win("SELECT TOP 50 * FROM [dbo].[t];"),
+            PageWindow { limit: Some(50), offset: 0 }
+        );
+        assert_eq!(
+            win("SELECT * FROM t ORDER BY id OFFSET 200 ROWS FETCH NEXT 100 ROWS ONLY;"),
+            PageWindow { limit: Some(100), offset: 200 }
+        );
+        // WHERE/ORDER BY don't confuse the parser; quoted text containing keywords is inert.
+        assert_eq!(
+            win("SELECT * FROM t WHERE name = 'limit 5 offset 2' ORDER BY id LIMIT 10 OFFSET 20"),
+            PageWindow { limit: Some(10), offset: 20 }
+        );
+        // An unquoted column named `offset` in WHERE isn't a paging clause.
+        assert_eq!(
+            win("SELECT * FROM t WHERE offset > 5 LIMIT 10"),
+            PageWindow { limit: Some(10), offset: 0 }
+        );
+        // Not a simple single-table read → no window.
+        assert!(parse_page_window("SELECT a, b FROM t LIMIT 5").is_none());
+    }
+
+    #[test]
+    fn with_page_window_rewrites_in_place() {
+        let pg = |sql: &str, l, o| with_page_window(DbKind::Postgres, sql, l, o).unwrap();
+        assert_eq!(pg("SELECT * FROM t LIMIT 100;", 100, 200), "SELECT * FROM t LIMIT 100 OFFSET 200;");
+        assert_eq!(pg("SELECT * FROM t LIMIT 100 OFFSET 200;", 100, 0), "SELECT * FROM t LIMIT 100;");
+        // WHERE and ORDER BY survive the rewrite.
+        assert_eq!(
+            pg("SELECT * FROM t WHERE a > 1 ORDER BY a LIMIT 50 OFFSET 50", 50, 100),
+            "SELECT * FROM t WHERE a > 1 ORDER BY a LIMIT 50 OFFSET 100;"
+        );
+        // A query with no paging clause gains one.
+        assert_eq!(pg("SELECT * FROM t", 100, 0), "SELECT * FROM t LIMIT 100;");
+
+        let ms = |sql: &str, l, o| with_page_window(DbKind::SqlServer, sql, l, o).unwrap();
+        // Page one without ORDER BY keeps the TOP form.
+        assert_eq!(ms("SELECT TOP 100 * FROM t;", 100, 0), "SELECT TOP 100 * FROM t;");
+        // Deeper pages need OFFSET…FETCH, which needs an ORDER BY.
+        assert_eq!(
+            ms("SELECT TOP 100 * FROM t;", 100, 200),
+            "SELECT * FROM t ORDER BY (SELECT NULL) OFFSET 200 ROWS FETCH NEXT 100 ROWS ONLY;"
+        );
+        assert_eq!(
+            ms("SELECT * FROM t ORDER BY id OFFSET 200 ROWS FETCH NEXT 100 ROWS ONLY;", 100, 300),
+            "SELECT * FROM t ORDER BY id OFFSET 300 ROWS FETCH NEXT 100 ROWS ONLY;"
+        );
+        // Joins and projections are refused.
+        assert!(with_page_window(DbKind::Postgres, "SELECT a FROM t", 10, 0).is_none());
+    }
+
+    #[test]
+    fn build_count_sql_keeps_where_drops_order_and_paging() {
+        assert_eq!(
+            build_count_sql("SELECT * FROM t LIMIT 100 OFFSET 200;").unwrap(),
+            "SELECT COUNT(*) FROM t;"
+        );
+        assert_eq!(
+            build_count_sql("SELECT * FROM \"s\".\"t\" WHERE a > 1 ORDER BY a LIMIT 50").unwrap(),
+            "SELECT COUNT(*) FROM \"s\".\"t\" WHERE a > 1;"
+        );
+        assert_eq!(
+            build_count_sql("SELECT TOP 100 * FROM [dbo].[t]").unwrap(),
+            "SELECT COUNT(*) FROM [dbo].[t];"
+        );
+        assert!(build_count_sql("SELECT a, b FROM t").is_none());
     }
 
     #[test]

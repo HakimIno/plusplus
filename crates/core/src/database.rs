@@ -18,9 +18,18 @@ pub trait Database: Send + Sync {
     /// Introspect the connected database into a [`SchemaTree`] (tables, columns, indexes).
     async fn introspect(&self) -> Result<SchemaTree>;
 
-    /// Execute an arbitrary SQL statement and return the result set. For DML statements
-    /// the returned rows are empty and `stats.rows_affected` is populated instead.
-    async fn execute(&self, sql: &str) -> Result<QueryResult>;
+    /// Execute an arbitrary SQL statement and return the result set, materializing at most
+    /// `max_rows` rows. Backends stream rows off the wire and stop accumulating at the cap,
+    /// so a `SELECT` over a huge table can't exhaust memory; a capped result comes back with
+    /// [`QueryResult::truncated`] set. For DML statements the returned rows are empty and
+    /// `stats.rows_affected` is populated instead.
+    async fn execute_capped(&self, sql: &str, max_rows: usize) -> Result<QueryResult>;
+
+    /// Execute with no row cap. Convenience for internal queries that are known-small
+    /// (counts, introspection helpers) and for tests.
+    async fn execute(&self, sql: &str) -> Result<QueryResult> {
+        self.execute_capped(sql, usize::MAX).await
+    }
 
     /// Execute a batch of DML statements as a single atomic transaction: either every
     /// statement commits, or the first failure rolls back all preceding ones. Returns

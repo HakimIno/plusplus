@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use tiberius::{Column, ColumnData, FromSqlOwned, Row};
+use tiberius::{ColumnData, FromSqlOwned, Row};
 
 use crate::database::{statements_return_rows, Database, ROW_KEYWORDS};
 use crate::error::{CoreError, Result};
@@ -206,17 +206,54 @@ impl Database for MsSqlDb {
         })
     }
 
-    async fn execute(&self, sql: &str) -> Result<QueryResult> {
+    async fn execute_capped(&self, sql: &str, max_rows: usize) -> Result<QueryResult> {
+        use futures_util::TryStreamExt;
+        use tiberius::QueryItem;
         let start = Instant::now();
         let elapsed = |start: Instant| start.elapsed().as_secs_f64() * 1000.0;
 
         if mssql_returns_rows(sql) {
-            let rows = self.fetch(sql).await?;
-            let columns = rows.first().map(column_meta).unwrap_or_default();
-            let data = rows
-                .into_iter()
-                .map(|row| row.into_iter().map(|c| decode(&c)).collect())
-                .collect();
+            let mut conn = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| CoreError::Pool(e.to_string()))?;
+            let mut stream = conn.simple_query(sql.to_string()).await?;
+            // Stream row-by-row instead of `into_first_result` so at most `max_rows` rows
+            // are materialized. The stream is still drained to its end — TDS gives no way
+            // to abandon it mid-result without poisoning the pooled connection — but rows
+            // past the cap (and any later result sets, as before) are dropped on the floor.
+            let mut columns: Vec<ColumnMeta> = Vec::new();
+            let mut data: Vec<Vec<Value>> = Vec::new();
+            let mut truncated = false;
+            let mut result_sets = 0usize;
+            while let Some(item) = stream.try_next().await? {
+                match item {
+                    QueryItem::Metadata(meta) => {
+                        result_sets += 1;
+                        if result_sets == 1 {
+                            columns = meta
+                                .columns()
+                                .iter()
+                                .map(|c| ColumnMeta {
+                                    name: c.name().to_string(),
+                                    type_name: format!("{:?}", c.column_type()),
+                                })
+                                .collect();
+                        }
+                    }
+                    QueryItem::Row(row) => {
+                        if result_sets > 1 {
+                            continue;
+                        }
+                        if data.len() >= max_rows {
+                            truncated = true;
+                            continue;
+                        }
+                        data.push(row.into_iter().map(|c| decode(&c)).collect());
+                    }
+                }
+            }
             Ok(QueryResult {
                 columns,
                 rows: data,
@@ -224,6 +261,7 @@ impl Database for MsSqlDb {
                     elapsed_ms: elapsed(start),
                     rows_affected: None,
                 },
+                truncated,
             })
         } else {
             // DML/DDL: `execute` reports rows affected (summed across statements).
@@ -240,6 +278,7 @@ impl Database for MsSqlDb {
                     elapsed_ms: elapsed(start),
                     rows_affected: Some(res.total()),
                 },
+                truncated: false,
             })
         }
     }
@@ -293,16 +332,6 @@ fn get_str(row: &Row, idx: usize) -> String {
         .flatten()
         .unwrap_or_default()
         .to_string()
-}
-
-fn column_meta(row: &Row) -> Vec<ColumnMeta> {
-    row.columns()
-        .iter()
-        .map(|c: &Column| ColumnMeta {
-            name: c.name().to_string(),
-            type_name: format!("{:?}", c.column_type()),
-        })
-        .collect()
 }
 
 /// Decode one cell. By the time a [`Row`] reaches us, tiberius has already resolved each

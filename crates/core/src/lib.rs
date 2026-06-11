@@ -21,12 +21,12 @@ use std::sync::Arc;
 pub use database::Database;
 pub use error::{CoreError, Result};
 pub use model::{
-    build_add_column_sql, build_create_index_sql, build_create_table_sql, build_delete_sql,
-    build_drop_column_sql, build_drop_index_sql, build_drop_table_sql, build_insert_sql,
-    build_rename_column_sql, build_update_sql, simple_select_target, ColumnDef, ColumnInfo,
-    ColumnMeta, ConnectionColor, ConnectionConfig, ConnectionIcon, DbKind, FkAction, ForeignKeyDef,
-    IndexDef,
-    IndexInfo, QueryResult, QueryStats, SchemaTree, SslMode, TableInfo,
+    build_add_column_sql, build_count_sql, build_create_index_sql, build_create_table_sql,
+    build_delete_sql, build_drop_column_sql, build_drop_index_sql, build_drop_table_sql,
+    build_insert_sql, build_rename_column_sql, build_update_sql, parse_page_window,
+    simple_select_target, with_page_window, ColumnDef, ColumnInfo, ColumnMeta, ConnectionColor,
+    ConnectionConfig, ConnectionIcon, DbKind, FkAction, ForeignKeyDef, IndexDef, IndexInfo,
+    PageWindow, QueryResult, QueryStats, SchemaTree, SslMode, TableInfo,
 };
 pub use value::Value;
 
@@ -125,6 +125,61 @@ mod tests {
         // Row 2: NULLs decode as Value::Null.
         assert!(res.rows[1][1].is_null());
         assert!(res.rows[1][2].is_null());
+    }
+
+    #[tokio::test]
+    async fn select_stops_materializing_at_the_row_cap() {
+        let (db, _guard) = temp_db().await;
+        db.execute("CREATE TABLE t (id INTEGER)").await.unwrap();
+        let values: Vec<String> = (1..=10).map(|i| format!("({i})")).collect();
+        db.execute(&format!("INSERT INTO t (id) VALUES {}", values.join(", ")))
+            .await
+            .unwrap();
+
+        let res = db.execute_capped("SELECT * FROM t", 4).await.unwrap();
+        assert_eq!(res.row_count(), 4);
+        assert!(res.truncated);
+        assert_eq!(res.column_count(), 1); // metadata survives the cap
+
+        let res = db.execute_capped("SELECT * FROM t", 100).await.unwrap();
+        assert_eq!(res.row_count(), 10);
+        assert!(!res.truncated);
+    }
+
+    /// End-to-end pager flow on a real (100k-row) table: rewrite the window, fetch one
+    /// page, count the total — the exact sequence the UI's pager performs.
+    #[tokio::test]
+    async fn paging_walks_a_big_table() {
+        let (db, _guard) = temp_db().await;
+        db.execute("CREATE TABLE big (id INTEGER PRIMARY KEY)")
+            .await
+            .unwrap();
+        db.execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000) \
+             INSERT INTO big (id) SELECT i FROM n",
+        )
+        .await
+        .unwrap();
+
+        // Jump to the middle of the table: only that page is materialized.
+        let sql = with_page_window(DbKind::Sqlite, "SELECT * FROM big LIMIT 1000;", 1000, 50_000)
+            .unwrap();
+        assert_eq!(sql, "SELECT * FROM big LIMIT 1000 OFFSET 50000;");
+        let page = db.execute_capped(&sql, 100_000).await.unwrap();
+        assert_eq!(page.row_count(), 1000);
+        assert!(!page.truncated);
+        assert_eq!(page.rows[0][0], Value::Int(50_001));
+
+        // The pager's total comes from a COUNT over the same FROM/WHERE.
+        let count_sql = build_count_sql(&sql).unwrap();
+        let total = db.execute(&count_sql).await.unwrap();
+        assert_eq!(total.rows[0][0], Value::Int(100_000));
+
+        // An unpaged SELECT over the same table stops at the cap instead of materializing
+        // everything.
+        let capped = db.execute_capped("SELECT * FROM big", 5_000).await.unwrap();
+        assert_eq!(capped.row_count(), 5_000);
+        assert!(capped.truncated);
     }
 
     #[tokio::test]

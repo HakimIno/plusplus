@@ -364,6 +364,7 @@ mod tests {
             columns,
             rows: data,
             stats: QueryStats::default(),
+            truncated: false,
         }
     }
 

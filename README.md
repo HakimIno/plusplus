@@ -33,6 +33,15 @@ resizable columns, click-to-sort headers, a TablePlus-style filter bar
 (column / operator / value conditions), and a details panel showing the selected row
 field by field.
 
+**Big tables.** Million-row tables are browsed server-side, one page at a time. Table
+tabs get a pager in the status bar (first/prev/next/last plus a page size) that rewrites
+the query's `LIMIT/OFFSET` — or `TOP` / `OFFSET … FETCH` on SQL Server — in place, so the
+SQL editor always shows exactly what ran, and a background `COUNT(*)` supplies the
+"1–1,000 of 1,234,567" total. Hand-written WHERE / ORDER BY clauses survive page flips.
+As a safety net, every query streams rows off the wire and stops materializing at 100k
+rows (the result is marked as capped in the status line), so an accidental
+`SELECT * FROM huge` can't exhaust memory on any backend.
+
 **Editing.** When a result maps cleanly back to one table (any simple
 `SELECT * FROM t …`), cells become editable in place with type-aware editors. You can also
 add and remove whole rows: double-click the trailing **＋** strip to add a new row (tinted

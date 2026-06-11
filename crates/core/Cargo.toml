@@ -16,6 +16,7 @@ path = "src/lib.rs"
 [dependencies]
 sqlx.workspace = true
 tokio.workspace = true
+futures-util.workspace = true
 # SQL Server: tiberius is the TDS driver; bb8 gives it the pooling sqlx provides natively.
 tiberius.workspace = true
 bb8.workspace = true

@@ -2913,6 +2913,7 @@ dependencies = [
  "bb8",
  "bb8-tiberius",
  "chrono",
+ "futures-util",
  "keyring",
  "serde",
  "serde_json",

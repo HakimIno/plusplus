@@ -19,6 +19,12 @@ use crate::edit::{EditSource, Edits};
 use crate::filter::{self, FilterState};
 use crate::theme::ThemeId;
 
+/// The most rows a single query will materialize in memory. A `SELECT` over a bigger
+/// result streams up to the cap and comes back marked truncated — browse the rest with
+/// the pager (table tabs) or a narrower query. ~100k rows keeps even wide results in the
+/// hundreds of MB, far below where the grid stops being useful anyway.
+const MAX_FETCH_ROWS: usize = 100_000;
+
 /// Messages sent from background tasks back to the UI thread.
 enum AppMessage {
     /// A connect+introspect attempt finished.
@@ -45,6 +51,12 @@ enum AppMessage {
     Committed {
         tab_id: u64,
         result: Result<usize, String>,
+    },
+    /// A background `SELECT COUNT(*)` for a paged table tab finished. Failures are
+    /// non-fatal — the pager just shows an unknown total.
+    Counted {
+        tab_id: u64,
+        result: Result<u64, String>,
     },
     /// A DDL schema migration finished. `Ok` means success; carry a status message.
     SchemaApplied(Result<String, String>),
@@ -107,6 +119,9 @@ struct QueryTab {
     filter: FilterState,
     /// Data vs Structure view in the central panel (table tabs only).
     view: TabView,
+    /// Total rows the tab's query matches server-side (ignoring LIMIT/OFFSET), counted in
+    /// the background for paged table tabs. `None` while unknown / not a table tab.
+    total_rows: Option<u64>,
 }
 
 impl QueryTab {
@@ -124,6 +139,7 @@ impl QueryTab {
             edits: Edits::default(),
             filter: FilterState::default(),
             view: TabView::default(),
+            total_rows: None,
         }
     }
 
@@ -207,10 +223,26 @@ impl QueryTab {
     }
 }
 
+/// Pull the single scalar out of a `SELECT COUNT(*)` result. Backends decode big counts
+/// as Int; NUMERIC-ish ones arrive as Text.
+fn count_from_result(res: &QueryResult) -> Result<u64, String> {
+    match res.rows.first().and_then(|row| row.first()) {
+        Some(dbcore::Value::Int(n)) => Ok((*n).max(0) as u64),
+        Some(dbcore::Value::Text(s)) => s.trim().parse::<u64>().map_err(|e| e.to_string()),
+        _ => Err("count query returned no scalar".to_string()),
+    }
+}
+
 /// Human-readable status line for a completed result.
 fn result_status(res: &QueryResult) -> String {
     match res.stats.rows_affected {
         Some(n) => format!("OK — {n} row(s) affected in {:.1} ms", res.stats.elapsed_ms),
+        None if res.truncated => format!(
+            "First {} row(s) × {} col(s) in {:.1} ms — capped; narrow the query or page through",
+            res.row_count(),
+            res.column_count(),
+            res.stats.elapsed_ms
+        ),
         None => format!(
             "{} row(s) × {} col(s) in {:.1} ms",
             res.row_count(),
@@ -382,6 +414,11 @@ enum Action {
         pin: bool,
     },
     SortBy(usize),
+    /// Pager: jump to another page of a paged table tab. Rewrites the tab's LIMIT/OFFSET
+    /// in place (the SQL editor always shows what runs) and re-runs the query.
+    Page(PageNav),
+    /// Pager: switch the page size, staying on the page that holds the current offset.
+    SetPageSize(u64),
     /// Build staged edits into SQL and open the preview dialog.
     PreviewEdits,
     /// User confirmed the preview: execute the statements transactionally.
@@ -398,6 +435,16 @@ enum Action {
     ApplySchema,
     /// Close the schema editor / DDL preview without applying.
     CancelSchema,
+}
+
+/// Where the pager should jump.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PageNav {
+    First,
+    Prev,
+    Next,
+    /// Only offered when the total row count is known.
+    Last,
 }
 
 /// Drag-to-reorder state for the query-tab strip.
@@ -1021,7 +1068,45 @@ impl DbGuiApp {
                             tab.edits.source = tab.edits.pending_source.take();
                             tab.edits.clear();
                             let status = result_status(&res);
+                            let fetched = res.row_count() as u64;
+                            let truncated = res.truncated;
                             tab.set_result(res);
+                            // Refresh the pager total for paged table tabs: a short first
+                            // page already tells us the total; otherwise count server-side
+                            // in the background (the WHERE clause may have changed).
+                            tab.total_rows = None;
+                            if tab.edits.source.is_some() {
+                                let window = dbcore::parse_page_window(&tab.sql);
+                                if let Some(limit) =
+                                    window.and_then(|w| w.limit.map(|l| (w.offset, l)))
+                                {
+                                    let (offset, limit) = limit;
+                                    if offset == 0 && fetched < limit && !truncated {
+                                        tab.total_rows = Some(fetched);
+                                    } else if let Some((db, count_sql)) = tab
+                                        .conn_id
+                                        .as_deref()
+                                        .and_then(|id| {
+                                            self.active_connections
+                                                .iter()
+                                                .find(|c| c.config_id == id)
+                                        })
+                                        .map(|c| c.db.clone())
+                                        .zip(dbcore::build_count_sql(&tab.sql))
+                                    {
+                                        let tx = self.tx.clone();
+                                        self.rt.spawn(async move {
+                                            let result = db
+                                                .execute(&count_sql)
+                                                .await
+                                                .map_err(|e| e.to_string())
+                                                .and_then(|r| count_from_result(&r));
+                                            let _ = tx
+                                                .send(AppMessage::Counted { tab_id, result });
+                                        });
+                                    }
+                                }
+                            }
                             if is_active {
                                 self.status_msg = status;
                                 self.error = None;
@@ -1032,6 +1117,13 @@ impl DbGuiApp {
                             self.status_msg = "Query failed".to_string();
                         }
                         Err(_) => {}
+                    }
+                }
+                AppMessage::Counted { tab_id, result } => {
+                    if let (Some(tab), Ok(n)) =
+                        (self.tabs.iter_mut().find(|t| t.id == tab_id), result)
+                    {
+                        tab.total_rows = Some(n);
                     }
                 }
                 AppMessage::Committed { tab_id, result } => {
@@ -1167,9 +1259,81 @@ impl DbGuiApp {
         self.error = None;
         self.status_msg = "Running query…".to_string();
         self.rt.spawn(async move {
-            let result = db.execute(&sql).await.map_err(|e| e.to_string());
+            let result = db
+                .execute_capped(&sql, MAX_FETCH_ROWS)
+                .await
+                .map_err(|e| e.to_string());
             let _ = tx.send(AppMessage::Queried { tab_id, result });
         });
+    }
+
+    /// Rewrite the active tab's paging window to `(limit, offset)` in its connection's
+    /// dialect and re-run. No-op when the tab isn't a paged simple-table read.
+    fn run_page(&mut self, limit: u64, offset: u64) {
+        let Some(kind) = self.active().map(|a| a.db.kind()) else {
+            return;
+        };
+        let idx = self.active_query_tab;
+        let Some(sql) = dbcore::with_page_window(kind, &self.tabs[idx].sql, limit, offset)
+        else {
+            return;
+        };
+        self.tabs[idx].sql = sql;
+        // The rewrite preserves the simple-select shape, so the result stays editable.
+        self.tabs[idx].edits.pending_source = self.derive_edit_source(idx);
+        self.workspace_dirty = true;
+        self.start_query_for(idx);
+    }
+
+    /// Pager navigation for the active (paged) table tab.
+    fn page_nav(&mut self, nav: PageNav) {
+        if self.busy != Busy::Idle {
+            return;
+        }
+        let tab = self.tab();
+        let Some(win) = dbcore::parse_page_window(&tab.sql) else {
+            return;
+        };
+        let Some(limit) = win.limit.filter(|&l| l > 0) else {
+            return;
+        };
+        let total = tab.total_rows;
+        let offset = match nav {
+            PageNav::First => 0,
+            PageNav::Prev => win.offset.saturating_sub(limit),
+            PageNav::Next => win.offset + limit,
+            PageNav::Last => match total {
+                Some(t) if t > 0 => ((t - 1) / limit) * limit,
+                _ => return,
+            },
+        };
+        // Never run past a known end (the pager disables these buttons, but a stale
+        // total or a keyboard repeat could still get here).
+        if let Some(t) = total {
+            if offset >= t && offset != 0 {
+                return;
+            }
+        }
+        if offset == win.offset {
+            return;
+        }
+        self.run_page(limit, offset);
+    }
+
+    /// Change the active tab's page size, snapping the offset to the new page grid so
+    /// the rows currently on screen stay within the shown page.
+    fn set_page_size(&mut self, size: u64) {
+        if self.busy != Busy::Idle || size == 0 {
+            return;
+        }
+        let Some(win) = dbcore::parse_page_window(&self.tab().sql) else {
+            return;
+        };
+        if win.limit == Some(size) {
+            return;
+        }
+        let offset = (win.offset / size) * size;
+        self.run_page(size, offset);
     }
 
     /// Work out whether the tab's SQL still reads one whole table, and if so build the
@@ -1568,6 +1732,8 @@ impl DbGuiApp {
             Action::BeautifySql => self.beautify_sql(),
             Action::OpenTable { sql, source, pin } => self.open_table(sql, source, pin),
             Action::SortBy(col) => self.tab_mut().apply_sort(col),
+            Action::Page(nav) => self.page_nav(nav),
+            Action::SetPageSize(n) => self.set_page_size(n),
             Action::PreviewEdits => self.commit_edits(),
             Action::ConfirmEdits => self.confirm_edits(),
             Action::CancelEdits => {
@@ -1862,7 +2028,7 @@ impl DbGuiApp {
         // bordering the central area (nothing on top of it) for a clean, smooth drag.
         self.top_bar(ui_root, frame, &mut actions);
         self.query_tab_bar(ui_root, &mut actions);
-        self.status_bar(ui_root);
+        self.status_bar(ui_root, &mut actions);
         if self.show_query_console {
             self.query_console(ui_root, &mut actions);
         }
@@ -1931,8 +2097,10 @@ mod tests {
         async fn introspect(&self) -> dbcore::Result<SchemaTree> {
             unreachable!()
         }
-        async fn execute(&self, _sql: &str) -> dbcore::Result<QueryResult> {
-            unreachable!()
+        async fn execute_capped(&self, _sql: &str, _max_rows: usize) -> dbcore::Result<QueryResult> {
+            // Background tasks (queries, pager counts) may legitimately land here in tests
+            // that only assert on the UI-side state; an empty result keeps them quiet.
+            Ok(QueryResult::default())
         }
         async fn execute_transaction(&self, _stmts: &[String]) -> dbcore::Result<usize> {
             unreachable!()
@@ -1982,7 +2150,55 @@ mod tests {
             columns,
             rows: data,
             stats: QueryStats::default(),
+            truncated: false,
         }
+    }
+
+    /// The pager rewrites the tab's LIMIT/OFFSET in place and never runs past a known end.
+    #[test]
+    fn pager_rewrites_sql_and_respects_total() {
+        let mut app = DbGuiApp::construct();
+        app.active_connections.push(ActiveConnection {
+            config_id: "c1".into(),
+            name: "conn".into(),
+            db: std::sync::Arc::new(DummyDb),
+            schema: fake_schema(1, 2),
+            databases: Vec::new(),
+        });
+        {
+            let tab = app.tab_mut();
+            tab.conn_id = Some("c1".into());
+            tab.sql = "SELECT * FROM table_0 LIMIT 100;".into();
+            tab.edits.source = Some(EditSource {
+                schema: None,
+                table: "table_0".into(),
+                pk_cols: vec!["field_0".into()],
+            });
+            tab.total_rows = Some(250);
+        }
+
+        let mut go = |app: &mut DbGuiApp, action: Action| {
+            app.busy = Busy::Idle; // each page flip leaves a query in flight
+            app.apply_action(action);
+        };
+
+        go(&mut app, Action::Page(PageNav::Next));
+        assert_eq!(app.tab().sql, "SELECT * FROM table_0 LIMIT 100 OFFSET 100;");
+        go(&mut app, Action::Page(PageNav::Last));
+        assert_eq!(app.tab().sql, "SELECT * FROM table_0 LIMIT 100 OFFSET 200;");
+        // Past the known end → no-op.
+        go(&mut app, Action::Page(PageNav::Next));
+        assert_eq!(app.tab().sql, "SELECT * FROM table_0 LIMIT 100 OFFSET 200;");
+        go(&mut app, Action::Page(PageNav::Prev));
+        assert_eq!(app.tab().sql, "SELECT * FROM table_0 LIMIT 100 OFFSET 100;");
+        go(&mut app, Action::Page(PageNav::First));
+        assert_eq!(app.tab().sql, "SELECT * FROM table_0 LIMIT 100;");
+        // Changing the page size snaps the offset onto the new grid.
+        go(&mut app, Action::Page(PageNav::Last));
+        go(&mut app, Action::SetPageSize(500));
+        assert_eq!(app.tab().sql, "SELECT * FROM table_0 LIMIT 500;");
+        // The rewrite keeps the tab editable (a fresh pending source is derived).
+        assert!(app.tab().edits.pending_source.is_some());
     }
 
     fn collect_clash_text(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
@@ -2505,6 +2721,7 @@ mod tests {
                 vec![Value::Null; 7],
             ],
             stats: QueryStats::default(),
+            truncated: false,
         };
         {
             let tab = app.tab_mut();
@@ -2562,6 +2779,7 @@ mod tests {
             ],
             rows: vec![vec![Value::Int(13), Value::Text("Coffee".into())]],
             stats: QueryStats::default(),
+            truncated: false,
         };
         {
             let tab = app.tab_mut();
