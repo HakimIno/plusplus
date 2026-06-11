@@ -188,25 +188,42 @@ fn column_meta(row: &SqliteRow) -> Vec<ColumnMeta> {
         .collect()
 }
 
-/// Decode one SQLite cell. SQLite is dynamically typed, so we probe storage classes in
-/// order (integer → real → text → blob) rather than dispatching on a declared type.
+/// Decode one SQLite cell. SQLite is dynamically typed, so dispatch on the *value's*
+/// storage class — known per cell from the raw value — instead of probing decoders in
+/// order: each failed probe allocates a boxed decode error, which dominated the decode
+/// cost on large text-heavy results.
 fn decode(row: &SqliteRow, idx: usize) -> Value {
-    if let Ok(raw) = row.try_get_raw(idx) {
-        if raw.is_null() {
-            return Value::Null;
+    let Ok(raw) = row.try_get_raw(idx) else {
+        return Value::Null;
+    };
+    if raw.is_null() {
+        return Value::Null;
+    }
+    let ti = raw.type_info();
+    match ti.name() {
+        "INTEGER" => row.try_get::<i64, _>(idx).map(Value::Int).unwrap_or(Value::Null),
+        "REAL" => row.try_get::<f64, _>(idx).map(Value::Float).unwrap_or(Value::Null),
+        "TEXT" => row.try_get::<String, _>(idx).map(Value::Text).unwrap_or(Value::Null),
+        "BLOB" => row
+            .try_get::<Vec<u8>, _>(idx)
+            .map(Value::Bytes)
+            .unwrap_or(Value::Null),
+        // Unexpected storage class (e.g. an inferred BOOLEAN/DATETIME): fall back to the
+        // old probing order so nothing ever decodes worse than before.
+        _ => {
+            if let Ok(v) = row.try_get::<i64, _>(idx) {
+                return Value::Int(v);
+            }
+            if let Ok(v) = row.try_get::<f64, _>(idx) {
+                return Value::Float(v);
+            }
+            if let Ok(v) = row.try_get::<String, _>(idx) {
+                return Value::Text(v);
+            }
+            if let Ok(v) = row.try_get::<Vec<u8>, _>(idx) {
+                return Value::Bytes(v);
+            }
+            Value::Null
         }
     }
-    if let Ok(v) = row.try_get::<i64, _>(idx) {
-        return Value::Int(v);
-    }
-    if let Ok(v) = row.try_get::<f64, _>(idx) {
-        return Value::Float(v);
-    }
-    if let Ok(v) = row.try_get::<String, _>(idx) {
-        return Value::Text(v);
-    }
-    if let Ok(v) = row.try_get::<Vec<u8>, _>(idx) {
-        return Value::Bytes(v);
-    }
-    Value::Null
 }

@@ -178,17 +178,24 @@ impl Database for PostgresDb {
             // most `max_rows` rows; dropping the stream early cancels the rest of the fetch.
             let mut stream = sqlx::query(AssertSqlSafe(sql.to_string())).fetch(&self.pool);
             let mut columns: Vec<ColumnMeta> = Vec::new();
+            // Upper-cased type names resolved once per result; `decode` dispatches on
+            // these instead of re-uppercasing the type name for every cell.
+            let mut types: Vec<String> = Vec::new();
             let mut data: Vec<Vec<Value>> = Vec::new();
             let mut truncated = false;
             while let Some(row) = stream.try_next().await? {
                 if columns.is_empty() {
                     columns = column_meta(&row);
+                    types = columns
+                        .iter()
+                        .map(|c| c.type_name.to_ascii_uppercase())
+                        .collect();
                 }
                 if data.len() >= max_rows {
                     truncated = true;
                     break;
                 }
-                data.push((0..columns.len()).map(|i| decode(&row, i)).collect());
+                data.push((0..columns.len()).map(|i| decode(&row, i, &types[i])).collect());
             }
             Ok(QueryResult {
                 columns,
@@ -251,15 +258,15 @@ fn column_meta(row: &PgRow) -> Vec<ColumnMeta> {
 }
 
 /// Decode one Postgres cell into a backend-agnostic [`Value`], dispatching on the
-/// declared type name and falling back gracefully for types we don't special-case.
-fn decode(row: &PgRow, idx: usize) -> Value {
+/// column's upper-cased type name (resolved once per result by the caller) and falling
+/// back gracefully for types we don't special-case.
+fn decode(row: &PgRow, idx: usize, name: &str) -> Value {
     if let Ok(raw) = row.try_get_raw(idx) {
         if raw.is_null() {
             return Value::Null;
         }
     }
-    let name = row.column(idx).type_info().name().to_ascii_uppercase();
-    match name.as_str() {
+    match name {
         "BOOL" => row
             .try_get::<bool, _>(idx)
             .map(Value::Bool)
