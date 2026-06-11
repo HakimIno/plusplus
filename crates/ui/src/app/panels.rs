@@ -558,10 +558,11 @@ impl DbGuiApp {
                                 let mut rects = Vec::with_capacity(self.connections.len());
                                 let pointer_y = ui.ctx().pointer_interact_pos().map(|p| p.y);
                                 for (idx, conn) in self.connections.iter().enumerate() {
-                                    let live = self
+                                    let active_conn = self
                                         .active_connections
                                         .iter()
-                                        .any(|active| active.config_id == conn.id);
+                                        .find(|a| a.config_id == conn.id);
+                                    let live = active_conn.is_some();
                                     // Highlight the connection the active tab is bound to.
                                     let selected = bound_id.as_deref() == Some(conn.id.as_str());
                                     let drag_float_y = match (&self.connection_drag, pointer_y) {
@@ -593,7 +594,12 @@ impl DbGuiApp {
                                             actions.push(Action::Connect(idx));
                                         }
                                     }
+                                    let databases: Vec<String> = active_conn
+                                        .map(|a| a.databases.clone())
+                                        .unwrap_or_default();
+                                    let current_db = conn.database.clone();
                                     resp.context_menu(|ui| {
+                                        ui.set_min_width(180.0);
                                         let connect_label =
                                             if live { "Reconnect" } else { "Connect" };
                                         if icons::button(ui, icons::connect(), connect_label, true)
@@ -601,6 +607,39 @@ impl DbGuiApp {
                                         {
                                             actions.push(Action::Connect(idx));
                                             ui.close();
+                                        }
+                                        if live && !databases.is_empty() {
+                                            ui.menu_button(
+                                                egui::RichText::new("  Switch Database  ▶"),
+                                                |ui| {
+                                                    ui.set_min_width(160.0);
+                                                    egui::ScrollArea::vertical()
+                                                        .max_height(220.0)
+                                                        .show(ui, |ui| {
+                                                            for db in &databases {
+                                                                let is_current = *db == current_db;
+                                                                let tint = ui.visuals().widgets.inactive.fg_stroke.color;
+                                                                let db_img = egui::Image::new(icons::database())
+                                                                    .fit_to_exact_size(egui::vec2(14.0, 14.0))
+                                                                    .tint(tint);
+                                                                let label = if is_current {
+                                                                    format!("✓  {db}")
+                                                                } else {
+                                                                    db.clone()
+                                                                };
+                                                                let btn = egui::Button::image_and_text(db_img, label)
+                                                                    .min_size(egui::vec2(ui.available_width(), 0.0));
+                                                                if ui.add_enabled(!is_current, btn).clicked() {
+                                                                    actions.push(Action::SwitchDatabase {
+                                                                        conn_idx: idx,
+                                                                        database: db.clone(),
+                                                                    });
+                                                                    ui.close();
+                                                                }
+                                                            }
+                                                        });
+                                                },
+                                            );
                                         }
                                         if icons::button(ui, icons::edit(), "Edit…", true).clicked()
                                         {
@@ -1011,6 +1050,142 @@ impl DbGuiApp {
                 style::empty_illustration(ui, icons::empty_results());
             }
         });
+    }
+
+    /// Full-page first-run welcome screen. Replaces the entire window; no title bar.
+    /// Called from `draw()` with an early return so no other panels render simultaneously.
+    pub(super) fn draw_welcome_page(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let ctx = root.ctx().clone();
+
+        // Left: decorative illustration panel.
+        egui::Panel::left("welcome_illus")
+            .exact_size(320.0)
+            .resizable(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(palette::PANEL())
+                    .inner_margin(egui::Margin::same(0)),
+            )
+            .show_inside(root, |ui| {
+                let rect = ui.max_rect();
+                let center = rect.center();
+                let p = ui.painter();
+
+                // Concentric accent rings (fading outward).
+                for (r, alpha) in [(52.0f32, 80u8), (88.0, 50), (130.0, 25)] {
+                    let c = palette::ACCENT().linear_multiply(alpha as f32 / 255.0);
+                    p.circle_stroke(center, r, egui::Stroke::new(1.0, c));
+                }
+
+                // Floating dots orbiting at various angles & distances.
+                for &(angle_deg, dist, r, alpha) in &[
+                    (20.0f32, 68.0f32, 5.0f32, 0.70f32),
+                    (100.0,   95.0,    3.5,     0.45),
+                    (190.0,   72.0,    4.5,     0.60),
+                    (270.0,  105.0,    5.5,     0.75),
+                    (55.0,   120.0,    3.0,     0.35),
+                    (155.0,  115.0,    4.0,     0.50),
+                ] {
+                    let a = angle_deg.to_radians();
+                    let pos = center + egui::vec2(a.cos() * dist, a.sin() * dist);
+                    p.circle_filled(pos, r, palette::ACCENT().linear_multiply(alpha));
+                }
+
+                // Small sparkle crosses.
+                for &(angle_deg, dist) in &[(42.0f32, 92.0f32), (215.0, 98.0)] {
+                    let a = angle_deg.to_radians();
+                    let pos = center + egui::vec2(a.cos() * dist, a.sin() * dist);
+                    let stroke = egui::Stroke::new(1.5, palette::ACCENT().linear_multiply(0.45));
+                    let s = 5.0_f32;
+                    p.line_segment([pos - egui::vec2(s, 0.0), pos + egui::vec2(s, 0.0)], stroke);
+                    p.line_segment([pos - egui::vec2(0.0, s), pos + egui::vec2(0.0, s)], stroke);
+                }
+
+                // Large database icon at centre.
+                let sz = 52.0;
+                ui.scope_builder(
+                    egui::UiBuilder::new().max_rect(egui::Rect::from_center_size(center, egui::vec2(sz, sz))),
+                    |ui| { icons::show_colored(ui, icons::database(), sz, palette::ACCENT()); },
+                );
+
+                // Small table icon — upper-right orbit.
+                let tbl = center + egui::vec2(56.0, -54.0);
+                ui.scope_builder(
+                    egui::UiBuilder::new().max_rect(egui::Rect::from_center_size(tbl, egui::vec2(22.0, 22.0))),
+                    |ui| { icons::show_colored(ui, icons::table(), 22.0, palette::ACCENT().linear_multiply(0.7)); },
+                );
+
+                // Small key icon — lower-left orbit.
+                let key = center + egui::vec2(-56.0, 52.0);
+                ui.scope_builder(
+                    egui::UiBuilder::new().max_rect(egui::Rect::from_center_size(key, egui::vec2(20.0, 20.0))),
+                    |ui| { icons::show_colored(ui, icons::key(), 20.0, palette::ACCENT().linear_multiply(0.55)); },
+                );
+            });
+
+        // Right: text content, theme picker, CTA.
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(palette::BASE())
+                    .inner_margin(egui::Margin::symmetric(52, 0)),
+            )
+            .show_inside(root, |ui| {
+                // Vertically centre the content block.
+                let avail_h = ui.available_height();
+                ui.add_space((avail_h - 370.0_f32).max(24.0) / 2.0);
+
+                // --- App name ---
+                ui.label(
+                    egui::RichText::new("plusplus")
+                        .size(44.0)
+                        .strong()
+                        .color(palette::ACCENT()),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new("Your fast, native database client")
+                        .size(14.0)
+                        .color(palette::TEXT_WEAK()),
+                );
+
+                ui.add_space(30.0);
+
+                // --- Feature bullets ---
+                for txt in [
+                    "Connect to Postgres, MySQL, MSSQL & SQLite",
+                    "Browse schemas, tables & columns",
+                    "Inline cell editing with safe transactions",
+                    "SQL editor with syntax highlighting",
+                ] {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("·  ").color(palette::ACCENT()));
+                        ui.label(egui::RichText::new(txt).color(palette::TEXT_WEAK()));
+                    });
+                    ui.add_space(3.0);
+                }
+
+                ui.add_space(30.0);
+
+                // --- Theme picker ---
+                style::section_header(ui, "Choose a theme");
+                ui.add_space(10.0);
+                let mut chosen = self.theme;
+                for id in ThemeId::ALL {
+                    ui.radio_value(&mut chosen, id, id.label());
+                    ui.add_space(3.0);
+                }
+                if chosen != self.theme {
+                    self.set_theme(&ctx, chosen);
+                }
+
+                ui.add_space(30.0);
+
+                // --- CTA ---
+                if icons::primary_button(ui, icons::play(), "Get Started", true).clicked() {
+                    actions.push(Action::DismissWelcome);
+                }
+            });
     }
 
     pub(super) fn settings_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {

@@ -197,6 +197,17 @@ impl Database for PostgresDb {
         tx.commit().await?;
         Ok(stmts.len())
     }
+
+    async fn list_databases(&self) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT datname FROM pg_database \
+             WHERE datistemplate = false AND datallowconn = true \
+             ORDER BY datname",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(name,)| name).collect())
+    }
 }
 
 /// Build result-column metadata from a sample row.

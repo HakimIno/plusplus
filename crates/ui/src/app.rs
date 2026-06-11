@@ -25,6 +25,8 @@ enum AppMessage {
     Connected {
         conn_id: String,
         name: String,
+        /// Populated on initial connect; empty on a re-introspect (schema change).
+        databases: Vec<String>,
         result: Result<(Arc<dyn Database>, SchemaTree), String>,
     },
     /// A connection test from the add/edit dialog finished.
@@ -74,6 +76,8 @@ struct ActiveConnection {
     name: String,
     db: Arc<dyn Database>,
     schema: SchemaTree,
+    /// All databases available on this server; empty for SQLite.
+    databases: Vec<String>,
 }
 
 /// One query tab: an independent SQL editor with its own result, view state, and the
@@ -355,11 +359,14 @@ enum Action {
     NewConnection,
     EditConnection(usize),
     DeleteConnection(usize),
+    /// Switch the target database for a saved connection and reconnect.
+    SwitchDatabase { conn_idx: usize, database: String },
     TestConnection,
     SaveConnection,
     CancelDialog,
     OpenSettings,
     CloseSettings,
+    DismissWelcome,
     BrowseSqlitePath,
     RunQuery,
     /// Reformat the active tab's SQL in its connection's dialect (Beautify, Cmd/Ctrl+I).
@@ -472,6 +479,10 @@ pub struct DbGuiApp {
     theme: ThemeId,
     /// SQL beautifier preferences (persisted to settings.json).
     beautify: crate::format::BeautifyPrefs,
+
+    // --- first-run ---
+    /// Show the welcome screen (true only on first launch; cleared when user clicks "Get Started").
+    show_welcome: bool,
 }
 
 impl DbGuiApp {
@@ -519,6 +530,7 @@ impl DbGuiApp {
                 .unwrap_or(beautify_defaults.uppercase),
             indent: settings.beautify_indent.unwrap_or(beautify_defaults.indent),
         };
+        let show_welcome = !settings.welcomed.unwrap_or(false);
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -563,6 +575,7 @@ impl DbGuiApp {
             commit_pending: None,
             schema_editor: None,
             schema_pending: None,
+            show_welcome,
         }
     }
 
@@ -645,12 +658,13 @@ impl DbGuiApp {
         self.persist_settings();
     }
 
-    /// Flush all settings.json-backed preferences (theme, beautifier) to disk.
+    /// Flush all settings.json-backed preferences (theme, beautifier, welcomed) to disk.
     fn persist_settings(&mut self) {
         let settings = dbcore::config::Settings {
             theme: Some(self.theme.key().to_string()),
             beautify_uppercase: Some(self.beautify.uppercase),
             beautify_indent: Some(self.beautify.indent),
+            welcomed: Some(!self.show_welcome),
         };
         if let Err(e) = dbcore::config::save_settings(&settings) {
             self.error = Some(format!("Could not save settings: {e}"));
@@ -911,26 +925,34 @@ impl DbGuiApp {
                 AppMessage::Connected {
                     conn_id,
                     name,
+                    databases,
                     result,
                 } => {
                     self.busy = Busy::Idle;
                     match result {
                         Ok((db, schema)) => {
                             let n = schema.tables.len();
-                            let active = ActiveConnection {
-                                config_id: conn_id,
-                                name: name.clone(),
-                                db,
-                                schema,
-                            };
                             if let Some(idx) = self
                                 .active_connections
                                 .iter()
-                                .position(|conn| conn.config_id == active.config_id)
+                                .position(|conn| conn.config_id == conn_id)
                             {
-                                self.active_connections[idx] = active;
+                                let prev_databases = std::mem::take(&mut self.active_connections[idx].databases);
+                                self.active_connections[idx] = ActiveConnection {
+                                    config_id: conn_id,
+                                    name: name.clone(),
+                                    db,
+                                    schema,
+                                    databases: if databases.is_empty() { prev_databases } else { databases },
+                                };
                             } else {
-                                self.active_connections.push(active);
+                                self.active_connections.push(ActiveConnection {
+                                    config_id: conn_id,
+                                    name: name.clone(),
+                                    db,
+                                    schema,
+                                    databases,
+                                });
                             }
                             self.status_msg = format!("Connected to {name} — {n} tables");
                             self.error = None;
@@ -1063,6 +1085,7 @@ impl DbGuiApp {
                                         let _ = tx.send(AppMessage::Connected {
                                             conn_id,
                                             name,
+                                            databases: Vec::new(),
                                             result,
                                         });
                                     });
@@ -1096,9 +1119,11 @@ impl DbGuiApp {
         self.error = None;
         self.status_msg = format!("Connecting to {name}…");
         self.rt.spawn(async move {
+            let mut databases = Vec::new();
             let result = async {
                 let db = dbcore::connect(&cfg, password).await?;
                 let schema = db.introspect().await?;
+                databases = db.list_databases().await.unwrap_or_default();
                 Ok::<_, dbcore::CoreError>((db, schema))
             }
             .await
@@ -1106,6 +1131,7 @@ impl DbGuiApp {
             let _ = tx.send(AppMessage::Connected {
                 conn_id: id,
                 name,
+                databases,
                 result,
             });
         });
@@ -1493,11 +1519,24 @@ impl DbGuiApp {
                     self.workspace_dirty = true;
                 }
             }
+            Action::SwitchDatabase { conn_idx, database } => {
+                if let Some(cfg) = self.connections.get_mut(conn_idx) {
+                    cfg.database = database;
+                    if let Err(e) = dbcore::config::save_connections(&self.connections) {
+                        self.error = Some(e.to_string());
+                    }
+                }
+                self.bind_connection(conn_idx, true);
+            }
             Action::TestConnection => self.start_connection_test(),
             Action::SaveConnection => self.save_connection(),
             Action::CancelDialog => self.editor = None,
             Action::OpenSettings => self.settings_open = true,
             Action::CloseSettings => self.settings_open = false,
+            Action::DismissWelcome => {
+                self.show_welcome = false;
+                self.persist_settings();
+            }
             Action::BrowseSqlitePath => {
                 if let Some(path) = rfd::FileDialog::new().pick_file() {
                     if let Some(ed) = &mut self.editor {
@@ -1702,6 +1741,16 @@ impl DbGuiApp {
     fn draw(&mut self, ui_root: &mut egui::Ui, frame: Option<&eframe::Frame>) {
         let ctx = ui_root.ctx().clone();
         self.poll_messages(&ctx);
+
+        // First-run welcome page: replace the entire window until "Get Started" is clicked.
+        if self.show_welcome {
+            let mut actions = Vec::new();
+            self.draw_welcome_page(ui_root, &mut actions);
+            for action in actions {
+                self.apply_action(action);
+            }
+            return;
+        }
 
         let mut actions: Vec<Action> = Vec::new();
 

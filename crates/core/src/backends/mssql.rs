@@ -256,6 +256,17 @@ impl Database for MsSqlDb {
             .await?;
         Ok(n)
     }
+
+    async fn list_databases(&self) -> Result<Vec<String>> {
+        let rows = self
+            .fetch(
+                "SELECT name FROM sys.databases \
+                 WHERE state_desc = 'ONLINE' AND database_id > 4 \
+                 ORDER BY name",
+            )
+            .await?;
+        Ok(rows.iter().map(|r| get_str(r, 0)).filter(|s| !s.is_empty()).collect())
+    }
 }
 
 /// Read a column as a string, treating decode failures and NULLs as the empty string.

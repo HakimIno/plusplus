@@ -26,6 +26,13 @@ pub trait Database: Send + Sync {
     /// statement commits, or the first failure rolls back all preceding ones. Returns
     /// the number of statements on success.
     async fn execute_transaction(&self, stmts: &[String]) -> Result<usize>;
+
+    /// Return all databases visible from this connection. Used to populate the
+    /// "Switch database" submenu on the connection icon. Returns an empty vec for
+    /// backends that don't support multiple databases (SQLite).
+    async fn list_databases(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 }
 
 /// First keywords that mark a statement as row-returning, for the common SQL dialects.

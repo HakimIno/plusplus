@@ -66,6 +66,9 @@ pub struct Settings {
     /// SQL beautifier: indent width in spaces. `None` = the default (2).
     #[serde(default)]
     pub beautify_indent: Option<u8>,
+    /// Whether the user has completed the first-run welcome flow. `None` = not yet.
+    #[serde(default)]
+    pub welcomed: Option<bool>,
 }
 
 /// Load app settings. A missing or unreadable file yields defaults — settings are a

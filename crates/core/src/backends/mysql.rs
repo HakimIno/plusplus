@@ -175,6 +175,13 @@ impl Database for MySqlDb {
         tx.commit().await?;
         Ok(stmts.len())
     }
+
+    async fn list_databases(&self) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as("SHOW DATABASES")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.into_iter().map(|(name,)| name).collect())
+    }
 }
 
 fn column_meta(row: &MySqlRow) -> Vec<ColumnMeta> {
