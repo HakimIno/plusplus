@@ -6,16 +6,41 @@
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, FontId};
 
-// Tokyo-Night-ish palette, readable on the dark theme.
-const KEYWORD: Color32 = Color32::from_rgb(0x7a, 0xa2, 0xf7); // blue
-const STRING: Color32 = Color32::from_rgb(0x9e, 0xce, 0x6a); // green
-const NUMBER: Color32 = Color32::from_rgb(0xe0, 0xaf, 0x68); // amber
-const COMMENT: Color32 = Color32::from_rgb(0x60, 0x68, 0x79); // gray
-const PUNCT: Color32 = Color32::from_rgb(0x89, 0xdd, 0xff); // cyan
-const IDENT: Color32 = Color32::from_rgb(0xc6, 0xcc, 0xd6); // default text
+struct SqlColors {
+    keyword: Color32,
+    string: Color32,
+    number: Color32,
+    comment: Color32,
+    punct: Color32,
+    ident: Color32,
+}
+
+fn sql_colors() -> SqlColors {
+    let t = crate::theme::current();
+    if t.is_dark {
+        SqlColors {
+            keyword: Color32::from_rgb(0x7a, 0xa2, 0xf7),
+            string: Color32::from_rgb(0x9e, 0xce, 0x6a),
+            number: Color32::from_rgb(0xe0, 0xaf, 0x68),
+            comment: Color32::from_rgb(0x60, 0x68, 0x79),
+            punct: Color32::from_rgb(0x89, 0xdd, 0xff),
+            ident: Color32::from_rgb(0xc6, 0xcc, 0xd6),
+        }
+    } else {
+        SqlColors {
+            keyword: t.accent,
+            string: t.success,
+            number: t.warning,
+            comment: t.text_faint,
+            punct: Color32::from_rgb(0x0e, 0x6e, 0x82),
+            ident: t.text,
+        }
+    }
+}
 
 /// Build a coloured layout job for `text`, using `font` for every run.
 pub fn highlight_sql(text: &str, font: FontId) -> LayoutJob {
+    let colors = sql_colors();
     let mut job = LayoutJob::default();
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
@@ -45,7 +70,7 @@ pub fn highlight_sql(text: &str, font: FontId) -> LayoutJob {
             push(
                 &mut job,
                 &chars[start..i].iter().collect::<String>(),
-                COMMENT,
+                colors.comment,
             );
             continue;
         }
@@ -61,7 +86,7 @@ pub fn highlight_sql(text: &str, font: FontId) -> LayoutJob {
             push(
                 &mut job,
                 &chars[start..i].iter().collect::<String>(),
-                COMMENT,
+                colors.comment,
             );
             continue;
         }
@@ -84,7 +109,7 @@ pub fn highlight_sql(text: &str, font: FontId) -> LayoutJob {
             push(
                 &mut job,
                 &chars[start..i].iter().collect::<String>(),
-                STRING,
+                colors.string,
             );
             continue;
         }
@@ -96,7 +121,11 @@ pub fn highlight_sql(text: &str, font: FontId) -> LayoutJob {
                 i += 1;
             }
             let word: String = chars[start..i].iter().collect();
-            let color = if is_keyword(&word) { KEYWORD } else { IDENT };
+            let color = if is_keyword(&word) {
+                colors.keyword
+            } else {
+                colors.ident
+            };
             push(&mut job, &word, color);
             continue;
         }
@@ -110,14 +139,14 @@ pub fn highlight_sql(text: &str, font: FontId) -> LayoutJob {
             push(
                 &mut job,
                 &chars[start..i].iter().collect::<String>(),
-                NUMBER,
+                colors.number,
             );
             continue;
         }
 
         // Punctuation / operators.
         if "(),;*=<>!+-/%|.".contains(c) {
-            push(&mut job, &c.to_string(), PUNCT);
+            push(&mut job, &c.to_string(), colors.punct);
             i += 1;
             continue;
         }
@@ -125,7 +154,11 @@ pub fn highlight_sql(text: &str, font: FontId) -> LayoutJob {
         // Whitespace and everything else.
         let start = i;
         i += 1;
-        push(&mut job, &chars[start..i].iter().collect::<String>(), IDENT);
+        push(
+            &mut job,
+            &chars[start..i].iter().collect::<String>(),
+            colors.ident,
+        );
     }
 
     job

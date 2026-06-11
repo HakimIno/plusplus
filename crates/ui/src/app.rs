@@ -676,18 +676,6 @@ impl DbGuiApp {
         }
     }
 
-    /// Whether the tab bar should show the update badge.
-    fn update_badge_visible(&self) -> bool {
-        match &self.update {
-            crate::update::UpdatePhase::Available(offer)
-            | crate::update::UpdatePhase::Ready { offer, .. } => {
-                self.update_dismissed.as_deref() != Some(offer.version.as_str())
-            }
-            crate::update::UpdatePhase::Downloading { .. } => true,
-            _ => false,
-        }
-    }
-
     #[cfg(target_os = "macos")]
     fn start_update_check(&mut self) {
         if !matches!(self.update, crate::update::UpdatePhase::Idle) {

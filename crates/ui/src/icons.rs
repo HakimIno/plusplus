@@ -126,15 +126,16 @@ pub fn connection_icon_picker_button(
     resp.on_hover_text(icon.label())
 }
 
-/// Render a decorative inline icon (no interaction), tinted to the normal text colour.
-pub fn show(ui: &mut egui::Ui, src: ImageSource<'static>, size: f32) -> egui::Response {
-    let tint = ui.visuals().text_color();
-    ui.add(image(ui, src, size, tint))
+/// Full-colour Streamline assets (database, table, …) — keep the SVG's own palette.
+pub fn show_native(ui: &mut egui::Ui, src: ImageSource<'static>, size: f32) -> egui::Response {
+    ui.add(
+        egui::Image::new(src).fit_to_exact_size(egui::vec2(size, size)),
+    )
 }
 
 /// Render a dimmed/weak inline icon (matches `ui.weak`).
 pub fn show_weak(ui: &mut egui::Ui, src: ImageSource<'static>, size: f32) -> egui::Response {
-    let tint = ui.visuals().weak_text_color();
+    let tint = crate::style::palette::TEXT_FAINT();
     ui.add(image(ui, src, size, tint))
 }
 

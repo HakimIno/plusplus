@@ -109,7 +109,12 @@ impl DbGuiApp {
             .exact_size(bar_height)
             .show_inside(root, |ui| {
                 let bar_rect = ui.max_rect();
-                let cols = title_bar::columns(bar_rect, chrome_inset);
+                let update_bar = self.update_title_bar_state();
+                let update_extra = update_bar
+                    .as_ref()
+                    .map(|s| Self::update_title_bar_width(ui, &s.0))
+                    .unwrap_or(0.0);
+                let cols = title_bar::columns(bar_rect, chrome_inset, update_extra);
                 let connected = self.active().is_some();
                 let has_result = self.tab().result.is_some();
                 let breadcrumb = self.breadcrumb_text();
@@ -172,6 +177,7 @@ impl DbGuiApp {
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
                             ui.add_space(6.0);
+                            self.update_title_bar_button(ui, actions);
                             if super::widgets::toolbar_icon_button(
                                 ui,
                                 icons::settings(),
@@ -344,19 +350,28 @@ impl DbGuiApp {
                             }
                             });
                         });
-                    self.update_tab_bar_button(ui, actions);
                 });
             });
     }
 
-    /// Fixed right-hand control on the query tab strip when a newer release is available.
-    fn update_tab_bar_button(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        if !self.update_badge_visible() {
-            return;
-        }
+    fn update_title_bar_width(ui: &egui::Ui, label: &str) -> f32 {
+        const H_PAD: f32 = 18.0;
+        const GAP: f32 = 4.0;
+        let text_w = ui
+            .painter()
+            .layout_no_wrap(
+                label.to_owned(),
+                egui::FontId::proportional(11.0),
+                egui::Color32::PLACEHOLDER,
+            )
+            .size()
+            .x;
+        text_w + H_PAD + GAP
+    }
 
-        let (label, tooltip, busy) = match &self.update {
-            crate::update::UpdatePhase::Downloading { offer, progress } => (
+    fn update_title_bar_state(&self) -> Option<(String, &'static str, bool)> {
+        match &self.update {
+            crate::update::UpdatePhase::Downloading { offer, progress } => Some((
                 if *progress > 0.0 {
                     format!("Updating… {}%", (*progress * 100.0).round() as u32)
                 } else {
@@ -364,27 +379,35 @@ impl DbGuiApp {
                 },
                 "Downloading the new version",
                 true,
-            ),
-            crate::update::UpdatePhase::Ready { offer, .. } => (
+            )),
+            crate::update::UpdatePhase::Ready { offer, .. } => Some((
                 format!("Install v{}", offer.version),
                 "Replace the installed app and relaunch",
                 false,
-            ),
-            crate::update::UpdatePhase::Available(offer) => (
-                format!("Update v{}", offer.version),
-                "A new version is available",
-                false,
-            ),
-            _ => return,
+            )),
+            crate::update::UpdatePhase::Available(offer)
+                if self.update_dismissed.as_deref() != Some(offer.version.as_str()) =>
+            {
+                Some((
+                    format!("Update v{}", offer.version),
+                    "A new version is available",
+                    false,
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// Outline update button in the title bar, rightmost (Settings sits just to its left).
+    fn update_title_bar_button(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let Some((label, tooltip, busy)) = self.update_title_bar_state() else {
+            return;
         };
 
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add_space(4.0);
-            let resp = super::widgets::update_badge_button(ui, &label, busy).on_hover_text(tooltip);
-            if resp.clicked() && !busy {
-                actions.push(Action::OpenUpdateDialog);
-            }
-        });
+        let resp = super::widgets::update_outline_button(ui, &label, busy).on_hover_text(tooltip);
+        if resp.clicked() && !busy {
+            actions.push(Action::OpenUpdateDialog);
+        }
     }
 
     /// While a query tab is being dragged, live-reorder it into the slot under its
@@ -438,10 +461,10 @@ impl DbGuiApp {
                             );
                         } else {
                             if self.busy != Busy::Idle {
-                                ui.add(egui::Spinner::new().size(11.0));
+                                ui.add(style::spinner(11.0));
                                 ui.add_space(4.0);
                             }
-                            icons::show_weak(ui, icons::table(), 12.0);
+                            icons::show_native(ui, icons::table(), 12.0);
                             ui.label(
                                 egui::RichText::new(&self.status_msg)
                                     .size(11.0)
@@ -710,7 +733,11 @@ impl DbGuiApp {
                             // Header: column name on the left, a colour-coded type badge
                             // pinned to the right edge so types scan as a column.
                             ui.horizontal(|ui| {
-                                ui.strong(&col.name);
+                                ui.label(
+                                    egui::RichText::new(&col.name)
+                                        .strong()
+                                        .color(palette::TEXT()),
+                                );
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| style::type_badge(ui, &col.type_name, kind_color(kind)),
@@ -881,7 +908,7 @@ impl DbGuiApp {
 
                                 if self.connections.is_empty() {
                                     ui.vertical_centered(|ui| {
-                                        icons::show_weak(ui, icons::database(), 16.0);
+                                        icons::show_native(ui, icons::database(), 16.0);
                                     });
                                 }
                             });
@@ -979,7 +1006,7 @@ impl DbGuiApp {
         };
 
         ui.horizontal(|ui| {
-            icons::show(ui, icons::database(), icons::SIZE);
+            icons::show_native(ui, icons::database(), icons::SIZE);
             style::truncated_label(
                 ui,
                 &active.schema.database_name,
@@ -1003,7 +1030,7 @@ impl DbGuiApp {
                     false,
                 )
                 .show_header(ui, |ui| {
-                    icons::show_weak(ui, icons::table(), 15.0);
+                    icons::show_native(ui, icons::table(), 15.0);
                     ui.add_space(2.0);
                     style::truncated_label(ui, &table.name, None, false, egui::Sense::click())
                 })
@@ -1944,7 +1971,7 @@ impl DbGuiApp {
                 match &editor.test_state {
                     ConnTestState::Testing(_) => {
                         ui.horizontal(|ui| {
-                            ui.spinner();
+                            ui.add(style::spinner(style::CONTROL_H));
                             ui.label("Testing connection…");
                         });
                     }
@@ -2153,7 +2180,15 @@ fn structure_view(ui: &mut egui::Ui, info: &dbcore::TableInfo) {
 
     let row_height = egui::TextStyle::Monospace.resolve(ui.style()).size + 8.0;
     let header = |ui: &mut egui::Ui, title: &str| {
-        ui.add(egui::Label::new(egui::RichText::new(title).strong()).selectable(false));
+        style::paint_table_header_cell(ui);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(title)
+                    .strong()
+                    .color(palette::TEXT()),
+            )
+            .selectable(false),
+        );
     };
 
     egui::ScrollArea::vertical()
@@ -2177,8 +2212,13 @@ fn structure_view(ui: &mut egui::Ui, info: &dbcore::TableInfo) {
                 .column(Column::remainder().at_least(60.0).clip(true))
                 .header(24.0, |mut h| {
                     h.col(|ui| {
+                        style::paint_table_header_cell(ui);
                         ui.add_space(4.0);
-                        ui.weak("#");
+                        ui.label(
+                            egui::RichText::new("#")
+                                .color(palette::TEXT_FAINT())
+                                .monospace(),
+                        );
                     });
                     for title in ["column_name", "data_type", "nullable", "key"] {
                         h.col(|ui| header(ui, title));
@@ -2241,8 +2281,13 @@ fn structure_view(ui: &mut egui::Ui, info: &dbcore::TableInfo) {
                     .column(Column::remainder().at_least(60.0).clip(true))
                     .header(24.0, |mut h| {
                         h.col(|ui| {
+                            style::paint_table_header_cell(ui);
                             ui.add_space(4.0);
-                            ui.weak("#");
+                            ui.label(
+                                egui::RichText::new("#")
+                                    .color(palette::TEXT_FAINT())
+                                    .monospace(),
+                            );
                         });
                         for title in ["index_name", "unique", "columns"] {
                             h.col(|ui| header(ui, title));

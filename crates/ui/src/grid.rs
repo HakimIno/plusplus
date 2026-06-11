@@ -4,7 +4,7 @@
 //! Only the visible rows are rendered each frame, so it stays smooth at 100k+ rows.
 
 use crate::edit::{EditOutcome, EditorKind, Edits};
-use crate::style::palette;
+use crate::style::{self, palette};
 use dbcore::{QueryResult, Value};
 use egui_extras::{Column, TableBuilder};
 
@@ -144,11 +144,17 @@ fn build_grid(
     builder
         .header(24.0, |mut header| {
             header.col(|ui| {
+                style::paint_table_header_cell(ui);
                 ui.add_space(4.0);
-                ui.weak("#");
+                ui.label(
+                    egui::RichText::new("#")
+                        .color(palette::TEXT_FAINT())
+                        .monospace(),
+                );
             });
             for (i, col) in result.columns.iter().enumerate() {
                 header.col(|ui| {
+                    style::paint_table_header_cell(ui);
                     let (arrow, sorted) = match sort {
                         Some((c, asc)) if c == i => (if asc { "  ↑" } else { "  ↓" }, true),
                         _ => ("", false),

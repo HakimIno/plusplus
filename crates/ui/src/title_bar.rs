@@ -9,9 +9,8 @@ use crate::style::palette;
 #[cfg(target_os = "macos")]
 const MAC_TRAFFIC_LIGHTS_INSET: f32 = 78.0;
 
-/// Width reserved for the right-hand tool cluster: settings + four layout toggles
-/// (connections, query console, schema, details), each 26px wide with 4px gap, plus margin.
-const RIGHT_TOOLS_WIDTH: f32 = 174.0;
+/// Right-hand cluster without the optional update button (settings + four layout toggles).
+pub const RIGHT_TOOLS_BASE_WIDTH: f32 = 174.0;
 /// Width of the left-hand icon cluster (excluding traffic-light inset).
 const LEFT_TOOLS_WIDTH: f32 = 108.0;
 
@@ -65,9 +64,11 @@ pub struct BarColumns {
     pub right: Rect,
 }
 
-pub fn columns(bar: Rect, chrome_inset: f32) -> BarColumns {
+/// `extra_right_width` — measured width of the update button when shown; `0` otherwise so
+/// the breadcrumb pill can use the full centre column.
+pub fn columns(bar: Rect, chrome_inset: f32, extra_right_width: f32) -> BarColumns {
     let left_w = chrome_inset + LEFT_TOOLS_WIDTH;
-    let right_w = RIGHT_TOOLS_WIDTH;
+    let right_w = RIGHT_TOOLS_BASE_WIDTH + extra_right_width.max(0.0);
     let left = Rect::from_min_max(bar.min, egui::pos2(bar.left() + left_w, bar.bottom()));
     let right = Rect::from_min_max(egui::pos2(bar.right() - right_w, bar.top()), bar.max);
     let center = Rect::from_min_max(

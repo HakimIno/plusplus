@@ -215,8 +215,15 @@ fn visuals() -> egui::Visuals {
         state.corner_radius = CornerRadius::same(6);
     }
 
-    // Separators / frame hairlines.
-    w.noninteractive.bg_stroke = Stroke::new(1.0, t.border);
+    // Separators / frame hairlines and table header column guides.
+    w.noninteractive.bg_fill = t.panel;
+    w.noninteractive.fg_stroke = Stroke::new(1.0, t.text_weak);
+    let hairline = if t.is_dark {
+        t.border_strong
+    } else {
+        t.border
+    };
+    w.noninteractive.bg_stroke = Stroke::new(1.0, hairline);
 
     // Default (resting) controls.
     w.inactive.bg_fill = t.surface;
@@ -269,7 +276,7 @@ pub fn icon_text_input(
     width: f32,
 ) -> egui::Response {
     const ICON: f32 = 14.0;
-    let tint = ui.visuals().weak_text_color();
+    let tint = palette::TEXT_FAINT();
     let img = egui::Image::new(icon)
         .fit_to_exact_size(egui::vec2(ICON, ICON))
         .tint(tint);
@@ -305,19 +312,40 @@ pub fn truncated_label(
 /// panel (CONNECTIONS, SCHEMA, …). Adds a little breathing room above itself.
 pub fn section_header(ui: &mut egui::Ui, text: &str) {
     ui.add_space(2.0);
+    let header_color = if crate::theme::current().is_dark {
+        palette::TEXT_FAINT()
+    } else {
+        palette::TEXT_WEAK()
+    };
     let mut job = LayoutJob::default();
     job.append(
         &text.to_uppercase(),
         0.0,
         TextFormat {
             font_id: FontId::new(11.0, FontFamily::Proportional),
-            color: palette::TEXT_FAINT(),
+            color: header_color,
             extra_letter_spacing: 1.4,
             ..Default::default()
         },
     );
     ui.add(egui::Label::new(job).selectable(false));
     ui.add_space(3.0);
+}
+
+/// Header-band fill + bottom rule for [`egui_extras::Table`] columns.
+pub fn paint_table_header_cell(ui: &mut egui::Ui) {
+    let rect = ui.available_rect_before_wrap();
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let t = crate::theme::current();
+    ui.painter()
+        .rect_filled(rect, CornerRadius::ZERO, t.panel);
+    ui.painter().hline(
+        rect.x_range(),
+        rect.bottom(),
+        Stroke::new(1.0, t.border),
+    );
 }
 
 /// A small rounded type tag (INTEGER, DATE, …) tinted with a semantic colour, used by the
@@ -355,11 +383,16 @@ pub fn status_dot(ui: &mut egui::Ui, color: Color32) -> egui::Response {
     resp
 }
 
+/// Theme-accent loading spinner.
+pub fn spinner(size: f32) -> egui::Spinner {
+    egui::Spinner::new().size(size).color(palette::ACCENT())
+}
+
 /// A centred loading placeholder: spinner plus a short status line.
 pub fn loading_state(ui: &mut egui::Ui, message: &str) {
     ui.add_space((ui.available_height() * 0.30).max(24.0));
     ui.vertical_centered(|ui| {
-        ui.add(egui::Spinner::new().size(32.0));
+        ui.add(spinner(32.0));
         ui.add_space(16.0);
         ui.label(
             egui::RichText::new(message)

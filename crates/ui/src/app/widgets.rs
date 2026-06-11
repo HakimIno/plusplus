@@ -216,10 +216,12 @@ fn paint_tab_chip(
         QueryTabKind::Table => icons::table(),
         QueryTabKind::Query => icons::code(),
     };
-    egui::Image::new(icon_src)
-        .fit_to_exact_size(icon_rect.size())
-        .tint(text_color)
-        .paint_at(ui, icon_rect);
+    let img = egui::Image::new(icon_src).fit_to_exact_size(icon_rect.size());
+    if matches!(kind, QueryTabKind::Table) {
+        img.paint_at(ui, icon_rect);
+    } else {
+        img.tint(text_color).paint_at(ui, icon_rect);
+    }
     let text_x = rect.left() + pad + TAB_ICON_SIZE + TAB_ICON_GAP;
     let pos = egui::pos2(text_x, rect.center().y - galley.size().y * 0.5);
     painter.galley(pos, galley.clone(), text_color);
@@ -485,17 +487,18 @@ pub(super) enum LayoutSide {
     Query,
 }
 
-/// Accent pill shown on the query tab bar when a newer release is available.
-pub(super) fn update_badge_button(ui: &mut egui::Ui, label: &str, busy: bool) -> egui::Response {
-    let text = egui::RichText::new(label)
-        .color(palette::ON_ACCENT())
-        .strong()
-        .size(11.0);
+/// Outline accent button for the title-bar update affordance.
+pub(super) fn update_outline_button(ui: &mut egui::Ui, label: &str, busy: bool) -> egui::Response {
+    let accent = palette::ACCENT();
+    let text = egui::RichText::new(label).color(accent).strong().size(11.0);
     let btn = egui::Button::new(text)
-        .fill(palette::ACCENT())
-        .stroke(egui::Stroke::new(1.0, palette::ACCENT_HOVER()))
+        .fill(egui::Color32::TRANSPARENT)
+        .stroke(egui::Stroke::new(1.0, accent))
+        .corner_radius(egui::CornerRadius::same(4))
         .min_size(egui::vec2(0.0, 22.0));
-    ui.add_enabled(!busy, btn)
+    let resp = ui.add_enabled(!busy, btn);
+    ui.add_space(TOOLBAR_ICON_GAP);
+    resp
 }
 
 pub(super) fn toolbar_icon_button(
