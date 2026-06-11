@@ -335,6 +335,50 @@ impl ConnectionIcon {
     }
 }
 
+/// How strictly a server connection should use TLS, mirroring Postgres' `sslmode`
+/// vocabulary so it translates cleanly to every backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SslMode {
+    /// Never use TLS; fail if the server insists on it.
+    Disable,
+    /// Use TLS if the server supports it, fall back to plaintext otherwise.
+    /// Matches the pre-TLS-config behavior, so it's the default for old configs.
+    #[default]
+    Prefer,
+    /// Require TLS but don't verify the server certificate.
+    Require,
+    /// Require TLS and verify the certificate against a trusted CA.
+    VerifyCa,
+    /// Require TLS, verify the CA, and check the hostname matches the certificate.
+    VerifyFull,
+}
+
+impl SslMode {
+    pub const ALL: [SslMode; 5] = [
+        SslMode::Disable,
+        SslMode::Prefer,
+        SslMode::Require,
+        SslMode::VerifyCa,
+        SslMode::VerifyFull,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SslMode::Disable => "Disable",
+            SslMode::Prefer => "Prefer",
+            SslMode::Require => "Require",
+            SslMode::VerifyCa => "Verify CA",
+            SslMode::VerifyFull => "Verify Full",
+        }
+    }
+
+    /// Does this mode validate the server certificate?
+    pub fn verifies_certificate(self) -> bool {
+        matches!(self, SslMode::VerifyCa | SslMode::VerifyFull)
+    }
+}
+
 /// A saved connection. Secret fields (passwords) are **never** stored here — they live in
 /// the OS keychain keyed by [`ConnectionConfig::id`]. Only non-secret fields are persisted
 /// to the JSON config file.
@@ -354,6 +398,13 @@ pub struct ConnectionConfig {
     pub user: String,
     #[serde(default)]
     pub database: String,
+    /// TLS policy for server backends. Ignored by SQLite.
+    #[serde(default)]
+    pub ssl_mode: SslMode,
+    /// Path to a PEM CA certificate used by the verify modes. Empty means the
+    /// system trust store.
+    #[serde(default)]
+    pub ssl_ca_cert: String,
     // --- file backends ---
     #[serde(default)]
     pub sqlite_path: String,
@@ -376,6 +427,8 @@ impl ConnectionConfig {
             port: kind.default_port(),
             user: String::new(),
             database: String::new(),
+            ssl_mode: SslMode::default(),
+            ssl_ca_cert: String::new(),
             sqlite_path: String::new(),
             title_bar_color: None,
             icon: ConnectionIcon::default(),

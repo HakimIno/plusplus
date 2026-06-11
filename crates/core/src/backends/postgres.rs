@@ -11,7 +11,7 @@ use crate::database::{returns_rows, Database};
 use crate::error::Result;
 use crate::model::{
     ColumnInfo, ColumnMeta, ConnectionConfig, DbKind, IndexInfo, QueryResult, QueryStats,
-    SchemaTree, TableInfo,
+    SchemaTree, SslMode, TableInfo,
 };
 use crate::value::Value;
 
@@ -26,11 +26,23 @@ impl PostgresDb {
     /// Open a pooled connection using the non-secret config plus an optional password
     /// (fetched from the keychain by the caller).
     pub async fn connect(cfg: &ConnectionConfig, password: Option<String>) -> Result<Self> {
+        use sqlx::postgres::PgSslMode;
+        let ssl_mode = match cfg.ssl_mode {
+            SslMode::Disable => PgSslMode::Disable,
+            SslMode::Prefer => PgSslMode::Prefer,
+            SslMode::Require => PgSslMode::Require,
+            SslMode::VerifyCa => PgSslMode::VerifyCa,
+            SslMode::VerifyFull => PgSslMode::VerifyFull,
+        };
         let mut opts = sqlx::postgres::PgConnectOptions::new()
             .host(&cfg.host)
             .port(cfg.port)
             .username(&cfg.user)
-            .database(&cfg.database);
+            .database(&cfg.database)
+            .ssl_mode(ssl_mode);
+        if !cfg.ssl_ca_cert.trim().is_empty() {
+            opts = opts.ssl_root_cert(cfg.ssl_ca_cert.trim());
+        }
         if let Some(pw) = password {
             opts = opts.password(&pw);
         }

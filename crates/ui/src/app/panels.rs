@@ -1485,6 +1485,40 @@ impl DbGuiApp {
                             )
                             .changed();
                             ui.end_row();
+
+                            ui.label("SSL mode");
+                            let previous_ssl = editor.config.ssl_mode;
+                            egui::ComboBox::from_id_salt("ssl_mode")
+                                .selected_text(editor.config.ssl_mode.label())
+                                .show_ui(ui, |ui| {
+                                    for mode in dbcore::SslMode::ALL {
+                                        ui.selectable_value(
+                                            &mut editor.config.ssl_mode,
+                                            mode,
+                                            mode.label(),
+                                        );
+                                    }
+                                });
+                            form_changed |= editor.config.ssl_mode != previous_ssl;
+                            ui.end_row();
+
+                            if editor.config.ssl_mode.verifies_certificate() {
+                                ui.label("CA certificate");
+                                ui.horizontal(|ui| {
+                                    form_changed |= status_text_input(
+                                        ui,
+                                        &mut editor.config.ssl_ca_cert,
+                                        "System trust store",
+                                        field_w,
+                                        None,
+                                    )
+                                    .changed();
+                                    if ui.button("Browse…").clicked() {
+                                        actions.push(Action::BrowseSslCaCert);
+                                    }
+                                });
+                                ui.end_row();
+                            }
                         } else {
                             ui.label("File");
                             ui.horizontal(|ui| {

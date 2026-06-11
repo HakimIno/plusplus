@@ -37,6 +37,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 # --- database access ---
 sqlx = { version = "0.9", default-features = false, features = [
     "runtime-tokio",
+    # rustls with the system trust store, so verify-ca/verify-full work against real
+    # CAs out of the box. ring matches the rustls stack tiberius already pulls in.
+    "tls-rustls-ring-native-roots",
     "postgres",
     "mysql",
     "sqlite",

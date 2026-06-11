@@ -14,7 +14,7 @@ use crate::database::{statements_return_rows, Database, ROW_KEYWORDS};
 use crate::error::{CoreError, Result};
 use crate::model::{
     ColumnInfo, ColumnMeta, ConnectionConfig, DbKind, IndexInfo, QueryResult, QueryStats,
-    SchemaTree, TableInfo,
+    SchemaTree, SslMode, TableInfo,
 };
 use crate::value::Value;
 
@@ -42,9 +42,25 @@ impl MsSqlDb {
             &cfg.user,
             password.as_deref().unwrap_or(""),
         ));
-        // Dev-friendly default: accept the server's certificate without validating a CA.
-        // Production deployments that need strict TLS should gate this behind a config flag.
-        config.trust_cert();
+        // TDS negotiates encryption up front, so "prefer" can't fall back to plaintext
+        // the way Postgres/MySQL can; it behaves like "require" here. The verify modes
+        // both check the hostname too (rustls always does), so VerifyCa == VerifyFull.
+        match cfg.ssl_mode {
+            SslMode::Disable => {
+                config.encryption(tiberius::EncryptionLevel::NotSupported);
+            }
+            SslMode::Prefer | SslMode::Require => {
+                config.encryption(tiberius::EncryptionLevel::Required);
+                config.trust_cert();
+            }
+            SslMode::VerifyCa | SslMode::VerifyFull => {
+                config.encryption(tiberius::EncryptionLevel::Required);
+                let ca = cfg.ssl_ca_cert.trim();
+                if !ca.is_empty() {
+                    config.trust_cert_ca(ca);
+                }
+            }
+        }
 
         let mgr = bb8_tiberius::ConnectionManager::build(config)
             .map_err(|e| CoreError::Pool(e.to_string()))?;

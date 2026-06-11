@@ -26,7 +26,7 @@ pub use model::{
     build_rename_column_sql, build_update_sql, simple_select_target, ColumnDef, ColumnInfo,
     ColumnMeta, ConnectionColor, ConnectionConfig, ConnectionIcon, DbKind, FkAction, ForeignKeyDef,
     IndexDef,
-    IndexInfo, QueryResult, QueryStats, SchemaTree, TableInfo,
+    IndexInfo, QueryResult, QueryStats, SchemaTree, SslMode, TableInfo,
 };
 pub use value::Value;
 

@@ -203,6 +203,23 @@ mod tests {
         assert!(back.tabs[1].source.is_none());
     }
 
+    /// Connections saved before TLS support load with the pre-TLS behavior (Prefer, no CA).
+    #[test]
+    fn connection_config_defaults_ssl_for_old_files() {
+        let json = br#"{
+            "id": "conn-1",
+            "name": "old",
+            "kind": "Postgres",
+            "host": "localhost",
+            "port": 5432,
+            "user": "me",
+            "database": "db"
+        }"#;
+        let cfg: crate::model::ConnectionConfig = serde_json::from_slice(json).unwrap();
+        assert_eq!(cfg.ssl_mode, crate::model::SslMode::Prefer);
+        assert!(cfg.ssl_ca_cert.is_empty());
+    }
+
     /// Missing/empty fields fall back to defaults (forward-compatible with older files).
     #[test]
     fn workspace_tolerates_missing_fields() {

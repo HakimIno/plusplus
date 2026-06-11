@@ -368,6 +368,7 @@ enum Action {
     CloseSettings,
     DismissWelcome,
     BrowseSqlitePath,
+    BrowseSslCaCert,
     RunQuery,
     /// Reformat the active tab's SQL in its connection's dialect (Beautify, Cmd/Ctrl+I).
     BeautifySql,
@@ -1545,6 +1546,18 @@ impl DbGuiApp {
                     }
                 }
             }
+            Action::BrowseSslCaCert => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("PEM certificate", &["pem", "crt", "cer"])
+                    .add_filter("All files", &["*"])
+                    .pick_file()
+                {
+                    if let Some(ed) = &mut self.editor {
+                        ed.config.ssl_ca_cert = path.to_string_lossy().into_owned();
+                        ed.test_state = ConnTestState::Untested;
+                    }
+                }
+            }
             Action::RunQuery => {
                 let idx = self.active_query_tab;
                 // Editability is re-derived from the SQL itself on every run: any simple
@@ -2042,6 +2055,7 @@ mod tests {
             config_id: "c1".into(),
             name: "one".into(),
             db,
+            databases: Vec::new(),
             schema: fake_schema(2, 2),
         });
         app.tab_mut().conn_id = Some("c1".into());
@@ -2066,6 +2080,7 @@ mod tests {
             config_id: "c1".into(),
             name: "one".into(),
             db,
+            databases: Vec::new(),
             schema: fake_schema(1, 1),
         });
         app.tab_mut().conn_id = Some("c1".into());
@@ -2098,6 +2113,7 @@ mod tests {
             config_id: "c1".into(),
             name: "one".into(),
             db,
+            databases: Vec::new(),
             schema: fake_schema(1, 1),
         });
         app.tab_mut().conn_id = Some("c1".into());
@@ -2110,6 +2126,7 @@ mod tests {
             config_id: "c1".into(),
             name: "one".into(),
             db: std::sync::Arc::new(DummyDb),
+            databases: Vec::new(),
             schema: fake_schema(1, 1),
         });
 
@@ -2348,6 +2365,7 @@ mod tests {
             config_id: "c1".into(),
             name: "one".into(),
             db,
+            databases: Vec::new(),
             schema: fake_schema(3, 4),
         });
         app.tab_mut().conn_id = Some("c1".into());
@@ -2382,6 +2400,7 @@ mod tests {
             config_id: "c1".into(),
             name: "one".into(),
             db,
+            databases: Vec::new(),
             schema: fake_schema(3, 30),
         });
         {
@@ -2642,6 +2661,7 @@ mod tests {
             config_id: "test".into(),
             name: "test-conn".into(),
             db,
+            databases: Vec::new(),
             schema: fake_schema(15, 5),
         });
 

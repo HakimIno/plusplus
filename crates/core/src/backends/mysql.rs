@@ -11,7 +11,7 @@ use crate::database::{returns_rows, Database};
 use crate::error::Result;
 use crate::model::{
     ColumnInfo, ColumnMeta, ConnectionConfig, DbKind, IndexInfo, QueryResult, QueryStats,
-    SchemaTree, TableInfo,
+    SchemaTree, SslMode, TableInfo,
 };
 use crate::value::Value;
 
@@ -22,11 +22,23 @@ pub struct MySqlDb {
 
 impl MySqlDb {
     pub async fn connect(cfg: &ConnectionConfig, password: Option<String>) -> Result<Self> {
+        use sqlx::mysql::MySqlSslMode;
+        let ssl_mode = match cfg.ssl_mode {
+            SslMode::Disable => MySqlSslMode::Disabled,
+            SslMode::Prefer => MySqlSslMode::Preferred,
+            SslMode::Require => MySqlSslMode::Required,
+            SslMode::VerifyCa => MySqlSslMode::VerifyCa,
+            SslMode::VerifyFull => MySqlSslMode::VerifyIdentity,
+        };
         let mut opts = sqlx::mysql::MySqlConnectOptions::new()
             .host(&cfg.host)
             .port(cfg.port)
             .username(&cfg.user)
-            .database(&cfg.database);
+            .database(&cfg.database)
+            .ssl_mode(ssl_mode);
+        if !cfg.ssl_ca_cert.trim().is_empty() {
+            opts = opts.ssl_ca(cfg.ssl_ca_cert.trim());
+        }
         if let Some(pw) = password {
             opts = opts.password(&pw);
         }
