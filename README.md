@@ -15,8 +15,9 @@ fallback everywhere, and all content is UTF-8 end to end.
 **Connections.** Saved connections live in a JSON config, while passwords go to the OS
 keychain — never to disk in plaintext. Server connections have a per-connection SSL mode
 (disable / prefer / require / verify-ca / verify-full) with an optional custom CA
-certificate, falling back to the system trust store. Live connections are pooled and
-shared, so several tabs can work against the same database at once.
+certificate, falling back to the system trust store, plus a client certificate and key
+for mutual TLS (PostgreSQL and MySQL/MariaDB). Live connections are pooled and shared,
+so several tabs can work against the same database at once.
 
 **Schema browsing.** Connecting introspects the whole database into a sidebar tree:
 tables, columns (type, nullability, primary key), and indexes, filterable by name. A

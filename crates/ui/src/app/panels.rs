@@ -1519,6 +1519,42 @@ impl DbGuiApp {
                                 });
                                 ui.end_row();
                             }
+
+                            if editor.config.kind.supports_client_cert()
+                                && editor.config.ssl_mode != dbcore::SslMode::Disable
+                            {
+                                ui.label("Client certificate");
+                                ui.horizontal(|ui| {
+                                    form_changed |= status_text_input(
+                                        ui,
+                                        &mut editor.config.ssl_client_cert,
+                                        "None",
+                                        field_w,
+                                        None,
+                                    )
+                                    .changed();
+                                    if ui.button("Browse…").clicked() {
+                                        actions.push(Action::BrowseSslClientCert);
+                                    }
+                                });
+                                ui.end_row();
+
+                                ui.label("Client key");
+                                ui.horizontal(|ui| {
+                                    form_changed |= status_text_input(
+                                        ui,
+                                        &mut editor.config.ssl_client_key,
+                                        "None",
+                                        field_w,
+                                        None,
+                                    )
+                                    .changed();
+                                    if ui.button("Browse…").clicked() {
+                                        actions.push(Action::BrowseSslClientKey);
+                                    }
+                                });
+                                ui.end_row();
+                            }
                         } else {
                             ui.label("File");
                             ui.horizontal(|ui| {

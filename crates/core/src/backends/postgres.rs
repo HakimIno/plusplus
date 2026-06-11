@@ -43,6 +43,12 @@ impl PostgresDb {
         if !cfg.ssl_ca_cert.trim().is_empty() {
             opts = opts.ssl_root_cert(cfg.ssl_ca_cert.trim());
         }
+        if !cfg.ssl_client_cert.trim().is_empty() {
+            opts = opts.ssl_client_cert(cfg.ssl_client_cert.trim());
+        }
+        if !cfg.ssl_client_key.trim().is_empty() {
+            opts = opts.ssl_client_key(cfg.ssl_client_key.trim());
+        }
         if let Some(pw) = password {
             opts = opts.password(&pw);
         }

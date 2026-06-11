@@ -369,6 +369,8 @@ enum Action {
     DismissWelcome,
     BrowseSqlitePath,
     BrowseSslCaCert,
+    BrowseSslClientCert,
+    BrowseSslClientKey,
     RunQuery,
     /// Reformat the active tab's SQL in its connection's dialect (Beautify, Cmd/Ctrl+I).
     BeautifySql,
@@ -1547,16 +1549,13 @@ impl DbGuiApp {
                 }
             }
             Action::BrowseSslCaCert => {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("PEM certificate", &["pem", "crt", "cer"])
-                    .add_filter("All files", &["*"])
-                    .pick_file()
-                {
-                    if let Some(ed) = &mut self.editor {
-                        ed.config.ssl_ca_cert = path.to_string_lossy().into_owned();
-                        ed.test_state = ConnTestState::Untested;
-                    }
-                }
+                self.browse_pem_into(&["pem", "crt", "cer"], |cfg| &mut cfg.ssl_ca_cert)
+            }
+            Action::BrowseSslClientCert => {
+                self.browse_pem_into(&["pem", "crt", "cer"], |cfg| &mut cfg.ssl_client_cert)
+            }
+            Action::BrowseSslClientKey => {
+                self.browse_pem_into(&["pem", "key"], |cfg| &mut cfg.ssl_client_key)
             }
             Action::RunQuery => {
                 let idx = self.active_query_tab;
@@ -1630,6 +1629,25 @@ impl DbGuiApp {
                 } else {
                     self.schema_editor = None;
                 }
+            }
+        }
+    }
+
+    /// Open a file picker filtered to `extensions` and store the chosen path into the
+    /// connection-editor field selected by `field`.
+    fn browse_pem_into(
+        &mut self,
+        extensions: &[&str],
+        field: impl FnOnce(&mut dbcore::ConnectionConfig) -> &mut String,
+    ) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("PEM file", extensions)
+            .add_filter("All files", &["*"])
+            .pick_file()
+        {
+            if let Some(ed) = &mut self.editor {
+                *field(&mut ed.config) = path.to_string_lossy().into_owned();
+                ed.test_state = ConnTestState::Untested;
             }
         }
     }

@@ -35,6 +35,12 @@ impl DbKind {
         )
     }
 
+    /// Whether this backend can present a client certificate (mutual TLS).
+    /// tiberius hardcodes no-client-auth, so SQL Server can't; SQLite has no TLS at all.
+    pub fn supports_client_cert(self) -> bool {
+        matches!(self, DbKind::Postgres | DbKind::MySql | DbKind::MariaDb)
+    }
+
     pub fn default_port(self) -> u16 {
         match self {
             DbKind::Postgres => 5432,
@@ -405,6 +411,13 @@ pub struct ConnectionConfig {
     /// system trust store.
     #[serde(default)]
     pub ssl_ca_cert: String,
+    /// Path to a PEM client certificate for mutual TLS. Empty means none.
+    /// Only honoured by backends where [`DbKind::supports_client_cert`] is true.
+    #[serde(default)]
+    pub ssl_client_cert: String,
+    /// Path to the PEM private key matching `ssl_client_cert`. Empty means none.
+    #[serde(default)]
+    pub ssl_client_key: String,
     // --- file backends ---
     #[serde(default)]
     pub sqlite_path: String,
@@ -429,6 +442,8 @@ impl ConnectionConfig {
             database: String::new(),
             ssl_mode: SslMode::default(),
             ssl_ca_cert: String::new(),
+            ssl_client_cert: String::new(),
+            ssl_client_key: String::new(),
             sqlite_path: String::new(),
             title_bar_color: None,
             icon: ConnectionIcon::default(),

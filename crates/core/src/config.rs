@@ -218,6 +218,8 @@ mod tests {
         let cfg: crate::model::ConnectionConfig = serde_json::from_slice(json).unwrap();
         assert_eq!(cfg.ssl_mode, crate::model::SslMode::Prefer);
         assert!(cfg.ssl_ca_cert.is_empty());
+        assert!(cfg.ssl_client_cert.is_empty());
+        assert!(cfg.ssl_client_key.is_empty());
     }
 
     /// Missing/empty fields fall back to defaults (forward-compatible with older files).
