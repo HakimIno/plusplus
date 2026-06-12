@@ -815,6 +815,34 @@ pub struct IndexInfo {
     pub columns: Vec<String>,
 }
 
+/// A foreign key as introspected from the schema.
+#[derive(Debug, Clone)]
+pub struct ForeignKeyInfo {
+    /// Constraint name. Empty for SQLite, which doesn't expose one.
+    pub name: String,
+    /// Referencing columns, in constraint order; pairs positionally with `ref_columns`.
+    pub columns: Vec<String>,
+    /// Schema of the referenced table, where the backend qualifies it.
+    pub ref_schema: Option<String>,
+    pub ref_table: String,
+    pub ref_columns: Vec<String>,
+    /// Referential actions as reported by the backend (e.g. "CASCADE", "NO ACTION").
+    pub on_delete: String,
+    pub on_update: String,
+}
+
+impl ForeignKeyInfo {
+    /// Human-readable `cols → ref_table(ref_cols)` summary for tree rows and tooltips.
+    pub fn display(&self) -> String {
+        format!(
+            "{} → {}({})",
+            self.columns.join(", "),
+            self.ref_table,
+            self.ref_columns.join(", ")
+        )
+    }
+}
+
 /// A table (or view) with its columns and indexes.
 #[derive(Debug, Clone)]
 pub struct TableInfo {
@@ -823,6 +851,7 @@ pub struct TableInfo {
     pub name: String,
     pub columns: Vec<ColumnInfo>,
     pub indexes: Vec<IndexInfo>,
+    pub foreign_keys: Vec<ForeignKeyInfo>,
 }
 
 impl TableInfo {
@@ -926,6 +955,18 @@ impl FkAction {
             FkAction::Restrict => "RESTRICT",
         }
     }
+
+    /// Parse a backend-reported referential action ("CASCADE", "SET NULL", "SET_NULL", …).
+    /// Unknown actions (e.g. SET DEFAULT, which the editor doesn't offer) map to `None`.
+    pub fn from_rule(rule: &str) -> Option<FkAction> {
+        match rule.trim().replace('_', " ").to_ascii_uppercase().as_str() {
+            "NO ACTION" => Some(FkAction::NoAction),
+            "CASCADE" => Some(FkAction::Cascade),
+            "SET NULL" => Some(FkAction::SetNull),
+            "RESTRICT" => Some(FkAction::Restrict),
+            _ => None,
+        }
+    }
 }
 
 /// Foreign key constraint definition (used inside CREATE TABLE or as ADD CONSTRAINT).
@@ -1022,6 +1063,41 @@ pub fn build_create_table_sql(
 /// Build a `DROP TABLE` statement.
 pub fn build_drop_table_sql(kind: DbKind, schema: Option<&str>, table: &str) -> String {
     format!("DROP TABLE {};", ddl_table_ref(kind, schema, table))
+}
+
+/// Build an `ALTER TABLE … ADD [CONSTRAINT] FOREIGN KEY` statement.
+/// Not supported by SQLite (which requires a table rebuild); callers must not emit it there.
+pub fn build_add_fk_sql(
+    kind: DbKind,
+    schema: Option<&str>,
+    table: &str,
+    fk: &ForeignKeyDef,
+) -> String {
+    format!(
+        "ALTER TABLE {} ADD {};",
+        ddl_table_ref(kind, schema, table),
+        fk_clause_sql(kind, fk)
+    )
+}
+
+/// Build the statement dropping a foreign key constraint (dialect-aware).
+/// Not supported by SQLite (which requires a table rebuild); callers must not emit it there.
+pub fn build_drop_fk_sql(
+    kind: DbKind,
+    schema: Option<&str>,
+    table: &str,
+    constraint: &str,
+) -> String {
+    let verb = match kind {
+        // MySQL/MariaDB use DROP FOREIGN KEY; DROP CONSTRAINT only exists from MySQL 8.0.19.
+        DbKind::MySql | DbKind::MariaDb => "DROP FOREIGN KEY",
+        _ => "DROP CONSTRAINT",
+    };
+    format!(
+        "ALTER TABLE {} {verb} {};",
+        ddl_table_ref(kind, schema, table),
+        kind.quote_ident(constraint)
+    )
 }
 
 /// Build an `ALTER TABLE … ADD COLUMN` statement.
@@ -1304,5 +1380,42 @@ mod tests {
         );
         // No keys ⇒ refuse (never emit an unfiltered DELETE).
         assert_eq!(build_delete_sql(DbKind::Postgres, None, "t", &[]), None);
+    }
+
+    #[test]
+    fn fk_action_parses_backend_rule_spellings() {
+        // information_schema spells it with spaces; sys.foreign_keys with underscores.
+        assert_eq!(FkAction::from_rule("CASCADE"), Some(FkAction::Cascade));
+        assert_eq!(FkAction::from_rule("SET NULL"), Some(FkAction::SetNull));
+        assert_eq!(FkAction::from_rule("SET_NULL"), Some(FkAction::SetNull));
+        assert_eq!(FkAction::from_rule("no action"), Some(FkAction::NoAction));
+        assert_eq!(FkAction::from_rule("RESTRICT"), Some(FkAction::Restrict));
+        assert_eq!(FkAction::from_rule("SET DEFAULT"), None);
+        assert_eq!(FkAction::from_rule(""), None);
+    }
+
+    #[test]
+    fn build_fk_ddl_is_dialect_aware() {
+        let fk = ForeignKeyDef {
+            name: "fk_orders_user".into(),
+            columns: vec!["user_id".into()],
+            ref_table: "users".into(),
+            ref_columns: vec!["id".into()],
+            on_delete: FkAction::Cascade,
+        };
+        assert_eq!(
+            build_add_fk_sql(DbKind::Postgres, Some("public"), "orders", &fk),
+            "ALTER TABLE \"public\".\"orders\" ADD CONSTRAINT \"fk_orders_user\" \
+             FOREIGN KEY (\"user_id\") REFERENCES \"users\" (\"id\") ON DELETE CASCADE;"
+        );
+        assert_eq!(
+            build_drop_fk_sql(DbKind::Postgres, Some("public"), "orders", "fk_orders_user"),
+            "ALTER TABLE \"public\".\"orders\" DROP CONSTRAINT \"fk_orders_user\";"
+        );
+        // MySQL drops via DROP FOREIGN KEY, with backtick identifiers.
+        assert_eq!(
+            build_drop_fk_sql(DbKind::MySql, None, "orders", "fk_orders_user"),
+            "ALTER TABLE `orders` DROP FOREIGN KEY `fk_orders_user`;"
+        );
     }
 }

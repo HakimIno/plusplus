@@ -24,12 +24,13 @@ use std::sync::Arc;
 pub use database::Database;
 pub use error::{CoreError, Result};
 pub use model::{
-    build_add_column_sql, build_count_sql, build_create_index_sql, build_create_table_sql,
-    build_delete_sql, build_drop_column_sql, build_drop_index_sql, build_drop_table_sql,
-    build_insert_sql, build_rename_column_sql, build_update_sql, parse_page_window,
-    simple_select_target, with_page_window, ColumnDef, ColumnInfo, ColumnMeta, ConnectionColor,
-    ConnectionConfig, ConnectionIcon, DbKind, FkAction, ForeignKeyDef, IndexDef, IndexInfo,
-    PageWindow, QueryResult, QueryStats, SchemaTree, SslMode, TableInfo,
+    build_add_column_sql, build_add_fk_sql, build_count_sql, build_create_index_sql,
+    build_create_table_sql, build_delete_sql, build_drop_column_sql, build_drop_fk_sql,
+    build_drop_index_sql, build_drop_table_sql, build_insert_sql, build_rename_column_sql,
+    build_update_sql, parse_page_window, simple_select_target, with_page_window, ColumnDef,
+    ColumnInfo, ColumnMeta, ConnectionColor, ConnectionConfig, ConnectionIcon, DbKind, FkAction,
+    ForeignKeyDef, ForeignKeyInfo, IndexDef, IndexInfo, PageWindow, QueryResult, QueryStats,
+    SchemaTree, SslMode, TableInfo,
 };
 pub use value::Value;
 
@@ -280,6 +281,56 @@ mod tests {
             .expect("index present");
         assert!(idx.unique);
         assert_eq!(idx.columns, vec!["email".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn introspects_foreign_keys() {
+        let (db, _guard) = temp_db().await;
+        db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY)")
+            .await
+            .unwrap();
+        db.execute(
+            "CREATE TABLE orders (\
+                 id INTEGER PRIMARY KEY, \
+                 user_id INTEGER REFERENCES users(id) ON DELETE CASCADE ON UPDATE SET NULL\
+             )",
+        )
+        .await
+        .unwrap();
+        // Composite FK: both column pairs must come back as one constraint, in order.
+        db.execute("CREATE TABLE pairs (a INTEGER, b INTEGER, PRIMARY KEY (a, b))")
+            .await
+            .unwrap();
+        db.execute(
+            "CREATE TABLE links (\
+                 x INTEGER, y INTEGER, \
+                 FOREIGN KEY (x, y) REFERENCES pairs (a, b)\
+             )",
+        )
+        .await
+        .unwrap();
+
+        let schema = db.introspect().await.unwrap();
+        let orders = schema.tables.iter().find(|t| t.name == "orders").unwrap();
+        assert_eq!(orders.foreign_keys.len(), 1);
+        let fk = &orders.foreign_keys[0];
+        assert_eq!(fk.columns, vec!["user_id".to_string()]);
+        assert_eq!(fk.ref_table, "users");
+        assert_eq!(fk.ref_columns, vec!["id".to_string()]);
+        assert_eq!(fk.on_delete, "CASCADE");
+        assert_eq!(fk.on_update, "SET NULL");
+        assert_eq!(fk.display(), "user_id → users(id)");
+
+        let links = schema.tables.iter().find(|t| t.name == "links").unwrap();
+        assert_eq!(links.foreign_keys.len(), 1);
+        let fk = &links.foreign_keys[0];
+        assert_eq!(fk.columns, vec!["x".to_string(), "y".to_string()]);
+        assert_eq!(fk.ref_table, "pairs");
+        assert_eq!(fk.ref_columns, vec!["a".to_string(), "b".to_string()]);
+
+        // Tables without FKs stay empty.
+        let users = schema.tables.iter().find(|t| t.name == "users").unwrap();
+        assert!(users.foreign_keys.is_empty());
     }
 
     #[test]

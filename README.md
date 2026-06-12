@@ -37,7 +37,8 @@ whole log can be cleared. Recording can be switched off in Settings, since SQL t
 contain data values.
 
 **Schema browsing.** Connecting introspects the whole database into a sidebar tree:
-tables, columns (type, nullability, primary key), and indexes, filterable by name. A
+tables, columns (type, nullability, primary key), indexes, and foreign keys
+(`col → table(col)`, with the referential actions in the tooltip), filterable by name. A
 single click previews a table's rows; a double click opens it as a permanent tab.
 
 **Query tabs.** Each tab is an independent SQL editor (with syntax highlighting) bound to
@@ -70,7 +71,8 @@ Anything that can't be mapped back safely (joins, projections, aggregates) is re
 
 **Data / Structure views.** A table tab can switch between its rows (*Data*) and the
 table's definition (*Structure*): columns with types, nullability, and keys, plus its
-indexes — straight from the introspected schema, no extra queries.
+indexes and foreign keys (with their ON DELETE / ON UPDATE actions) — straight from the
+introspected schema, no extra queries.
 
 **Themes.** Three built-in color themes (Carbon, Midnight, Daylight), persisted across
 runs.

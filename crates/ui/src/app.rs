@@ -2594,6 +2594,7 @@ mod tests {
                         unique: true,
                         columns: vec!["field_0".into()],
                     }],
+                    foreign_keys: Vec::new(),
                 })
                 .collect(),
         }

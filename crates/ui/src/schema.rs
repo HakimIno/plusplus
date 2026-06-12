@@ -1,9 +1,9 @@
 //! Schema editor state — no egui drawing here; all rendering is in panels.rs.
 
 use dbcore::{
-    build_add_column_sql, build_create_index_sql, build_create_table_sql, build_drop_column_sql,
-    build_drop_index_sql, build_rename_column_sql, ColumnDef, DbKind, FkAction, ForeignKeyDef,
-    IndexDef, TableInfo,
+    build_add_column_sql, build_add_fk_sql, build_create_index_sql, build_create_table_sql,
+    build_drop_column_sql, build_drop_fk_sql, build_drop_index_sql, build_rename_column_sql,
+    ColumnDef, DbKind, FkAction, ForeignKeyDef, ForeignKeyInfo, IndexDef, TableInfo,
 };
 
 // ─── Draft types (UI working copies) ────────────────────────────────────────
@@ -137,6 +137,20 @@ impl FkDraft {
         }
     }
 
+    pub fn from_existing(fk: &ForeignKeyInfo) -> Self {
+        Self {
+            constraint_name: fk.name.clone(),
+            columns_raw: fk.columns.join(", "),
+            ref_table: fk.ref_table.clone(),
+            ref_columns_raw: fk.ref_columns.join(", "),
+            // SET DEFAULT and other actions the editor doesn't offer display as NO ACTION;
+            // existing FKs are only ever dropped wholesale, so this is cosmetic.
+            on_delete: FkAction::from_rule(&fk.on_delete).unwrap_or_default(),
+            is_existing: true,
+            drop: false,
+        }
+    }
+
     fn split_cols(raw: &str) -> Vec<String> {
         raw.split(',')
             .map(|s| s.trim().to_string())
@@ -218,6 +232,7 @@ impl SchemaEditor {
             .iter()
             .map(|i| IndexDraft::from_existing(&i.name, &i.columns, i.unique))
             .collect();
+        let fks = table.foreign_keys.iter().map(FkDraft::from_existing).collect();
         Self {
             mode: SchemaEditorMode::EditTable,
             table_name: table.name.clone(),
@@ -225,7 +240,7 @@ impl SchemaEditor {
             db_kind,
             columns,
             indexes,
-            fks: Vec::new(),
+            fks,
             active_tab: SchemaTab::Columns,
             original_table_name: Some(table.name.clone()),
         }
@@ -362,6 +377,40 @@ impl SchemaEditor {
                         table,
                         &idx.to_def(),
                     ));
+                }
+
+                // Dropped foreign keys
+                for fk in self.fks.iter().filter(|f| f.is_existing && f.drop) {
+                    if self.db_kind == DbKind::Sqlite {
+                        return Err(
+                            "SQLite cannot drop a foreign key from an existing table.".into()
+                        );
+                    }
+                    if fk.constraint_name.trim().is_empty() {
+                        return Err("Cannot drop a foreign key without a constraint name.".into());
+                    }
+                    stmts.push(build_drop_fk_sql(
+                        self.db_kind,
+                        self.schema(),
+                        table,
+                        fk.constraint_name.trim(),
+                    ));
+                }
+
+                // New foreign keys
+                for fk in self.fks.iter().filter(|f| !f.is_existing && !f.drop) {
+                    if self.db_kind == DbKind::Sqlite {
+                        return Err(
+                            "SQLite cannot add a foreign key to an existing table.".into()
+                        );
+                    }
+                    let def = fk.to_def();
+                    if def.columns.is_empty() || def.ref_table.trim().is_empty() {
+                        return Err(
+                            "New foreign keys must specify columns and a referenced table.".into(),
+                        );
+                    }
+                    stmts.push(build_add_fk_sql(self.db_kind, self.schema(), table, &def));
                 }
             }
         }

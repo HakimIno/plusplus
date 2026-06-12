@@ -10,8 +10,8 @@ use sqlx::{AssertSqlSafe, Column, ConnectOptions, Row, TypeInfo, ValueRef};
 use crate::database::{returns_rows, Database};
 use crate::error::Result;
 use crate::model::{
-    ColumnInfo, ColumnMeta, ConnectionConfig, DbKind, IndexInfo, QueryResult, QueryStats,
-    SchemaTree, TableInfo,
+    ColumnInfo, ColumnMeta, ConnectionConfig, DbKind, ForeignKeyInfo, IndexInfo, QueryResult,
+    QueryStats, SchemaTree, TableInfo,
 };
 use crate::value::Value;
 
@@ -60,11 +60,13 @@ impl Database for SqliteDb {
         for (table,) in names {
             let columns = self.introspect_columns(&table).await?;
             let indexes = self.introspect_indexes(&table).await?;
+            let foreign_keys = self.introspect_foreign_keys(&table).await?;
             tables.push(TableInfo {
                 schema: None,
                 name: table,
                 columns,
                 indexes,
+                foreign_keys,
             });
         }
 
@@ -170,6 +172,49 @@ impl SqliteDb {
             });
         }
         Ok(indexes)
+    }
+
+    async fn introspect_foreign_keys(&self, table: &str) -> Result<Vec<ForeignKeyInfo>> {
+        // One row per column pair, grouped by `id`; rows arrive ordered by (id, seq).
+        let q = format!("PRAGMA foreign_key_list({})", quote_ident(table));
+        let rows = sqlx::query(AssertSqlSafe(q)).fetch_all(&self.pool).await?;
+        let mut fks: Vec<(i64, ForeignKeyInfo)> = Vec::new();
+        for r in &rows {
+            let id: i64 = r.try_get("id").unwrap_or(0);
+            let column: String = r.try_get("from").unwrap_or_default();
+            // `to` is NULL when the FK implicitly references the target's primary key.
+            let ref_column: String = r
+                .try_get::<Option<String>, _>("to")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            match fks.iter_mut().find(|(fk_id, _)| *fk_id == id) {
+                Some((_, fk)) => {
+                    fk.columns.push(column);
+                    if !ref_column.is_empty() {
+                        fk.ref_columns.push(ref_column);
+                    }
+                }
+                None => fks.push((
+                    id,
+                    ForeignKeyInfo {
+                        // SQLite doesn't expose constraint names through the PRAGMA.
+                        name: String::new(),
+                        columns: vec![column],
+                        ref_schema: None,
+                        ref_table: r.try_get("table").unwrap_or_default(),
+                        ref_columns: if ref_column.is_empty() {
+                            Vec::new()
+                        } else {
+                            vec![ref_column]
+                        },
+                        on_delete: r.try_get("on_delete").unwrap_or_default(),
+                        on_update: r.try_get("on_update").unwrap_or_default(),
+                    },
+                )),
+            }
+        }
+        Ok(fks.into_iter().map(|(_, fk)| fk).collect())
     }
 }
 

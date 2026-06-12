@@ -291,6 +291,92 @@ pub fn icon_text_input(
     )
 }
 
+/// Rounded-square checkbox styled with the accent colour — a filled square with a bold
+/// white tick when checked, an empty bordered square when unchecked. Matches the schema
+/// editor table (NULL / PK / Unique). Pass `label: None` for a box-only toggle.
+pub fn accent_checkbox(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    checked: &mut bool,
+    label: Option<&str>,
+) -> egui::Response {
+    const SIZE: f32 = 16.0;
+    const R: CornerRadius = CornerRadius::same(4);
+
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, mut resp) = ui.allocate_exact_size(egui::vec2(SIZE, SIZE), sense);
+
+    let label_resp = label.map(|label| {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(label)
+                    .size(11.5)
+                    .color(if enabled {
+                        palette::TEXT_WEAK()
+                    } else {
+                        palette::TEXT_FAINT()
+                    }),
+            )
+            .sense(sense),
+        )
+    });
+
+    let toggled = resp.clicked() || label_resp.as_ref().is_some_and(|r| r.clicked());
+    if enabled && toggled {
+        *checked = !*checked;
+        resp.mark_changed();
+    }
+
+    if ui.is_rect_visible(rect) {
+        let accent = palette::ACCENT();
+        let painter = ui.painter();
+        if *checked {
+            let fill = if enabled {
+                accent
+            } else {
+                accent.linear_multiply(0.4)
+            };
+            painter.rect_filled(rect, R, fill);
+            let p = rect.min;
+            let s = rect.size();
+            let stroke = Stroke::new(2.2, Color32::WHITE);
+            painter.line_segment(
+                [
+                    Pos2::new(p.x + s.x * 0.19, p.y + s.y * 0.52),
+                    Pos2::new(p.x + s.x * 0.42, p.y + s.y * 0.76),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(p.x + s.x * 0.42, p.y + s.y * 0.76),
+                    Pos2::new(p.x + s.x * 0.81, p.y + s.y * 0.25),
+                ],
+                stroke,
+            );
+        } else {
+            let (fill, border) = if resp.hovered() && enabled {
+                (
+                    accent.linear_multiply(0.10),
+                    Stroke::new(1.5, accent.linear_multiply(0.65)),
+                )
+            } else {
+                (
+                    Color32::TRANSPARENT,
+                    Stroke::new(1.5, palette::BORDER_STRONG()),
+                )
+            };
+            painter.rect(rect, R, fill, border, egui::StrokeKind::Inside);
+        }
+    }
+
+    resp
+}
+
 /// Single-line label that truncates with "…" when it doesn't fit the panel width.
 /// Pass `tooltip` to show the full text on hover (defaults to `text`).
 pub fn truncated_label(

@@ -10,8 +10,8 @@ use sqlx::{AssertSqlSafe, Column, ConnectOptions, Row, TypeInfo, ValueRef};
 use crate::database::{returns_rows, Database};
 use crate::error::Result;
 use crate::model::{
-    ColumnInfo, ColumnMeta, ConnectionConfig, DbKind, IndexInfo, QueryResult, QueryStats,
-    SchemaTree, SslMode, TableInfo,
+    ColumnInfo, ColumnMeta, ConnectionConfig, DbKind, ForeignKeyInfo, IndexInfo, QueryResult,
+    QueryStats, SchemaTree, SslMode, TableInfo,
 };
 use crate::value::Value;
 
@@ -90,6 +90,7 @@ impl Database for MySqlDb {
                     name,
                     columns: Vec::new(),
                     indexes: Vec::new(),
+                    foreign_keys: Vec::new(),
                 },
             );
         }
@@ -139,6 +140,44 @@ impl Database for MySqlDb {
                     unique,
                     columns: columns.into_iter().map(|(_, column)| column).collect(),
                 });
+            }
+        }
+
+        // Foreign keys: KEY_COLUMN_USAGE carries the column pairs, REFERENTIAL_CONSTRAINTS
+        // the delete/update rules.
+        type FkRow = (String, String, String, String, String, String, String);
+        let fk_rows: Vec<FkRow> = sqlx::query_as(
+            "SELECT kcu.TABLE_NAME, kcu.CONSTRAINT_NAME, kcu.COLUMN_NAME, \
+                    kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME, \
+                    rc.DELETE_RULE, rc.UPDATE_RULE \
+             FROM information_schema.KEY_COLUMN_USAGE kcu \
+             JOIN information_schema.REFERENTIAL_CONSTRAINTS rc \
+               ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA \
+              AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME \
+              AND rc.TABLE_NAME = kcu.TABLE_NAME \
+             WHERE kcu.TABLE_SCHEMA = DATABASE() \
+               AND kcu.REFERENCED_TABLE_NAME IS NOT NULL \
+             ORDER BY kcu.TABLE_NAME, kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for (table, constraint, column, ref_table, ref_column, del, upd) in fk_rows {
+            if let Some(info) = tables.get_mut(&table) {
+                match info.foreign_keys.iter_mut().find(|fk| fk.name == constraint) {
+                    Some(fk) => {
+                        fk.columns.push(column);
+                        fk.ref_columns.push(ref_column);
+                    }
+                    None => info.foreign_keys.push(ForeignKeyInfo {
+                        name: constraint,
+                        columns: vec![column],
+                        ref_schema: None,
+                        ref_table,
+                        ref_columns: vec![ref_column],
+                        on_delete: del,
+                        on_update: upd,
+                    }),
+                }
             }
         }
 

@@ -364,8 +364,8 @@ pub fn ui(ui: &mut egui::Ui, state: &mut FilterState, columns: &[String]) -> Opt
         ui.horizontal(|ui| {
             ui.add_space(2.0);
 
-            // On/off toggle for this condition.
-            ui.checkbox(&mut cond.enabled, "")
+            // On/off toggle — same accent checkbox as the schema editor table.
+            crate::style::accent_checkbox(ui, true, &mut cond.enabled, None)
                 .on_hover_text("Enable / disable this condition");
 
             // Column picker.

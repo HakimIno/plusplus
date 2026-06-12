@@ -1062,6 +1062,31 @@ impl DbGuiApp {
                             });
                         }
                     }
+                    if !table.foreign_keys.is_empty() {
+                        ui.add_space(3.0);
+                        for fk in &table.foreign_keys {
+                            ui.horizontal(|ui| {
+                                icons::show_weak(ui, icons::connect(), 13.0);
+                                ui.add_space(2.0);
+                                let detail = fk.display();
+                                let hover = if fk.name.is_empty() {
+                                    format!("{detail} · on delete {}", fk.on_delete)
+                                } else {
+                                    format!(
+                                        "{} · {detail} · on delete {}",
+                                        fk.name, fk.on_delete
+                                    )
+                                };
+                                style::truncated_label(
+                                    ui,
+                                    &detail,
+                                    Some(&hover),
+                                    true,
+                                    egui::Sense::hover(),
+                                );
+                            });
+                        }
+                    }
                 });
 
             let resp = header
@@ -2474,8 +2499,8 @@ impl DbGuiApp {
     }
 }
 
-/// The Structure view of a table tab: its introspected columns and indexes as two
-/// read-only grids, styled after the results grid (TablePlus's "Structure" mode).
+/// The Structure view of a table tab: its introspected columns, indexes, and foreign keys
+/// as read-only grids, styled after the results grid (TablePlus's "Structure" mode).
 fn structure_view(ui: &mut egui::Ui, info: &dbcore::TableInfo) {
     use egui_extras::{Column, TableBuilder};
 
@@ -2621,6 +2646,91 @@ fn structure_view(ui: &mut egui::Ui, info: &dbcore::TableInfo) {
                                 });
                                 row.col(|ui| {
                                     ui.label(idx.columns.join(", "));
+                                });
+                            });
+                        }
+                    });
+            }
+
+            if !info.foreign_keys.is_empty() {
+                ui.add_space(12.0);
+                style::section_header(ui, "Foreign Keys");
+                ui.add_space(2.0);
+                TableBuilder::new(ui)
+                    .id_salt("structure_fks")
+                    .striped(true)
+                    .resizable(true)
+                    .vscroll(false)
+                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                    .auto_shrink([false, true])
+                    .column(Column::exact(30.0))
+                    .column(Column::initial(220.0).at_least(60.0).clip(true))
+                    .column(Column::initial(140.0).at_least(60.0).clip(true))
+                    .column(Column::initial(220.0).at_least(60.0).clip(true))
+                    .column(Column::initial(100.0).at_least(60.0).clip(true))
+                    .column(Column::remainder().at_least(60.0).clip(true))
+                    .header(24.0, |mut h| {
+                        h.col(|ui| {
+                            style::paint_table_header_cell(ui);
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new("#")
+                                    .color(palette::TEXT_FAINT())
+                                    .monospace(),
+                            );
+                        });
+                        for title in
+                            ["constraint_name", "columns", "references", "on_delete", "on_update"]
+                        {
+                            h.col(|ui| header(ui, title));
+                        }
+                    })
+                    .body(|mut body| {
+                        for (i, fk) in info.foreign_keys.iter().enumerate() {
+                            body.row(row_height, |mut row| {
+                                row.col(|ui| {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.add_space(4.0);
+                                            ui.weak(
+                                                egui::RichText::new(format!("{}", i + 1))
+                                                    .monospace(),
+                                            );
+                                        },
+                                    );
+                                });
+                                row.col(|ui| {
+                                    icons::show_weak(ui, icons::connect(), 13.0);
+                                    ui.add_space(2.0);
+                                    if fk.name.is_empty() {
+                                        ui.colored_label(palette::TEXT_FAINT(), "(unnamed)");
+                                    } else {
+                                        ui.label(&fk.name);
+                                    }
+                                });
+                                row.col(|ui| {
+                                    ui.label(fk.columns.join(", "));
+                                });
+                                row.col(|ui| {
+                                    // Qualify the target with its schema only when it lives
+                                    // outside this table's own schema.
+                                    let target = match (&fk.ref_schema, &info.schema) {
+                                        (Some(rs), Some(s)) if rs != s => {
+                                            format!("{rs}.{}", fk.ref_table)
+                                        }
+                                        _ => fk.ref_table.clone(),
+                                    };
+                                    ui.label(format!(
+                                        "{target} ({})",
+                                        fk.ref_columns.join(", ")
+                                    ));
+                                });
+                                row.col(|ui| {
+                                    ui.label(&fk.on_delete);
+                                });
+                                row.col(|ui| {
+                                    ui.label(&fk.on_update);
                                 });
                             });
                         }
@@ -2891,78 +3001,6 @@ fn details_value_box(
 
 // ─── Schema editor tab helpers ────────────────────────────────────────────────
 
-/// Rounded-square checkbox styled with the accent colour — a filled square with a bold
-/// white tick when checked, an empty bordered square when unchecked.
-/// Clicking either the box or the label toggles the value.
-fn schema_checkbox(
-    ui: &mut egui::Ui,
-    enabled: bool,
-    checked: &mut bool,
-    label: &str,
-) -> egui::Response {
-    const SIZE: f32 = 16.0;
-    const R: egui::CornerRadius = egui::CornerRadius::same(4);
-
-    let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
-    let (rect, mut resp) = ui.allocate_exact_size(egui::vec2(SIZE, SIZE), sense);
-
-    let label_resp = ui.add(
-        egui::Label::new(
-            egui::RichText::new(label)
-                .size(11.5)
-                .color(if enabled { palette::TEXT_WEAK() } else { palette::TEXT_FAINT() }),
-        )
-        .sense(sense),
-    );
-
-    if enabled && (resp.clicked() || label_resp.clicked()) {
-        *checked = !*checked;
-        resp.mark_changed();
-    }
-
-    if ui.is_rect_visible(rect) {
-        let accent = palette::ACCENT();
-        let painter = ui.painter();
-        if *checked {
-            let fill = if enabled { accent } else { accent.linear_multiply(0.4) };
-            painter.rect_filled(rect, R, fill);
-            // Bold tick: two line segments
-            let p = rect.min;
-            let s = rect.size();
-            let stroke = egui::Stroke::new(2.2, egui::Color32::WHITE);
-            painter.line_segment(
-                [
-                    egui::pos2(p.x + s.x * 0.19, p.y + s.y * 0.52),
-                    egui::pos2(p.x + s.x * 0.42, p.y + s.y * 0.76),
-                ],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    egui::pos2(p.x + s.x * 0.42, p.y + s.y * 0.76),
-                    egui::pos2(p.x + s.x * 0.81, p.y + s.y * 0.25),
-                ],
-                stroke,
-            );
-        } else {
-            let (fill, border) = if resp.hovered() && enabled {
-                (
-                    accent.linear_multiply(0.10),
-                    egui::Stroke::new(1.5, accent.linear_multiply(0.65)),
-                )
-            } else {
-                (
-                    egui::Color32::TRANSPARENT,
-                    egui::Stroke::new(1.5, palette::BORDER_STRONG()),
-                )
-            };
-            painter.rect(rect, R, fill, border, egui::StrokeKind::Inside);
-        }
-    }
-
-    resp
-}
-
 /// Common column types per database, offered in the Type dropdown. The current value is
 /// always shown even if it isn't in this list (e.g. an exotic type on an existing column).
 fn db_type_options(kind: dbcore::DbKind) -> &'static [&'static str] {
@@ -3044,10 +3082,10 @@ fn schema_columns_tab(
                 });
                 ui.add_space(2.0);
                 // Nullable
-                schema_checkbox(ui, !col.drop, &mut col.nullable, "NULL");
+                style::accent_checkbox(ui, !col.drop, &mut col.nullable, Some("NULL"));
                 ui.add_space(2.0);
                 // PK
-                schema_checkbox(ui, !col.drop, &mut col.primary_key, "PK");
+                style::accent_checkbox(ui, !col.drop, &mut col.primary_key, Some("PK"));
                 ui.add_space(2.0);
                 // Default
                 ui.add_enabled(
@@ -3129,7 +3167,7 @@ fn schema_indexes_tab(ui: &mut egui::Ui, indexes: &mut Vec<crate::schema::IndexD
                         .margin(pad),
                 );
                 ui.add_space(2.0);
-                schema_checkbox(ui, !idx.drop, &mut idx.unique, "Unique");
+                style::accent_checkbox(ui, !idx.drop, &mut idx.unique, Some("Unique"));
 
                 if idx.is_existing {
                     let (label, hover) = if idx.drop {

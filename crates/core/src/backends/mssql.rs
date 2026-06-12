@@ -13,8 +13,8 @@ use tiberius::{ColumnData, FromSqlOwned, Row};
 use crate::database::{statements_return_rows, Database, ROW_KEYWORDS};
 use crate::error::{CoreError, Result};
 use crate::model::{
-    ColumnInfo, ColumnMeta, ConnectionConfig, DbKind, IndexInfo, QueryResult, QueryStats,
-    SchemaTree, SslMode, TableInfo,
+    ColumnInfo, ColumnMeta, ConnectionConfig, DbKind, ForeignKeyInfo, IndexInfo, QueryResult,
+    QueryStats, SchemaTree, SslMode, TableInfo,
 };
 use crate::value::Value;
 
@@ -117,6 +117,7 @@ impl Database for MsSqlDb {
                     name,
                     columns: Vec::new(),
                     indexes: Vec::new(),
+                    foreign_keys: Vec::new(),
                 },
             );
         }
@@ -197,6 +198,50 @@ impl Database for MsSqlDb {
                     unique,
                     columns,
                 });
+            }
+        }
+
+        // Foreign keys, from the sys catalog; column pairs ordered by constraint_column_id.
+        for row in self
+            .fetch(
+                "SELECT s.name, t.name, fk.name, rs.name, rt.name, pc.name, rc.name, \
+                        fk.delete_referential_action_desc, fk.update_referential_action_desc \
+                 FROM sys.foreign_keys fk \
+                 JOIN sys.tables t ON fk.parent_object_id = t.object_id \
+                 JOIN sys.schemas s ON t.schema_id = s.schema_id \
+                 JOIN sys.tables rt ON fk.referenced_object_id = rt.object_id \
+                 JOIN sys.schemas rs ON rt.schema_id = rs.schema_id \
+                 JOIN sys.foreign_key_columns fkc \
+                   ON fkc.constraint_object_id = fk.object_id \
+                 JOIN sys.columns pc \
+                   ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id \
+                 JOIN sys.columns rc \
+                   ON rc.object_id = fkc.referenced_object_id \
+                  AND rc.column_id = fkc.referenced_column_id \
+                 ORDER BY s.name, t.name, fk.name, fkc.constraint_column_id",
+            )
+            .await?
+        {
+            let schema = get_str(&row, 0);
+            let table = get_str(&row, 1);
+            let constraint = get_str(&row, 2);
+            if let Some(info) = tables.get_mut(&(schema, table)) {
+                match info.foreign_keys.iter_mut().find(|fk| fk.name == constraint) {
+                    Some(fk) => {
+                        fk.columns.push(get_str(&row, 5));
+                        fk.ref_columns.push(get_str(&row, 6));
+                    }
+                    None => info.foreign_keys.push(ForeignKeyInfo {
+                        name: constraint,
+                        columns: vec![get_str(&row, 5)],
+                        ref_schema: Some(get_str(&row, 3)),
+                        ref_table: get_str(&row, 4),
+                        ref_columns: vec![get_str(&row, 6)],
+                        // sys reports "NO_ACTION" / "SET_NULL"; normalize to SQL spelling.
+                        on_delete: get_str(&row, 7).replace('_', " "),
+                        on_update: get_str(&row, 8).replace('_', " "),
+                    }),
+                }
             }
         }
 

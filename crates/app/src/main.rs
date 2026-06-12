@@ -69,6 +69,8 @@ const APP_ICON: &[u8] = include_bytes!("../assets/icon/png/icon-256.png");
 fn main() -> eframe::Result<()> {
     let icon = eframe::icon_data::from_png_bytes(APP_ICON).expect("valid app icon PNG");
 
+
+    
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 820.0])
         .with_min_inner_size([800.0, 500.0])

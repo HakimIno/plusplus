@@ -15,7 +15,8 @@ pub trait Database: Send + Sync {
     /// Which backend this is.
     fn kind(&self) -> DbKind;
 
-    /// Introspect the connected database into a [`SchemaTree`] (tables, columns, indexes).
+    /// Introspect the connected database into a [`SchemaTree`] (tables, columns, indexes,
+    /// foreign keys).
     async fn introspect(&self) -> Result<SchemaTree>;
 
     /// Execute an arbitrary SQL statement and return the result set, materializing at most
