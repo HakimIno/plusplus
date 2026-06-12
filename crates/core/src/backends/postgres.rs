@@ -165,23 +165,34 @@ impl Database for PostgresDb {
             }
         }
 
-        // Foreign keys. Referencing and referenced columns are paired positionally by
-        // joining key_column_usage on both sides of the referential constraint.
+        // Foreign keys, from pg_catalog rather than information_schema: the standard views
+        // hide a referential constraint unless the user holds non-SELECT privileges on
+        // *both* of its tables (a plain read-only role sees none of them), and their
+        // (schema, constraint-name) join breaks when two tables reuse a constraint name.
+        // pg_constraint is visible to everyone and precise per constraint OID; unnesting
+        // conkey/confkey together keeps composite-key column pairs aligned.
+        const ACTION_CASE: &str = "WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' \
+             WHEN 'd' THEN 'SET DEFAULT' WHEN 'r' THEN 'RESTRICT' ELSE 'NO ACTION'";
         type FkRow = (String, String, String, String, String, String, String, String, String);
         let fk_rows: Vec<FkRow> = sqlx::query_as(AssertSqlSafe(format!(
-            "SELECT kcu.table_schema, kcu.table_name, kcu.constraint_name, kcu.column_name, \
-                    rk.table_schema, rk.table_name, rk.column_name, \
-                    rc.delete_rule, rc.update_rule \
-             FROM information_schema.referential_constraints rc \
-             JOIN information_schema.key_column_usage kcu \
-               ON kcu.constraint_schema = rc.constraint_schema \
-              AND kcu.constraint_name = rc.constraint_name \
-             JOIN information_schema.key_column_usage rk \
-               ON rk.constraint_schema = rc.unique_constraint_schema \
-              AND rk.constraint_name = rc.unique_constraint_name \
-              AND rk.ordinal_position = kcu.position_in_unique_constraint \
-             WHERE kcu.table_schema NOT IN {SYSTEM_SCHEMAS} \
-             ORDER BY kcu.table_schema, kcu.table_name, kcu.constraint_name, kcu.ordinal_position"
+            "SELECT sch.nspname, tbl.relname, con.conname, \
+                    fsch.nspname, ftbl.relname, \
+                    att.attname, fatt.attname, \
+                    CASE con.confdeltype {ACTION_CASE} END, \
+                    CASE con.confupdtype {ACTION_CASE} END \
+             FROM pg_constraint con \
+             JOIN pg_class tbl ON tbl.oid = con.conrelid \
+             JOIN pg_namespace sch ON sch.oid = tbl.relnamespace \
+             JOIN pg_class ftbl ON ftbl.oid = con.confrelid \
+             JOIN pg_namespace fsch ON fsch.oid = ftbl.relnamespace \
+             CROSS JOIN LATERAL unnest(con.conkey, con.confkey) \
+                  WITH ORDINALITY AS cols(attnum, fattnum, ord) \
+             JOIN pg_attribute att \
+               ON att.attrelid = con.conrelid AND att.attnum = cols.attnum \
+             JOIN pg_attribute fatt \
+               ON fatt.attrelid = con.confrelid AND fatt.attnum = cols.fattnum \
+             WHERE con.contype = 'f' AND sch.nspname NOT IN {SYSTEM_SCHEMAS} \
+             ORDER BY sch.nspname, tbl.relname, con.conname, cols.ord"
         )))
         .fetch_all(&self.pool)
         .await?;

@@ -5,6 +5,7 @@
 
 mod app;
 mod edit;
+mod erd;
 mod filter;
 mod format;
 mod grid;

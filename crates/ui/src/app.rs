@@ -436,6 +436,10 @@ enum Action {
     CloseSettings,
     /// Show/hide the query-history side panel.
     ToggleHistory,
+    /// Open/close the ER diagram of the active connection (takes over the central panel).
+    ToggleErd,
+    /// Rebuild the open ER diagram from the current schema (after DDL / re-introspection).
+    RefreshErd,
     /// Wipe the on-disk query history.
     ClearHistory,
     /// Put a history entry's SQL into the active tab's editor.
@@ -582,6 +586,9 @@ pub struct DbGuiApp {
     /// Whether the History dialog is open; `history_cache` holds its rows while it is.
     history_open: bool,
     history_cache: Vec<dbcore::history::HistoryEntry>,
+    /// Open ER diagram (takes over the central panel, like the schema editor).
+    /// A snapshot of the schema it was built from; not persisted.
+    erd: Option<crate::erd::ErDiagram>,
 
     // --- layout ---
     show_connection_tabs: bool,
@@ -717,6 +724,7 @@ impl DbGuiApp {
             history_enabled,
             history_open: false,
             history_cache: Vec::new(),
+            erd: None,
             show_welcome,
             update: crate::update::UpdatePhase::Idle,
             update_dialog_open: false,
@@ -886,6 +894,28 @@ impl DbGuiApp {
     fn active_connection_config(&self) -> Option<&ConnectionConfig> {
         let id = self.tab().conn_id.as_deref()?;
         self.connections.iter().find(|c| c.id == id)
+    }
+
+    /// Rebuild the open ER diagram from its connection's current schema, keeping the
+    /// user's pan/zoom and the position of every node whose table survived.
+    fn refresh_erd(&mut self) {
+        let Some(old) = self.erd.take() else { return };
+        let Some(conn) = self
+            .active_connections
+            .iter()
+            .find(|c| c.config_id == old.conn_id)
+        else {
+            // Connection dropped while the diagram was open: nothing to rebuild from.
+            return;
+        };
+        let mut fresh = crate::erd::ErDiagram::build(&old.conn_id, &conn.schema);
+        for node in &mut fresh.nodes {
+            if let Some(prev) = old.nodes.iter().find(|n| n.title == node.title) {
+                node.pos = prev.pos;
+            }
+        }
+        fresh.scene_rect = old.scene_rect;
+        self.erd = Some(fresh);
     }
 
     fn active_title_bar_color(&self) -> Option<ConnectionColor> {
@@ -1116,6 +1146,10 @@ impl DbGuiApp {
     /// Drop a live connection from the pool (tabs bound to it become "not connected").
     fn disconnect_conn(&mut self, id: &str) {
         self.active_connections.retain(|c| c.config_id != id);
+        // An ER diagram of the dropped connection is stale; close it.
+        if self.erd.as_ref().is_some_and(|e| e.conn_id == id) {
+            self.erd = None;
+        }
         for tab in &mut self.tabs {
             if tab.conn_id.as_deref() == Some(id) {
                 tab.result = None;
@@ -1155,6 +1189,7 @@ impl DbGuiApp {
                     match result {
                         Ok((db, schema)) => {
                             let n = schema.tables.len();
+                            let arrived_id = conn_id.clone();
                             if let Some(idx) = self
                                 .active_connections
                                 .iter()
@@ -1179,6 +1214,11 @@ impl DbGuiApp {
                             }
                             self.status_msg = format!("Connected to {name} — {n} tables");
                             self.error = None;
+                            // A fresh schema invalidates an open diagram of this connection
+                            // (e.g. after a DDL migration re-introspects).
+                            if self.erd.as_ref().is_some_and(|e| e.conn_id == arrived_id) {
+                                self.refresh_erd();
+                            }
                         }
                         Err(e) => {
                             self.error = Some(format!("Connection failed: {e}"));
@@ -2066,6 +2106,19 @@ impl DbGuiApp {
                     self.history_open = true;
                 }
             }
+            Action::ToggleErd => {
+                if self.erd.is_some() {
+                    self.erd = None;
+                } else if let Some(active) = self.active() {
+                    self.erd = Some(crate::erd::ErDiagram::build(
+                        &active.config_id,
+                        &active.schema,
+                    ));
+                } else {
+                    self.error = Some("Connect to a database to view its ER diagram.".into());
+                }
+            }
+            Action::RefreshErd => self.refresh_erd(),
             Action::ClearHistory => {
                 if let Err(e) = dbcore::history::clear() {
                     self.error = Some(format!("Could not clear history: {e}"));
@@ -3558,6 +3611,137 @@ mod tests {
         assert!(
             clashes.is_empty(),
             "ID clashes detected:\n{}",
+            clashes.join("\n")
+        );
+    }
+
+    /// A small schema with a real FK so ERD tests exercise edges, not just boxes.
+    fn fake_schema_with_fk() -> SchemaTree {
+        let mut schema = fake_schema(3, 4);
+        schema.tables[1].foreign_keys.push(dbcore::ForeignKeyInfo {
+            name: "fk_t1_t0".into(),
+            columns: vec!["field_1".into()],
+            ref_schema: None,
+            ref_table: "table_0".into(),
+            ref_columns: vec!["field_0".into()],
+            on_delete: "CASCADE".into(),
+            on_update: "NO ACTION".into(),
+        });
+        schema
+    }
+
+    fn connect_fake(app: &mut DbGuiApp, schema: SchemaTree) {
+        let db: std::sync::Arc<dyn dbcore::Database> = std::sync::Arc::new(DummyDb);
+        app.active_connections.push(ActiveConnection {
+            config_id: "c1".into(),
+            name: "one".into(),
+            db,
+            databases: Vec::new(),
+            schema,
+        });
+        app.tab_mut().conn_id = Some("c1".into());
+    }
+
+    /// ToggleErd needs a live connection; with one it snapshots the schema, and a second
+    /// toggle closes the diagram again.
+    #[test]
+    fn toggle_erd_builds_from_the_active_connection() {
+        let mut app = DbGuiApp::construct();
+        app.apply_action(Action::ToggleErd);
+        assert!(app.erd.is_none());
+        assert!(app.error.is_some(), "no connection should surface an error");
+
+        connect_fake(&mut app, fake_schema_with_fk());
+        app.error = None;
+        app.apply_action(Action::ToggleErd);
+        let erd = app.erd.as_ref().expect("diagram should open");
+        assert_eq!(erd.nodes.len(), 3);
+        assert_eq!(erd.edges.len(), 1);
+        assert_eq!(erd.conn_id, "c1");
+
+        app.apply_action(Action::ToggleErd);
+        assert!(app.erd.is_none());
+    }
+
+    /// RefreshErd rebuilds from the connection's current schema, keeping the position of
+    /// nodes whose table survived; disconnecting closes the stale diagram outright.
+    #[test]
+    fn erd_refresh_keeps_positions_and_disconnect_closes() {
+        let mut app = DbGuiApp::construct();
+        connect_fake(&mut app, fake_schema_with_fk());
+        app.apply_action(Action::ToggleErd);
+
+        // The user drags table_0 somewhere specific…
+        let moved = egui::pos2(1234.0, 567.0);
+        app.erd.as_mut().unwrap().nodes[0].pos = moved;
+
+        // …then the schema gains a table and the diagram refreshes.
+        app.active_connections[0].schema = {
+            let mut s = fake_schema_with_fk();
+            s.tables.push(TableInfo {
+                schema: None,
+                name: "brand_new".into(),
+                columns: vec![ColumnInfo {
+                    name: "id".into(),
+                    data_type: "INTEGER".into(),
+                    nullable: false,
+                    primary_key: true,
+                }],
+                indexes: Vec::new(),
+                foreign_keys: Vec::new(),
+            });
+            s
+        };
+        app.apply_action(Action::RefreshErd);
+        let erd = app.erd.as_ref().expect("refresh keeps the diagram open");
+        assert_eq!(erd.nodes.len(), 4);
+        let kept = erd.nodes.iter().find(|n| n.title == "table_0").unwrap();
+        assert_eq!(kept.pos, moved, "surviving nodes keep their dragged position");
+
+        app.disconnect_conn("c1");
+        assert!(app.erd.is_none(), "diagram closes with its connection");
+    }
+
+    /// Render the ER diagram headlessly (open over a connected app) and capture ID
+    /// clashes; also exercises the Scene's pan/zoom plumbing for a few frames.
+    #[test]
+    fn probe_erd_view_id_clash() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::style::apply(&ctx);
+
+        let mut app = DbGuiApp::construct();
+        connect_fake(&mut app, fake_schema_with_fk());
+        app.apply_action(Action::ToggleErd);
+        assert!(app.erd.is_some());
+
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+        let mut clashes: Vec<String> = Vec::new();
+        for _ in 0..5 {
+            let events = vec![
+                egui::Event::PointerMoved(egui::pos2(500.0, 350.0)),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -20.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ];
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let out = ctx.run_ui(raw, |ui| app.draw(ui, None));
+            clashes.extend(collect_clash_text(&out.shapes));
+        }
+
+        assert!(app.erd.is_some(), "the diagram must survive drawing");
+        clashes.sort();
+        clashes.dedup();
+        assert!(
+            clashes.is_empty(),
+            "ID clashes detected in the ER diagram:\n{}",
             clashes.join("\n")
         );
     }

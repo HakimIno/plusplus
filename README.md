@@ -41,6 +41,14 @@ tables, columns (type, nullability, primary key), indexes, and foreign keys
 (`col → table(col)`, with the referential actions in the tooltip), filterable by name. A
 single click previews a table's rows; a double click opens it as a permanent tab.
 
+**ER diagram.** A title-bar button opens the connected database as an entity-relationship
+diagram: every table is a box (columns, with primary-key dots and foreign-key rings) and
+every foreign key a curve between them, laid out automatically by a force-directed pass.
+The canvas pans and zooms (`egui::Scene`), boxes drag freely, clicking a table highlights
+its relations, and Fit / Re-layout / Refresh re-frame, re-arrange, or re-snapshot the
+diagram. It tracks schema migrations live — applying DDL re-introspects and rebuilds the
+open diagram, keeping the positions of tables that survived.
+
 **Query tabs.** Each tab is an independent SQL editor (with syntax highlighting) bound to
 its own connection, with its own result, sort, filter, and edit state. Table previews
 reuse one italic *preview* tab so casual browsing doesn't pile up tabs. The open tabs —
@@ -124,8 +132,13 @@ cargo run --bin plusplus    # build & launch the GUI (dev)
 cargo test --workspace      # data-layer and headless UI tests
 ```
 
-A small sample SQLite database with mixed Thai/English data ships at
-`examples/sample.sqlite` — add it as a SQLite connection to try the app without a server.
+A sample SQLite database ships at `examples/sample.sqlite` — add it as a SQLite
+connection to try the app without a server. It's a small Thai e-commerce shop: six
+linked tables (categories ⟲, customers, addresses, products, orders, order_items) with
+foreign keys in every flavour — self-referencing, composite primary key, ON DELETE
+CASCADE / SET NULL — plus a few hundred rows of order history, so the ER diagram,
+schema browser, and grid all have something real to show. Regenerate it any time with
+`rm -f examples/sample.sqlite && sqlite3 examples/sample.sqlite < examples/sample.sql`.
 
 ## Versioning
 

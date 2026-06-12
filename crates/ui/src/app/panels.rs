@@ -174,6 +174,11 @@ impl DbGuiApp {
                         {
                             actions.push(Action::ToggleHistory);
                         }
+                        if super::widgets::toolbar_icon_button(ui, icons::diagram(), "ER diagram")
+                            .clicked()
+                        {
+                            actions.push(Action::ToggleErd);
+                        }
                         if super::widgets::layout_toggle(
                             ui,
                             self.show_details_panel,
@@ -1214,6 +1219,14 @@ impl DbGuiApp {
 
     pub(super) fn central_panel(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
         let idx = self.active_query_tab;
+        // The ER diagram is app-wide (per connection, not per tab) and wins over
+        // everything else in the central panel while open.
+        if self.erd.is_some() {
+            egui::CentralPanel::default().show_inside(root, |ui| {
+                self.erd_view(ui, actions);
+            });
+            return;
+        }
         // The schema editor takes over the central panel (like Data/Structure) while open.
         if self.tabs[idx].schema_editor.is_some() {
             egui::CentralPanel::default().show_inside(root, |ui| {
@@ -2737,6 +2750,324 @@ fn structure_view(ui: &mut egui::Ui, info: &dbcore::TableInfo) {
                     });
             }
         });
+}
+
+// ─── ER diagram ──────────────────────────────────────────────────────────────
+
+impl DbGuiApp {
+    /// The ER diagram view: a pan/zoom canvas (`egui::Scene`) of draggable table boxes
+    /// connected by foreign-key curves. Takes over the central panel while open.
+    pub(super) fn erd_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let Some(erd) = self.erd.as_mut() else { return };
+
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            icons::show_native(ui, icons::diagram(), icons::SIZE);
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(format!("ER Diagram — {}", erd.database))
+                    .strong()
+                    .color(palette::TEXT()),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if icons::icon_button(ui, icons::close(), "Close the diagram").clicked() {
+                    actions.push(Action::ToggleErd);
+                }
+                if ui
+                    .small_button("Refresh")
+                    .on_hover_text("Rebuild from the current schema")
+                    .clicked()
+                {
+                    actions.push(Action::RefreshErd);
+                }
+                if ui
+                    .small_button("Re-layout")
+                    .on_hover_text("Recompute the automatic arrangement")
+                    .clicked()
+                {
+                    erd.layout();
+                }
+                if ui
+                    .small_button("Fit")
+                    .on_hover_text("Zoom to fit all tables")
+                    .clicked()
+                {
+                    erd.request_fit();
+                }
+                ui.add_space(6.0);
+                ui.colored_label(
+                    palette::TEXT_FAINT(),
+                    format!("{} tables · {} relations", erd.nodes.len(), erd.edges.len()),
+                );
+            });
+        });
+        ui.add_space(2.0);
+        ui.separator();
+
+        if erd.nodes.is_empty() {
+            ui.add_space(24.0);
+            ui.vertical_centered(|ui| {
+                ui.colored_label(palette::TEXT_FAINT(), "This database has no tables.");
+            });
+            return;
+        }
+
+        let mut scene_rect = erd.scene_rect;
+        egui::Scene::new()
+            .zoom_range(0.1..=2.5)
+            .show(ui, &mut scene_rect, |ui| {
+                erd_canvas(ui, erd);
+            });
+        erd.scene_rect = scene_rect;
+    }
+}
+
+/// Draw the diagram content inside the scene: FK curves first (under), then the
+/// draggable table boxes. All coordinates are scene-local; `egui::Scene` applies
+/// the pan/zoom transform around us.
+fn erd_canvas(ui: &mut egui::Ui, erd: &mut crate::erd::ErDiagram) {
+    use crate::erd::{HEADER_H, ROW_H};
+
+    // Node titles get one point over Body for hierarchy; Heading is avoided on purpose —
+    // its custom font family only exists once the app installs fonts (not in headless tests).
+    let title_font = egui::FontId::proportional(13.5);
+    let body_font = egui::TextStyle::Body.resolve(ui.style());
+    let small_font = egui::TextStyle::Small.resolve(ui.style());
+    let painter = ui.painter().clone();
+
+    // Measure boxes once with real font metrics (the layout used char-count estimates).
+    for node in &mut erd.nodes {
+        if node.size != egui::Vec2::ZERO {
+            continue;
+        }
+        let mut width: f32 = painter
+            .layout_no_wrap(node.title.clone(), title_font.clone(), palette::TEXT())
+            .size()
+            .x + 24.0;
+        for col in &node.columns {
+            let name =
+                painter.layout_no_wrap(col.name.clone(), body_font.clone(), palette::TEXT());
+            let ty =
+                painter.layout_no_wrap(col.data_type.clone(), small_font.clone(), palette::TEXT());
+            // marker + name + gap + type + padding
+            width = width.max(16.0 + name.size().x + 24.0 + ty.size().x + 12.0);
+        }
+        node.size = egui::vec2(
+            width.clamp(170.0, 380.0),
+            HEADER_H + node.columns.len() as f32 * ROW_H + 6.0,
+        );
+    }
+
+    // Edges first, so the boxes draw over them.
+    for edge in &erd.edges {
+        let highlighted = erd
+            .selected
+            .is_some_and(|s| s == edge.from || s == edge.to);
+        let color = if highlighted {
+            palette::ACCENT()
+        } else {
+            palette::BORDER_STRONG()
+        };
+        let stroke = egui::Stroke::new(if highlighted { 2.0 } else { 1.4 }, color);
+
+        let from_rect = erd.nodes[edge.from].rect();
+        let to_rect = erd.nodes[edge.to].rect();
+        let from_y = from_rect.top() + HEADER_H + (edge.from_row as f32 + 0.5) * ROW_H;
+        let to_y = match edge.to_row {
+            Some(row) => to_rect.top() + HEADER_H + (row as f32 + 0.5) * ROW_H,
+            None => to_rect.top() + HEADER_H * 0.5,
+        };
+
+        if edge.from == edge.to {
+            // Self-reference: a small loop out of the right side.
+            let r = from_rect.right();
+            let p0 = egui::pos2(r, from_y);
+            let p1 = egui::pos2(r, to_y + if edge.to_row == Some(edge.from_row) { ROW_H * 0.6 } else { 0.0 });
+            let reach = 46.0;
+            painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                [
+                    p0,
+                    p0 + egui::vec2(reach, 0.0),
+                    p1 + egui::vec2(reach, 0.0),
+                    p1,
+                ],
+                false,
+                egui::Color32::TRANSPARENT,
+                stroke,
+            ));
+            let out = egui::vec2(1.0, 0.0); // both ends leave through the right edge
+            erd_child_mark(&painter, p0, out, edge.many, stroke);
+            erd_parent_mark(&painter, p1, out, edge.optional, stroke);
+            continue;
+        }
+
+        // Exit/enter on the sides that face each other.
+        let from_right = to_rect.center().x >= from_rect.center().x;
+        let p0 = egui::pos2(
+            if from_right { from_rect.right() } else { from_rect.left() },
+            from_y,
+        );
+        let p1 = egui::pos2(
+            if from_right { to_rect.left() } else { to_rect.right() },
+            to_y,
+        );
+        let reach = ((p1.x - p0.x).abs() * 0.5).clamp(32.0, 140.0);
+        let out0 = egui::vec2(if from_right { 1.0 } else { -1.0 }, 0.0);
+        let c0 = p0 + out0 * reach;
+        let c1 = p1 - out0 * reach;
+        painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+            [p0, c0, c1, p1],
+            false,
+            egui::Color32::TRANSPARENT,
+            stroke,
+        ));
+        erd_child_mark(&painter, p0, out0, edge.many, stroke);
+        erd_parent_mark(&painter, p1, -out0, edge.optional, stroke);
+    }
+
+    // Nodes: drag to move, click to highlight a table's relations.
+    let mut clicked: Option<usize> = None;
+    for (i, node) in erd.nodes.iter_mut().enumerate() {
+        let id = ui.id().with(("erd_node", i));
+        let rect = node.rect();
+        let resp = ui.interact(rect, id, egui::Sense::click_and_drag());
+        if resp.dragged() {
+            node.pos += resp.drag_delta();
+        }
+        if resp.clicked() {
+            clicked = Some(i);
+        }
+        let rect = node.rect(); // after the drag delta
+        let selected = erd.selected == Some(i);
+
+        let border = if selected {
+            egui::Stroke::new(1.6, palette::ACCENT())
+        } else if resp.hovered() {
+            egui::Stroke::new(1.2, palette::BORDER_STRONG())
+        } else {
+            egui::Stroke::new(1.0, palette::BORDER())
+        };
+        painter.rect(
+            rect,
+            6.0,
+            palette::SURFACE(),
+            border,
+            egui::StrokeKind::Inside,
+        );
+        // Header band + title.
+        let header_rect =
+            egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), HEADER_H));
+        painter.line_segment(
+            [
+                egui::pos2(rect.left(), rect.top() + HEADER_H),
+                egui::pos2(rect.right(), rect.top() + HEADER_H),
+            ],
+            egui::Stroke::new(1.0, palette::BORDER()),
+        );
+        let title =
+            painter.layout_no_wrap(node.title.clone(), title_font.clone(), palette::TEXT());
+        painter.galley(
+            egui::pos2(
+                header_rect.left() + 10.0,
+                header_rect.center().y - title.size().y / 2.0,
+            ),
+            title,
+            palette::TEXT(),
+        );
+
+        // Column rows: a marker (PK dot / FK ring), the name, and the type right-aligned.
+        for (r, col) in node.columns.iter().enumerate() {
+            let y = rect.top() + HEADER_H + (r as f32 + 0.5) * ROW_H;
+            let marker = egui::pos2(rect.left() + 11.0, y);
+            if col.primary_key {
+                painter.circle_filled(marker, 2.8, palette::ACCENT());
+            } else if col.foreign_key {
+                painter.circle_stroke(marker, 2.8, egui::Stroke::new(1.2, palette::ACCENT()));
+            }
+            let name_color = if col.primary_key {
+                palette::TEXT()
+            } else {
+                palette::TEXT_WEAK()
+            };
+            let name = painter.layout_no_wrap(col.name.clone(), body_font.clone(), name_color);
+            painter.galley(
+                egui::pos2(rect.left() + 20.0, y - name.size().y / 2.0),
+                name,
+                name_color,
+            );
+            let ty = painter.layout_no_wrap(
+                col.data_type.clone(),
+                small_font.clone(),
+                palette::TEXT_FAINT(),
+            );
+            painter.galley(
+                egui::pos2(rect.right() - 8.0 - ty.size().x, y - ty.size().y / 2.0),
+                ty,
+                palette::TEXT_FAINT(),
+            );
+        }
+
+        // The FK summary for this table, on hover.
+        if resp.hovered() && !erd.edges.is_empty() {
+            let details: Vec<&str> = erd
+                .edges
+                .iter()
+                .filter(|e| e.from == i)
+                .map(|e| e.detail.as_str())
+                .collect();
+            if !details.is_empty() {
+                resp.on_hover_text(details.join("\n"));
+            }
+        }
+    }
+    if let Some(i) = clicked {
+        erd.selected = if erd.selected == Some(i) { None } else { Some(i) };
+    }
+}
+
+/// Crow's-foot mark at the referencing (FK) end of an edge. `p` sits on the box border
+/// and `out` is the unit direction the edge leaves the box in: a three-prong foot fanning
+/// into the border for "many", a single perpendicular bar for "one" (unique FK).
+fn erd_child_mark(
+    painter: &egui::Painter,
+    p: egui::Pos2,
+    out: egui::Vec2,
+    many: bool,
+    stroke: egui::Stroke,
+) {
+    let n = egui::vec2(-out.y, out.x);
+    if many {
+        let q = p + out * 10.0; // the point on the line the prongs fan out from
+        for k in [-1.0, 0.0, 1.0] {
+            painter.line_segment([q, p + n * (4.5 * k)], stroke);
+        }
+    } else {
+        let q = p + out * 7.0;
+        painter.line_segment([q + n * 4.5, q - n * 4.5], stroke);
+    }
+}
+
+/// Cardinality mark at the referenced (parent) end: a double bar for "exactly one", or a
+/// hollow circle plus bar for "zero or one" (nullable FK). `out` points away from the box.
+fn erd_parent_mark(
+    painter: &egui::Painter,
+    p: egui::Pos2,
+    out: egui::Vec2,
+    optional: bool,
+    stroke: egui::Stroke,
+) {
+    let n = egui::vec2(-out.y, out.x);
+    let bar = |at: f32| {
+        let q = p + out * at;
+        painter.line_segment([q + n * 4.5, q - n * 4.5], stroke);
+    };
+    if optional {
+        bar(6.0);
+        painter.circle_stroke(p + out * 13.5, 3.2, stroke);
+    } else {
+        bar(6.0);
+        bar(10.0);
+    }
 }
 
 /// Semantic colour for a column's editor kind, used by the Details panel's type badges:

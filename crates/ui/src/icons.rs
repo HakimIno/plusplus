@@ -38,6 +38,7 @@ icon_fns! {
     conn_treasure => "../assets/icons/streamline-plump-color--treasure-chest-flat.svg",
     code       => "../assets/icons/code.svg",
     column     => "../assets/icons/column.svg",
+    diagram    => "../assets/icons/diagram.svg",
     key        => "../assets/icons/key.svg",
     index      => "../assets/icons/index.svg",
     filter     => "../assets/icons/filter.svg",
