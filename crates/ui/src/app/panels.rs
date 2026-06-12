@@ -1989,35 +1989,12 @@ impl DbGuiApp {
 
                         ui.label("Type");
                         let previous_kind = editor.config.kind;
-                        egui::ComboBox::from_id_salt("kind")
-                            .selected_text(editor.config.kind.label())
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut editor.config.kind,
-                                    dbcore::DbKind::Postgres,
-                                    "PostgreSQL",
-                                );
-                                ui.selectable_value(
-                                    &mut editor.config.kind,
-                                    dbcore::DbKind::MySql,
-                                    "MySQL",
-                                );
-                                ui.selectable_value(
-                                    &mut editor.config.kind,
-                                    dbcore::DbKind::MariaDb,
-                                    "MariaDB",
-                                );
-                                ui.selectable_value(
-                                    &mut editor.config.kind,
-                                    dbcore::DbKind::SqlServer,
-                                    "SQL Server",
-                                );
-                                ui.selectable_value(
-                                    &mut editor.config.kind,
-                                    dbcore::DbKind::Sqlite,
-                                    "SQLite",
-                                );
-                            });
+                        icons::db_kind_combo(
+                            ui,
+                            &mut editor.config.kind,
+                            "kind",
+                            field_w,
+                        );
                         if editor.config.kind != previous_kind {
                             editor.config.port = editor.config.kind.default_port();
                             form_changed = true;

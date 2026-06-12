@@ -2,11 +2,14 @@
 //! They are rendered via `egui_extras`' SVG image loader and tinted to the current theme
 //! text colour, so they stay crisp at any size and adapt to light/dark themes.
 
-use dbcore::ConnectionIcon;
+use dbcore::{ConnectionIcon, DbKind};
 use egui::{include_image, ImageSource};
 
 /// Default on-canvas size for an icon, in points.
 pub const SIZE: f32 = 16.0;
+
+/// Size for database-kind logos in pickers and labels.
+pub const DB_KIND_ICON_SIZE: f32 = 16.0;
 
 macro_rules! icon_fns {
     ($($name:ident => $path:literal),* $(,)?) => {
@@ -44,6 +47,96 @@ icon_fns! {
     save       => "../assets/icons/save.svg",
     settings   => "../assets/icons/settings.svg",
     empty_results => "../assets/empty-results.svg",
+    db_postgres_dark => "../assets/icondb/skill-icons--postgresql-dark.svg",
+    db_postgres_light => "../assets/icondb/skill-icons--postgresql-light.svg",
+    db_mysql_dark => "../assets/icondb/skill-icons--mysql-dark.svg",
+    db_mysql_light => "../assets/icondb/skill-icons--mysql-light.svg",
+    db_mariadb => "../assets/icondb/devicon--mariadb.svg",
+    db_sqlserver => "../assets/icondb/devicon-plain--microsoftsqlserver-wordmark.svg",
+    db_sqlite => "../assets/icondb/skill-icons--sqlite.svg",
+}
+
+/// Embedded logo for a database backend; picks light/dark Postgres/MySQL variants from the theme.
+pub fn db_kind_icon(kind: DbKind) -> ImageSource<'static> {
+    let dark = crate::theme::current().is_dark;
+    match kind {
+        DbKind::Postgres => {
+            if dark {
+                db_postgres_dark()
+            } else {
+                db_postgres_light()
+            }
+        }
+        DbKind::MySql => {
+            if dark {
+                db_mysql_dark()
+            } else {
+                db_mysql_light()
+            }
+        }
+        DbKind::MariaDb => db_mariadb(),
+        DbKind::SqlServer => db_sqlserver(),
+        DbKind::Sqlite => db_sqlite(),
+    }
+}
+
+fn db_kind_button_image(kind: DbKind) -> egui::Image<'static> {
+    egui::Image::new(db_kind_icon(kind)).fit_to_exact_size(egui::vec2(
+        DB_KIND_ICON_SIZE,
+        DB_KIND_ICON_SIZE,
+    ))
+}
+
+/// Menu row: one selectable button with logo and label sharing hover/selection.
+pub fn db_kind_selectable(
+    ui: &mut egui::Ui,
+    current: &mut DbKind,
+    kind: DbKind,
+) -> egui::Response {
+    let selected = *current == kind;
+    let btn = egui::Button::image_and_text(db_kind_button_image(kind), kind.label())
+        .selected(selected)
+        .frame_when_inactive(selected)
+        .frame(true)
+        .min_size(egui::vec2(ui.available_width(), 0.0));
+
+    let mut response = ui.add(btn);
+    if response.clicked() && !selected {
+        *current = kind;
+        response.mark_changed();
+    }
+    response
+}
+
+/// Combo-style picker: one button (icon + label + arrow) opening a logo-labelled menu.
+pub fn db_kind_combo(
+    ui: &mut egui::Ui,
+    current: &mut DbKind,
+    id: impl std::hash::Hash,
+    width: f32,
+) -> egui::Response {
+    let btn = egui::Button::image_and_text(db_kind_button_image(*current), current.label())
+        .right_text(egui::RichText::new("▾").size(10.0))
+        .min_size(egui::vec2(width, 0.0));
+    let button_response = ui.add(btn);
+
+    egui::Popup::menu(&button_response)
+        .id(egui::Id::new(id).with("popup"))
+        .width(button_response.rect.width())
+        .show(|ui| {
+            ui.set_min_width(ui.available_width());
+            for kind in [
+                DbKind::Postgres,
+                DbKind::MySql,
+                DbKind::MariaDb,
+                DbKind::SqlServer,
+                DbKind::Sqlite,
+            ] {
+                db_kind_selectable(ui, current, kind);
+            }
+        });
+
+    button_response
 }
 
 /// Build a themed image widget for an icon at the given size.
