@@ -246,10 +246,6 @@ pub struct ActiveEdit {
     pub col: usize,
     pub kind: EditorKind,
     pub buf: String,
-    /// Set while the editor still needs keyboard focus; cleared once it actually has it.
-    /// (Kept set across frames — a one-shot request can be lost to a discarded egui pass,
-    /// leaving a visible editor that ignores typing.)
-    pub focus: bool,
     /// Which view opened this editor (that view renders it; the other shows a label).
     pub origin: EditOrigin,
 }
@@ -450,7 +446,6 @@ impl Edits {
             col,
             kind: self.col_kind(col),
             buf,
-            focus: true,
             origin,
         });
     }
@@ -553,12 +548,13 @@ pub fn render_editor(
         Some(size) => ui.add_sized(size, field),
         None => ui.add(field.desired_width(f32::INFINITY)),
     };
-    // Keep requesting focus until the field actually has it. A one-shot request can be
-    // swallowed by a discarded egui pass (popup/tooltip sizing), which would leave a
-    // visible editor that silently ignores typing.
-    if resp.has_focus() {
-        active.focus = false;
-    } else if active.focus {
+    // An open editor owns keyboard focus: re-request it any frame it doesn't have it.
+    // A one-shot request can be swallowed by a discarded egui pass, and egui silently
+    // drops focus when the cell scrolls out of the virtualized grid (the widget isn't
+    // rendered, so no lost_focus is ever reported) — either would leave a visible editor
+    // that ignores typing. A *deliberate* focus move (clicking elsewhere) is observed as
+    // lost_focus below and closes the editor, so this never fights another widget.
+    if !resp.has_focus() && !resp.lost_focus() {
         resp.request_focus();
     }
 
@@ -569,10 +565,10 @@ pub fn render_editor(
         if valid {
             return EditOutcome::Commit;
         }
-        // Enter on invalid input keeps the editor open so it can be fixed; losing focus by
-        // clicking elsewhere discards it.
+        // Enter on invalid input keeps the editor open so it can be fixed (the focus
+        // re-request above grabs it back next frame); losing focus by clicking elsewhere
+        // discards it.
         if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            active.focus = true;
             return EditOutcome::Continue;
         }
         return EditOutcome::Cancel;

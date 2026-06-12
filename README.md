@@ -29,6 +29,13 @@ port through it, and the database driver connects through that — no exposed DB
 needed. One bastion session multiplexes all of a connection's pooled channels, and it
 tears down with the connection.
 
+**Query history.** Every executed statement — queries, staged-edit commits, DDL — is
+appended to a local audit log (`history.jsonl` in the config dir) with its connection,
+time, duration, and outcome. A title-bar button toggles a right-hand history panel that
+updates live as queries run; entries can be copied or sent back into the editor, and the
+whole log can be cleared. Recording can be switched off in Settings, since SQL text can
+contain data values.
+
 **Schema browsing.** Connecting introspects the whole database into a sidebar tree:
 tables, columns (type, nullability, primary key), and indexes, filterable by name. A
 single click previews a table's rows; a double click opens it as a permanent tab.

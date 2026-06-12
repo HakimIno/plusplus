@@ -12,6 +12,7 @@ pub mod backends;
 pub mod config;
 pub mod database;
 pub mod error;
+pub mod history;
 pub mod model;
 pub mod safety;
 pub mod secrets;

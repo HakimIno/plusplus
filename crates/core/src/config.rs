@@ -8,7 +8,9 @@ use crate::model::ConnectionConfig;
 
 /// Directory where plusplus stores its config, e.g. `~/.config/plusplus` on Linux/macOS or
 /// `%APPDATA%\plusplus` on Windows. We avoid an extra crate and derive it from env vars.
-fn config_dir() -> Result<PathBuf> {
+
+
+pub(crate) fn config_dir() -> Result<PathBuf> {
     // Honour XDG on unix, APPDATA on Windows, else fall back to ~/.config/plusplus.
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         if !xdg.is_empty() {
@@ -69,6 +71,9 @@ pub struct Settings {
     /// Whether the user has completed the first-run welcome flow. `None` = not yet.
     #[serde(default)]
     pub welcomed: Option<bool>,
+    /// Record executed statements to the on-disk query history. `None` = the default (on).
+    #[serde(default)]
+    pub history_enabled: Option<bool>,
 }
 
 /// Load app settings. A missing or unreadable file yields defaults — settings are a

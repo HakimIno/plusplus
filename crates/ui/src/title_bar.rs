@@ -9,10 +9,8 @@ use crate::style::palette;
 #[cfg(target_os = "macos")]
 const MAC_TRAFFIC_LIGHTS_INSET: f32 = 78.0;
 
-/// Right-hand cluster without the optional update button (settings + four layout toggles).
-pub const RIGHT_TOOLS_BASE_WIDTH: f32 = 174.0;
-/// Width of the left-hand icon cluster (excluding traffic-light inset).
-const LEFT_TOOLS_WIDTH: f32 = 108.0;
+/// Horizontal breathing room between the side clusters and the centre breadcrumb.
+const CLUSTER_GAP: f32 = 8.0;
 
 /// Left inset to clear native macOS traffic lights when drawing into the titlebar space.
 pub fn traffic_lights_inset(ctx: &egui::Context, frame: Option<&eframe::Frame>) -> f32 {
@@ -57,29 +55,32 @@ pub fn height(chrome_inset: f32) -> f32 {
     }
 }
 
-/// Three fixed columns for a TablePlus-style title bar: tools | breadcrumb | tools.
-pub struct BarColumns {
-    pub left: Rect,
-    pub center: Rect,
-    pub right: Rect,
+/// Draw one title-bar cluster inside `rect` with the given flow `layout` and return the
+/// space its widgets actually used. Side clusters size themselves from their contents,
+/// so adding or removing a button never needs a width constant updated anywhere.
+pub fn cluster(
+    ui: &mut Ui,
+    rect: Rect,
+    layout: egui::Layout,
+    add_contents: impl FnOnce(&mut Ui),
+) -> Rect {
+    ui.scope_builder(UiBuilder::new().max_rect(rect).layout(layout), |ui| {
+        ui.set_clip_rect(rect);
+        add_contents(ui);
+        ui.min_rect()
+    })
+    .inner
 }
 
-/// `extra_right_width` — measured width of the update button when shown; `0` otherwise so
-/// the breadcrumb pill can use the full centre column.
-pub fn columns(bar: Rect, chrome_inset: f32, extra_right_width: f32) -> BarColumns {
-    let left_w = chrome_inset + LEFT_TOOLS_WIDTH;
-    let right_w = RIGHT_TOOLS_BASE_WIDTH + extra_right_width.max(0.0);
-    let left = Rect::from_min_max(bar.min, egui::pos2(bar.left() + left_w, bar.bottom()));
-    let right = Rect::from_min_max(egui::pos2(bar.right() - right_w, bar.top()), bar.max);
-    let center = Rect::from_min_max(
-        egui::pos2(left.right(), bar.top()),
-        egui::pos2(right.left(), bar.bottom()),
-    );
-    BarColumns {
-        left,
-        center,
-        right,
-    }
+/// The space left for the centre breadcrumb once both measured side clusters are drawn.
+/// Collapses to zero width (never inverts) when the window is extremely narrow.
+pub fn center_rect(bar: Rect, left_used: Rect, right_used: Rect) -> Rect {
+    let left_edge = left_used.right() + CLUSTER_GAP;
+    let right_edge = (right_used.left() - CLUSTER_GAP).max(left_edge);
+    Rect::from_min_max(
+        egui::pos2(left_edge, bar.top()),
+        egui::pos2(right_edge, bar.bottom()),
+    )
 }
 
 /// Compact connection path pill — full width, short height, visibly rounded on every corner.
@@ -123,10 +124,3 @@ pub fn breadcrumb(ui: &mut Ui, text: &str, fill: Option<Color32>) -> egui::Respo
     response.on_hover_text(text)
 }
 
-/// Run `add_contents` inside one title-bar column (clipped so widgets never bleed).
-pub fn column(ui: &mut Ui, rect: Rect, add_contents: impl FnOnce(&mut Ui)) {
-    ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
-        ui.set_clip_rect(rect);
-        add_contents(ui);
-    });
-}

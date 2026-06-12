@@ -71,6 +71,11 @@ fn status_text_input(
     with_field_status(ui, status, |ui| style::text_input(ui, text, hint, width))
 }
 
+/// First non-empty line of a SQL string, for one-line list displays.
+fn first_line(sql: &str) -> &str {
+    sql.lines().find(|l| !l.trim().is_empty()).unwrap_or("")
+}
+
 fn connection_color_to_egui(color: dbcore::ConnectionColor) -> egui::Color32 {
     egui::Color32::from_rgb(color.r, color.g, color.b)
 }
@@ -109,127 +114,118 @@ impl DbGuiApp {
             .exact_size(bar_height)
             .show_inside(root, |ui| {
                 let bar_rect = ui.max_rect();
-                let update_bar = self.update_title_bar_state();
-                let update_extra = update_bar
-                    .as_ref()
-                    .map(|s| Self::update_title_bar_width(ui, &s.0))
-                    .unwrap_or(0.0);
-                let cols = title_bar::columns(bar_rect, chrome_inset, update_extra);
                 let connected = self.active().is_some();
                 let has_result = self.tab().result.is_some();
                 let breadcrumb = self.breadcrumb_text();
 
-                title_bar::column(ui, cols.left, |ui| {
-                    ui.allocate_ui_with_layout(
-                        ui.available_size(),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            ui.add_space(chrome_inset.max(6.0));
+                // Side clusters are drawn first and size themselves from their contents;
+                // the breadcrumb then takes exactly the space left between them.
+                let left_used = title_bar::cluster(
+                    ui,
+                    bar_rect,
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.add_space(chrome_inset.max(6.0));
+                        if super::widgets::toolbar_icon_button(ui, icons::plus(), "New connection")
+                            .clicked()
+                        {
+                            actions.push(Action::NewConnection);
+                        }
+                        if super::widgets::toolbar_icon_button(
+                            ui,
+                            icons::disconnect(),
+                            "Disconnect",
+                        )
+                        .clicked()
+                            && connected
+                        {
+                            actions.push(Action::Disconnect);
+                        }
+                        if has_result {
+                            super::widgets::toolbar_sep(ui);
                             if super::widgets::toolbar_icon_button(
                                 ui,
-                                icons::plus(),
-                                "New connection",
+                                icons::filter(),
+                                "Filter results",
                             )
                             .clicked()
                             {
-                                actions.push(Action::NewConnection);
+                                let visible = self.tab().filter.visible;
+                                self.tab_mut().filter.visible = !visible;
                             }
-                            if super::widgets::toolbar_icon_button(
-                                ui,
-                                icons::disconnect(),
-                                "Disconnect",
-                            )
-                            .clicked()
-                                && connected
-                            {
-                                actions.push(Action::Disconnect);
-                            }
-                            if has_result {
-                                super::widgets::toolbar_sep(ui);
-                                if super::widgets::toolbar_icon_button(
-                                    ui,
-                                    icons::filter(),
-                                    "Filter results",
-                                )
-                                .clicked()
-                                {
-                                    let visible = self.tab().filter.visible;
-                                    self.tab_mut().filter.visible = !visible;
-                                }
-                            }
-                        },
-                    );
-                });
+                        }
+                    },
+                );
 
-                title_bar::column(ui, cols.center, |ui| {
-                    ui.allocate_ui_with_layout(
-                        ui.available_size(),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            title_bar::breadcrumb(ui, &breadcrumb, breadcrumb_fill);
-                        },
-                    );
-                });
+                let right_used = title_bar::cluster(
+                    ui,
+                    bar_rect,
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        ui.add_space(6.0);
+                        self.update_title_bar_button(ui, actions);
+                        if super::widgets::toolbar_icon_button(ui, icons::settings(), "Settings")
+                            .clicked()
+                        {
+                            actions.push(Action::OpenSettings);
+                        }
+                        if super::widgets::toolbar_icon_button(ui, icons::code(), "Query history")
+                            .clicked()
+                        {
+                            actions.push(Action::ToggleHistory);
+                        }
+                        if super::widgets::layout_toggle(
+                            ui,
+                            self.show_details_panel,
+                            super::widgets::LayoutSide::Details,
+                            "Details panel",
+                        )
+                        .clicked()
+                        {
+                            self.show_details_panel = !self.show_details_panel;
+                        }
+                        if super::widgets::layout_toggle(
+                            ui,
+                            self.show_schema_panel,
+                            super::widgets::LayoutSide::Schema,
+                            "Schema panel",
+                        )
+                        .clicked()
+                        {
+                            self.show_schema_panel = !self.show_schema_panel;
+                        }
+                        if super::widgets::layout_toggle(
+                            ui,
+                            self.show_query_console,
+                            super::widgets::LayoutSide::Query,
+                            "Query console",
+                        )
+                        .clicked()
+                        {
+                            self.show_query_console = !self.show_query_console;
+                        }
+                        if super::widgets::layout_toggle(
+                            ui,
+                            self.show_connection_tabs,
+                            super::widgets::LayoutSide::Connections,
+                            "Connection tabs",
+                        )
+                        .clicked()
+                        {
+                            self.show_connection_tabs = !self.show_connection_tabs;
+                        }
+                    },
+                );
 
-                title_bar::column(ui, cols.right, |ui| {
-                    ui.allocate_ui_with_layout(
-                        ui.available_size(),
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            ui.add_space(6.0);
-                            self.update_title_bar_button(ui, actions);
-                            if super::widgets::toolbar_icon_button(
-                                ui,
-                                icons::settings(),
-                                "Settings",
-                            )
-                            .clicked()
-                            {
-                                actions.push(Action::OpenSettings);
-                            }
-                            if super::widgets::layout_toggle(
-                                ui,
-                                self.show_details_panel,
-                                super::widgets::LayoutSide::Details,
-                                "Details panel",
-                            )
-                            .clicked()
-                            {
-                                self.show_details_panel = !self.show_details_panel;
-                            }
-                            if super::widgets::layout_toggle(
-                                ui,
-                                self.show_schema_panel,
-                                super::widgets::LayoutSide::Schema,
-                                "Schema panel",
-                            )
-                            .clicked()
-                            {
-                                self.show_schema_panel = !self.show_schema_panel;
-                            }
-                            if super::widgets::layout_toggle(
-                                ui,
-                                self.show_query_console,
-                                super::widgets::LayoutSide::Query,
-                                "Query console",
-                            )
-                            .clicked()
-                            {
-                                self.show_query_console = !self.show_query_console;
-                            }
-                            if super::widgets::layout_toggle(
-                                ui,
-                                self.show_connection_tabs,
-                                super::widgets::LayoutSide::Connections,
-                                "Connection tabs",
-                            )
-                            .clicked()
-                            {
-                                self.show_connection_tabs = !self.show_connection_tabs;
-                            }
-                        },
-                    );
-                });
+                let center = title_bar::center_rect(bar_rect, left_used, right_used);
+                title_bar::cluster(
+                    ui,
+                    center,
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        title_bar::breadcrumb(ui, &breadcrumb, breadcrumb_fill);
+                    },
+                );
             });
     }
 
@@ -352,21 +348,6 @@ impl DbGuiApp {
                         });
                 });
             });
-    }
-
-    fn update_title_bar_width(ui: &egui::Ui, label: &str) -> f32 {
-        const H_PAD: f32 = 18.0;
-        const GAP: f32 = 4.0;
-        let text_w = ui
-            .painter()
-            .layout_no_wrap(
-                label.to_owned(),
-                egui::FontId::proportional(11.0),
-                egui::Color32::PLACEHOLDER,
-            )
-            .size()
-            .x;
-        text_w + H_PAD + GAP
     }
 
     fn update_title_bar_state(&self) -> Option<(String, &'static str, bool)> {
@@ -1258,23 +1239,35 @@ impl DbGuiApp {
                         result.rows.get(r).and_then(|row| row.get(c)).cloned()
                     }
                 };
-                // Commit/cancel the open editor before opening a new one, so switching cells
-                // doesn't drop the in-progress edit. Values are typed against the stored cell.
-                if resp.commit_edit {
-                    let cell = edits.active.as_ref().map(|a| (a.row, a.col));
-                    if let Some((ar, ac)) = cell {
-                        match original(ar, ac) {
-                            Some(orig) => {
-                                let _ = edits.commit_active(&orig);
+                // Commit the open editor into the staged set, typing the value against the
+                // stored cell; invalid input matches the click-away rule and is discarded.
+                let settle_active = |edits: &mut crate::edit::Edits| {
+                    let Some((ar, ac)) = edits.active.as_ref().map(|a| (a.row, a.col)) else {
+                        return;
+                    };
+                    match original(ar, ac) {
+                        Some(orig) => {
+                            if !edits.commit_active(&orig) {
+                                edits.cancel_active();
                             }
-                            None => edits.cancel_active(),
                         }
+                        None => edits.cancel_active(),
                     }
+                };
+                if resp.commit_edit {
+                    settle_active(edits);
                 }
                 if resp.cancel_edit {
                     edits.cancel_active();
                 }
                 if let Some((r, c)) = resp.begin_edit {
+                    // An editor can still be open on another cell without ever having
+                    // reported lost_focus (its cell may have scrolled out of the virtualized
+                    // grid, so the widget wasn't rendered) — settle it first instead of
+                    // silently dropping the typed value when `begin` replaces it.
+                    if edits.active.as_ref().is_some_and(|a| (a.row, a.col) != (r, c)) {
+                        settle_active(edits);
+                    }
                     // Continue editing from the staged value if present, else the original.
                     let seed = edits
                         .staged(r, c)
@@ -1293,6 +1286,7 @@ impl DbGuiApp {
                 // Double-clicking empty table space appends a new (insert) row, selects it,
                 // and opens an editor on the first text-editable column right away.
                 if resp.add_row {
+                    settle_active(edits);
                     let new_id = edits.add_new_row();
                     *selected_row = Some(row_order.len() + edits.new_rows - 1);
                     let first_col = (0..result.column_count())
@@ -1610,6 +1604,20 @@ impl DbGuiApp {
                     ui.radio_value(&mut chosen, id, id.label());
                 }
 
+                ui.add_space(10.0);
+                style::section_header(ui, "Privacy");
+                if ui
+                    .checkbox(&mut self.history_enabled, "Record query history")
+                    .on_hover_text(
+                        "Append every executed statement (with its outcome) to a local \
+                         log file. SQL may contain data values — turn this off for \
+                         sensitive work.",
+                    )
+                    .changed()
+                {
+                    self.persist_settings();
+                }
+
                 style::dialog_footer(ui, |ui| {
                     if icons::button(ui, icons::close(), "Close", true).clicked() {
                         close = true;
@@ -1623,6 +1631,127 @@ impl DbGuiApp {
         if !open || close {
             actions.push(Action::CloseSettings);
         }
+    }
+
+    /// Right-hand query-history panel (the audit log): every executed statement with its
+    /// connection, time, duration, and outcome, newest first. Toggled from the title bar.
+    pub(super) fn history_panel(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
+        egui::Panel::right("history_panel")
+            .resizable(true)
+            .default_size(300.0)
+            .show_separator_line(true)
+            .show_inside(root, |ui| {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    style::section_header(ui, "Query History");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icons::icon_button(ui, icons::close(), "Hide history").clicked() {
+                            actions.push(Action::ToggleHistory);
+                        }
+                        if icons::icon_button(ui, icons::trash(), "Delete the entire history")
+                            .clicked()
+                        {
+                            actions.push(Action::ClearHistory);
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+
+                if self.history_cache.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No queries recorded yet.")
+                            .color(palette::TEXT_WEAK()),
+                    );
+                    return;
+                }
+
+                let font = egui::TextStyle::Monospace.resolve(ui.style());
+                let body_h = ui.text_style_height(&egui::TextStyle::Body);
+                let spacing = ui.spacing().item_spacing.y;
+                // Each entry stacks three lines plus a separator; keep the estimate in
+                // sync with the layout below so `show_rows` scrolls without jitter.
+                let row_h = 3.0 * (body_h + spacing) + 8.0;
+                let count = self.history_cache.len();
+                egui::ScrollArea::vertical()
+                    .id_salt("history_scroll")
+                    .auto_shrink([false, false])
+                    .show_rows(ui, row_h, count, |ui, range| {
+                        for offset in range {
+                            // Newest entries last in the cache; display newest first.
+                            let idx = count - 1 - offset;
+                            let entry = &self.history_cache[idx];
+
+                            // Line 1: status + connection, actions on the right.
+                            ui.horizontal(|ui| {
+                                let (status, color) = if entry.ok {
+                                    ("ok", egui::Color32::from_rgb(58, 178, 108))
+                                } else {
+                                    ("err", palette::DANGER())
+                                };
+                                ui.label(egui::RichText::new(status).strong().color(color));
+                                ui.label(egui::RichText::new(&entry.conn_name).strong());
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .small_button("Use")
+                                            .on_hover_text("Put this SQL into the active tab")
+                                            .clicked()
+                                        {
+                                            actions.push(Action::UseHistorySql(idx));
+                                        }
+                                        if ui.small_button("Copy").clicked() {
+                                            ui.ctx().copy_text(entry.sql.clone());
+                                        }
+                                    },
+                                );
+                            });
+
+                            // Line 2: when, how many rows, how long.
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(
+                                        entry.at.replace('T', " ").trim_end_matches('Z'),
+                                    )
+                                    .small()
+                                    .color(palette::TEXT_WEAK()),
+                                );
+                                if let Some(rows) = entry.rows {
+                                    ui.label(
+                                        egui::RichText::new(format!("{rows} rows"))
+                                            .small()
+                                            .color(palette::TEXT_WEAK()),
+                                    );
+                                }
+                                ui.label(
+                                    egui::RichText::new(format!("{:.0} ms", entry.elapsed_ms))
+                                        .small()
+                                        .color(palette::TEXT_WEAK()),
+                                );
+                            });
+
+                            // Line 3: one truncated line of SQL (or the error); hover for all.
+                            let detail = match &entry.error {
+                                Some(e) => format!("{} — {e}", first_line(&entry.sql)),
+                                None => first_line(&entry.sql).to_string(),
+                            };
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(detail).font(font.clone()).color(
+                                        if entry.ok {
+                                            palette::TEXT_WEAK()
+                                        } else {
+                                            palette::DANGER()
+                                        },
+                                    ),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(&entry.sql);
+                            ui.separator();
+                        }
+                    });
+            });
     }
 
     /// Modal showing the SQL that will be executed, with Commit and Cancel buttons.

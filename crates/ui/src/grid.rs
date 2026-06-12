@@ -12,6 +12,12 @@ use egui_extras::{Column, TableBuilder};
 /// below it — once the total exceeds the panel the grid scrolls horizontally instead.
 const COL_W: f32 = 160.0;
 
+/// Height of the double-click-to-add-row strip kept under the table when it's editable.
+/// The strip is *reserved* (the table is shrunk to sit above it), never overlaid: an
+/// overlay would be the topmost widget in egui's hit-test and would steal single and
+/// double clicks from any row rendered beneath it.
+const ADD_ROW_ZONE: f32 = 24.0;
+
 /// What the grid reports back to the app after a frame.
 #[derive(Default)]
 pub struct GridResponse {
@@ -29,9 +35,6 @@ pub struct GridResponse {
     pub cancel_edit: bool,
     /// Empty table space was double-clicked → append a new (insert) row.
     pub add_row: bool,
-    /// Any cell was double-clicked this frame (even non-editable ones like Bytes/deleted).
-    /// Used to suppress add_row when the fallback zone overlaps the last visible row.
-    cell_dbl_clicked: bool,
 }
 
 /// What a body row at a given display index represents.
@@ -78,23 +81,42 @@ pub fn results_grid(
     let table_rect = ui.available_rect_before_wrap();
     let rendered_rows = order.len() + edits.new_rows;
 
-    if desired_total <= ui.available_width() {
-        build_grid(
-            ui, result, order, sort, selected, edits, editable, gutter_w, row_height, &mut out,
-            grid_id,
-        );
+    // When editable, reserve the add-row strip *below* the table rather than overlaying
+    // it on top: rows can then never render under the strip, so it can't steal their
+    // clicks (egui's hit-test gives ties to the last-registered widget — an overlay made
+    // the bottom ~24 px of a scrolled grid a dead zone where rows couldn't be selected
+    // and a double-click added a row instead of opening the editor).
+    let grid_rect = if editable {
+        egui::Rect::from_min_max(
+            table_rect.min,
+            egui::pos2(
+                table_rect.right(),
+                (table_rect.bottom() - ADD_ROW_ZONE).max(table_rect.top()),
+            ),
+        )
     } else {
-        egui::ScrollArea::horizontal()
-            .id_salt(("results_hscroll", grid_id))
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.set_width(desired_total);
-                build_grid(
-                    ui, result, order, sort, selected, edits, editable, gutter_w, row_height,
-                    &mut out, grid_id,
-                );
-            });
-    }
+        table_rect
+    };
+
+    ui.scope_builder(egui::UiBuilder::new().max_rect(grid_rect), |ui| {
+        if desired_total <= ui.available_width() {
+            build_grid(
+                ui, result, order, sort, selected, edits, editable, gutter_w, row_height,
+                &mut out, grid_id,
+            );
+        } else {
+            egui::ScrollArea::horizontal()
+                .id_salt(("results_hscroll", grid_id))
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.set_width(desired_total);
+                    build_grid(
+                        ui, result, order, sort, selected, edits, editable, gutter_w,
+                        row_height, &mut out, grid_id,
+                    );
+                });
+        }
+    });
     capture_empty_table_double_click(ui, table_rect, rendered_rows, row_height, editable, grid_id, &mut out);
 
     out
@@ -257,9 +279,6 @@ fn build_grid(
                     // only hover, so double-click on the text itself would otherwise be lost.
                     let dbl = col_resp.double_clicked()
                         || label_resp.is_some_and(|r| r.double_clicked());
-                    if dbl {
-                        out.cell_dbl_clicked = true;
-                    }
                     if editable
                         && dbl
                         && state != crate::edit::RowState::Deleted
@@ -280,9 +299,10 @@ fn build_grid(
         });
 }
 
-/// Reserve the blank space under the table rows as an invisible add-row target. When rows
-/// fill the entire panel there is no natural empty space, so a thin fixed zone is kept at
-/// the bottom regardless — this ensures a new row can always be created by double-clicking.
+/// Turn the blank space under the table rows into an invisible add-row target. The table
+/// itself stops [`ADD_ROW_ZONE`] above the panel bottom (see [`results_grid`]), so the zone
+/// never overlaps a row: it covers the reserved strip plus any empty space above it when
+/// the rows don't fill the panel.
 fn capture_empty_table_double_click(
     ui: &mut egui::Ui,
     table_rect: egui::Rect,
@@ -295,12 +315,9 @@ fn capture_empty_table_double_click(
     if !editable {
         return;
     }
-    // When rows don't fill the panel, use the empty space below them. When they do, keep a
-    // 24 px fallback zone at the bottom so the user can always double-click to add a row.
-    const ADD_ROW_ZONE: f32 = 24.0;
     // egui_extras positions each row at row_height + item_spacing.y intervals (see
-    // TableBody::rows), so content_bottom must use the same stride or the zone will overlap
-    // the last row and trigger add_row when the user double-clicks its bottom portion.
+    // TableBody::rows), so content_bottom must use the same stride or the zone would start
+    // inside the last row's space when the table doesn't fill the panel.
     let row_step = row_height + ui.spacing().item_spacing.y;
     let content_bottom = table_rect.top() + 24.0 + rendered_rows as f32 * row_step;
     let zone_top = content_bottom.min(table_rect.bottom() - ADD_ROW_ZONE);
@@ -317,14 +334,7 @@ fn capture_empty_table_double_click(
         egui::Id::new(("results_grid_empty_add_row", grid_id)),
         egui::Sense::click(),
     );
-    // Suppress add_row when the fallback zone overlaps the last visible row and the user
-    // actually double-clicked any cell — including Bytes or deleted-row cells that don't set
-    // begin_edit/toggle but still represent a deliberate click on an existing row.
-    if resp.double_clicked()
-        && out.begin_edit.is_none()
-        && out.toggle.is_none()
-        && !out.cell_dbl_clicked
-    {
+    if resp.double_clicked() {
         out.add_row = true;
     }
 }
@@ -434,6 +444,51 @@ mod tests {
             clashes.is_empty(),
             "ID clashes detected in results grid:\n{}",
             clashes.join("\n")
+        );
+    }
+
+    /// With an editable, scrollable result the table must stop above the add-row strip.
+    /// (It used to extend underneath it, and the invisible strip — registered last, hence
+    /// topmost in egui's hit-test — stole single and double clicks from the rows below it.)
+    #[test]
+    fn editable_grid_reserves_add_row_strip() {
+        let ctx = egui::Context::default();
+        let result = fake_result(500, 3); // tall enough to scroll
+        let order: Vec<usize> = (0..result.rows.len()).collect();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0));
+        // The strip starts ADD_ROW_ZONE above the panel bottom; the central panel's frame
+        // margin only pulls the table bottom further up, so this bound is conservative.
+        let strip_top = screen.bottom() - ADD_ROW_ZONE;
+
+        let mut edits = Edits::default();
+        let mut offenders: Vec<String> = Vec::new();
+        for _ in 0..2 {
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let out = ctx.run_ui(raw, |ui| {
+                egui::CentralPanel::default().show_inside(ui, |ui| {
+                    let _ = results_grid(ui, &result, &order, None, None, &mut edits, true, 0);
+                });
+            });
+            // Any cell text allowed to paint below the strip top means a row is rendered
+            // under the add-row zone. Shapes clipped above the strip can't paint there.
+            for cs in &out.shapes {
+                if cs.clip_rect.bottom() <= strip_top {
+                    continue;
+                }
+                if let egui::epaint::Shape::Text(t) = &cs.shape {
+                    if t.pos.y > strip_top && !t.galley.text().is_empty() {
+                        offenders.push(format!("{:?} at y={}", t.galley.text(), t.pos.y));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "table rows rendered under the add-row strip:\n{}",
+            offenders.join("\n")
         );
     }
 }

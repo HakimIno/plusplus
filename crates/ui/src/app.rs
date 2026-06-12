@@ -42,14 +42,20 @@ enum AppMessage {
         result: Result<(), String>,
     },
     /// A query finished. `tab_id` routes the result back to the tab that started it, even
-    /// if the user has since switched tabs.
+    /// if the user has since switched tabs. `conn_id`/`sql` carry what actually ran,
+    /// for the query history.
     Queried {
         tab_id: u64,
+        conn_id: String,
+        sql: String,
         result: Result<QueryResult, String>,
     },
     /// A batch of staged edits was saved (`Ok` carries the number of rows updated).
     Committed {
         tab_id: u64,
+        conn_id: String,
+        sql: String,
+        elapsed_ms: f64,
         result: Result<usize, String>,
     },
     /// A background `SELECT COUNT(*)` for a paged table tab finished. Failures are
@@ -62,6 +68,9 @@ enum AppMessage {
     /// `tab_id` is the tab whose schema editor initiated it (to close that editor).
     SchemaApplied {
         tab_id: u64,
+        conn_id: String,
+        sql: String,
+        elapsed_ms: f64,
         result: Result<String, String>,
     },
     /// Background GitHub Releases check finished.
@@ -425,6 +434,12 @@ enum Action {
     CancelDialog,
     OpenSettings,
     CloseSettings,
+    /// Show/hide the query-history side panel.
+    ToggleHistory,
+    /// Wipe the on-disk query history.
+    ClearHistory,
+    /// Put a history entry's SQL into the active tab's editor.
+    UseHistorySql(usize),
     DismissWelcome,
     BrowseSqlitePath,
     BrowseSslCaCert,
@@ -560,6 +575,11 @@ pub struct DbGuiApp {
     /// Destructive statements found when running a query against a production
     /// connection, held for the confirmation dialog. `None` = dialog closed.
     danger_pending: Option<Vec<dbcore::safety::DangerousStatement>>,
+    /// Record executed statements to the on-disk query history (settings toggle).
+    history_enabled: bool,
+    /// Whether the History dialog is open; `history_cache` holds its rows while it is.
+    history_open: bool,
+    history_cache: Vec<dbcore::history::HistoryEntry>,
 
     // --- layout ---
     show_connection_tabs: bool,
@@ -635,6 +655,7 @@ impl DbGuiApp {
             indent: settings.beautify_indent.unwrap_or(beautify_defaults.indent),
         };
         let show_welcome = !settings.welcomed.unwrap_or(false);
+        let history_enabled = settings.history_enabled.unwrap_or(true);
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -679,6 +700,9 @@ impl DbGuiApp {
             commit_pending: None,
             schema_pending: None,
             danger_pending: None,
+            history_enabled,
+            history_open: false,
+            history_cache: Vec::new(),
             show_welcome,
             update: crate::update::UpdatePhase::Idle,
             update_dialog_open: false,
@@ -812,6 +836,7 @@ impl DbGuiApp {
             beautify_uppercase: Some(self.beautify.uppercase),
             beautify_indent: Some(self.beautify.indent),
             welcomed: Some(!self.show_welcome),
+            history_enabled: Some(self.history_enabled),
         };
         if let Err(e) = dbcore::config::save_settings(&settings) {
             self.error = Some(format!("Could not save settings: {e}"));
@@ -1177,9 +1202,30 @@ impl DbGuiApp {
                         }
                     }
                 }
-                AppMessage::Queried { tab_id, result } => {
+                AppMessage::Queried {
+                    tab_id,
+                    conn_id,
+                    sql,
+                    result,
+                } => {
                     self.busy = Busy::Idle;
                     self.querying_tab_id = None;
+                    match &result {
+                        Ok(res) => {
+                            let rows = res.stats.rows_affected.unwrap_or(res.row_count() as u64);
+                            self.record_history(
+                                &conn_id,
+                                &sql,
+                                true,
+                                None,
+                                Some(rows),
+                                res.stats.elapsed_ms,
+                            );
+                        }
+                        Err(e) => {
+                            self.record_history(&conn_id, &sql, false, Some(e.clone()), None, 0.0)
+                        }
+                    }
                     let is_active = self
                         .tabs
                         .get(self.active_query_tab)
@@ -1260,8 +1306,22 @@ impl DbGuiApp {
                         tab.total_rows = Some(n);
                     }
                 }
-                AppMessage::Committed { tab_id, result } => {
+                AppMessage::Committed {
+                    tab_id,
+                    conn_id,
+                    sql,
+                    elapsed_ms,
+                    result,
+                } => {
                     self.busy = Busy::Idle;
+                    self.record_history(
+                        &conn_id,
+                        &sql,
+                        result.is_ok(),
+                        result.as_ref().err().cloned(),
+                        None,
+                        elapsed_ms,
+                    );
                     let is_active = self
                         .tabs
                         .get(self.active_query_tab)
@@ -1331,8 +1391,22 @@ impl DbGuiApp {
                         self.error = Some(e);
                     }
                 },
-                AppMessage::SchemaApplied { tab_id, result } => {
+                AppMessage::SchemaApplied {
+                    tab_id,
+                    conn_id: history_conn_id,
+                    sql,
+                    elapsed_ms,
+                    result,
+                } => {
                     self.busy = Busy::Idle;
+                    self.record_history(
+                        &history_conn_id,
+                        &sql,
+                        result.is_ok(),
+                        result.as_ref().err().cloned(),
+                        None,
+                        elapsed_ms,
+                    );
                     match result {
                         Ok(msg) => {
                             self.status_msg = msg;
@@ -1423,6 +1497,48 @@ impl DbGuiApp {
         });
     }
 
+    /// Append one executed statement to the on-disk query history. Best effort: history
+    /// is never load-bearing, so failures are swallowed. No-op when disabled in settings.
+    fn record_history(
+        &mut self,
+        conn_id: &str,
+        sql: &str,
+        ok: bool,
+        error: Option<String>,
+        rows: Option<u64>,
+        elapsed_ms: f64,
+    ) {
+        if !self.history_enabled {
+            return;
+        }
+        // Unit tests construct real apps and pump real messages; never let them write
+        // into the user's actual history file.
+        if cfg!(test) {
+            return;
+        }
+        let conn_name = self
+            .connections
+            .iter()
+            .find(|c| c.id == conn_id)
+            .map(|c| c.name.clone())
+            .unwrap_or_default();
+        let entry = dbcore::history::HistoryEntry {
+            at: dbcore::history::now_rfc3339(),
+            conn_id: conn_id.to_string(),
+            conn_name,
+            sql: sql.to_string(),
+            ok,
+            error,
+            rows,
+            elapsed_ms,
+        };
+        let _ = dbcore::history::append(&entry);
+        // Keep an open History dialog live.
+        if self.history_open {
+            self.history_cache.push(entry);
+        }
+    }
+
     /// Is the tab at `idx` bound to a connection whose saved config is marked production?
     fn tab_connection_is_production(&self, idx: usize) -> bool {
         self.tabs
@@ -1445,6 +1561,7 @@ impl DbGuiApp {
             return;
         }
         let tab_id = tab.id;
+        let conn_id = tab.conn_id.clone().unwrap_or_default();
         let db = match tab
             .conn_id
             .as_deref()
@@ -1466,7 +1583,12 @@ impl DbGuiApp {
                 .execute_capped(&sql, MAX_FETCH_ROWS)
                 .await
                 .map_err(|e| e.to_string());
-            let _ = tx.send(AppMessage::Queried { tab_id, result });
+            let _ = tx.send(AppMessage::Queried {
+                tab_id,
+                conn_id,
+                sql,
+                result,
+            });
         });
     }
 
@@ -1617,8 +1739,8 @@ impl DbGuiApp {
         let Some(stmts) = self.commit_pending.take() else {
             return;
         };
-        let db = match self.active() {
-            Some(active) => active.db.clone(),
+        let (db, conn_id) = match self.active() {
+            Some(active) => (active.db.clone(), active.config_id.clone()),
             None => return,
         };
         let idx = self.active_query_tab;
@@ -1629,12 +1751,19 @@ impl DbGuiApp {
         self.error = None;
         self.status_msg = format!("Saving {n} change(s)…");
         self.rt.spawn(async move {
+            let start = std::time::Instant::now();
             let result = db
                 .execute_transaction(&stmts)
                 .await
                 .map(|_| n)
                 .map_err(|e| e.to_string());
-            let _ = tx.send(AppMessage::Committed { tab_id, result });
+            let _ = tx.send(AppMessage::Committed {
+                tab_id,
+                conn_id,
+                sql: stmts.join("\n"),
+                elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
+                result,
+            });
         });
     }
 
@@ -1913,6 +2042,33 @@ impl DbGuiApp {
             Action::CancelDialog => self.editor = None,
             Action::OpenSettings => self.settings_open = true,
             Action::CloseSettings => self.settings_open = false,
+            Action::ToggleHistory => {
+                if self.history_open {
+                    self.history_open = false;
+                    self.history_cache = Vec::new();
+                } else {
+                    self.history_cache =
+                        dbcore::history::load(dbcore::history::MAX_ENTRIES).unwrap_or_default();
+                    self.history_open = true;
+                }
+            }
+            Action::ClearHistory => {
+                if let Err(e) = dbcore::history::clear() {
+                    self.error = Some(format!("Could not clear history: {e}"));
+                } else {
+                    self.history_cache.clear();
+                    self.status_msg = "Query history cleared".to_string();
+                }
+            }
+            // The panel stays open: picking entries to compare or replay in sequence is
+            // the whole point of a sidebar.
+            Action::UseHistorySql(i) => {
+                if let Some(entry) = self.history_cache.get(i) {
+                    let sql = entry.sql.clone();
+                    self.tab_mut().sql = sql;
+                    self.workspace_dirty = true;
+                }
+            }
             Action::DismissWelcome => {
                 self.show_welcome = false;
                 self.persist_settings();
@@ -2008,7 +2164,10 @@ impl DbGuiApp {
                 let Some(stmts) = self.schema_pending.take() else {
                     return;
                 };
-                let Some(db) = self.active().map(|a| a.db.clone()) else {
+                let Some((db, conn_id)) = self
+                    .active()
+                    .map(|a| (a.db.clone(), a.config_id.clone()))
+                else {
                     return;
                 };
                 let n = stmts.len();
@@ -2018,12 +2177,19 @@ impl DbGuiApp {
                 self.error = None;
                 self.status_msg = format!("Applying {n} DDL statement(s)…");
                 self.rt.spawn(async move {
+                    let start = std::time::Instant::now();
                     let result = db
                         .execute_transaction(&stmts)
                         .await
                         .map(|_| format!("Schema migration applied ({n} statement(s))"))
                         .map_err(|e| e.to_string());
-                    let _ = tx.send(AppMessage::SchemaApplied { tab_id, result });
+                    let _ = tx.send(AppMessage::SchemaApplied {
+                        tab_id,
+                        conn_id,
+                        sql: stmts.join("\n"),
+                        elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
+                        result,
+                    });
                 });
             }
             Action::CancelSchema => {
@@ -2310,6 +2476,10 @@ impl DbGuiApp {
         }
         if self.show_schema_panel {
             self.left_panel(ui_root, &mut actions);
+        }
+        // History sits outermost on the right, so the details panel stays next to the grid.
+        if self.history_open {
+            self.history_panel(ui_root, &mut actions);
         }
         if self.show_details_panel {
             self.right_panel(ui_root);
