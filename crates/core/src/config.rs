@@ -74,6 +74,9 @@ pub struct Settings {
     /// Record executed statements to the on-disk query history. `None` = the default (on).
     #[serde(default)]
     pub history_enabled: Option<bool>,
+    /// The last version of the app the user has seen the "What's New" dialog for.
+    #[serde(default)]
+    pub last_seen_version: Option<String>,
 }
 
 /// Load app settings. A missing or unreadable file yields defaults — settings are a

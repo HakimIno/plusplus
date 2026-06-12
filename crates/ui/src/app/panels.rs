@@ -1581,6 +1581,48 @@ impl DbGuiApp {
         }
     }
 
+    pub(super) fn whats_new_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        if !self.show_whats_new {
+            return;
+        }
+
+        let mut open = true;
+        let mut close = false;
+
+        style::dialog_window("What's New")
+            .open(&mut open)
+            .resizable(false)
+            .frame(style::dialog_frame(ctx))
+            .show(ctx, |ui| {
+                ui.set_min_width(360.0);
+                ui.label(
+                    egui::RichText::new(format!("plusplus v{}", crate::update::CURRENT_VERSION))
+                        .strong()
+                        .size(16.0),
+                );
+                ui.add_space(8.0);
+
+                style::section_header(ui, "Release notes");
+                egui::ScrollArea::vertical()
+                    .id_salt("whats_new_notes_scroll")
+                    .max_height(180.0)
+                    .show(ui, |ui| {
+                        ui.label("• Implement query history feature with local audit log\n• Refactor dialog UI components for improved consistency and layout\n• Improve light-mode readability\n• Added \"What's New\" dialog on update");
+                    });
+                ui.add_space(8.0);
+
+                style::dialog_footer(ui, |ui| {
+                    if icons::primary_button(ui, icons::play(), "Awesome", true).clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if !open || close {
+            actions.push(Action::DismissWhatsNew);
+        }
+    }
+
     pub(super) fn settings_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         if !self.settings_open {
             return;

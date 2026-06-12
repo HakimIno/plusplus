@@ -491,6 +491,8 @@ enum Action {
     DownloadUpdate,
     /// Replace the installed app and relaunch (macOS).
     InstallUpdate,
+    /// Dismiss the What's New dialog.
+    DismissWhatsNew,
 }
 
 /// Where the pager should jump.
@@ -604,6 +606,8 @@ pub struct DbGuiApp {
     update_dismissed: Option<String>,
     /// Set when the updater should close the window after scheduling install.
     pending_quit: bool,
+    /// Show the What's New dialog (true when the app version is newer than last seen).
+    show_whats_new: bool,
 }
 
 impl DbGuiApp {
@@ -655,6 +659,16 @@ impl DbGuiApp {
             indent: settings.beautify_indent.unwrap_or(beautify_defaults.indent),
         };
         let show_welcome = !settings.welcomed.unwrap_or(false);
+        let mut show_whats_new = false;
+        if !show_welcome {
+            let last_seen = settings.last_seen_version.as_deref().unwrap_or("0.0.0");
+            if crate::update::version_gt(crate::update::CURRENT_VERSION, last_seen) {
+                show_whats_new = true;
+                let mut new_settings = settings.clone();
+                new_settings.last_seen_version = Some(crate::update::CURRENT_VERSION.to_string());
+                let _ = dbcore::config::save_settings(&new_settings);
+            }
+        }
         let history_enabled = settings.history_enabled.unwrap_or(true);
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -708,6 +722,7 @@ impl DbGuiApp {
             update_dialog_open: false,
             update_dismissed: None,
             pending_quit: false,
+            show_whats_new,
         }
     }
 
@@ -831,13 +846,12 @@ impl DbGuiApp {
 
     /// Flush all settings.json-backed preferences (theme, beautifier, welcomed) to disk.
     fn persist_settings(&mut self) {
-        let settings = dbcore::config::Settings {
-            theme: Some(self.theme.key().to_string()),
-            beautify_uppercase: Some(self.beautify.uppercase),
-            beautify_indent: Some(self.beautify.indent),
-            welcomed: Some(!self.show_welcome),
-            history_enabled: Some(self.history_enabled),
-        };
+        let mut settings = dbcore::config::load_settings();
+        settings.theme = Some(self.theme.key().to_string());
+        settings.beautify_uppercase = Some(self.beautify.uppercase);
+        settings.beautify_indent = Some(self.beautify.indent);
+        settings.welcomed = Some(!self.show_welcome);
+        settings.history_enabled = Some(self.history_enabled);
         if let Err(e) = dbcore::config::save_settings(&settings) {
             self.error = Some(format!("Could not save settings: {e}"));
         }
@@ -2224,6 +2238,7 @@ impl DbGuiApp {
                     }
                 }
             }
+            Action::DismissWhatsNew => self.show_whats_new = false,
         }
     }
 
@@ -2495,6 +2510,7 @@ impl DbGuiApp {
         self.danger_confirm_dialog(&ctx, &mut actions);
         self.schema_preview_dialog(&ctx, &mut actions);
         self.update_dialog(&ctx, &mut actions);
+        self.whats_new_dialog(&ctx, &mut actions);
 
         let structural = actions.iter().any(|a| {
             matches!(
