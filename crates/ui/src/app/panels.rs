@@ -6,6 +6,10 @@ use crate::style::{self, palette};
 use crate::theme::ThemeId;
 use crate::title_bar;
 
+/// The ER diagram is hidden for now (not ready to ship); flip to `true` to bring
+/// back the toolbar button. The feature code itself is kept intact.
+const ERD_ENABLED: bool = false;
+
 /// Group a number's digits with commas (`1234567` → `"1,234,567"`) for the pager.
 fn group_digits(n: u64) -> String {
     let digits = n.to_string();
@@ -174,7 +178,12 @@ impl DbGuiApp {
                         {
                             actions.push(Action::ToggleHistory);
                         }
-                        if super::widgets::toolbar_icon_button(ui, icons::diagram(), "ER diagram")
+                        if ERD_ENABLED
+                            && super::widgets::toolbar_icon_button(
+                                ui,
+                                icons::diagram(),
+                                "ER diagram",
+                            )
                             .clicked()
                         {
                             actions.push(Action::ToggleErd);
