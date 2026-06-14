@@ -570,6 +570,8 @@ pub struct DbGuiApp {
     details_date_pick: Option<(usize, usize)>,
     settings_open: bool,
     schema_filter: String,
+    /// SQL editor autocomplete (table/column/keyword popup). Transient; not persisted.
+    autocomplete: crate::autocomplete::State,
     status_msg: String,
     error: Option<String>,
     /// SQL statements staged for the commit-preview dialog. `None` = dialog closed;
@@ -710,6 +712,7 @@ impl DbGuiApp {
             details_date_pick: None,
             settings_open: false,
             schema_filter: String::new(),
+            autocomplete: crate::autocomplete::State::default(),
             status_msg: "Ready".to_string(),
             error: None,
             show_connection_tabs: true,

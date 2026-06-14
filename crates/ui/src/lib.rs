@@ -4,6 +4,7 @@
 //! constructs it and runs it; this crate owns all rendering and UI state.
 
 mod app;
+mod autocomplete;
 mod edit;
 mod erd;
 mod filter;

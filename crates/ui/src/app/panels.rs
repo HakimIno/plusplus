@@ -10,6 +10,15 @@ use crate::title_bar;
 /// back the toolbar button. The feature code itself is kept intact.
 const ERD_ENABLED: bool = false;
 
+/// Byte offset of the `char_idx`-th character in `s` (its length when out of range), for
+/// turning the editor's char-based caret indices into `str` slice bounds.
+fn char_to_byte(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(b, _)| b)
+        .unwrap_or(s.len())
+}
+
 /// Group a number's digits with commas (`1234567` → `"1,234,567"`) for the pager.
 fn group_digits(n: u64) -> String {
     let digits = n.to_string();
@@ -630,6 +639,21 @@ impl DbGuiApp {
                     ui.ctx().fonts_mut(|f| f.layout_job(job))
                 };
 
+                // Autocomplete: while the popup is open, steal its navigation keys before the
+                // editor renders so arrows/Enter/Tab drive the suggestion list instead of the
+                // text cursor. Ctrl+Space force-opens it (also when the prefix is empty).
+                let mut nav = crate::autocomplete::NavKeys::default();
+                if self.autocomplete.open {
+                    ui.input_mut(|i| {
+                        nav.down |= i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown);
+                        nav.up |= i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp);
+                        nav.accept |= i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                        nav.accept |= i.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+                        nav.dismiss |= i.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+                    });
+                }
+                let force = ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Space));
+
                 // Fill the panel's height instead of shrinking to the text: otherwise a long
                 // query would grow the scroll area and push the whole panel taller, fighting
                 // the size the user dragged it to. With `auto_shrink` off the editor keeps the
@@ -648,15 +672,21 @@ impl DbGuiApp {
                         // overflow the viewport by a few pixels and trigger a permanent scrollbar.
                         let avail = ui.available_height() - 2.0 * ui.spacing().item_spacing.y;
                         let rows = (avail / row_height).floor().max(5.0) as usize;
-                        let resp = ui.add(
-                            egui::TextEdit::multiline(&mut self.tab_mut().sql)
-                                .code_editor()
-                                .desired_rows(rows)
-                                .desired_width(f32::INFINITY)
-                                .layouter(&mut layouter)
-                                .hint_text("Write SQL here, then press Run (Cmd/Ctrl+Enter)"),
-                        );
-                        if resp.changed() {
+                        // `.show()` (not `ui.add`) exposes the galley + cursor so the popup can
+                        // anchor under the caret and we can move the caret after an insertion.
+                        let output = egui::TextEdit::multiline(&mut self.tabs[self.active_query_tab].sql)
+                            .code_editor()
+                            .desired_rows(rows)
+                            .desired_width(f32::INFINITY)
+                            .layouter(&mut layouter)
+                            .hint_text("Write SQL here, then press Run (Cmd/Ctrl+Enter)")
+                            .show(ui);
+
+                        let resp = &output.response.response;
+                        let editor_id = resp.id;
+                        let focused = resp.has_focus();
+                        let text_changed = resp.changed();
+                        if text_changed {
                             // Editing the SQL means the rows currently on screen may no longer
                             // map back to one table, so they turn read-only; the next Run
                             // re-derives editability from the new SQL (`derive_edit_source`).
@@ -666,8 +696,181 @@ impl DbGuiApp {
                             tab.preview = false;
                             self.workspace_dirty = true;
                         }
+
+                        // Caret position (char index + on-screen rect) drives the popup.
+                        let cursor = output.cursor_range.map(|r| r.primary);
+                        let cursor_char = cursor.map(|c| c.index);
+                        let cursor_rect = cursor.map(|c| {
+                            output
+                                .galley
+                                .pos_from_cursor(c)
+                                .translate(output.galley_pos.to_vec2())
+                        });
+
+                        let ctx = ui.ctx().clone();
+                        self.update_autocomplete(
+                            &ctx,
+                            editor_id,
+                            focused,
+                            text_changed,
+                            force,
+                            cursor_char,
+                            cursor_rect,
+                            nav,
+                        );
                     });
             });
+    }
+
+    /// Drive the SQL editor's autocomplete popup for one frame: recompute suggestions from
+    /// the caret position, apply navigation/accept, and draw the popup. Called from
+    /// [`Self::query_console`] right after the editor renders.
+    #[allow(clippy::too_many_arguments)]
+    fn update_autocomplete(
+        &mut self,
+        ctx: &egui::Context,
+        editor_id: egui::Id,
+        focused: bool,
+        text_changed: bool,
+        force: bool,
+        cursor_char: Option<usize>,
+        cursor_rect: Option<egui::Rect>,
+        nav: crate::autocomplete::NavKeys,
+    ) {
+        // Esc dismisses without touching the text; the editor never saw the keystroke.
+        if nav.dismiss {
+            self.autocomplete.open = false;
+            return;
+        }
+
+        // While the editor is focused it reports a live caret; cache it so a click on the
+        // popup — which strips the editor's focus that same frame, nulling the caret — can
+        // still recompute and resolve the insertion point.
+        if let (Some(cc), Some(cr)) = (cursor_char, cursor_rect) {
+            self.autocomplete.caret_char = cc;
+            self.autocomplete.anchor = cr;
+        }
+
+        if focused {
+            // Recompute against the live text. Borrow the connection's schema and the tab's
+            // SQL immutably together, then hand ownership back so the borrows end.
+            let completion = {
+                let (schema, kind) = match self.active() {
+                    Some(c) => (Some(&c.schema), Some(c.db.kind())),
+                    None => (None, None),
+                };
+                let sql = &self.tabs[self.active_query_tab].sql;
+                crate::autocomplete::complete(
+                    sql,
+                    self.autocomplete.caret_char,
+                    schema,
+                    kind,
+                    force,
+                )
+            };
+
+            // Open while actively typing (or on a forced trigger); a caret that merely sits
+            // in a word — e.g. after a click — shouldn't pop the menu back up on its own.
+            let typing = text_changed || force;
+            match completion {
+                Some(c) if self.autocomplete.open || typing => {
+                    self.autocomplete.items = c.items;
+                    self.autocomplete.replace_start = c.replace_start;
+                    self.autocomplete.open = true;
+                    self.autocomplete.selected = self
+                        .autocomplete
+                        .selected
+                        .min(self.autocomplete.items.len() - 1);
+                }
+                _ => {
+                    self.autocomplete.open = false;
+                }
+            }
+        }
+        // When not focused we leave `open`/`items` as they were: the popup keeps showing so a
+        // click in progress can land on a row. The click-outside check below closes it.
+
+        if !self.autocomplete.open {
+            return;
+        }
+
+        // Apply list navigation consumed before the editor rendered.
+        let len = self.autocomplete.items.len();
+        if nav.down {
+            self.autocomplete.selected = (self.autocomplete.selected + 1) % len;
+        }
+        if nav.up {
+            self.autocomplete.selected = (self.autocomplete.selected + len - 1) % len;
+        }
+
+        let anchor = self.autocomplete.anchor;
+        let (event, popup_rect) =
+            crate::autocomplete::show_popup(ctx, &self.autocomplete, anchor, nav.up || nav.down);
+
+        let accept = if nav.accept {
+            Some(self.autocomplete.selected)
+        } else if let crate::autocomplete::Event::Accept(i) = event {
+            Some(i)
+        } else {
+            None
+        };
+        if let Some(idx) = accept {
+            self.accept_completion(ctx, editor_id, idx, self.autocomplete.caret_char);
+            return;
+        }
+
+        // The editor lost focus without a row being chosen. Keep the popup only while the
+        // pointer is pressing inside it (the press half of a click on a row, before the
+        // release that fires `clicked()`); any other focus loss — a click elsewhere, Tab
+        // away — dismisses it.
+        if !focused {
+            let keep = ctx.input(|i| {
+                (i.pointer.any_down() || i.pointer.any_pressed())
+                    && i.pointer
+                        .interact_pos()
+                        .is_some_and(|p| popup_rect.contains(p))
+            });
+            if !keep {
+                self.autocomplete.open = false;
+            }
+        }
+    }
+
+    /// Insert suggestion `idx` over the prefix at the caret, then move the caret past it.
+    fn accept_completion(
+        &mut self,
+        ctx: &egui::Context,
+        editor_id: egui::Id,
+        idx: usize,
+        cursor_char: usize,
+    ) {
+        let Some(suggestion) = self.autocomplete.items.get(idx).map(|s| s.insert.clone()) else {
+            return;
+        };
+        let start = self.autocomplete.replace_start;
+        let tab = &mut self.tabs[self.active_query_tab];
+        let byte_start = char_to_byte(&tab.sql, start);
+        let byte_cursor = char_to_byte(&tab.sql, cursor_char);
+        // Guard against indices that went stale if the text shifted under us this frame.
+        if byte_start > byte_cursor || byte_cursor > tab.sql.len() {
+            self.autocomplete.open = false;
+            return;
+        }
+        tab.sql.replace_range(byte_start..byte_cursor, &suggestion);
+        tab.edits.source = None;
+        tab.preview = false;
+        self.workspace_dirty = true;
+
+        // Move the editor's caret to just after the inserted text.
+        let new_cursor = start + suggestion.chars().count();
+        if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, editor_id) {
+            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(new_cursor),
+            )));
+            state.store(ctx, editor_id);
+        }
+        ctx.memory_mut(|m| m.request_focus(editor_id));
+        self.autocomplete.open = false;
     }
 
     /// Right-hand Details panel: the selected row's columns and values.

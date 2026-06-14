@@ -169,7 +169,7 @@ fn is_keyword(word: &str) -> bool {
     KEYWORDS.contains(&upper.as_str())
 }
 
-const KEYWORDS: &[&str] = &[
+pub(crate) const KEYWORDS: &[&str] = &[
     "SELECT",
     "FROM",
     "WHERE",
