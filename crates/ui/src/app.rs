@@ -572,6 +572,13 @@ pub struct DbGuiApp {
     schema_filter: String,
     /// SQL editor autocomplete (table/column/keyword popup). Transient; not persisted.
     autocomplete: crate::autocomplete::State,
+    /// Recently-run, successful SQL — the pool the editor's ghost-text autosuggestion
+    /// matches a prefix against (fish-shell style). Seeded from history on launch and
+    /// appended to as queries run. In-memory only.
+    suggest_pool: Vec<String>,
+    /// The ghost-text remainder shown after the caret last frame (the text Tab accepts),
+    /// or `None` when nothing is suggested. Recomputed each frame.
+    ghost_suggestion: Option<String>,
     status_msg: String,
     error: Option<String>,
     /// SQL statements staged for the commit-preview dialog. `None` = dialog closed;
@@ -626,6 +633,16 @@ impl DbGuiApp {
         // Restore the saved workspace (open tabs + their SQL/connection binding). Kept out of
         // `construct` so tests get a deterministic single-tab app independent of disk state.
         app.restore_workspace();
+
+        // Seed the editor's ghost-text autosuggestion pool from the on-disk history (only
+        // statements that ran cleanly). Kept out of `construct` for the same reason as the
+        // workspace — tests stay off the user's real history file.
+        app.suggest_pool = dbcore::history::load(dbcore::history::MAX_ENTRIES)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.ok)
+            .map(|e| e.sql)
+            .collect();
 
         #[cfg(target_os = "macos")]
         app.start_update_check();
@@ -713,6 +730,8 @@ impl DbGuiApp {
             settings_open: false,
             schema_filter: String::new(),
             autocomplete: crate::autocomplete::State::default(),
+            suggest_pool: Vec::new(),
+            ghost_suggestion: None,
             status_msg: "Ready".to_string(),
             error: None,
             show_connection_tabs: true,
@@ -1565,6 +1584,15 @@ impl DbGuiApp {
         rows: Option<u64>,
         elapsed_ms: f64,
     ) {
+        // Feed the editor's ghost-text pool with statements that ran cleanly (independent
+        // of the history-logging setting, which only governs the on-disk audit log). Skip
+        // under test so the pool stays deterministic.
+        if ok && !cfg!(test) {
+            self.suggest_pool.push(sql.to_string());
+            if self.suggest_pool.len() > dbcore::history::MAX_ENTRIES {
+                self.suggest_pool.remove(0);
+            }
+        }
         if !self.history_enabled {
             return;
         }

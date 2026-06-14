@@ -654,6 +654,13 @@ impl DbGuiApp {
                 }
                 let force = ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Space));
 
+                // Ghost text (fish-shell autosuggestion): when the popup is closed and a
+                // suggestion was trailing the caret last frame, Tab accepts it. Stolen here,
+                // before the editor, so the keystroke drives the suggestion, not a literal tab.
+                let accept_ghost = !self.autocomplete.open
+                    && self.ghost_suggestion.is_some()
+                    && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+
                 // Fill the panel's height instead of shrinking to the text: otherwise a long
                 // query would grow the scroll area and push the whole panel taller, fighting
                 // the size the user dragged it to. With `auto_shrink` off the editor keeps the
@@ -718,8 +725,96 @@ impl DbGuiApp {
                             cursor_rect,
                             nav,
                         );
+
+                        self.update_ghost(
+                            ui,
+                            &ctx,
+                            editor_id,
+                            focused,
+                            cursor_char,
+                            cursor_rect,
+                            &font,
+                            accept_ghost,
+                        );
                     });
             });
+    }
+
+    /// Drive the editor's inline ghost-text suggestion for one frame: recompute it from the
+    /// caret, paint the greyed remainder, and apply a pending Tab acceptance. Suppressed
+    /// while the autocomplete popup is open (they share the Tab key).
+    #[allow(clippy::too_many_arguments)]
+    fn update_ghost(
+        &mut self,
+        ui: &egui::Ui,
+        ctx: &egui::Context,
+        editor_id: egui::Id,
+        focused: bool,
+        cursor_char: Option<usize>,
+        cursor_rect: Option<egui::Rect>,
+        font: &egui::FontId,
+        accept: bool,
+    ) {
+        // The popup owns the caret area and the Tab key while it's up; no ghost then.
+        let (Some(cursor_char), Some(cursor_rect)) = (cursor_char, cursor_rect) else {
+            self.ghost_suggestion = None;
+            return;
+        };
+        if !focused || self.autocomplete.open {
+            self.ghost_suggestion = None;
+            return;
+        }
+
+        let suggestion = {
+            let (schema, kind) = match self.active() {
+                Some(c) => (Some(&c.schema), Some(c.db.kind())),
+                None => (None, None),
+            };
+            let sql = &self.tabs[self.active_query_tab].sql;
+            crate::ghost::suggest(sql, cursor_char, &self.suggest_pool, schema, kind)
+        };
+
+        let Some(remainder) = suggestion else {
+            self.ghost_suggestion = None;
+            return;
+        };
+
+        if accept {
+            self.accept_ghost(ctx, editor_id, &remainder);
+            self.ghost_suggestion = None;
+            return;
+        }
+
+        // Paint the remainder in a faint colour, flush against the caret. A multi-line
+        // remainder flows left-aligned from the caret's x — fine for the common single-line
+        // case, which is what history completions almost always are.
+        ui.painter().text(
+            egui::pos2(cursor_rect.left(), cursor_rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            &remainder,
+            font.clone(),
+            palette::TEXT_FAINT(),
+        );
+        self.ghost_suggestion = Some(remainder);
+    }
+
+    /// Append an accepted ghost suggestion at the caret (the end of the buffer) and move
+    /// the caret past it.
+    fn accept_ghost(&mut self, ctx: &egui::Context, editor_id: egui::Id, remainder: &str) {
+        let tab = &mut self.tabs[self.active_query_tab];
+        tab.sql.push_str(remainder);
+        tab.edits.source = None;
+        tab.preview = false;
+        self.workspace_dirty = true;
+
+        let new_cursor = self.tabs[self.active_query_tab].sql.chars().count();
+        if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, editor_id) {
+            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(new_cursor),
+            )));
+            state.store(ctx, editor_id);
+        }
+        ctx.memory_mut(|m| m.request_focus(editor_id));
     }
 
     /// Drive the SQL editor's autocomplete popup for one frame: recompute suggestions from

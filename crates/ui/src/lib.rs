@@ -9,6 +9,7 @@ mod edit;
 mod erd;
 mod filter;
 mod format;
+mod ghost;
 mod grid;
 mod highlight;
 mod icons;
