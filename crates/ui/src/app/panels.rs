@@ -599,7 +599,7 @@ impl DbGuiApp {
             .default_size(150.0)
             .min_size(72.0)
             .show_inside(root, |ui| {
-                ui.add_space(6.0);
+                ui.add_space(2.0);
                 ui.horizontal(|ui| {
                     style::section_header(ui, "Query");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -630,7 +630,6 @@ impl DbGuiApp {
                         }
                     });
                 });
-                ui.add_space(6.0);
 
                 let font = egui::TextStyle::Monospace.resolve(ui.style());
                 let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
