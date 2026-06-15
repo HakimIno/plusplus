@@ -855,11 +855,12 @@ pub struct TableInfo {
 }
 
 impl TableInfo {
-    /// Fully-qualified, quote-safe name for use in generated SQL.
-    pub fn qualified(&self) -> String {
+    /// Fully-qualified, quote-safe name for use in generated SQL, quoted for `kind`
+    /// (backticks on MySQL/MariaDB, ANSI double quotes elsewhere).
+    pub fn qualified(&self, kind: DbKind) -> String {
         match &self.schema {
-            Some(s) => format!("\"{}\".\"{}\"", s, self.name),
-            None => format!("\"{}\"", self.name),
+            Some(s) => format!("{}.{}", kind.quote_ident(s), kind.quote_ident(&self.name)),
+            None => kind.quote_ident(&self.name),
         }
     }
 }

@@ -1128,18 +1128,8 @@ impl DbGuiApp {
                                             ui.close();
                                         }
                                         if live && !databases.is_empty() {
-                                            let tint = ui.visuals().widgets.inactive.fg_stroke.color;
-                                            let db_img = egui::Image::new(icons::database())
-                                                .fit_to_exact_size(egui::vec2(icons::SIZE, icons::SIZE))
-                                                .tint(tint);
-                                            let btn = egui::Button::image_and_text(db_img, "Switch Database")
-                                                .right_text("⏵");
-                                            #[allow(deprecated)]
-                                            egui::menu::menu_custom_button(
-                                                ui,
-                                                btn,
-                                                |ui| {
-                                                    ui.set_min_width(160.0);
+                                            ui.menu_button("Switch Database", |ui| {
+                                                ui.set_min_width(160.0);
                                                     egui::ScrollArea::vertical()
                                                         .max_height(220.0)
                                                         .show(ui, |ui| {
@@ -1418,7 +1408,7 @@ impl DbGuiApp {
                         .collect(),
                 };
                 actions.push(Action::OpenTable {
-                    sql: active.db.kind().preview_query(&table.qualified(), 100),
+                    sql: active.db.kind().preview_query(&table.qualified(active.db.kind()), 100),
                     source,
                     pin,
                 });

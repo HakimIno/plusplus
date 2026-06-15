@@ -115,8 +115,13 @@ impl Database for MySqlDb {
             }
         }
 
-        let idx_rows: Vec<(String, String, i32, String, i32)> = sqlx::query_as(
-            "SELECT TABLE_NAME, INDEX_NAME, NON_UNIQUE, COLUMN_NAME, SEQ_IN_INDEX \
+        // CAST the numeric columns to SIGNED so the wire type is deterministic: across
+        // MySQL/MariaDB versions information_schema reports these as INT/BIGINT UNSIGNED,
+        // and sqlx's typed decoding is strict (an UNSIGNED column won't decode into a
+        // signed Rust integer). Casting sidesteps version-specific type guessing.
+        let idx_rows: Vec<(String, String, i64, String, i64)> = sqlx::query_as(
+            "SELECT TABLE_NAME, INDEX_NAME, CAST(NON_UNIQUE AS SIGNED), \
+                    COLUMN_NAME, CAST(SEQ_IN_INDEX AS SIGNED) \
              FROM information_schema.STATISTICS \
              WHERE TABLE_SCHEMA = DATABASE() \
              ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX",
@@ -124,7 +129,7 @@ impl Database for MySqlDb {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut grouped: BTreeMap<(String, String), (bool, Vec<(i32, String)>)> = BTreeMap::new();
+        let mut grouped: BTreeMap<(String, String), (bool, Vec<(i64, String)>)> = BTreeMap::new();
         for (table, index, non_unique, column, seq) in idx_rows {
             let entry = grouped
                 .entry((table, index))
@@ -277,6 +282,12 @@ fn decode(row: &MySqlRow, idx: usize, name: &str) -> Value {
             return Value::Null;
         }
     }
+    // MySQL reports unsigned/zerofill integers with a suffix (e.g. "INT UNSIGNED",
+    // "BIGINT UNSIGNED ZEROFILL"). Strip those modifiers so the base type drives dispatch;
+    // the integer arms below already fall back to the unsigned Rust type when decoding.
+    let name = name
+        .trim_end_matches(" ZEROFILL")
+        .trim_end_matches(" UNSIGNED");
     match name {
         "BOOLEAN" | "BOOL" => row
             .try_get::<bool, _>(idx)
