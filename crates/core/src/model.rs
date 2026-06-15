@@ -1129,6 +1129,61 @@ pub fn build_drop_column_sql(
     )
 }
 
+/// Build `ALTER TABLE … ALTER/MODIFY COLUMN` statement(s) to change an existing column's
+/// type and nullability (and, when a non-empty `default` is given, its DEFAULT).
+///
+/// Dialects diverge enough that this returns a list: Postgres needs one statement per aspect,
+/// while MySQL restates the whole column in a single `MODIFY`. SQLite can't alter a column in
+/// place — callers must guard against it (it isn't handled here). `primary_key` is ignored:
+/// changing a table's primary key is a separate constraint operation, not a column alter.
+pub fn build_alter_column_sql(
+    kind: DbKind,
+    schema: Option<&str>,
+    table: &str,
+    col: &ColumnDef,
+) -> Vec<String> {
+    let tref = ddl_table_ref(kind, schema, table);
+    let c = kind.quote_ident(&col.name);
+    let ty = col.data_type.trim();
+    let default = col
+        .default
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty());
+
+    match kind {
+        DbKind::Postgres => {
+            let mut out = vec![
+                format!("ALTER TABLE {tref} ALTER COLUMN {c} TYPE {ty};"),
+                format!(
+                    "ALTER TABLE {tref} ALTER COLUMN {c} {};",
+                    if col.nullable { "DROP NOT NULL" } else { "SET NOT NULL" }
+                ),
+            ];
+            if let Some(d) = default {
+                out.push(format!("ALTER TABLE {tref} ALTER COLUMN {c} SET DEFAULT {d};"));
+            }
+            out
+        }
+        DbKind::MySql | DbKind::MariaDb => {
+            let null = if col.nullable { "NULL" } else { "NOT NULL" };
+            let def = default.map(|d| format!(" DEFAULT {d}")).unwrap_or_default();
+            vec![format!("ALTER TABLE {tref} MODIFY COLUMN {c} {ty} {null}{def};")]
+        }
+        DbKind::SqlServer => {
+            let null = if col.nullable { "NULL" } else { "NOT NULL" };
+            let mut out = vec![format!("ALTER TABLE {tref} ALTER COLUMN {c} {ty} {null};")];
+            if let Some(d) = default {
+                // SQL Server attaches a DEFAULT through a (here unnamed) constraint.
+                out.push(format!("ALTER TABLE {tref} ADD DEFAULT {d} FOR {c};"));
+            }
+            out
+        }
+        // SQLite has no in-place column alter; the caller refuses this before reaching here.
+        DbKind::Sqlite => Vec::new(),
+    }
+}
+
 /// Build an `ALTER TABLE … RENAME COLUMN` (or `sp_rename` for SQL Server).
 pub fn build_rename_column_sql(
     kind: DbKind,
@@ -1202,6 +1257,58 @@ mod tests {
 
     fn target(sql: &str) -> Option<(Option<String>, String)> {
         simple_select_target(sql)
+    }
+
+    #[test]
+    fn alter_column_postgres_splits_type_and_nullability() {
+        let col = ColumnDef {
+            name: "price".into(),
+            data_type: "numeric(10,2)".into(),
+            nullable: false,
+            primary_key: false,
+            default: Some("0".into()),
+        };
+        let sql = build_alter_column_sql(DbKind::Postgres, Some("public"), "items", &col);
+        assert_eq!(
+            sql,
+            vec![
+                "ALTER TABLE \"public\".\"items\" ALTER COLUMN \"price\" TYPE numeric(10,2);",
+                "ALTER TABLE \"public\".\"items\" ALTER COLUMN \"price\" SET NOT NULL;",
+                "ALTER TABLE \"public\".\"items\" ALTER COLUMN \"price\" SET DEFAULT 0;",
+            ]
+        );
+    }
+
+    #[test]
+    fn alter_column_mysql_uses_single_modify() {
+        let col = ColumnDef {
+            name: "name".into(),
+            data_type: "varchar(255)".into(),
+            nullable: true,
+            primary_key: false,
+            default: None,
+        };
+        let sql = build_alter_column_sql(DbKind::MySql, None, "users", &col);
+        assert_eq!(sql, vec!["ALTER TABLE `users` MODIFY COLUMN `name` varchar(255) NULL;"]);
+    }
+
+    #[test]
+    fn alter_column_sqlserver_alters_then_adds_default() {
+        let col = ColumnDef {
+            name: "qty".into(),
+            data_type: "int".into(),
+            nullable: false,
+            primary_key: false,
+            default: Some("1".into()),
+        };
+        let sql = build_alter_column_sql(DbKind::SqlServer, Some("dbo"), "orders", &col);
+        assert_eq!(
+            sql,
+            vec![
+                "ALTER TABLE \"dbo\".\"orders\" ALTER COLUMN \"qty\" int NOT NULL;",
+                "ALTER TABLE \"dbo\".\"orders\" ADD DEFAULT 1 FOR \"qty\";",
+            ]
+        );
     }
 
     #[test]

@@ -32,6 +32,29 @@ pub struct MsSqlDb {
 
 impl MsSqlDb {
     pub async fn connect(cfg: &ConnectionConfig, password: Option<String>) -> Result<Self> {
+        // Probe TCP reachability first, with a short timeout. SQL Server deliberately
+        // *delays* its "Login failed" response (anti-brute-force throttling), so a wrong
+        // password can take several seconds to come back. If we relied on a single short
+        // overall timeout, that delay would be clipped and misreported as an unreachable
+        // host — highlighting Host/Port when the real problem is the credentials. Splitting
+        // the two lets an unreachable host fail fast here (→ a clear host/port error), while
+        // a reachable host gets a generous budget below for the TLS+login handshake so its
+        // real error (e.g. "Login failed for user 'x'") can surface and flag User/Password.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio::net::TcpStream::connect((cfg.host.as_str(), cfg.port)),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(CoreError::Pool(format!("could not reach the host: {e}"))),
+            Err(_) => {
+                return Err(CoreError::Pool(
+                    "connection timed out — could not reach the host".into(),
+                ))
+            }
+        }
+
         let mut config = tiberius::Config::new();
         config.host(&cfg.host);
         config.port(cfg.port);
@@ -64,8 +87,27 @@ impl MsSqlDb {
 
         let mgr = bb8_tiberius::ConnectionManager::build(config)
             .map_err(|e| CoreError::Pool(e.to_string()))?;
+
+        // Validate credentials by opening one real connection through the manager. We can't
+        // rely on the pool for this: bb8 establishes connections in a background task and
+        // funnels any failure (e.g. "Login failed") into its error sink, so `pool.get()`
+        // only ever surfaces a generic `TimedOut` — never the real reason. `connect()` here
+        // returns the actual tiberius error so the UI can show it and flag User/Password.
+        // Bounded by a timeout in case TLS/login stalls; the host is already known reachable
+        // from the TCP probe above, and the budget is generous because SQL Server
+        // deliberately delays failed-login responses.
+        use bb8::ManageConnection;
+        match tokio::time::timeout(std::time::Duration::from_secs(15), mgr.connect()).await {
+            Ok(Ok(_conn)) => {}
+            Ok(Err(e)) => return Err(map_conn_err(e)),
+            Err(_) => return Err(CoreError::Pool("timed out during the login handshake".into())),
+        }
+
         let pool = bb8::Pool::builder()
             .max_size(5)
+            // Don't let a transient runtime failure spin for the default 30s; surface it.
+            .retry_connection(false)
+            .connection_timeout(std::time::Duration::from_secs(15))
             .build(mgr)
             .await
             .map_err(|e| CoreError::Pool(e.to_string()))?;
@@ -73,11 +115,7 @@ impl MsSqlDb {
     }
 
     async fn fetch(&self, sql: &str) -> Result<Vec<Row>> {
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| CoreError::Pool(e.to_string()))?;
+        let mut conn = self.pool.get().await.map_err(map_pool_err)?;
         let stream = conn.simple_query(sql.to_string()).await?;
         Ok(stream.into_first_result().await?)
     }
@@ -141,7 +179,20 @@ impl Database for MsSqlDb {
 
         for row in self
             .fetch(
-                "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE \
+                // Compose the full declared type (with length/precision) in T-SQL so it comes
+                // back as one string — `char(10)`, `numeric(10,2)`, `nvarchar(max)`. Without the
+                // length, an ALTER COLUMN built from this would silently shrink the column
+                // (e.g. `char` defaults to `char(1)`), so the editor needs the real width.
+                "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, \
+                   DATA_TYPE + CASE \
+                     WHEN DATA_TYPE IN ('char','varchar','nchar','nvarchar','binary','varbinary') \
+                       THEN '(' + CASE WHEN CHARACTER_MAXIMUM_LENGTH = -1 THEN 'max' \
+                                       ELSE CAST(CHARACTER_MAXIMUM_LENGTH AS varchar(11)) END + ')' \
+                     WHEN DATA_TYPE IN ('decimal','numeric') \
+                       THEN '(' + CAST(NUMERIC_PRECISION AS varchar(11)) + ',' \
+                                + CAST(NUMERIC_SCALE AS varchar(11)) + ')' \
+                     ELSE '' END AS FULL_TYPE, \
+                   IS_NULLABLE \
                  FROM INFORMATION_SCHEMA.COLUMNS \
                  ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION",
             )
@@ -262,7 +313,7 @@ impl Database for MsSqlDb {
                 .pool
                 .get()
                 .await
-                .map_err(|e| CoreError::Pool(e.to_string()))?;
+                .map_err(map_pool_err)?;
             let mut stream = conn.simple_query(sql.to_string()).await?;
             // Stream row-by-row instead of `into_first_result` so at most `max_rows` rows
             // are materialized. The stream is still drained to its end — TDS gives no way
@@ -314,7 +365,7 @@ impl Database for MsSqlDb {
                 .pool
                 .get()
                 .await
-                .map_err(|e| CoreError::Pool(e.to_string()))?;
+                .map_err(map_pool_err)?;
             let res = conn.execute(sql.to_string(), &[]).await?;
             Ok(QueryResult {
                 columns: Vec::new(),
@@ -337,7 +388,7 @@ impl Database for MsSqlDb {
             .pool
             .get()
             .await
-            .map_err(|e| CoreError::Pool(e.to_string()))?;
+            .map_err(map_pool_err)?;
         // SET XACT_ABORT ON: any runtime error automatically rolls back the transaction,
         // leaving the connection in a clean state when returned to the pool.
         conn.simple_query("SET XACT_ABORT ON; BEGIN TRANSACTION;")
@@ -366,6 +417,26 @@ impl Database for MsSqlDb {
             )
             .await?;
         Ok(rows.iter().map(|r| get_str(r, 0)).filter(|s| !s.is_empty()).collect())
+    }
+}
+
+/// Turn a bb8 pool error into a clean [`CoreError`]. `RunError::User` carries the real
+/// tiberius error (e.g. "Login failed for user 'x'."), which we surface as a `Tiberius`
+/// error so the UI shows the actual reason and can highlight the offending field. A
+/// `TimedOut` means we never reached the server within the connection timeout.
+fn map_conn_err(err: bb8_tiberius::Error) -> CoreError {
+    match err {
+        bb8_tiberius::Error::Tiberius(e) => CoreError::Tiberius(e),
+        bb8_tiberius::Error::Io(e) => CoreError::Pool(e.to_string()),
+    }
+}
+
+fn map_pool_err(err: bb8::RunError<bb8_tiberius::Error>) -> CoreError {
+    match err {
+        bb8::RunError::User(e) => map_conn_err(e),
+        bb8::RunError::TimedOut => {
+            CoreError::Pool("connection timed out — could not reach the host".into())
+        }
     }
 }
 

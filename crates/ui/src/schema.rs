@@ -1,8 +1,9 @@
 //! Schema editor state — no egui drawing here; all rendering is in panels.rs.
 
 use dbcore::{
-    build_add_column_sql, build_add_fk_sql, build_create_index_sql, build_create_table_sql,
-    build_drop_column_sql, build_drop_fk_sql, build_drop_index_sql, build_rename_column_sql,
+    build_add_column_sql, build_add_fk_sql, build_alter_column_sql, build_create_index_sql,
+    build_create_table_sql, build_drop_column_sql, build_drop_fk_sql, build_drop_index_sql,
+    build_rename_column_sql,
     ColumnDef, DbKind, FkAction, ForeignKeyDef, ForeignKeyInfo, IndexDef, TableInfo,
 };
 
@@ -17,6 +18,10 @@ pub struct ColumnDraft {
     pub default: String,
     /// Only set for existing columns (ALTER TABLE context).
     pub original_name: Option<String>,
+    /// Type/nullability as introspected, kept so an edit to them can be detected and turned
+    /// into an `ALTER COLUMN`. `None` for newly added columns.
+    pub original_type: Option<String>,
+    pub original_nullable: Option<bool>,
     /// Whether the column existed before editing (vs. being newly added).
     pub is_existing: bool,
     /// Mark for deletion (existing column will get DROP COLUMN).
@@ -32,6 +37,8 @@ impl ColumnDraft {
             primary_key: false,
             default: String::new(),
             original_name: None,
+            original_type: None,
+            original_nullable: None,
             is_existing: false,
             drop: false,
         }
@@ -45,9 +52,26 @@ impl ColumnDraft {
             primary_key,
             default: String::new(),
             original_name: Some(name.into()),
+            original_type: Some(data_type.into()),
+            original_nullable: Some(nullable),
             is_existing: true,
             drop: false,
         }
+    }
+
+    /// True when an existing column's type, nullability, or (a newly entered) default differs
+    /// from how it was introspected — i.e. it needs an `ALTER COLUMN`.
+    pub fn is_altered(&self) -> bool {
+        if !self.is_existing {
+            return false;
+        }
+        let type_changed = self
+            .original_type
+            .as_deref()
+            .is_some_and(|t| !t.eq_ignore_ascii_case(self.data_type.trim()));
+        let null_changed = self.original_nullable.is_some_and(|n| n != self.nullable);
+        let default_set = !self.default.trim().is_empty();
+        type_changed || null_changed || default_set
     }
 
     pub fn to_def(&self) -> ColumnDef {
@@ -338,6 +362,28 @@ impl SchemaEditor {
                             col.name.trim(),
                         ));
                     }
+                }
+
+                // Altered existing columns (type / nullability / default). Runs after rename so
+                // it references the column's current name (`to_def` uses `col.name`).
+                for col in self
+                    .columns
+                    .iter()
+                    .filter(|c| c.is_existing && !c.drop && c.is_altered())
+                {
+                    if self.db_kind == DbKind::Sqlite {
+                        return Err(
+                            "SQLite cannot change a column's type or nullability in place; \
+                             recreate the table instead."
+                                .into(),
+                        );
+                    }
+                    stmts.extend(build_alter_column_sql(
+                        self.db_kind,
+                        self.schema(),
+                        table,
+                        &col.to_def(),
+                    ));
                 }
 
                 // New columns
