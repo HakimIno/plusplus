@@ -757,30 +757,51 @@ impl DbGuiApp {
         // The popup owns the caret area and the Tab key while it's up; no ghost then.
         let (Some(cursor_char), Some(cursor_rect)) = (cursor_char, cursor_rect) else {
             self.ghost_suggestion = None;
+            self.ghost_key = None;
             return;
         };
         if !focused || self.autocomplete.open {
             self.ghost_suggestion = None;
+            self.ghost_key = None;
             return;
         }
 
-        let suggestion = {
-            let (schema, kind) = match self.active() {
-                Some(c) => (Some(&c.schema), Some(c.db.kind())),
-                None => (None, None),
+        // Recompute only when the text or caret moved since the cached suggestion. While the
+        // focused editor merely repaints — e.g. the result grid is scrolling — reuse the cached
+        // value instead of re-scanning history and the schema every frame.
+        let key = (self.tabs[self.active_query_tab].sql.chars().count(), cursor_char);
+        if self.ghost_key != Some(key) {
+            self.ghost_suggestion = {
+                let (schema, kind) = match self.active() {
+                    Some(c) => (Some(&c.schema), Some(c.db.kind())),
+                    None => (None, None),
+                };
+                // Only complete from history this tab's own connection produced — never from
+                // another database's queries (whose tables, and SQL dialect, won't match).
+                let conn_id = self.tabs[self.active_query_tab].conn_id.as_deref();
+                let pool: Vec<&str> = match conn_id {
+                    Some(id) => self
+                        .suggest_pool
+                        .iter()
+                        .filter(|q| q.conn_id == id)
+                        .map(|q| q.sql.as_str())
+                        .collect(),
+                    None => Vec::new(),
+                };
+                let sql = &self.tabs[self.active_query_tab].sql;
+                crate::ghost::suggest(sql, cursor_char, &pool, schema, kind)
             };
-            let sql = &self.tabs[self.active_query_tab].sql;
-            crate::ghost::suggest(sql, cursor_char, &self.suggest_pool, schema, kind)
-        };
+            self.ghost_key = Some(key);
+        }
 
-        let Some(remainder) = suggestion else {
-            self.ghost_suggestion = None;
+        let Some(remainder) = self.ghost_suggestion.clone() else {
             return;
         };
 
         if accept {
             self.accept_ghost(ctx, editor_id, &remainder);
             self.ghost_suggestion = None;
+            self.ghost_key = None;
             return;
         }
 
@@ -845,7 +866,14 @@ impl DbGuiApp {
             self.autocomplete.anchor = cr;
         }
 
-        if focused {
+        // Open while actively typing (or on a forced trigger); a caret that merely sits in a
+        // word — e.g. after a click — shouldn't pop the menu back up on its own.
+        let typing = text_changed || force;
+        // Only scan the schema when there's a reason to: the user is typing/forcing, or the
+        // popup is already open and following the prefix. Recomputing every focused frame meant
+        // re-scanning the whole schema even while idle — e.g. when the grid scrolls and the
+        // still-focused editor keeps repainting — which made scrolling janky on big schemas.
+        if focused && (typing || self.autocomplete.open) {
             // Recompute against the live text. Borrow the connection's schema and the tab's
             // SQL immutably together, then hand ownership back so the borrows end.
             let completion = {
@@ -863,11 +891,8 @@ impl DbGuiApp {
                 )
             };
 
-            // Open while actively typing (or on a forced trigger); a caret that merely sits
-            // in a word — e.g. after a click — shouldn't pop the menu back up on its own.
-            let typing = text_changed || force;
             match completion {
-                Some(c) if self.autocomplete.open || typing => {
+                Some(c) => {
                     self.autocomplete.items = c.items;
                     self.autocomplete.replace_start = c.replace_start;
                     self.autocomplete.open = true;
@@ -876,7 +901,7 @@ impl DbGuiApp {
                         .selected
                         .min(self.autocomplete.items.len() - 1);
                 }
-                _ => {
+                None => {
                     self.autocomplete.open = false;
                 }
             }

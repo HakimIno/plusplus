@@ -66,7 +66,36 @@ fn fix_titlebar_click_through(cc: &eframe::CreationContext<'_>) {
 
 const APP_ICON: &[u8] = include_bytes!("../assets/icon/png/icon-256.png");
 
+/// Append every panic (UI thread or a background query worker) to a crash log beside the
+/// app's config, with a full backtrace, then run the default hook. Launched from Finder the
+/// process has no terminal, so without this a panic just vanishes — this turns "the app
+/// disappeared" into a file we can actually read. The default hook still runs after, so
+/// behaviour (abort/unwind) is unchanged.
+fn install_crash_logger() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Ok(dir) = dbcore::config::config_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            let path = dir.join("crash.log");
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            let thread = std::thread::current();
+            let entry = format!(
+                "\n===== plusplus v{} crash @ {} (thread {:?}) =====\n{info}\n{backtrace}\n",
+                env!("CARGO_PKG_VERSION"),
+                dbcore::history::now_rfc3339(),
+                thread.name().unwrap_or("unnamed"),
+            );
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                let _ = f.write_all(entry.as_bytes());
+            }
+        }
+        default(info);
+    }));
+}
+
 fn main() -> eframe::Result<()> {
+    install_crash_logger();
     let icon = eframe::icon_data::from_png_bytes(APP_ICON).expect("valid app icon PNG");
 
 

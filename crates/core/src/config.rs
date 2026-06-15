@@ -10,7 +10,7 @@ use crate::model::ConnectionConfig;
 /// `%APPDATA%\plusplus` on Windows. We avoid an extra crate and derive it from env vars.
 
 
-pub(crate) fn config_dir() -> Result<PathBuf> {
+pub fn config_dir() -> Result<PathBuf> {
     // Honour XDG on unix, APPDATA on Windows, else fall back to ~/.config/plusplus.
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         if !xdg.is_empty() {

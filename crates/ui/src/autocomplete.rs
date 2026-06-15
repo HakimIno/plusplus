@@ -75,7 +75,11 @@ pub struct NavKeys {
 const MAX_ITEMS: usize = 100;
 
 fn is_ident_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
+    // `is_alphanumeric` already covers ASCII and base letters of other scripts, but it
+    // excludes combining marks — Thai sara/tone marks (and similar) — which would split a
+    // word like `ชื่อ` mid-identifier. Treat any non-ASCII, non-whitespace char as part of
+    // the identifier so multi-byte names stay whole for prefix matching and tokenizing.
+    c.is_alphanumeric() || c == '_' || (!c.is_ascii() && !c.is_whitespace() && !c.is_control())
 }
 
 /// Compute suggestions for the identifier being typed at `cursor` (a char index).
@@ -245,11 +249,22 @@ pub fn complete(
 }
 
 fn matches_prefix(candidate: &str, prefix: &str) -> bool {
-    prefix.is_empty()
-        || (candidate.len() >= prefix.len()
-            && candidate[..prefix.len()].eq_ignore_ascii_case(prefix)
-            // Don't suggest what's already fully typed.
-            && !candidate.eq_ignore_ascii_case(prefix))
+    if prefix.is_empty() {
+        return true;
+    }
+    // Compare the leading `prefix` characters case-insensitively *by char*, never by byte:
+    // identifiers (and the typed prefix) may hold multi-byte UTF-8 — e.g. Thai, where one
+    // glyph is 3 bytes — so `candidate[..prefix.len()]` could slice mid-character and panic.
+    let mut cand = candidate.chars();
+    for p in prefix.chars() {
+        match cand.next() {
+            Some(c) if c.eq_ignore_ascii_case(&p) => {}
+            _ => return false,
+        }
+    }
+    // A char left over means `candidate` is strictly longer than `prefix`; equal length
+    // means it's already fully typed, which we don't suggest.
+    cand.next().is_some()
 }
 
 fn push_table(
@@ -778,5 +793,44 @@ mod tests {
     fn keywords_without_connection() {
         let c = complete("SEL", 3, None, None, false).unwrap();
         assert_eq!(c.items[0].insert, "SELECT");
+    }
+
+    #[test]
+    fn multibyte_prefix_does_not_panic() {
+        // A Thai prefix (3 bytes/char) once sliced `candidate` on a byte boundary and
+        // panicked; matching must be char-aware. Both the typed prefix and the candidate
+        // identifiers carry multi-byte text here.
+        let s = SchemaTree {
+            database_name: "db".to_string(),
+            tables: vec![TableInfo {
+                schema: None,
+                name: "ลูกค้า".to_string(),
+                columns: vec![
+                    ColumnInfo {
+                        name: "ชื่อ".to_string(),
+                        data_type: "text".to_string(),
+                        nullable: true,
+                        primary_key: false,
+                    },
+                    ColumnInfo {
+                        name: "อีเมล".to_string(),
+                        data_type: "text".to_string(),
+                        nullable: true,
+                        primary_key: false,
+                    },
+                ],
+                indexes: vec![],
+                foreign_keys: vec![],
+            }],
+        };
+        // `SELECT ชื่` should offer the matching Thai column without panicking. Non-ASCII
+        // identifiers come back quoted for the dialect (here, generic double quotes).
+        let sql = "SELECT ชื่";
+        let c = complete(sql, sql.chars().count(), Some(&s), None, false).unwrap();
+        assert!(c.items.iter().any(|i| i.insert == "\"ชื่อ\""));
+        // And a Thai table name after FROM.
+        let sql2 = "SELECT * FROM ลูก";
+        let c2 = complete(sql2, sql2.chars().count(), Some(&s), None, false).unwrap();
+        assert!(c2.items.iter().any(|i| i.insert == "\"ลูกค้า\""));
     }
 }

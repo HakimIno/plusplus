@@ -14,7 +14,9 @@
 use dbcore::{DbKind, SchemaTree, TableInfo};
 
 fn is_ident_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
+    // Keep multi-byte names (e.g. Thai, whose combining sara/tone marks aren't
+    // `is_alphanumeric`) whole when scanning words back from the caret.
+    c.is_alphanumeric() || c == '_' || (!c.is_ascii() && !c.is_whitespace() && !c.is_control())
 }
 
 /// Compute the ghost suggestion for `sql` with the caret at char index `cursor`.
@@ -27,7 +29,7 @@ fn is_ident_char(c: char) -> bool {
 pub fn suggest(
     sql: &str,
     cursor: usize,
-    history: &[String],
+    history: &[&str],
     schema: Option<&SchemaTree>,
     kind: Option<DbKind>,
 ) -> Option<String> {
@@ -48,7 +50,7 @@ pub fn suggest(
 
 /// Most-recent history entry that starts with `sql` (case-insensitively) and is strictly
 /// longer; the suggestion is the untyped remainder, in the history entry's own casing.
-fn history_suggestion(sql: &str, history: &[String]) -> Option<String> {
+fn history_suggestion(sql: &str, history: &[&str]) -> Option<String> {
     let typed_len = sql.chars().count();
     // Newest first: the last matching entry the user ran wins.
     for entry in history.iter().rev() {
@@ -240,7 +242,8 @@ mod tests {
     }
 
     fn suggest_end(sql: &str, history: &[String], schema: Option<&SchemaTree>) -> Option<String> {
-        suggest(sql, sql.chars().count(), history, schema, None)
+        let refs: Vec<&str> = history.iter().map(String::as_str).collect();
+        suggest(sql, sql.chars().count(), &refs, schema, None)
     }
 
     #[test]
@@ -271,7 +274,8 @@ mod tests {
     #[test]
     fn no_suggestion_when_caret_not_at_end() {
         let hist = vec!["SELECT * FROM users".to_string()];
-        assert!(suggest("SELECT * FROM us", 3, &hist, None, None).is_none());
+        let refs: Vec<&str> = hist.iter().map(String::as_str).collect();
+        assert!(suggest("SELECT * FROM us", 3, &refs, None, None).is_none());
     }
 
     #[test]

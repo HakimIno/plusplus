@@ -528,6 +528,13 @@ struct ConnectionDrag {
     grab_y: f32,
 }
 
+/// One recently-run statement in the ghost-text pool, tagged with the connection it ran
+/// against so a suggestion only ever completes from the active tab's own database.
+struct PooledQuery {
+    conn_id: String,
+    sql: String,
+}
+
 pub struct DbGuiApp {
     // --- persisted config ---
     connections: Vec<ConnectionConfig>,
@@ -574,11 +581,17 @@ pub struct DbGuiApp {
     autocomplete: crate::autocomplete::State,
     /// Recently-run, successful SQL — the pool the editor's ghost-text autosuggestion
     /// matches a prefix against (fish-shell style). Seeded from history on launch and
-    /// appended to as queries run. In-memory only.
-    suggest_pool: Vec<String>,
+    /// appended to as queries run. In-memory only. Each entry carries its `conn_id` so the
+    /// suggestion is filtered to the active tab's database (never another connection's SQL).
+    suggest_pool: Vec<PooledQuery>,
     /// The ghost-text remainder shown after the caret last frame (the text Tab accepts),
-    /// or `None` when nothing is suggested. Recomputed each frame.
+    /// or `None` when nothing is suggested. Cached: recomputed only when the SQL or caret
+    /// changes, then repainted each frame (so scrolling a focused editor doesn't re-scan
+    /// history/schema every frame).
     ghost_suggestion: Option<String>,
+    /// `(sql char-length, caret char index)` the cached `ghost_suggestion` was computed for;
+    /// a mismatch is what triggers a recompute.
+    ghost_key: Option<(usize, usize)>,
     status_msg: String,
     error: Option<String>,
     /// SQL statements staged for the commit-preview dialog. `None` = dialog closed;
@@ -641,7 +654,10 @@ impl DbGuiApp {
             .unwrap_or_default()
             .into_iter()
             .filter(|e| e.ok)
-            .map(|e| e.sql)
+            .map(|e| PooledQuery {
+                conn_id: e.conn_id,
+                sql: e.sql,
+            })
             .collect();
 
         #[cfg(target_os = "macos")]
@@ -732,6 +748,7 @@ impl DbGuiApp {
             autocomplete: crate::autocomplete::State::default(),
             suggest_pool: Vec::new(),
             ghost_suggestion: None,
+            ghost_key: None,
             status_msg: "Ready".to_string(),
             error: None,
             show_connection_tabs: true,
@@ -1588,7 +1605,10 @@ impl DbGuiApp {
         // of the history-logging setting, which only governs the on-disk audit log). Skip
         // under test so the pool stays deterministic.
         if ok && !cfg!(test) {
-            self.suggest_pool.push(sql.to_string());
+            self.suggest_pool.push(PooledQuery {
+                conn_id: conn_id.to_string(),
+                sql: sql.to_string(),
+            });
             if self.suggest_pool.len() > dbcore::history::MAX_ENTRIES {
                 self.suggest_pool.remove(0);
             }
@@ -2561,15 +2581,13 @@ impl DbGuiApp {
         }
 
         // Order matters: top/bottom/left/right carve space, central takes the rest. The
-        // status bar is carved first so it pins to the very bottom edge; the query console is
-        // carved next so it sits directly below the grid, leaving its top resize handle
-        // bordering the central area (nothing on top of it) for a clean, smooth drag.
+        // status bar is carved first so it pins to the very bottom edge. The left/right side
+        // panels are carved BEFORE the query console so they run the full height (down to the
+        // status bar); the console is then confined to the central column under the grid,
+        // instead of spanning the whole width and clipping the details/schema panels.
         self.top_bar(ui_root, frame, &mut actions);
         self.query_tab_bar(ui_root, &mut actions);
         self.status_bar(ui_root);
-        if self.show_query_console {
-            self.query_console(ui_root, &mut actions);
-        }
         if self.show_connection_tabs {
             self.connection_tabs(ui_root, &mut actions);
         }
@@ -2582,6 +2600,11 @@ impl DbGuiApp {
         }
         if self.show_details_panel {
             self.right_panel(ui_root);
+        }
+        // Carved last among the edge panels: the console borders only the central grid, so its
+        // top resize handle drags cleanly with nothing but the grid above it.
+        if self.show_query_console {
+            self.query_console(ui_root, &mut actions);
         }
         // A top panel after left/right carves the strip directly above the grid.
         self.filter_bar(ui_root);
