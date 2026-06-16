@@ -1066,6 +1066,45 @@ pub fn build_drop_table_sql(kind: DbKind, schema: Option<&str>, table: &str) -> 
     format!("DROP TABLE {};", ddl_table_ref(kind, schema, table))
 }
 
+/// Build the statement that empties a table of all rows, keeping its structure.
+/// SQLite has no `TRUNCATE`; it falls back to an unfiltered `DELETE`.
+pub fn build_truncate_table_sql(kind: DbKind, schema: Option<&str>, table: &str) -> String {
+    let tref = ddl_table_ref(kind, schema, table);
+    match kind {
+        DbKind::Sqlite => format!("DELETE FROM {tref};"),
+        _ => format!("TRUNCATE TABLE {tref};"),
+    }
+}
+
+/// Build the statement(s) that copy an existing table's structure and data into a new
+/// table named `new_table` (in the same schema). Dialects diverge on how much structure
+/// survives:
+/// - Postgres/MySQL/MariaDB clone the full definition, then bulk-insert the rows, so
+///   constraints and indexes are preserved.
+/// - SQLite (`CREATE TABLE … AS SELECT`) and SQL Server (`SELECT … INTO`) copy columns and
+///   data only — indexes, keys, and constraints are not carried over.
+pub fn build_clone_table_sql(
+    kind: DbKind,
+    schema: Option<&str>,
+    table: &str,
+    new_table: &str,
+) -> Vec<String> {
+    let src = ddl_table_ref(kind, schema, table);
+    let dst = ddl_table_ref(kind, schema, new_table);
+    match kind {
+        DbKind::Postgres => vec![
+            format!("CREATE TABLE {dst} (LIKE {src} INCLUDING ALL);"),
+            format!("INSERT INTO {dst} SELECT * FROM {src};"),
+        ],
+        DbKind::MySql | DbKind::MariaDb => vec![
+            format!("CREATE TABLE {dst} LIKE {src};"),
+            format!("INSERT INTO {dst} SELECT * FROM {src};"),
+        ],
+        DbKind::SqlServer => vec![format!("SELECT * INTO {dst} FROM {src};")],
+        DbKind::Sqlite => vec![format!("CREATE TABLE {dst} AS SELECT * FROM {src};")],
+    }
+}
+
 /// Build an `ALTER TABLE … ADD [CONSTRAINT] FOREIGN KEY` statement.
 /// Not supported by SQLite (which requires a table rebuild); callers must not emit it there.
 pub fn build_add_fk_sql(
@@ -1524,6 +1563,46 @@ mod tests {
         assert_eq!(
             build_drop_fk_sql(DbKind::MySql, None, "orders", "fk_orders_user"),
             "ALTER TABLE `orders` DROP FOREIGN KEY `fk_orders_user`;"
+        );
+    }
+
+    #[test]
+    fn truncate_table_dialects() {
+        assert_eq!(
+            build_truncate_table_sql(DbKind::Postgres, Some("public"), "orders"),
+            "TRUNCATE TABLE \"public\".\"orders\";"
+        );
+        // SQLite has no TRUNCATE — it falls back to an unfiltered DELETE.
+        assert_eq!(
+            build_truncate_table_sql(DbKind::Sqlite, None, "orders"),
+            "DELETE FROM \"orders\";"
+        );
+    }
+
+    #[test]
+    fn clone_table_dialects() {
+        // Postgres preserves structure (LIKE … INCLUDING ALL), then copies rows.
+        assert_eq!(
+            build_clone_table_sql(DbKind::Postgres, Some("public"), "orders", "orders_copy"),
+            vec![
+                "CREATE TABLE \"public\".\"orders_copy\" (LIKE \"public\".\"orders\" INCLUDING ALL);"
+                    .to_string(),
+                "INSERT INTO \"public\".\"orders_copy\" SELECT * FROM \"public\".\"orders\";"
+                    .to_string(),
+            ]
+        );
+        // MySQL uses CREATE TABLE … LIKE with backtick identifiers.
+        assert_eq!(
+            build_clone_table_sql(DbKind::MySql, None, "orders", "orders_copy"),
+            vec![
+                "CREATE TABLE `orders_copy` LIKE `orders`;".to_string(),
+                "INSERT INTO `orders_copy` SELECT * FROM `orders`;".to_string(),
+            ]
+        );
+        // SQLite copies columns + data only, in a single statement.
+        assert_eq!(
+            build_clone_table_sql(DbKind::Sqlite, None, "orders", "orders_copy"),
+            vec!["CREATE TABLE \"orders_copy\" AS SELECT * FROM \"orders\";".to_string()]
         );
     }
 }

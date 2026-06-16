@@ -1418,6 +1418,35 @@ impl DbGuiApp {
             let resp = header
                 .inner
                 .on_hover_text("Click to preview · double-click to open");
+            resp.context_menu(|ui| {
+                ui.set_min_width(180.0);
+                if icons::button(ui, icons::edit(), "Edit Table…", true).clicked() {
+                    actions.push(Action::OpenEditTable(table.clone()));
+                    ui.close();
+                }
+                if icons::button(ui, icons::table(), "Clone Table…", true)
+                    .on_hover_text("Copy this table's structure and rows into a new table")
+                    .clicked()
+                {
+                    actions.push(Action::CloneTable(table.clone()));
+                    ui.close();
+                }
+                ui.separator();
+                if icons::button(ui, icons::warning(), "Truncate Table…", true)
+                    .on_hover_text("Remove all rows but keep the table")
+                    .clicked()
+                {
+                    actions.push(Action::TruncateTable(table.clone()));
+                    ui.close();
+                }
+                if icons::button(ui, icons::trash(), "Drop Table…", true)
+                    .on_hover_text("Delete this table and all of its data")
+                    .clicked()
+                {
+                    actions.push(Action::DropTable(table.clone()));
+                    ui.close();
+                }
+            });
             // Single-click previews (reuses the italic preview tab); double-click pins.
             let pin = resp.double_clicked();
             if resp.clicked() || pin {

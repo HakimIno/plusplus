@@ -26,8 +26,9 @@ pub use error::{CoreError, Result};
 pub use model::{
     build_add_column_sql, build_add_fk_sql, build_alter_column_sql, build_count_sql,
     build_create_index_sql,
-    build_create_table_sql, build_delete_sql, build_drop_column_sql, build_drop_fk_sql,
-    build_drop_index_sql, build_drop_table_sql, build_insert_sql, build_rename_column_sql,
+    build_clone_table_sql, build_create_table_sql, build_delete_sql, build_drop_column_sql,
+    build_drop_fk_sql, build_drop_index_sql, build_drop_table_sql, build_insert_sql,
+    build_rename_column_sql, build_truncate_table_sql,
     build_update_sql, parse_page_window, simple_select_target, with_page_window, ColumnDef,
     ColumnInfo, ColumnMeta, ConnectionColor, ConnectionConfig, ConnectionIcon, DbKind, FkAction,
     ForeignKeyDef, ForeignKeyInfo, IndexDef, IndexInfo, PageWindow, QueryResult, QueryStats,

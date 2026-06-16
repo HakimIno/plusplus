@@ -480,6 +480,12 @@ enum Action {
     OpenNewTable,
     /// Open the schema editor to modify an existing table.
     OpenEditTable(TableInfo),
+    /// Stage a `CREATE TABLE … AS`/clone migration for a sidebar table (opens the DDL preview).
+    CloneTable(TableInfo),
+    /// Stage a `TRUNCATE`/empty-rows migration for a sidebar table (opens the DDL preview).
+    TruncateTable(TableInfo),
+    /// Stage a `DROP TABLE` migration for a sidebar table (opens the DDL preview).
+    DropTable(TableInfo),
     /// Validate editor state and move to the DDL-preview dialog.
     GenerateSchema,
     /// User confirmed the DDL preview: execute the statements and re-introspect.
@@ -2263,6 +2269,37 @@ impl DbGuiApp {
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
                 self.tab_mut().schema_editor = Some(SchemaEditor::edit_table(&table, kind));
                 self.schema_pending = None;
+            }
+            Action::CloneTable(table) => {
+                let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
+                self.tab_mut().schema_editor = None;
+                self.schema_pending = Some(dbcore::build_clone_table_sql(
+                    kind,
+                    table.schema.as_deref(),
+                    &table.name,
+                    &format!("{}_copy", table.name),
+                ));
+                self.error = None;
+            }
+            Action::TruncateTable(table) => {
+                let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
+                self.tab_mut().schema_editor = None;
+                self.schema_pending = Some(vec![dbcore::build_truncate_table_sql(
+                    kind,
+                    table.schema.as_deref(),
+                    &table.name,
+                )]);
+                self.error = None;
+            }
+            Action::DropTable(table) => {
+                let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
+                self.tab_mut().schema_editor = None;
+                self.schema_pending = Some(vec![dbcore::build_drop_table_sql(
+                    kind,
+                    table.schema.as_deref(),
+                    &table.name,
+                )]);
+                self.error = None;
             }
             Action::GenerateSchema => {
                 let Some(editor) = &self.tab().schema_editor else {
