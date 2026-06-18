@@ -175,6 +175,12 @@ impl DbGuiApp {
                     bar_rect,
                     egui::Layout::right_to_left(egui::Align::Center),
                     |ui| {
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            title_bar::window_controls(ui);
+                            title_bar::linux_group_separator(ui);
+                        }
+                        #[cfg(target_os = "macos")]
                         ui.add_space(6.0);
                         self.update_title_bar_button(ui, actions);
                         if super::widgets::toolbar_icon_button(ui, icons::settings(), "Settings")
@@ -182,6 +188,8 @@ impl DbGuiApp {
                         {
                             actions.push(Action::OpenSettings);
                         }
+                        #[cfg(not(target_os = "macos"))]
+                        title_bar::linux_group_separator(ui);
                         if super::widgets::toolbar_icon_button(ui, icons::code(), "Query history")
                             .clicked()
                         {
@@ -197,6 +205,8 @@ impl DbGuiApp {
                         {
                             actions.push(Action::ToggleErd);
                         }
+                        #[cfg(not(target_os = "macos"))]
+                        title_bar::linux_group_separator(ui);
                         if super::widgets::layout_toggle(
                             ui,
                             self.show_details_panel,

@@ -132,6 +132,19 @@ cargo run --bin plusplus    # build & launch the GUI (dev)
 cargo test --workspace      # data-layer and headless UI tests
 ```
 
+### Linux build / smoke run
+
+Ubuntu, Debian, Fedora, Arch, and openSUSE can use the Linux helper script:
+
+```bash
+scripts/linux-build.sh --install-deps --install-rust --release --smoke
+scripts/linux-build.sh --release --run
+```
+
+`--smoke` starts the GUI under Xvfb and treats a timeout as success, because a healthy
+GUI process keeps running until a user closes it. CI runs this path on Ubuntu, Debian,
+and Fedora in `.github/workflows/linux.yml`.
+
 A sample SQLite database ships at `examples/sample.sqlite` — add it as a SQLite
 connection to try the app without a server. It's a small Thai e-commerce shop: six
 linked tables (categories ⟲, customers, addresses, products, orders, order_items) with

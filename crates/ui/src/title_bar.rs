@@ -11,6 +11,10 @@ const MAC_TRAFFIC_LIGHTS_INSET: f32 = 78.0;
 
 /// Horizontal breathing room between the side clusters and the centre breadcrumb.
 const CLUSTER_GAP: f32 = 8.0;
+#[cfg(not(target_os = "macos"))]
+const LINUX_WINDOW_BUTTON_SIZE: egui::Vec2 = egui::vec2(26.0, 22.0);
+#[cfg(not(target_os = "macos"))]
+const LINUX_TITLE_GAP: f32 = 4.0;
 
 /// Left inset to clear native macOS traffic lights when drawing into the titlebar space.
 pub fn traffic_lights_inset(ctx: &egui::Context, frame: Option<&eframe::Frame>) -> f32 {
@@ -124,3 +128,142 @@ pub fn breadcrumb(ui: &mut Ui, text: &str, fill: Option<Color32>) -> egui::Respo
     response.on_hover_text(text)
 }
 
+#[cfg(not(target_os = "macos"))]
+#[derive(Clone, Copy)]
+enum WindowButton {
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
+}
+
+#[cfg(not(target_os = "macos"))]
+fn window_button(ui: &mut Ui, kind: WindowButton, hover: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(LINUX_WINDOW_BUTTON_SIZE, egui::Sense::click());
+    let danger = matches!(kind, WindowButton::Close);
+
+    let fill = if danger && resp.hovered() {
+        palette::DANGER()
+    } else if resp.hovered() {
+        palette::SURFACE_HOVER()
+    } else {
+        Color32::TRANSPARENT
+    };
+    let text_color = if danger && resp.hovered() {
+        Color32::WHITE
+    } else {
+        palette::TEXT_WEAK()
+    };
+
+    if ui.is_rect_visible(rect) {
+        ui.painter().rect(
+            rect,
+            CornerRadius::same(4),
+            fill,
+            Stroke::NONE,
+            egui::StrokeKind::Outside,
+        );
+
+        let stroke = Stroke::new(1.4, text_color);
+        let c = rect.center();
+        match kind {
+            WindowButton::Minimize => {
+                let y = c.y + 4.0;
+                ui.painter().line_segment(
+                    [egui::pos2(c.x - 4.5, y), egui::pos2(c.x + 4.5, y)],
+                    stroke,
+                );
+            }
+            WindowButton::Maximize => {
+                let r = Rect::from_center_size(c, egui::vec2(9.0, 8.0));
+                ui.painter()
+                    .rect_stroke(r, CornerRadius::same(1), stroke, egui::StrokeKind::Inside);
+            }
+            WindowButton::Restore => {
+                let back = Rect::from_center_size(c + egui::vec2(2.0, -2.0), egui::vec2(8.0, 7.0));
+                let front =
+                    Rect::from_center_size(c + egui::vec2(-1.5, 1.5), egui::vec2(8.0, 7.0));
+                ui.painter().rect_stroke(
+                    back,
+                    CornerRadius::same(1),
+                    stroke,
+                    egui::StrokeKind::Inside,
+                );
+                ui.painter().rect_filled(
+                    front.expand(1.0),
+                    CornerRadius::ZERO,
+                    if resp.hovered() {
+                        fill
+                    } else {
+                        palette::PANEL()
+                    },
+                );
+                ui.painter().rect_stroke(
+                    front,
+                    CornerRadius::same(1),
+                    stroke,
+                    egui::StrokeKind::Inside,
+                );
+            }
+            WindowButton::Close => {
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(c.x - 4.0, c.y - 4.0),
+                        egui::pos2(c.x + 4.0, c.y + 4.0),
+                    ],
+                    stroke,
+                );
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(c.x + 4.0, c.y - 4.0),
+                        egui::pos2(c.x - 4.0, c.y + 4.0),
+                    ],
+                    stroke,
+                );
+            }
+        }
+    }
+
+    ui.add_space(LINUX_TITLE_GAP);
+    resp.on_hover_text(hover)
+}
+
+/// Hairline separator between Linux title-bar groups. Kept here so macOS chrome is untouched.
+#[cfg(not(target_os = "macos"))]
+pub fn linux_group_separator(ui: &mut Ui) {
+    ui.add_space(2.0);
+    let h = 14.0;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(9.0, h), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.painter().vline(
+            rect.center().x,
+            rect.top()..=rect.bottom(),
+            Stroke::new(1.0, palette::BORDER()),
+        );
+    }
+    ui.add_space(2.0);
+}
+
+/// Window controls for undecorated Linux/Windows windows.
+#[cfg(not(target_os = "macos"))]
+pub fn window_controls(ui: &mut Ui) {
+    if window_button(ui, WindowButton::Close, "Close").clicked() {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    let maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
+    let max_kind = if maximized {
+        WindowButton::Restore
+    } else {
+        WindowButton::Maximize
+    };
+    let max_hover = if maximized { "Restore" } else { "Maximize" };
+    if window_button(ui, max_kind, max_hover).clicked() {
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+    }
+
+    if window_button(ui, WindowButton::Minimize, "Minimize").clicked() {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+    }
+}

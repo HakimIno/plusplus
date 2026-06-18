@@ -119,6 +119,13 @@ fn main() -> eframe::Result<()> {
             .with_movable_by_background(false);
     }
 
+    #[cfg(not(target_os = "macos"))]
+    {
+        viewport = viewport
+            .with_decorations(false)
+            .with_movable_by_background(false);
+    }
+
     let native_options = eframe::NativeOptions {
         viewport,
         ..Default::default()

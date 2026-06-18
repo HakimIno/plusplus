@@ -27,3 +27,5 @@ examples/*.sqlite-shm
 
 # Debug symbols
 *.pdb
+
+*desktop
