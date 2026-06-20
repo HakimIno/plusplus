@@ -244,6 +244,37 @@ impl Database for MySqlDb {
         }
     }
 
+    async fn export_query(
+        &self,
+        sql: &str,
+        sink: &mut (dyn crate::export::RowSink + Send),
+    ) -> Result<u64> {
+        use futures_util::TryStreamExt;
+        // Stream straight into the sink: rows are written to the file one at a time and never
+        // collected, so the whole (possibly huge) table never sits in memory.
+        let mut stream = sqlx::query(AssertSqlSafe(sql.to_string())).fetch(&self.pool);
+        let mut types: Vec<String> = Vec::new();
+        let mut began = false;
+        let mut count = 0u64;
+        while let Some(row) = stream.try_next().await? {
+            if !began {
+                let columns = column_meta(&row);
+                types = columns
+                    .iter()
+                    .map(|c| c.type_name.to_ascii_uppercase())
+                    .collect();
+                sink.begin(&columns)?;
+                began = true;
+            }
+            let values: Vec<Value> =
+                (0..types.len()).map(|i| decode(&row, i, &types[i])).collect();
+            sink.write_row(&values)?;
+            count += 1;
+        }
+        sink.finish()?;
+        Ok(count)
+    }
+
     async fn execute_transaction(&self, stmts: &[String]) -> Result<usize> {
         if stmts.is_empty() {
             return Ok(0);

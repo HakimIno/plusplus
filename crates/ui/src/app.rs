@@ -73,6 +73,11 @@ enum AppMessage {
         elapsed_ms: f64,
         result: Result<String, String>,
     },
+    /// A per-table export finished. `Ok` carries the file path and the number of rows written.
+    Exported {
+        table: String,
+        result: Result<(std::path::PathBuf, u64), String>,
+    },
     /// Background GitHub Releases check finished.
     UpdateChecked {
         result: Result<Option<crate::update::UpdateOffer>, String>,
@@ -262,6 +267,20 @@ fn count_from_result(res: &QueryResult) -> Result<u64, String> {
         Some(dbcore::Value::Text(s)) => s.trim().parse::<u64>().map_err(|e| e.to_string()),
         _ => Err("count query returned no scalar".to_string()),
     }
+}
+
+/// Stream a whole table to `path` in `format`, returning the number of rows written. The file
+/// is wrapped in a `BufWriter` and the backend streams rows straight into the format sink, so
+/// the table never has to fit in memory. Runs on the background runtime.
+async fn stream_export(
+    db: &dyn Database,
+    sql: &str,
+    format: dbcore::ExportFormat,
+    path: &std::path::Path,
+) -> dbcore::Result<u64> {
+    let file = std::fs::File::create(path)?;
+    let mut sink = format.sink(std::io::BufWriter::new(file));
+    db.export_query(sql, &mut *sink).await
 }
 
 /// Human-readable status line for a completed result.
@@ -466,6 +485,12 @@ enum Action {
     Page(PageNav),
     /// Pager: switch the page size, staying on the page that holds the current offset.
     SetPageSize(u64),
+    /// Export an entire table (every row, streamed server-side) to a file in the chosen
+    /// format, after picking a path from a save dialog. Triggered from the sidebar.
+    ExportTable {
+        table: TableInfo,
+        format: dbcore::ExportFormat,
+    },
     /// Build staged edits into SQL and open the preview dialog.
     PreviewEdits,
     /// User confirmed the preview: execute the statements transactionally.
@@ -1405,6 +1430,23 @@ impl DbGuiApp {
                         tab.total_rows = Some(n);
                     }
                 }
+                AppMessage::Exported { table, result } => match result {
+                    Ok((path, rows)) => {
+                        let file = path
+                            .file_name()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+                        self.status_msg = format!(
+                            "Exported {rows} row{} from {table} to {file}",
+                            if rows == 1 { "" } else { "s" }
+                        );
+                        self.error = None;
+                    }
+                    Err(e) => {
+                        self.error = Some(format!("Export of {table} failed: {e}"));
+                        self.status_msg = "Export failed".to_string();
+                    }
+                },
                 AppMessage::Committed {
                     tab_id,
                     conn_id,
@@ -1770,6 +1812,44 @@ impl DbGuiApp {
         }
         let offset = (win.offset / size) * size;
         self.run_page(size, offset);
+    }
+
+    /// Export a whole table to a file. Streams every row server-side (no row cap, never
+    /// materialized) straight into the chosen format, on the background runtime. Opens a save
+    /// dialog seeded with the table name first; a cancelled dialog is a no-op.
+    fn export_table(&mut self, table: &TableInfo, format: dbcore::ExportFormat) {
+        let Some(active) = self.active() else {
+            self.error = Some("Connect to a database to export a table.".into());
+            return;
+        };
+        let db = active.db.clone();
+        let kind = db.kind();
+        // SELECT * over the whole table — no LIMIT, so the stream covers every row.
+        let sql = format!("SELECT * FROM {}", table.qualified(kind));
+        let table_name = table.name.clone();
+
+        let default_name = format!("{}.{}", table_name, format.extension());
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(&default_name)
+            .add_filter(format.label(), &[format.extension()])
+            .save_file()
+        else {
+            return;
+        };
+
+        let tx = self.tx.clone();
+        self.status_msg = format!("Exporting {table_name}…");
+        self.error = None;
+        self.rt.spawn(async move {
+            let result = stream_export(db.as_ref(), &sql, format, &path)
+                .await
+                .map(|rows| (path, rows))
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AppMessage::Exported {
+                table: table_name,
+                result,
+            });
+        });
     }
 
     /// Work out whether the tab's SQL still reads one whole table, and if so build the
@@ -2250,6 +2330,7 @@ impl DbGuiApp {
             Action::SortBy(col) => self.tab_mut().apply_sort(col),
             Action::Page(nav) => self.page_nav(nav),
             Action::SetPageSize(n) => self.set_page_size(n),
+            Action::ExportTable { table, format } => self.export_table(&table, format),
             Action::PreviewEdits => self.commit_edits(),
             Action::ConfirmEdits => self.confirm_edits(),
             Action::CancelEdits => {
@@ -2715,6 +2796,14 @@ mod tests {
         }
         async fn execute_transaction(&self, _stmts: &[String]) -> dbcore::Result<usize> {
             unreachable!()
+        }
+        async fn export_query(
+            &self,
+            _sql: &str,
+            sink: &mut (dyn dbcore::RowSink + Send),
+        ) -> dbcore::Result<u64> {
+            sink.finish()?;
+            Ok(0)
         }
     }
 

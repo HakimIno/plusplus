@@ -379,6 +379,51 @@ impl Database for MsSqlDb {
         }
     }
 
+    async fn export_query(
+        &self,
+        sql: &str,
+        sink: &mut (dyn crate::export::RowSink + Send),
+    ) -> Result<u64> {
+        use futures_util::TryStreamExt;
+        use tiberius::QueryItem;
+        // Stream straight into the sink: rows are written one at a time and never collected,
+        // so the whole (possibly huge) table never sits in memory. As in execute_capped, only
+        // the first result set is exported; the stream is still drained fully because TDS
+        // can't be abandoned mid-result without poisoning the pooled connection.
+        let mut conn = self.pool.get().await.map_err(map_pool_err)?;
+        let mut stream = conn.simple_query(sql.to_string()).await?;
+        let mut result_sets = 0usize;
+        let mut count = 0u64;
+        while let Some(item) = stream.try_next().await? {
+            match item {
+                QueryItem::Metadata(meta) => {
+                    result_sets += 1;
+                    if result_sets == 1 {
+                        let columns: Vec<ColumnMeta> = meta
+                            .columns()
+                            .iter()
+                            .map(|c| ColumnMeta {
+                                name: c.name().to_string(),
+                                type_name: format!("{:?}", c.column_type()),
+                            })
+                            .collect();
+                        sink.begin(&columns)?;
+                    }
+                }
+                QueryItem::Row(row) => {
+                    if result_sets > 1 {
+                        continue;
+                    }
+                    let values: Vec<Value> = row.into_iter().map(|c| decode(&c)).collect();
+                    sink.write_row(&values)?;
+                    count += 1;
+                }
+            }
+        }
+        sink.finish()?;
+        Ok(count)
+    }
+
     async fn execute_transaction(&self, stmts: &[String]) -> Result<usize> {
         if stmts.is_empty() {
             return Ok(0);

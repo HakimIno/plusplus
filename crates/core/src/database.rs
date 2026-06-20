@@ -4,6 +4,7 @@
 use async_trait::async_trait;
 
 use crate::error::Result;
+use crate::export::RowSink;
 use crate::model::{DbKind, QueryResult, SchemaTree};
 
 /// A live connection to a database backend.
@@ -36,6 +37,13 @@ pub trait Database: Send + Sync {
     /// statement commits, or the first failure rolls back all preceding ones. Returns
     /// the number of statements on success.
     async fn execute_transaction(&self, stmts: &[String]) -> Result<usize>;
+
+    /// Stream every row of a row-returning `sql` straight into `sink`, returning the number
+    /// of rows written. Unlike [`Database::execute_capped`], there is *no* row cap and rows
+    /// are never collected into memory — the backend pulls one row off the wire, hands it to
+    /// the sink (which writes it to a file), and moves on. This is what backs per-table
+    /// export of arbitrarily large tables.
+    async fn export_query(&self, sql: &str, sink: &mut (dyn RowSink + Send)) -> Result<u64>;
 
     /// Return all databases visible from this connection. Used to populate the
     /// "Switch database" submenu on the connection icon. Returns an empty vec for

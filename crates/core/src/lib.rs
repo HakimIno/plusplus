@@ -12,6 +12,7 @@ pub mod backends;
 pub mod config;
 pub mod database;
 pub mod error;
+pub mod export;
 pub mod history;
 pub mod model;
 pub mod safety;
@@ -23,6 +24,7 @@ use std::sync::Arc;
 
 pub use database::Database;
 pub use error::{CoreError, Result};
+pub use export::{ExportFormat, RowSink};
 pub use model::{
     build_add_column_sql, build_add_fk_sql, build_alter_column_sql, build_count_sql,
     build_create_index_sql,
@@ -105,6 +107,13 @@ impl Database for Tunneled {
     }
     async fn execute_transaction(&self, stmts: &[String]) -> Result<usize> {
         self.inner.execute_transaction(stmts).await
+    }
+    async fn export_query(
+        &self,
+        sql: &str,
+        sink: &mut (dyn export::RowSink + Send),
+    ) -> Result<u64> {
+        self.inner.export_query(sql, sink).await
     }
     async fn list_databases(&self) -> Result<Vec<String>> {
         self.inner.list_databases().await

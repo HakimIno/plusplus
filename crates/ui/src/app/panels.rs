@@ -1441,6 +1441,25 @@ impl DbGuiApp {
                     actions.push(Action::CloneTable(table.clone()));
                     ui.close();
                 }
+                let export_label = egui::Image::new(icons::save())
+                    .fit_to_exact_size(egui::vec2(icons::SIZE, icons::SIZE))
+                    .tint(ui.visuals().widgets.inactive.fg_stroke.color);
+                ui.menu_button((export_label, "Export Table…"), |ui| {
+                    ui.set_min_width(160.0);
+                    for fmt in [dbcore::ExportFormat::Csv, dbcore::ExportFormat::Json] {
+                        if ui
+                            .button(format!("Export as {}…", fmt.label()))
+                            .on_hover_text("Stream every row of this table to a file")
+                            .clicked()
+                        {
+                            actions.push(Action::ExportTable {
+                                table: table.clone(),
+                                format: fmt,
+                            });
+                            ui.close();
+                        }
+                    }
+                });
                 ui.separator();
                 if icons::button(ui, icons::warning(), "Truncate Table…", true)
                     .on_hover_text("Remove all rows but keep the table")

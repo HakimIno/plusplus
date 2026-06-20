@@ -121,6 +121,33 @@ impl Database for SqliteDb {
         }
     }
 
+    async fn export_query(
+        &self,
+        sql: &str,
+        sink: &mut (dyn crate::export::RowSink + Send),
+    ) -> Result<u64> {
+        use futures_util::TryStreamExt;
+        // Stream straight into the sink: rows are written to the file one at a time and never
+        // collected, so the whole (possibly huge) table never sits in memory.
+        let mut stream = sqlx::query(AssertSqlSafe(sql.to_string())).fetch(&self.pool);
+        let mut ncols = 0usize;
+        let mut began = false;
+        let mut count = 0u64;
+        while let Some(row) = stream.try_next().await? {
+            if !began {
+                let columns = column_meta(&row);
+                ncols = columns.len();
+                sink.begin(&columns)?;
+                began = true;
+            }
+            let values: Vec<Value> = (0..ncols).map(|i| decode(&row, i)).collect();
+            sink.write_row(&values)?;
+            count += 1;
+        }
+        sink.finish()?;
+        Ok(count)
+    }
+
     async fn execute_transaction(&self, stmts: &[String]) -> Result<usize> {
         if stmts.is_empty() {
             return Ok(0);

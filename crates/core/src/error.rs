@@ -26,6 +26,10 @@ pub enum CoreError {
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
 
+    /// Writing an export to disk (or any other filesystem I/O) failed.
+    #[error("i/o error: {0}")]
+    Io(#[from] std::io::Error),
+
     /// Reading/writing a secret to the OS keychain failed.
     #[error("keychain error: {0}")]
     Keyring(String),
