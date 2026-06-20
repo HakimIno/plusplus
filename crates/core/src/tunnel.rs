@@ -3,26 +3,125 @@
 //! every TCP connection made to it through a `direct-tcpip` channel to the real database
 //! host. The backend driver then simply connects to `127.0.0.1:{local_port}`.
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use tokio::net::TcpListener;
 
 use crate::error::{CoreError, Result};
 use crate::model::ConnectionConfig;
 
-/// Accepts whatever host key the bastion presents, like the DB backends' non-verify SSL
-/// modes. Checking against `known_hosts` is a possible follow-up; the tunnel's purpose
-/// here is reachability and the DB connection inside it carries its own TLS policy.
-struct AcceptingHandler;
+/// The user's standard OpenSSH known_hosts (`~/.ssh/known_hosts`), if a home directory is
+/// resolvable. Read-only — verified against, never modified — so a bastion the user already
+/// trusts via the `ssh` CLI is honoured here too.
+fn user_known_hosts() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    Some(PathBuf::from(home).join(".ssh").join("known_hosts"))
+}
 
-impl russh::client::Handler for AcceptingHandler {
+/// plusplus's own known_hosts (`<config-dir>/known_hosts`). New bastion host keys are
+/// recorded here on first use, so we never touch the user's `~/.ssh/known_hosts`.
+fn plusplus_known_hosts() -> Result<PathBuf> {
+    Ok(crate::config::config_dir()?.join("known_hosts"))
+}
+
+/// The result of checking a presented host key against the known_hosts files.
+enum HostKeyCheck {
+    /// The key matches a recorded entry — trust it.
+    Match,
+    /// No entry exists for this host yet — first contact.
+    Unknown,
+    /// An entry exists for this host but the key differs — refuse (the message names the
+    /// offending file/line so the user can act).
+    Mismatch(String),
+}
+
+/// Check `pubkey` against each known_hosts file in `paths`, in order. A matching entry wins;
+/// a *conflicting* entry (same host, different key) fails closed as a possible MITM; if no
+/// file knows the host at all, it's [`HostKeyCheck::Unknown`].
+fn check_host_key(
+    host: &str,
+    port: u16,
+    pubkey: &russh::keys::PublicKey,
+    paths: &[PathBuf],
+) -> HostKeyCheck {
+    for path in paths {
+        match russh::keys::check_known_hosts_path(host, port, pubkey, path) {
+            Ok(true) => return HostKeyCheck::Match,
+            Ok(false) => continue, // this file doesn't know the host; try the next
+            Err(russh::keys::Error::KeyChanged { line }) => {
+                return HostKeyCheck::Mismatch(format!(
+                    "the SSH bastion's host key does not match the key recorded in {} (line {line}). \
+                     This can mean a man-in-the-middle attack — or the host key was legitimately \
+                     rotated. If you trust the new key, remove that line and reconnect.",
+                    path.display()
+                ));
+            }
+            Err(e) => {
+                // Any other error means we couldn't establish trust — refuse rather than
+                // fall through to "accept".
+                return HostKeyCheck::Mismatch(format!(
+                    "could not verify the SSH bastion's host key against {}: {e}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    HostKeyCheck::Unknown
+}
+
+/// Verifies the bastion's host key against known_hosts (trust-on-first-use). A key that
+/// matches is accepted; a *changed* key is refused as a possible MITM; an unseen host is
+/// recorded and then trusted, mirroring OpenSSH's `StrictHostKeyChecking=accept-new`.
+struct VerifyingHandler {
+    host: String,
+    port: u16,
+    /// known_hosts files to verify against, in order (user's first, then plusplus-managed).
+    known_hosts: Vec<PathBuf>,
+    /// File an unseen host key is recorded into (the plusplus-managed known_hosts).
+    learn_path: PathBuf,
+    /// Set to a precise reason when a key is refused, so [`SshTunnel::open`] can surface it
+    /// instead of the generic disconnect russh reports for a rejected key.
+    rejection: Arc<Mutex<Option<String>>>,
+}
+
+impl VerifyingHandler {
+    /// Record `reason` for the caller and reject the key (`Ok(false)` tells russh to refuse).
+    fn reject(&self, reason: String) -> std::result::Result<bool, russh::Error> {
+        if let Ok(mut slot) = self.rejection.lock() {
+            *slot = Some(reason);
+        }
+        Ok(false)
+    }
+}
+
+impl russh::client::Handler for VerifyingHandler {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::PublicKey,
+        server_public_key: &russh::keys::PublicKey,
     ) -> std::result::Result<bool, Self::Error> {
-        Ok(true)
+        match check_host_key(&self.host, self.port, server_public_key, &self.known_hosts) {
+            HostKeyCheck::Match => Ok(true),
+            HostKeyCheck::Unknown => {
+                // Trust on first use: record the key so a *later* change is caught as a
+                // mismatch. If we can't persist it, refuse rather than trust unverifiably.
+                match russh::keys::known_hosts::learn_known_hosts_path(
+                    &self.host,
+                    self.port,
+                    server_public_key,
+                    &self.learn_path,
+                ) {
+                    Ok(()) => Ok(true),
+                    Err(e) => self.reject(format!(
+                        "could not record the SSH bastion's host key in {}: {e}",
+                        self.learn_path.display()
+                    )),
+                }
+            }
+            HostKeyCheck::Mismatch(reason) => self.reject(reason),
+        }
     }
 }
 
@@ -51,6 +150,26 @@ impl SshTunnel {
     /// passphrase when `ssh_key_path` is set (empty/None for an unencrypted key), the
     /// SSH password otherwise.
     pub async fn open(cfg: &ConnectionConfig, secret: Option<&str>) -> Result<Self> {
+        // Verify the bastion's host key against the user's ~/.ssh/known_hosts and a
+        // plusplus-managed known_hosts, recording an unseen host on first use (TOFU).
+        let mut known_hosts = Vec::new();
+        if let Some(user) = user_known_hosts() {
+            known_hosts.push(user);
+        }
+        let learn_path = plusplus_known_hosts()?;
+        known_hosts.push(learn_path.clone());
+        Self::open_verified(cfg, secret, known_hosts, learn_path).await
+    }
+
+    /// Like [`SshTunnel::open`], but with explicit known_hosts files (verified in order) and
+    /// the file an unseen host key is recorded into. Lets tests point at a temp known_hosts
+    /// instead of the user's real one.
+    async fn open_verified(
+        cfg: &ConnectionConfig,
+        secret: Option<&str>,
+        known_hosts: Vec<PathBuf>,
+        learn_path: PathBuf,
+    ) -> Result<Self> {
         if cfg.ssh_host.trim().is_empty() || cfg.ssh_user.trim().is_empty() {
             return Err(CoreError::InvalidConfig(
                 "SSH tunnel needs a host and a user".into(),
@@ -58,13 +177,31 @@ impl SshTunnel {
         }
 
         let config = Arc::new(russh::client::Config::default());
-        let mut session = russh::client::connect(
+        let rejection = Arc::new(Mutex::new(None));
+        let handler = VerifyingHandler {
+            host: cfg.ssh_host.trim().to_string(),
+            port: cfg.ssh_port,
+            known_hosts,
+            learn_path,
+            rejection: rejection.clone(),
+        };
+        let mut session = match russh::client::connect(
             config,
             (cfg.ssh_host.trim().to_string(), cfg.ssh_port),
-            AcceptingHandler,
+            handler,
         )
         .await
-        .map_err(ssh_err)?;
+        {
+            Ok(session) => session,
+            Err(e) => {
+                // Prefer the precise host-key reason the handler recorded, if any: russh
+                // collapses a rejected key into a generic disconnect otherwise.
+                if let Some(reason) = rejection.lock().ok().and_then(|mut r| r.take()) {
+                    return Err(CoreError::Ssh(reason));
+                }
+                return Err(ssh_err(e));
+            }
+        };
 
         let user = cfg.ssh_user.trim().to_string();
         let key_path = cfg.ssh_key_path.trim();
@@ -145,6 +282,35 @@ mod tests {
     use russh::Channel;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
+
+    /// A throwaway known_hosts path under the temp dir, unique per call, so host-key
+    /// verification in tests never reads or writes the user's real `~/.ssh/known_hosts`.
+    fn temp_known_hosts() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "plusplus-knownhosts-test-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    /// A deterministic Ed25519 public key from a one-byte seed. Seed 7 matches the host key
+    /// [`spawn_bastion`] presents; any other seed stands in for a different (rogue) key.
+    fn host_pubkey(seed: u8) -> russh::keys::PublicKey {
+        use russh::keys::ssh_key::private::{Ed25519Keypair, KeypairData};
+        let mut pk = russh::keys::PrivateKey::new(
+            KeypairData::Ed25519(Ed25519Keypair::from_seed(&[seed; 32])),
+            "test",
+        )
+        .unwrap()
+        .public_key()
+        .clone();
+        // Keys presented over the wire and parsed back from known_hosts carry no comment;
+        // clear it so equality compares key material only (as it does in real use).
+        pk.set_comment("");
+        pk
+    }
 
     /// A miniature in-process bastion: password auth (`user` / `hunter2`) and real
     /// direct-tcpip forwarding, the two things [`SshTunnel`] relies on from an sshd.
@@ -251,7 +417,9 @@ mod tests {
         let ssh_port = spawn_bastion().await;
         let cfg = tunnel_cfg(echo_port, ssh_port);
 
-        let tunnel = SshTunnel::open(&cfg, Some("hunter2"))
+        // Unknown bastion → trust-on-first-use records its key into the temp known_hosts.
+        let kh = temp_known_hosts();
+        let tunnel = SshTunnel::open_verified(&cfg, Some("hunter2"), vec![kh.clone()], kh.clone())
             .await
             .expect("tunnel should open");
 
@@ -266,6 +434,7 @@ mod tests {
             conn.read_exact(&mut buf).await.unwrap();
             assert_eq!(buf, msg.as_bytes());
         }
+        let _ = std::fs::remove_file(&kh);
     }
 
     #[tokio::test]
@@ -274,12 +443,73 @@ mod tests {
         let ssh_port = spawn_bastion().await;
         let cfg = tunnel_cfg(echo_port, ssh_port);
 
-        let err = SshTunnel::open(&cfg, Some("wrong-password")).await;
+        let kh = temp_known_hosts();
+        let err =
+            SshTunnel::open_verified(&cfg, Some("wrong-password"), vec![kh.clone()], kh.clone())
+                .await;
         assert!(matches!(err, Err(CoreError::Ssh(_))), "bad password must fail");
 
         let mut blank = cfg.clone();
         blank.ssh_host.clear();
-        let err = SshTunnel::open(&blank, Some("hunter2")).await;
+        let err =
+            SshTunnel::open_verified(&blank, Some("hunter2"), vec![kh.clone()], kh.clone()).await;
         assert!(matches!(err, Err(CoreError::InvalidConfig(_))));
+        let _ = std::fs::remove_file(&kh);
+    }
+
+    /// A bastion whose presented host key conflicts with the one already recorded must be
+    /// refused as a possible man-in-the-middle, before authentication is even attempted.
+    #[tokio::test]
+    async fn tunnel_rejects_changed_host_key() {
+        let echo_port = spawn_echo().await;
+        let ssh_port = spawn_bastion().await;
+        let cfg = tunnel_cfg(echo_port, ssh_port);
+
+        // Pre-record a *different* key for this bastion's host:port (a rogue/changed key).
+        let kh = temp_known_hosts();
+        russh::keys::known_hosts::learn_known_hosts_path("127.0.0.1", ssh_port, &host_pubkey(9), &kh)
+            .unwrap();
+
+        let opened =
+            SshTunnel::open_verified(&cfg, Some("hunter2"), vec![kh.clone()], kh.clone()).await;
+        let reason = opened.as_ref().err().map(|e| e.to_string());
+        assert!(
+            matches!(&opened, Err(CoreError::Ssh(msg)) if msg.contains("does not match")),
+            "a changed host key must be refused, got {reason:?}"
+        );
+        let _ = std::fs::remove_file(&kh);
+    }
+
+    /// The known_hosts decision logic: unseen → Unknown, recorded same key → Match,
+    /// recorded different key → Mismatch, different host → Unknown. No network needed.
+    #[test]
+    fn check_host_key_classifies_against_known_hosts() {
+        let kh = temp_known_hosts();
+        let paths = [kh.clone()];
+
+        // A missing/empty known_hosts knows no host.
+        assert!(matches!(
+            check_host_key("bastion.example", 2222, &host_pubkey(7), &paths),
+            HostKeyCheck::Unknown
+        ));
+
+        // Record the key; now the same key matches and a different one conflicts.
+        russh::keys::known_hosts::learn_known_hosts_path("bastion.example", 2222, &host_pubkey(7), &kh)
+            .unwrap();
+        assert!(matches!(
+            check_host_key("bastion.example", 2222, &host_pubkey(7), &paths),
+            HostKeyCheck::Match
+        ));
+        assert!(matches!(
+            check_host_key("bastion.example", 2222, &host_pubkey(9), &paths),
+            HostKeyCheck::Mismatch(_)
+        ));
+
+        // A host we've never recorded is still Unknown, even with a key on file for another.
+        assert!(matches!(
+            check_host_key("other.example", 2222, &host_pubkey(7), &paths),
+            HostKeyCheck::Unknown
+        ));
+        let _ = std::fs::remove_file(&kh);
     }
 }

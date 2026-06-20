@@ -661,6 +661,25 @@ impl SslMode {
     pub fn verifies_certificate(self) -> bool {
         matches!(self, SslMode::VerifyCa | SslMode::VerifyFull)
     }
+
+    /// A short security caveat to show beneath the SSL picker, or `None` for the modes that
+    /// verify the server's identity (and so need no warning).
+    pub fn security_warning(self) -> Option<&'static str> {
+        match self {
+            SslMode::Disable => {
+                Some("Not encrypted — only use on your own machine or a fully trusted network.")
+            }
+            SslMode::Prefer => Some(
+                "Falls back to plaintext when the server has no TLS, and can be forced down to \
+                 plaintext by an attacker. Prefer Require or higher.",
+            ),
+            SslMode::Require => Some(
+                "Encrypted, but the server's certificate isn't verified — still open to a \
+                 man-in-the-middle. Use Verify Full for production.",
+            ),
+            SslMode::VerifyCa | SslMode::VerifyFull => None,
+        }
+    }
 }
 
 /// A saved connection. Secret fields (passwords) are **never** stored here — they live in
@@ -737,7 +756,11 @@ impl ConnectionConfig {
             port: kind.default_port(),
             user: String::new(),
             database: String::new(),
-            ssl_mode: SslMode::default(),
+            // New connections default to Require: encrypted, with no silent fallback to
+            // plaintext (which an attacker could force). Saved configs are left untouched —
+            // a file missing `ssl_mode` still deserializes to Prefer (see SslMode's Default),
+            // so upgrading the app never changes an existing connection's security.
+            ssl_mode: SslMode::Require,
             ssl_ca_cert: String::new(),
             ssl_client_cert: String::new(),
             ssl_client_key: String::new(),
@@ -1296,6 +1319,19 @@ mod tests {
 
     fn target(sql: &str) -> Option<(Option<String>, String)> {
         simple_select_target(sql)
+    }
+
+    /// New connections start at Require (encrypted, no plaintext fallback). The bare
+    /// `SslMode::default()` stays Prefer — that's the value an old, pre-TLS config file
+    /// deserializes to, and it must not change underneath existing connections.
+    #[test]
+    fn new_connection_defaults_to_require_but_default_stays_prefer() {
+        assert_eq!(ConnectionConfig::new(DbKind::Postgres).ssl_mode, SslMode::Require);
+        assert_eq!(SslMode::default(), SslMode::Prefer);
+        // Only the non-verifying modes carry a warning; the verifying ones don't.
+        assert!(SslMode::Prefer.security_warning().is_some());
+        assert!(SslMode::Require.security_warning().is_some());
+        assert!(SslMode::VerifyFull.security_warning().is_none());
     }
 
     #[test]

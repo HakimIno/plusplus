@@ -474,7 +474,10 @@ impl DbGuiApp {
                                 egui::RichText::new(err).size(11.0).color(palette::DANGER()),
                             );
                         } else {
-                            if self.busy != Busy::Idle {
+
+
+
+                            if self.busy == Busy::Querying {
                                 ui.add(style::spinner(11.0));
                                 ui.add_space(4.0);
                             }
@@ -1302,23 +1305,39 @@ impl DbGuiApp {
                 );
                 ui.add_space(4.0);
 
-                egui::ScrollArea::vertical()
-                    .id_salt("schema_scroll")
-                    .show(ui, |ui| {
-                        // Keep tree content within the panel — long names must not widen it.
-                        ui.set_width(ui.available_width());
-                        self.schema_tree(ui, actions);
+                if self.active().is_some() {
+                    egui::ScrollArea::vertical()
+                        .id_salt("schema_scroll")
+                        .show(ui, |ui| {
+                            // Keep tree content within the panel — long names must not widen it.
+                            ui.set_width(ui.available_width());
+                            self.schema_tree(ui, actions);
+                        });
+                } else {
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                        let avail = ui.available_height();
+                        ui.add_space(avail * 0.4);
+                        if self.busy == Busy::Connecting {
+                            ui.add(style::spinner(32.0));
+                            ui.add_space(16.0);
+                            ui.label(
+                                egui::RichText::new("Connecting...")
+                                    .color(palette::TEXT_WEAK())
+                                    .size(14.0),
+                            );
+                        } else {
+                            ui.label(
+                                egui::RichText::new("Connect to a database to browse its schema.")
+                                    .color(palette::TEXT_FAINT()),
+                            );
+                        }
                     });
+                }
             });
     }
 
     fn schema_tree(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let Some(active) = self.active() else {
-            ui.add_space(4.0);
-            ui.colored_label(
-                palette::TEXT_FAINT(),
-                "Connect to a database to browse its schema.",
-            );
             return;
         };
 
@@ -2545,6 +2564,18 @@ impl DbGuiApp {
                                 });
                             form_changed |= editor.config.ssl_mode != previous_ssl;
                             ui.end_row();
+
+                            // Flag the modes that don't verify the server's identity, so the
+                            // weaker choices read as a deliberate trade-off rather than a default.
+                            if let Some(warning) = editor.config.ssl_mode.security_warning() {
+                                ui.label("");
+                                ui.label(
+                                    egui::RichText::new(format!("⚠ {warning}"))
+                                        .size(11.0)
+                                        .color(palette::WARNING()),
+                                );
+                                ui.end_row();
+                            }
 
                             if editor.config.ssl_mode.verifies_certificate() {
                                 ui.label("CA certificate");
