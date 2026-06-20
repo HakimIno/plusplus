@@ -1641,8 +1641,13 @@ impl DbGuiApp {
             Some(result) if result.column_count() > 0 => {
                 let resp =
                     results_grid(ui, result, row_order, sort, *selected_row, edits, editable, tab_id);
-                if let Some(col) = resp.sort {
-                    actions.push(Action::SortBy(col));
+                if let Some(cmd) = resp.sort {
+                    actions.push(match cmd {
+                        crate::grid::SortCmd::Toggle(col) => Action::SortBy(col),
+                        crate::grid::SortCmd::Asc(col) => Action::SetSort { col, asc: true },
+                        crate::grid::SortCmd::Desc(col) => Action::SetSort { col, asc: false },
+                        crate::grid::SortCmd::Clear => Action::ClearSort,
+                    });
                 }
                 if let Some(row) = resp.selected {
                     *selected_row = Some(row);

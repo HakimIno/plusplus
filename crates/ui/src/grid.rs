@@ -12,17 +12,34 @@ use egui_extras::{Column, TableBuilder};
 /// below it — once the total exceeds the panel the grid scrolls horizontally instead.
 const COL_W: f32 = 160.0;
 
+/// Header row height. Used both by the `TableBuilder` header and by the empty-table
+/// double-click zone, which measures down from the header — they must agree.
+const HEADER_H: f32 = 26.0;
+
 /// Height of the double-click-to-add-row strip kept under the table when it's editable.
 /// The strip is *reserved* (the table is shrunk to sit above it), never overlaid: an
 /// overlay would be the topmost widget in egui's hit-test and would steal single and
 /// double clicks from any row rendered beneath it.
 const ADD_ROW_ZONE: f32 = 24.0;
 
+/// A sort request from a column header (click or the header menu).
+#[derive(Clone, Copy)]
+pub enum SortCmd {
+    /// Header clicked: sort by this column, flipping direction if it's already the sort.
+    Toggle(usize),
+    /// Menu: sort this column ascending.
+    Asc(usize),
+    /// Menu: sort this column descending.
+    Desc(usize),
+    /// Menu: drop the sort and return to the natural row order.
+    Clear,
+}
+
 /// What the grid reports back to the app after a frame.
 #[derive(Default)]
 pub struct GridResponse {
-    /// A header was clicked → (re)sort by this column index.
-    pub sort: Option<usize>,
+    /// A header sort request (click or menu).
+    pub sort: Option<SortCmd>,
     /// A row was clicked → select this *display* row index (index into `order`).
     pub selected: Option<usize>,
     /// A cell was double-clicked → start editing it (raw row index, column index).
@@ -164,7 +181,7 @@ fn build_grid(
     }
 
     builder
-        .header(24.0, |mut header| {
+        .header(HEADER_H, |mut header| {
             header.col(|ui| {
                 style::paint_table_header_cell(ui);
                 ui.add_space(4.0);
@@ -175,25 +192,7 @@ fn build_grid(
                 );
             });
             for (i, col) in result.columns.iter().enumerate() {
-                header.col(|ui| {
-                    style::paint_table_header_cell(ui);
-                    let (arrow, sorted) = match sort {
-                        Some((c, asc)) if c == i => (if asc { "  ↑" } else { "  ↓" }, true),
-                        _ => ("", false),
-                    };
-                    let mut text = egui::RichText::new(format!("{}{arrow}", col.name)).strong();
-                    text = text.color(if sorted {
-                        palette::ACCENT()
-                    } else {
-                        palette::TEXT()
-                    });
-                    let label = egui::Label::new(text)
-                        .sense(egui::Sense::click())
-                        .selectable(false);
-                    if ui.add(label).on_hover_text(&col.type_name).clicked() {
-                        out.sort = Some(i);
-                    }
-                });
+                header.col(|ui| header_cell(ui, i, col, sort, out));
             }
         })
         .body(|body| {
@@ -299,6 +298,121 @@ fn build_grid(
         });
 }
 
+/// One column header: the name (click to toggle sort), an accent underline + arrow when it's
+/// the active sort, and a `⌄` menu (also reachable by right-click) with explicit
+/// sort/clear/copy actions — TablePlus-style.
+fn header_cell(
+    ui: &mut egui::Ui,
+    i: usize,
+    col: &dbcore::ColumnMeta,
+    sort: Option<(usize, bool)>,
+    out: &mut GridResponse,
+) {
+    style::paint_table_header_cell(ui);
+    let sorted_dir = match sort {
+        Some((c, asc)) if c == i => Some(asc),
+        _ => None,
+    };
+    // Accent underline marks the active sort column (drawn over the default header border).
+    if sorted_dir.is_some() {
+        let rect = ui.max_rect();
+        ui.painter().hline(
+            rect.x_range(),
+            rect.bottom() - 1.0,
+            egui::Stroke::new(2.0, palette::ACCENT()),
+        );
+    }
+    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.add_space(6.0);
+        let arrow = match sorted_dir {
+            Some(true) => "  ↑",
+            Some(false) => "  ↓",
+            None => "",
+        };
+        let color = if sorted_dir.is_some() {
+            palette::ACCENT()
+        } else {
+            palette::TEXT()
+        };
+        let text = egui::RichText::new(format!("{}{arrow}", col.name))
+            .strong()
+            .color(color);
+        let name = ui
+            .add(
+                egui::Label::new(text)
+                    .sense(egui::Sense::click())
+                    .selectable(false),
+            )
+            .on_hover_text(format!(
+                "{}  ·  click to sort · right-click for options",
+                col.type_name
+            ));
+        if name.clicked() {
+            out.sort = Some(SortCmd::Toggle(i));
+        }
+        name.context_menu(|ui| header_menu(ui, i, col, sorted_dir.is_some(), out));
+
+        // A small frameless ⋮ icon pinned to the right edge opens the column menu — far
+        // lighter than a full button, and it reads as "more actions here".
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_space(4.0);
+            let dots = egui::Image::new(crate::icons::more_vert())
+                .fit_to_exact_size(egui::vec2(12.0, 12.0))
+                .tint(palette::TEXT_FAINT())
+                .sense(egui::Sense::click());
+            let menu = ui.add(dots).on_hover_text("Column options");
+            egui::Popup::menu(&menu)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| header_menu(ui, i, col, sorted_dir.is_some(), out));
+        });
+    });
+}
+
+/// The per-column header menu (shared by the `⌄` button and the right-click context menu).
+fn header_menu(
+    ui: &mut egui::Ui,
+    col: usize,
+    meta: &dbcore::ColumnMeta,
+    is_sorted: bool,
+    out: &mut GridResponse,
+) {
+    ui.set_min_width(190.0);
+    // Column identity at the top, so the menu doubles as a "what is this column" tooltip.
+    ui.label(egui::RichText::new(&meta.name).strong());
+    if !meta.type_name.is_empty() {
+        ui.label(
+            egui::RichText::new(&meta.type_name)
+                .color(palette::TEXT_FAINT())
+                .small(),
+        );
+    }
+    ui.separator();
+    if ui.button("Sort Ascending   ↑").clicked() {
+        out.sort = Some(SortCmd::Asc(col));
+        ui.close();
+    }
+    if ui.button("Sort Descending  ↓").clicked() {
+        out.sort = Some(SortCmd::Desc(col));
+        ui.close();
+    }
+    if ui
+        .add_enabled(is_sorted, egui::Button::new("Clear Sort"))
+        .clicked()
+    {
+        out.sort = Some(SortCmd::Clear);
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("Copy column name").clicked() {
+        ui.ctx().copy_text(meta.name.clone());
+        ui.close();
+    }
+    if ui.button("Copy column type").clicked() {
+        ui.ctx().copy_text(meta.type_name.clone());
+        ui.close();
+    }
+}
+
 /// Turn the blank space under the table rows into an invisible add-row target. The table
 /// itself stops [`ADD_ROW_ZONE`] above the panel bottom (see [`results_grid`]), so the zone
 /// never overlaps a row: it covers the reserved strip plus any empty space above it when
@@ -319,7 +433,7 @@ fn capture_empty_table_double_click(
     // TableBody::rows), so content_bottom must use the same stride or the zone would start
     // inside the last row's space when the table doesn't fill the panel.
     let row_step = row_height + ui.spacing().item_spacing.y;
-    let content_bottom = table_rect.top() + 24.0 + rendered_rows as f32 * row_step;
+    let content_bottom = table_rect.top() + HEADER_H + rendered_rows as f32 * row_step;
     let zone_top = content_bottom.min(table_rect.bottom() - ADD_ROW_ZONE);
     if zone_top >= table_rect.bottom() {
         return;

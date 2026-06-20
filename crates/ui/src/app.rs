@@ -234,6 +234,25 @@ impl QueryTab {
         self.recompute_view();
     }
 
+    /// Sort a column in an explicit direction (from the header menu, vs `apply_sort`'s toggle).
+    fn set_sort(&mut self, col: usize, ascending: bool) {
+        let Some(result) = &self.result else { return };
+        if col >= result.column_count() {
+            return;
+        }
+        self.sort = Some((col, ascending));
+        self.recompute_view();
+    }
+
+    /// Drop the sort and return to the result's natural row order.
+    fn clear_sort(&mut self) {
+        if self.sort.is_none() {
+            return;
+        }
+        self.sort = None;
+        self.recompute_view();
+    }
+
     /// Commit the cell currently being typed into the staged set. Returns `false` if its
     /// value is invalid (the editor stays open), so callers can refuse to proceed.
     fn flush_active_edit(&mut self) -> bool {
@@ -480,6 +499,10 @@ enum Action {
         pin: bool,
     },
     SortBy(usize),
+    /// Header menu: sort a column in an explicit direction (vs `SortBy`, which toggles).
+    SetSort { col: usize, asc: bool },
+    /// Header menu: drop the sort, back to natural row order.
+    ClearSort,
     /// Pager: jump to another page of a paged table tab. Rewrites the tab's LIMIT/OFFSET
     /// in place (the SQL editor always shows what runs) and re-runs the query.
     Page(PageNav),
@@ -2328,6 +2351,8 @@ impl DbGuiApp {
             Action::BeautifySql => self.beautify_sql(),
             Action::OpenTable { sql, source, pin } => self.open_table(sql, source, pin),
             Action::SortBy(col) => self.tab_mut().apply_sort(col),
+            Action::SetSort { col, asc } => self.tab_mut().set_sort(col, asc),
+            Action::ClearSort => self.tab_mut().clear_sort(),
             Action::Page(nav) => self.page_nav(nav),
             Action::SetPageSize(n) => self.set_page_size(n),
             Action::ExportTable { table, format } => self.export_table(&table, format),

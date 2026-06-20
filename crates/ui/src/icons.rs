@@ -42,6 +42,7 @@ icon_fns! {
     key        => "../assets/icons/key.svg",
     index      => "../assets/icons/index.svg",
     filter     => "../assets/icons/filter.svg",
+    more_vert  => "../assets/icons/more-vert.svg",
     search     => "../assets/icons/search.svg",
     warning    => "../assets/icons/warning.svg",
     close      => "../assets/icons/close.svg",
