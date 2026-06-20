@@ -23,8 +23,34 @@ jobs:
       - name: Build universal .app + .dmg
         run: scripts/release.sh --universal
 
+      # Sign every DMG with the project's minisign key so the in-app updater (which verifies
+      # the signature against the public key baked into the binary) will accept it. This is
+      # mandatory: a release with no signature is refused by clients, so fail loudly here if
+      # the signing secret is missing rather than shipping an un-updatable build.
+      - name: Sign DMGs (minisign)
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+            echo "::error::MINISIGN_SECRET_KEY secret is not set — releases must be signed. See docs/RELEASE_SIGNING.md"
+            exit 1
+          fi
+          brew install minisign
+          KEYFILE="$(mktemp)"
+          trap 'rm -f "${KEYFILE}"' EXIT
+          printf '%s\n' "${MINISIGN_SECRET_KEY}" > "${KEYFILE}"
+          for dmg in target/dist/plusplus-*.dmg; do
+            echo "→ signing ${dmg}"
+            printf '%s' "${MINISIGN_PASSWORD:-}" | minisign -S -s "${KEYFILE}" -m "${dmg}"
+          done
+          ls -l target/dist/plusplus-*.dmg.minisig
+
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: target/dist/plusplus-*.dmg
+          files: |
+            target/dist/plusplus-*.dmg
+            target/dist/plusplus-*.dmg.minisig
           generate_release_notes: true

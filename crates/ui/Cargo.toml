@@ -20,6 +20,8 @@ egui.workspace = true
 egui_extras.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
+# Verifies the minisign signature of a downloaded update before it is installed.
+minisign-verify.workspace = true
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true

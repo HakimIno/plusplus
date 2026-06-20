@@ -12,11 +12,27 @@ pub const GITHUB_REPO: &str = "HakimIno/plusplus";
 /// Workspace version baked in at compile time.
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Minisign public key (the **second**, non-comment line of a `minisign -G` public-key
+/// file) that genuine release DMGs are signed with. A downloaded update is installed only
+/// if its detached `.minisig` signature verifies against this key, which roots trust in a
+/// private key the maintainer holds offline rather than in GitHub: a tampered or
+/// substituted DMG — even on a compromised release or account — can't be signed and is
+/// refused.
+///
+/// **Empty = no key configured → every update is refused (fail closed).** To enable signed
+/// updates: run `minisign -G` once, paste the public key's second line here, store the
+/// secret key as the CI `MINISIGN_SECRET_KEY`/`MINISIGN_PASSWORD` secrets, and the release
+/// workflow will publish a `<dmg>.minisig` beside each DMG. See docs/RELEASE_SIGNING.md.
+pub const MINISIGN_PUBLIC_KEY: &str = "";
+
 /// A newer release found on GitHub.
 #[derive(Clone, Debug)]
 pub struct UpdateOffer {
     pub version: String,
     pub download_url: String,
+    /// URL of the DMG's detached minisign signature (`<dmg>.minisig`). Empty when the
+    /// release published no signature — such an update fails verification and is refused.
+    pub signature_url: String,
     pub notes: String,
 }
 
@@ -134,11 +150,49 @@ pub async fn check_for_update() -> Result<Option<UpdateOffer>, String> {
         })
         .ok_or_else(|| format!("release v{version} has no .dmg asset"))?;
 
+    // The detached signature is published as `<dmg-name>.minisig`. A missing one leaves
+    // `signature_url` empty; verification then refuses the update at download time rather
+    // than installing something unsigned.
+    let sig_name = format!("{}.minisig", dmg.name);
+    let signature_url = release
+        .assets
+        .iter()
+        .find(|a| a.name == sig_name)
+        .map(|a| a.browser_download_url.clone())
+        .unwrap_or_default();
+
     Ok(Some(UpdateOffer {
         version,
         download_url: dmg.browser_download_url.clone(),
+        signature_url,
         notes: release.body.unwrap_or_default(),
     }))
+}
+
+/// Verify `data` (the downloaded DMG bytes) against its detached minisign signature
+/// `minisig` (the full `.minisig` file contents) using the built-in [`MINISIGN_PUBLIC_KEY`].
+///
+/// Fails closed: an unconfigured key, a malformed signature, or a signature that doesn't
+/// match all return `Err`, so a caller that only installs on `Ok` can never run an
+/// unverified or tampered update.
+fn verify_signature(public_key_b64: &str, data: &[u8], minisig: &str) -> Result<(), String> {
+    use minisign_verify::{PublicKey, Signature};
+
+    let key = public_key_b64.trim();
+    if key.is_empty() {
+        return Err(
+            "update verification is not configured (no signing key built into this app) — \
+             refusing to install"
+                .into(),
+        );
+    }
+    let public_key = PublicKey::from_base64(key)
+        .map_err(|e| format!("invalid built-in update signing key: {e}"))?;
+    let signature =
+        Signature::decode(minisig).map_err(|e| format!("malformed update signature: {e}"))?;
+    public_key.verify(data, &signature, false).map_err(|_| {
+        "update signature does not match the expected signing key — refusing to install".into()
+    })
 }
 
 /// Stream a release DMG into the system temp directory, reporting byte progress.
@@ -196,11 +250,48 @@ pub async fn download_update(
         }
     }
 
+    // Verify the signature before the file is ever promoted to its final path, so a failed
+    // (or absent) signature leaves nothing installable behind. The DMG stays at `.partial`
+    // until it is proven authentic.
+    if let Err(e) = verify_download(&partial, &offer.signature_url, &client).await {
+        let _ = tokio::fs::remove_file(&partial).await;
+        return Err(e);
+    }
+
     tokio::fs::rename(&partial, &dest)
         .await
         .map_err(|e| format!("download failed: {e}"))?;
 
     Ok(dest)
+}
+
+/// Fetch the detached signature at `signature_url` and verify the file at `dmg_path`
+/// against it with the built-in key. A release that published no signature
+/// (`signature_url` empty) is rejected — an unsigned update is never installed.
+async fn verify_download(
+    dmg_path: &Path,
+    signature_url: &str,
+    client: &reqwest::Client,
+) -> Result<(), String> {
+    if signature_url.trim().is_empty() {
+        return Err(
+            "this release is not signed — refusing to install an unverified update".into(),
+        );
+    }
+    let minisig = client
+        .get(signature_url)
+        .send()
+        .await
+        .map_err(|e| format!("could not fetch update signature: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("could not fetch update signature: {e}"))?
+        .text()
+        .await
+        .map_err(|e| format!("could not read update signature: {e}"))?;
+    let bytes = tokio::fs::read(dmg_path)
+        .await
+        .map_err(|e| format!("could not re-read downloaded update: {e}"))?;
+    verify_signature(MINISIGN_PUBLIC_KEY, &bytes, &minisig)
 }
 
 /// Spawn a detached installer that waits for this process to exit, then replaces the app.
@@ -263,5 +354,25 @@ mod tests {
         assert!(!version_gt("0.1.0", "0.1.0"));
         assert!(!version_gt("0.1.0", "0.2.0"));
         assert!(version_gt("1.0.0", "0.9.9"));
+    }
+
+    // A real positive vector would require a minisign keypair + signature generated with the
+    // `minisign` CLI, which can't be produced in-tree; the end-to-end happy path is covered by
+    // the release workflow signing a DMG that the app then verifies. These tests pin the
+    // fail-closed behaviour, which is what protects users.
+
+    #[test]
+    fn verify_refuses_when_no_key_is_configured() {
+        // An empty built-in key must fail closed, never silently accept.
+        let err = verify_signature("", b"anything", "untrusted comment: x\n").unwrap_err();
+        assert!(err.contains("not configured"), "got: {err}");
+    }
+
+    #[test]
+    fn verify_rejects_unparseable_key_or_signature() {
+        // A malformed built-in key is refused rather than treated as "no signature needed".
+        assert!(verify_signature("not-a-valid-key", b"data", "untrusted comment: x\n").is_err());
+        // Likewise garbage signature text can't be decoded → refused.
+        assert!(verify_signature("not-a-valid-key", b"data", "not a signature at all").is_err());
     }
 }
