@@ -1,256 +1,140 @@
+<div align="center">
+
 # plusplus
 
-A native database GUI written entirely in Rust, in the spirit of TablePlus. One window
-for everything: browse a database's schema, run SQL, inspect and edit the results — fast,
-keyboard-friendly, and without ever blocking the UI on the network.
+### A blazingly fast, native database GUI — in the spirit of TablePlus, written in Rust.
 
-It speaks **PostgreSQL**, **MySQL / MariaDB**, **SQL Server**, and **SQLite** through one
-backend abstraction, so every feature works the same way against any of them.
+One window for everything: browse your schema, run SQL, and edit results — without ever
+waiting on the network.
 
-Thai text is a first-class citizen: a Thai-capable font (Noto Sans Thai) is embedded as a
-fallback everywhere, and all content is UTF-8 end to end.
+**PostgreSQL · MySQL / MariaDB · SQL Server · SQLite**
 
-## What it does
+<img src="docs/screenshots/hero.png" alt="plusplus main window" width="860">
 
-**Connections.** Saved connections live in a JSON config, while passwords go to the OS
-keychain — never to disk in plaintext. Server connections have a per-connection SSL mode
-(disable / prefer / require / verify-ca / verify-full) with an optional custom CA
-certificate, falling back to the system trust store, plus a client certificate and key
-for mutual TLS (PostgreSQL and MySQL/MariaDB). Live connections are pooled and shared,
-so several tabs can work against the same database at once.
+</div>
 
-A connection can be marked **production**: destructive statements (`UPDATE`, `DELETE`,
-`DROP`, `TRUNCATE`, `ALTER`) are then held in a confirmation dialog before they run —
-with an extra callout when an `UPDATE`/`DELETE` has no `WHERE` clause at all.
+---
 
-Server connections can also ride an **SSH tunnel**: the app authenticates to a bastion
-host (password or private key, with the secret in the OS keychain), forwards a loopback
-port through it, and the database driver connects through that — no exposed DB port
-needed. One bastion session multiplexes all of a connection's pooled channels, and it
-tears down with the connection.
+## Why it feels fast
 
-**Query history.** Every executed statement — queries, staged-edit commits, DDL — is
-appended to a local audit log (`history.jsonl` in the config dir) with its connection,
-time, duration, and outcome. A title-bar button toggles a right-hand history panel that
-updates live as queries run; entries can be copied or sent back into the editor, and the
-whole log can be cleared. Recording can be switched off in Settings, since SQL text can
-contain data values.
+plusplus is a single native binary — no Electron, no web view, no runtime to boot. It opens
+instantly and stays smooth no matter how big the data gets.
 
-**Schema browsing.** Connecting introspects the whole database into a sidebar tree:
-tables, columns (type, nullability, primary key), indexes, and foreign keys
-(`col → table(col)`, with the referential actions in the tooltip), filterable by name. A
-single click previews a table's rows; a double click opens it as a permanent tab.
+- ⚡ **The UI never blocks.** Every query, count, and export runs off the main thread. You
+  can keep scrolling, typing, and switching tabs while a million rows stream in.
+- 📜 **Grids that don't choke.** Results render in a virtualized grid that stays buttery
+  past **100k rows** — resize columns, sort, and filter without a hitch.
+- 🐘 **Million-row tables, one page at a time.** Huge tables are paged **server-side**, so
+  you browse `1–1,000 of 1,234,567` without dragging the whole table over the wire.
+- 🛟 **Never blows up your RAM.** Queries stream off the wire and stop at a safe cap, so an
+  accidental `SELECT * FROM huge` can't take the app down.
+- 🔌 **One interface, four databases.** Postgres, MySQL/MariaDB, SQL Server, and SQLite all
+  behave identically — same grid, same editing, same shortcuts.
 
-**ER diagram.** A title-bar button opens the connected database as an entity-relationship
-diagram: every table is a box (columns, with primary-key dots and foreign-key rings) and
-every foreign key a curve between them, laid out automatically by a force-directed pass.
-The canvas pans and zooms (`egui::Scene`), boxes drag freely, clicking a table highlights
-its relations, and Fit / Re-layout / Refresh re-frame, re-arrange, or re-snapshot the
-diagram. It tracks schema migrations live — applying DDL re-introspects and rebuilds the
-open diagram, keeping the positions of tables that survived.
+---
 
-**Query tabs.** Each tab is an independent SQL editor (with syntax highlighting) bound to
-its own connection, with its own result, sort, filter, and edit state. Table previews
-reuse one italic *preview* tab so casual browsing doesn't pile up tabs. The open tabs —
-their SQL, connection, and source table — persist across restarts.
+## What you can do
 
-**The grid.** Results render in a virtualized grid that stays smooth past 100k rows:
-resizable columns, click-to-sort headers, a TablePlus-style filter bar
-(column / operator / value conditions), and a details panel showing the selected row
-field by field.
+### Browse any database instantly
 
-**Big tables.** Million-row tables are browsed server-side, one page at a time. Table
-tabs get a pager in the status bar (first/prev/next/last plus a page size) that rewrites
-the query's `LIMIT/OFFSET` — or `TOP` / `OFFSET … FETCH` on SQL Server — in place, so the
-SQL editor always shows exactly what ran, and a background `COUNT(*)` supplies the
-"1–1,000 of 1,234,567" total. Hand-written WHERE / ORDER BY clauses survive page flips.
-As a safety net, every query streams rows off the wire and stops materializing at 100k
-rows (the result is marked as capped in the status line), so an accidental
-`SELECT * FROM huge` can't exhaust memory on any backend.
+Connect and the whole schema appears in a filterable sidebar — tables, columns, primary
+keys, indexes, and foreign keys. Single-click to preview rows, double-click to open a tab.
 
-**Editing.** When a result maps cleanly back to one table (any simple
-`SELECT * FROM t …`), cells become editable in place with type-aware editors. You can also
-add and remove whole rows: double-click the trailing **＋** strip to add a new row (tinted
-green), and select a row and press **Backspace/Delete** to mark it for deletion (tinted
-red). Edits are *staged* — not yet written — until **Cmd/Ctrl+S** turns them into primary-key
-`UPDATE`s, `INSERT`s (rejected if a new row's primary key is missing or duplicates an
-existing one), and `DELETE`s, then reloads the grid with what the database actually stored.
-Anything that can't be mapped back safely (joins, projections, aggregates) is read-only.
+<div align="center">
+<img src="docs/screenshots/grid.png" alt="Result grid with filter bar and pager" width="820">
+</div>
 
-**Data / Structure views.** A table tab can switch between its rows (*Data*) and the
-table's definition (*Structure*): columns with types, nullability, and keys, plus its
-indexes and foreign keys (with their ON DELETE / ON UPDATE actions) — straight from the
-introspected schema, no extra queries.
+### See how everything connects
 
-**Themes.** Three built-in color themes (Carbon, Midnight, Daylight), persisted across
-runs.
+One click opens your database as a live **ER diagram**: every table a box, every foreign key
+a curve, auto-arranged and fully pannable/zoomable. It even tracks schema changes live.
 
-Everything important has a shortcut: **Cmd/Ctrl+Enter** runs, **Cmd/Ctrl+S** saves staged
-edits, **Cmd/Ctrl+R** reloads the result (dropping unsaved edits), **Esc** discards unsaved
-edits, **Backspace/Delete** marks the selected row for deletion, **Cmd/Ctrl+T / W** opens
-and closes tabs, **Cmd/Ctrl+F** toggles the filter bar.
+<div align="center">
+<img src="docs/screenshots/erd.png" alt="ER diagram" width="820">
+</div>
 
-## How it's built
+### Edit data right in the grid
 
-A Cargo workspace separates the data layer from the GUI, so the interesting logic is
-unit-testable without opening a window:
+When a result maps back to a single table, cells become editable in place. Add rows, delete
+rows, tweak values — everything is **staged** and shown in colour until you hit save, so
+nothing touches the database until you mean it.
 
-```
-crates/
-  core/      # backend abstraction: connections, introspection, query execution
-  analysis/  # placeholder for Polars-based result analysis (stats, group-by, charts)
-  ui/        # egui views, widgets, app state
-  app/       # eframe entry point; embeds the Thai font, wires it all together
-```
+<div align="center">
+<img src="docs/screenshots/editing.png" alt="Inline editing with staged changes" width="820">
+</div>
 
-The design rests on a few ideas:
+### Export whole tables in seconds
 
-- **One trait, many backends.** `core::Database` (`kind` / `introspect` / `execute`) is
-  all the app knows about a database; each backend decodes its native types into a common
-  `Value` enum. Adding a backend means one module plus one match arm — the UI doesn't
-  change.
-- **The UI thread never waits.** Database work runs on a `tokio` runtime and reports back
-  over a channel that the UI drains each frame; a tab id routes every result to the tab
-  that asked for it, even if the user has moved on.
-- **Editing is safety-first.** Editability is *derived from the SQL itself* on every run,
-  values are validated against their column types before any statement is built, and
-  generated `UPDATE`s are keyed strictly by primary key.
-- The internal crate is imported as `dbcore` (not `core`) so it doesn't shadow Rust's
-  std `core`.
+Right-click any table → **Export Table** → **CSV** or **JSON**. The export streams
+server-side, straight to disk, with no row cap — so even multi-million-row tables export
+whole while the app stays responsive.
 
-Built on `eframe`/`egui` + `egui_extras` for the GUI, `sqlx` and `tiberius` for the
-databases, `tokio` for async, and `keyring` for secrets. Versions are pinned in the root
-`Cargo.toml`.
+---
 
-## Running it
+## More that's built in
 
-Requires stable Rust (pinned via `rust-toolchain.toml`); SQLite is bundled, so there's
-nothing else to install.
+- **Safe on production.** Mark a connection *production* and destructive statements
+  (`UPDATE`, `DELETE`, `DROP`, `TRUNCATE`, `ALTER`) pause for confirmation — with a loud
+  warning when an `UPDATE`/`DELETE` has no `WHERE`.
+- **Connect through anything.** Per-connection SSL (up to verify-full + mutual TLS) and
+  optional **SSH tunnels** through a bastion host. Passwords and keys live in the OS
+  keychain, never on disk in plaintext.
+- **Query history.** Every statement is logged with its connection, time, duration, and
+  outcome — replay or copy any of it from a live side panel.
+- **Independent query tabs.** Each tab is its own editor with syntax highlighting, its own
+  connection, result, sort, and filter — and they all persist across restarts.
+- **Thai-friendly.** A Thai-capable font is embedded everywhere; everything is UTF-8 end
+  to end.
+- **Themes.** Carbon, Midnight, and Daylight, remembered across runs.
+
+### Keyboard-first
+
+| Shortcut | Action |
+|---|---|
+| `Cmd/Ctrl + Enter` | Run query |
+| `Cmd/Ctrl + S` | Save staged edits |
+| `Cmd/Ctrl + R` | Reload result |
+| `Esc` | Discard unsaved edits |
+| `Backspace / Delete` | Mark row for deletion |
+| `Cmd/Ctrl + T / W` | Open / close tab |
+| `Cmd/Ctrl + F` | Toggle filter bar |
+
+---
+
+## Try it
+
+SQLite is bundled, so there's nothing else to install.
 
 ```bash
-cargo run --bin plusplus    # build & launch the GUI (dev)
-cargo test --workspace      # data-layer and headless UI tests
+cargo run --bin plusplus
 ```
 
-### Linux build / smoke run
+A sample database ships at `examples/sample.sqlite` — add it as a SQLite connection to
+explore a small Thai e-commerce shop (linked tables, foreign keys in every flavour, real
+order history) and see the schema browser, grid, and ER diagram with real data.
 
-Ubuntu, Debian, Fedora, Arch, and openSUSE can use the Linux helper script:
+## Install on macOS
+
+```bash
+scripts/release.sh --install     # build, package, and replace /Applications/plusplus.app
+```
+
+Installed copies check [GitHub Releases](https://github.com/HakimIno/plusplus/releases) on
+launch; when a newer build is published, an **Update** button appears in the app and updates
+in place — no manual reinstall.
+
+## Run on Linux
+
+Ubuntu, Debian, Fedora, Arch, and openSUSE can use the helper script (CI smoke-tests this
+path on Ubuntu, Debian, and Fedora):
 
 ```bash
 scripts/linux-build.sh --install-deps --install-rust --release --smoke
 scripts/linux-build.sh --release --run
 ```
 
-`--smoke` starts the GUI under Xvfb and treats a timeout as success, because a healthy
-GUI process keeps running until a user closes it. CI runs this path on Ubuntu, Debian,
-and Fedora in `.github/workflows/linux.yml`.
+---
 
-A sample SQLite database ships at `examples/sample.sqlite` — add it as a SQLite
-connection to try the app without a server. It's a small Thai e-commerce shop: six
-linked tables (categories ⟲, customers, addresses, products, orders, order_items) with
-foreign keys in every flavour — self-referencing, composite primary key, ON DELETE
-CASCADE / SET NULL — plus a few hundred rows of order history, so the ER diagram,
-schema browser, and grid all have something real to show. Regenerate it any time with
-`rm -f examples/sample.sqlite && sqlite3 examples/sample.sqlite < examples/sample.sql`.
-
-## Versioning
-
-The release version is defined once in the root `Cargo.toml`:
-
-```toml
-[workspace.package]
-version = "0.1.0"
-```
-
-Every release gets a matching **git tag** `vX.Y.Z` (e.g. `v0.1.0`) and a **DMG**
-`target/dist/plusplus-X.Y.Z.dmg`. Bump the version in `Cargo.toml`, then run
-`scripts/release.sh --tag` to build, package, and create the tag.
-
-### In-app updates (macOS)
-
-Installed copies check [GitHub Releases](https://github.com/HakimIno/plusplus/releases)
-on launch. When a newer `plusplus-X.Y.Z.dmg` is published, a pill button appears on the
-query tab bar (**Update vX.Y.Z**). The app downloads the DMG, replaces
-`/Applications/plusplus.app`, and relaunches — no manual reinstall.
-
-Publish an update:
-
-```bash
-# bump version in Cargo.toml, commit, then:
-git push origin v0.2.0   # triggers .github/workflows/release.yml
-```
-
-Or build locally and attach the DMG to a GitHub Release manually. The release must include
-an asset named `plusplus-<version>.dmg` (produced by `scripts/release.sh`).
-
-## macOS release (build, install, remove)
-
-### Quick dev run
-
-```bash
-cargo run --bin plusplus
-```
-
-### Release build + `.app` + `.dmg`
-
-```bash
-# Host architecture only (fastest)
-scripts/release.sh
-
-# Universal binary (Intel + Apple Silicon) — slower, best for distribution
-scripts/release.sh --universal
-
-# Build + package + create git tag vX.Y.Z
-scripts/release.sh --tag
-
-# Build + package + replace the installed copy in /Applications
-scripts/release.sh --install
-```
-
-Outputs:
-
-| Artifact | Path |
-|---|---|
-| App bundle | `target/dist/plusplus.app` |
-| Installer DMG | `target/dist/plusplus-<version>.dmg` |
-
-### Install / replace / remove
-
-The install script **removes the old app first**, then copies the new build:
-
-```bash
-packaging/macos/install.sh      # replace /Applications/plusplus.app
-packaging/macos/uninstall.sh    # remove /Applications/plusplus.app
-```
-
-Or manually:
-
-```bash
-rm -rf /Applications/plusplus.app
-cp -R target/dist/plusplus.app /Applications/
-open -a plusplus
-```
-
-### Tag workflow (recommended)
-
-```bash
-# 1. Bump version in Cargo.toml (e.g. 0.1.0 → 0.2.0)
-# 2. Commit the bump
-git add Cargo.toml Cargo.lock
-git commit -m "Bump version to 0.2.0"
-
-# 3. Build, package, and tag
-scripts/release.sh --universal --tag
-
-# 4. Push the tag (when ready to publish)
-git push origin v0.2.0
-```
-
-Low-level steps (without the release script):
-
-```bash
-cargo build --release --bin plusplus --target x86_64-apple-darwin
-cargo build --release --bin plusplus --target aarch64-apple-darwin
-packaging/macos/make-dmg.sh
-packaging/macos/install.sh
-```
+<div align="center">
+<sub>Built with Rust · <a href="https://github.com/HakimIno/plusplus">github.com/HakimIno/plusplus</a></sub>
+</div>
