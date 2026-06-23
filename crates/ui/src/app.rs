@@ -3683,10 +3683,16 @@ mod tests {
     /// Build an app with a live SQLite connection carrying a table, view, and trigger. Returns
     /// the app and the temp-db path (delete when done). Shared by the screenshot generators.
     fn demo_app_with_objects() -> (DbGuiApp, std::path::PathBuf) {
+        use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Arc;
+        // Unique per call: the two screenshot tests run in one process and must not share a file.
+        static N: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "plusplus-snap-{}-{}.sqlite",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let path =
-            std::env::temp_dir().join(format!("plusplus-snap-{}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let mut cfg = dbcore::ConnectionConfig::new(DbKind::Sqlite);
         cfg.name = "demo".into();
