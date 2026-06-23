@@ -31,10 +31,15 @@ pub use model::{
     build_clone_table_sql, build_create_table_sql, build_delete_sql, build_drop_column_sql,
     build_drop_fk_sql, build_drop_index_sql, build_drop_table_sql, build_insert_sql,
     build_rename_column_sql, build_truncate_table_sql,
-    build_update_sql, parse_page_window, simple_select_target, with_page_window, ColumnDef,
-    ColumnInfo, ColumnMeta, ConnectionColor, ConnectionConfig, ConnectionIcon, DbKind, FkAction,
-    ForeignKeyDef, ForeignKeyInfo, IndexDef, IndexInfo, PageWindow, QueryResult, QueryStats,
-    SchemaTree, SslMode, TableInfo,
+    build_create_routine_sql, build_create_trigger_sql, build_create_view_sql,
+    build_drop_routine_sql, build_drop_trigger_sql, build_drop_view_sql, build_update_sql,
+    parse_page_window, parse_trigger_header, routine_supports_replace, select_body_after_as,
+    simple_select_target, view_supports_replace, with_page_window, ColumnDef, ColumnInfo,
+    ColumnMeta, ConnectionColor,
+    ConnectionConfig, ConnectionIcon, DbKind, FkAction, ForeignKeyDef, ForeignKeyInfo, IndexDef,
+    IndexInfo, PageWindow, ParamMode, QueryResult, QueryStats, RoutineInfo, RoutineKind,
+    RoutineBuild, RoutineParam, SchemaTree, SslMode, TableInfo, TriggerBuild, TriggerEvent,
+    TriggerInfo, TriggerLevel, TriggerTiming, ViewInfo,
 };
 pub use value::Value;
 
@@ -342,6 +347,51 @@ mod tests {
         // Tables without FKs stay empty.
         let users = schema.tables.iter().find(|t| t.name == "users").unwrap();
         assert!(users.foreign_keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn introspects_views_and_triggers() {
+        let (db, _guard) = temp_db().await;
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)")
+            .await
+            .unwrap();
+        db.execute("CREATE TABLE audit (msg TEXT)").await.unwrap();
+        db.execute("CREATE VIEW v_pos AS SELECT id, n FROM t WHERE n > 0")
+            .await
+            .unwrap();
+        db.execute(
+            "CREATE TRIGGER trg_ins AFTER INSERT ON t FOR EACH ROW \
+             WHEN NEW.n > 0 BEGIN INSERT INTO audit (msg) VALUES ('inserted'); END",
+        )
+        .await
+        .unwrap();
+
+        let schema = db.introspect().await.unwrap();
+
+        // The view is split out of `tables` and carries its columns and defining SELECT.
+        assert!(schema.tables.iter().all(|t| t.name != "v_pos"));
+        let view = schema
+            .views
+            .iter()
+            .find(|v| v.name == "v_pos")
+            .expect("view present");
+        assert_eq!(view.columns.len(), 2);
+        assert!(view.definition.to_uppercase().contains("SELECT"));
+        assert!(!view.materialized);
+
+        // The trigger is parsed into structured fields from its stored DDL.
+        let trg = schema
+            .triggers
+            .iter()
+            .find(|t| t.name == "trg_ins")
+            .expect("trigger present");
+        assert_eq!(trg.timing, TriggerTiming::After);
+        assert_eq!(trg.table, "t");
+        assert_eq!(trg.events, vec![TriggerEvent::Insert]);
+        assert!(trg.when_condition.is_some());
+
+        // SQLite has no stored functions or procedures.
+        assert!(schema.routines.is_empty());
     }
 
     #[test]

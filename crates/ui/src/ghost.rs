@@ -214,6 +214,9 @@ mod tests {
     fn schema() -> SchemaTree {
         SchemaTree {
             database_name: "db".to_string(),
+            views: Vec::new(),
+            routines: Vec::new(),
+            triggers: Vec::new(),
             tables: vec![
                 TableInfo {
                     schema: None,

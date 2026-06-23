@@ -12,6 +12,8 @@ path = "src/lib.rs"
 
 [dev-dependencies]
 async-trait.workspace = true
+# Headless rendering harness used to snapshot the UI to PNG (Metal/wgpu offscreen).
+egui_kittest = { version = "0.34", features = ["wgpu", "snapshot"] }
 
 [dependencies]
 dbcore.workspace = true

@@ -10,8 +10,9 @@ use sqlx::{AssertSqlSafe, Column, ConnectOptions, Row, TypeInfo, ValueRef};
 use crate::database::{returns_rows, Database};
 use crate::error::Result;
 use crate::model::{
-    ColumnInfo, ColumnMeta, ConnectionConfig, DbKind, ForeignKeyInfo, IndexInfo, QueryResult,
-    QueryStats, SchemaTree, TableInfo,
+    parse_trigger_header, select_body_after_as, ColumnInfo, ColumnMeta, ConnectionConfig, DbKind,
+    ForeignKeyInfo, IndexInfo, QueryResult, QueryStats, SchemaTree, TableInfo, TriggerInfo,
+    TriggerLevel, ViewInfo,
 };
 use crate::value::Value;
 
@@ -47,32 +48,60 @@ impl Database for SqliteDb {
     }
 
     async fn introspect(&self) -> Result<SchemaTree> {
-        // Tables and views, excluding SQLite's internal bookkeeping tables.
-        let names: Vec<(String,)> = sqlx::query_as(
-            "SELECT name FROM sqlite_master \
-             WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' \
+        // Tables, views, and triggers in one sweep, excluding SQLite's internal bookkeeping
+        // objects. `tbl_name` is the owning table (== name for tables/views); `sql` is the
+        // original `CREATE` text (NULL for auto-created objects).
+        let objects: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master \
+             WHERE type IN ('table', 'view', 'trigger') AND name NOT LIKE 'sqlite_%' \
              ORDER BY name",
         )
         .fetch_all(&self.pool)
         .await?;
 
-        let mut tables = Vec::with_capacity(names.len());
-        for (table,) in names {
-            let columns = self.introspect_columns(&table).await?;
-            let indexes = self.introspect_indexes(&table).await?;
-            let foreign_keys = self.introspect_foreign_keys(&table).await?;
-            tables.push(TableInfo {
-                schema: None,
-                name: table,
-                columns,
-                indexes,
-                foreign_keys,
-            });
+        let mut tables = Vec::new();
+        let mut views = Vec::new();
+        let mut triggers = Vec::new();
+        for (ty, name, tbl_name, sql) in objects {
+            match ty.as_str() {
+                "table" => {
+                    let columns = self.introspect_columns(&name).await?;
+                    let indexes = self.introspect_indexes(&name).await?;
+                    let foreign_keys = self.introspect_foreign_keys(&name).await?;
+                    tables.push(TableInfo {
+                        schema: None,
+                        name,
+                        columns,
+                        indexes,
+                        foreign_keys,
+                    });
+                }
+                "view" => {
+                    let columns = self.introspect_columns(&name).await?;
+                    views.push(ViewInfo {
+                        schema: None,
+                        name,
+                        columns,
+                        definition: select_body_after_as(sql.as_deref().unwrap_or_default()),
+                        materialized: false,
+                    });
+                }
+                "trigger" => triggers.push(parse_sqlite_trigger(
+                    &name,
+                    tbl_name.as_deref().unwrap_or_default(),
+                    sql.as_deref().unwrap_or_default(),
+                )),
+                _ => {}
+            }
         }
 
         Ok(SchemaTree {
             database_name: self.name.clone(),
             tables,
+            views,
+            // SQLite has no stored functions or procedures.
+            routines: Vec::new(),
+            triggers,
         })
     }
 
@@ -248,6 +277,25 @@ impl SqliteDb {
 /// Quote an SQLite identifier for safe inlining into a PRAGMA.
 fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+/// Parse a SQLite `CREATE TRIGGER` statement into structured fields. SQLite only exposes the
+/// original DDL text, so the full statement is kept verbatim in `action` for display; the
+/// structured fields (parsed by the shared [`parse_trigger_header`]) drive the tree summary
+/// and the visual editor.
+fn parse_sqlite_trigger(name: &str, table: &str, sql: &str) -> TriggerInfo {
+    let (timing, events, _level, when_condition) = parse_trigger_header(sql);
+    TriggerInfo {
+        schema: None,
+        name: name.to_string(),
+        table: table.to_string(),
+        timing,
+        events,
+        // SQLite triggers are always row-level regardless of any FOR EACH clause.
+        level: TriggerLevel::Row,
+        when_condition,
+        action: sql.trim().to_string(),
+    }
 }
 
 fn column_meta(row: &SqliteRow) -> Vec<ColumnMeta> {

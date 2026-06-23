@@ -368,6 +368,9 @@ mod tests {
     fn sample_schema() -> SchemaTree {
         SchemaTree {
             database_name: "shop".into(),
+            views: Vec::new(),
+            routines: Vec::new(),
+            triggers: Vec::new(),
             tables: vec![
                 table("users", vec![col("id", true), col("email", false)], vec![]),
                 table(

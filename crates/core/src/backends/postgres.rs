@@ -10,8 +10,9 @@ use sqlx::{AssertSqlSafe, Column, ConnectOptions, Row, TypeInfo, ValueRef};
 use crate::database::{returns_rows, Database};
 use crate::error::Result;
 use crate::model::{
-    ColumnInfo, ColumnMeta, ConnectionConfig, DbKind, ForeignKeyInfo, IndexInfo, QueryResult,
-    QueryStats, SchemaTree, SslMode, TableInfo,
+    parse_trigger_header, ColumnInfo, ColumnMeta, ConnectionConfig, DbKind, ForeignKeyInfo,
+    IndexInfo, ParamMode, QueryResult, QueryStats, RoutineInfo, RoutineKind, RoutineParam,
+    SchemaTree, SslMode, TableInfo, TriggerInfo, ViewInfo,
 };
 use crate::value::Value;
 
@@ -96,6 +97,56 @@ impl Database for PostgresDb {
             );
         }
 
+        // Views (regular + materialized). Materialized views are Postgres-specific and live
+        // in pg_matviews, not information_schema. Regular views get their columns from the
+        // column sweep below; both carry their defining SELECT. `unwrap_or_default` keeps a
+        // privilege error from failing the whole introspection.
+        let mut views: BTreeMap<(String, String), ViewInfo> = BTreeMap::new();
+        let view_rows: Vec<(String, String, Option<String>)> = sqlx::query_as(AssertSqlSafe(
+            format!(
+                "SELECT table_schema, table_name, view_definition FROM information_schema.views \
+                 WHERE table_schema NOT IN {SYSTEM_SCHEMAS} \
+                 ORDER BY table_schema, table_name"
+            ),
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        for (schema, name, def) in view_rows {
+            views.insert(
+                (schema.clone(), name.clone()),
+                ViewInfo {
+                    schema: Some(schema),
+                    name,
+                    columns: Vec::new(),
+                    definition: def.unwrap_or_default().trim().to_string(),
+                    materialized: false,
+                },
+            );
+        }
+        let matview_rows: Vec<(String, String, Option<String>)> = sqlx::query_as(AssertSqlSafe(
+            format!(
+                "SELECT schemaname, matviewname, definition FROM pg_matviews \
+                 WHERE schemaname NOT IN {SYSTEM_SCHEMAS} \
+                 ORDER BY schemaname, matviewname"
+            ),
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        for (schema, name, def) in matview_rows {
+            views.insert(
+                (schema.clone(), name.clone()),
+                ViewInfo {
+                    schema: Some(schema),
+                    name,
+                    columns: Vec::new(),
+                    definition: def.unwrap_or_default().trim().to_string(),
+                    materialized: true,
+                },
+            );
+        }
+
         // Columns (ordered by ordinal position).
         let col_rows: Vec<(String, String, String, String)> = sqlx::query_as(AssertSqlSafe(format!(
             "SELECT table_schema, table_name, column_name, data_type FROM information_schema.columns \
@@ -135,14 +186,17 @@ impl Database for PostgresDb {
         }
 
         for (schema, table, column, data_type) in col_rows {
+            let key = (schema.clone(), table.clone(), column.clone());
+            let col = ColumnInfo {
+                name: column,
+                data_type,
+                nullable: nullable.get(&key).copied().unwrap_or(true),
+                primary_key: pk_set.contains_key(&key),
+            };
             if let Some(info) = tables.get_mut(&(schema.clone(), table.clone())) {
-                let key = (schema, table, column.clone());
-                info.columns.push(ColumnInfo {
-                    name: column,
-                    data_type,
-                    nullable: nullable.get(&key).copied().unwrap_or(true),
-                    primary_key: pk_set.contains_key(&key),
-                });
+                info.columns.push(col);
+            } else if let Some(view) = views.get_mut(&(schema, table)) {
+                view.columns.push(col);
             }
         }
 
@@ -218,9 +272,78 @@ impl Database for PostgresDb {
             }
         }
 
+        // Routines: functions ('f') and procedures ('p'); aggregates/window funcs excluded.
+        // `pg_get_functiondef` yields the full `CREATE` text for display; arguments and the
+        // return clause come pre-rendered and are parsed into structured params.
+        let mut routines = Vec::new();
+        type RoutineRow =
+            (String, String, String, Option<String>, Option<String>, String, Option<String>);
+        let routine_rows: Vec<RoutineRow> = sqlx::query_as(AssertSqlSafe(format!(
+            "SELECT n.nspname, p.proname, p.prokind::text, \
+                    pg_get_function_arguments(p.oid), pg_get_function_result(p.oid), \
+                    l.lanname, pg_get_functiondef(p.oid) \
+             FROM pg_proc p \
+             JOIN pg_namespace n ON n.oid = p.pronamespace \
+             JOIN pg_language l ON l.oid = p.prolang \
+             WHERE n.nspname NOT IN {SYSTEM_SCHEMAS} AND p.prokind IN ('f', 'p') \
+             ORDER BY n.nspname, p.proname"
+        )))
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        for (schema, name, prokind, args, result, lang, def) in routine_rows {
+            let kind = if prokind == "p" {
+                RoutineKind::Procedure
+            } else {
+                RoutineKind::Function
+            };
+            routines.push(RoutineInfo {
+                schema: Some(schema),
+                name,
+                kind,
+                params: parse_pg_args(args.as_deref().unwrap_or_default()),
+                return_type: (kind == RoutineKind::Function).then_some(result).flatten(),
+                language: lang,
+                body: def.unwrap_or_default(),
+            });
+        }
+
+        // Triggers: skip internal (FK-enforcement) triggers; parse the rendered def into
+        // structured fields, keeping the full `CREATE TRIGGER … EXECUTE FUNCTION …` in `action`.
+        let mut triggers = Vec::new();
+        let trig_rows: Vec<(String, String, String, String)> = sqlx::query_as(AssertSqlSafe(
+            format!(
+                "SELECT n.nspname, c.relname, t.tgname, pg_get_triggerdef(t.oid) \
+                 FROM pg_trigger t \
+                 JOIN pg_class c ON c.oid = t.tgrelid \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE NOT t.tgisinternal AND n.nspname NOT IN {SYSTEM_SCHEMAS} \
+                 ORDER BY n.nspname, c.relname, t.tgname"
+            ),
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        for (schema, table, name, def) in trig_rows {
+            let (timing, events, level, when_condition) = parse_trigger_header(&def);
+            triggers.push(TriggerInfo {
+                schema: Some(schema),
+                name,
+                table,
+                timing,
+                events,
+                level,
+                when_condition,
+                action: def,
+            });
+        }
+
         Ok(SchemaTree {
             database_name,
             tables: tables.into_values().collect(),
+            views: views.into_values().collect(),
+            routines,
+            triggers,
         })
     }
 
@@ -438,4 +561,97 @@ fn parse_index_columns(indexdef: &str) -> Vec<String> {
         .map(|c| c.trim().trim_matches('"').to_string())
         .filter(|c| !c.is_empty())
         .collect()
+}
+
+/// Parse the rendered output of `pg_get_function_arguments` (e.g.
+/// `"a integer, b text DEFAULT 'x', OUT total numeric, VARIADIC nums integer[]"`) into
+/// structured parameters. Splits on top-level commas (respecting parens/brackets/quotes),
+/// then reads an optional leading mode keyword, the parameter name, and the remaining type
+/// (minus any `DEFAULT`). Best-effort: unnamed parameters with multi-word types are rare and
+/// may mis-split, which only affects the visual editor's pre-fill, never browsing.
+fn parse_pg_args(s: &str) -> Vec<RoutineParam> {
+    split_top_level_commas(s)
+        .iter()
+        .filter_map(|arg| parse_one_pg_arg(arg.trim()))
+        .collect()
+}
+
+/// Split `s` on commas that are not nested inside parentheses/brackets or a string literal.
+fn split_top_level_commas(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut in_quote = false;
+    let mut start = 0usize;
+    for (i, b) in s.bytes().enumerate() {
+        match b {
+            b'\'' => in_quote = !in_quote,
+            b'(' | b'[' if !in_quote => depth += 1,
+            b')' | b']' if !in_quote => depth -= 1,
+            b',' if !in_quote && depth == 0 => {
+                out.push(s[start..i].to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if start < s.len() {
+        out.push(s[start..].to_string());
+    }
+    out.retain(|p| !p.trim().is_empty());
+    out
+}
+
+/// Parse one argument declaration into a [`RoutineParam`].
+fn parse_one_pg_arg(arg: &str) -> Option<RoutineParam> {
+    if arg.is_empty() {
+        return None;
+    }
+    // Optional leading mode keyword (INOUT before OUT so the prefix doesn't shadow it).
+    let mut rest = arg;
+    let mut mode = ParamMode::In;
+    for (kw, m) in [
+        ("INOUT", ParamMode::InOut),
+        ("OUT", ParamMode::Out),
+        ("VARIADIC", ParamMode::Variadic),
+        ("IN", ParamMode::In),
+    ] {
+        if let Some(after) = strip_leading_word(rest, kw) {
+            mode = m;
+            rest = after;
+            break;
+        }
+    }
+    // Split off a trailing `DEFAULT expr`.
+    let (decl, default) = match rest.to_ascii_uppercase().find(" DEFAULT ") {
+        Some(pos) => {
+            let d = rest[pos + " DEFAULT ".len()..].trim();
+            (rest[..pos].trim(), (!d.is_empty()).then(|| d.to_string()))
+        }
+        None => (rest.trim(), None),
+    };
+    // pg emits "name type"; the first token is the name, the remainder the (possibly
+    // multi-word) type.
+    let (name, data_type) = decl.split_once(char::is_whitespace)?;
+    Some(RoutineParam {
+        name: name.to_string(),
+        data_type: data_type.trim().to_string(),
+        mode,
+        default,
+    })
+}
+
+/// Strip a leading whole word `word` (case-insensitive) off `s`, returning the trimmed
+/// remainder, or `None` if `s` doesn't start with that exact word.
+fn strip_leading_word<'a>(s: &'a str, word: &str) -> Option<&'a str> {
+    let s = s.trim_start();
+    let head = s.get(..word.len())?;
+    if !head.eq_ignore_ascii_case(word) {
+        return None;
+    }
+    let rest = &s[word.len()..];
+    match rest.chars().next() {
+        None => Some(rest),
+        Some(c) if c.is_whitespace() => Some(rest.trim_start()),
+        _ => None,
+    }
 }

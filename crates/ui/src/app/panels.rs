@@ -1287,12 +1287,55 @@ impl DbGuiApp {
                     style::section_header(ui, "Schema");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let connected = self.active().is_some();
-                        let resp = icons::icon_button(ui, icons::plus(), "New Table");
-                        if resp.enabled() && resp.clicked() && connected {
-                            actions.push(Action::OpenNewTable);
-                        }
+                        // SQLite has no stored functions or procedures.
+                        let supports_routines = self
+                            .active()
+                            .is_some_and(|a| a.db.kind() != dbcore::DbKind::Sqlite);
+                        let menu = ui.add_enabled_ui(connected, |ui| {
+                            let plus = egui::Image::new(icons::plus())
+                                .fit_to_exact_size(egui::vec2(icons::SIZE, icons::SIZE))
+                                .tint(ui.visuals().widgets.inactive.fg_stroke.color);
+                            ui.menu_button(plus, |ui| {
+                                ui.set_min_width(150.0);
+                                if icons::button(ui, icons::table(), "New Table…", true).clicked() {
+                                    actions.push(Action::OpenNewTable);
+                                    ui.close();
+                                }
+                                if icons::button(ui, icons::table(), "New View…", true).clicked() {
+                                    actions.push(Action::OpenNewView);
+                                    ui.close();
+                                }
+                                if icons::button(ui, icons::play(), "New Trigger…", true).clicked() {
+                                    actions.push(Action::OpenNewTrigger);
+                                    ui.close();
+                                }
+                                if supports_routines {
+                                    ui.separator();
+                                    if icons::button(ui, icons::code(), "New Function…", true)
+                                        .clicked()
+                                    {
+                                        actions.push(Action::OpenNewRoutine(
+                                            dbcore::RoutineKind::Function,
+                                        ));
+                                        ui.close();
+                                    }
+                                    if icons::button(ui, icons::code(), "New Procedure…", true)
+                                        .clicked()
+                                    {
+                                        actions.push(Action::OpenNewRoutine(
+                                            dbcore::RoutineKind::Procedure,
+                                        ));
+                                        ui.close();
+                                    }
+                                }
+                            })
+                            .response
+                            .on_hover_text("Create a new object");
+                        });
                         if !connected {
-                            let _ = resp.on_disabled_hover_text("Connect to a database first");
+                            let _ = menu.response.on_disabled_hover_text(
+                                "Connect to a database first",
+                            );
                         }
                     });
                 });
@@ -1515,6 +1558,174 @@ impl DbGuiApp {
                     pin,
                 });
             }
+        }
+
+        // Views, functions, procedures, and triggers follow the tables.
+        self.schema_object_tree(ui, actions);
+    }
+
+    /// Render the non-table schema objects — views, functions, procedures, triggers — as
+    /// collapsible groups beneath the tables. Each group appears only when it has objects
+    /// matching the sidebar filter, and is collapsed by default to keep the tree compact.
+    fn schema_object_tree(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let Some(active) = self.active() else {
+            return;
+        };
+        let kind = active.db.kind();
+        let filter = self.schema_filter.to_lowercase();
+        let matches = |name: &str| filter.is_empty() || name.to_lowercase().contains(&filter);
+
+        // ── Views: collapsible like tables (columns as children), click to preview rows. ──
+        let views: Vec<&dbcore::ViewInfo> = active
+            .schema
+            .views
+            .iter()
+            .filter(|v| matches(&v.name))
+            .collect();
+        if !views.is_empty() {
+            object_group(ui, "views_group", "Views", views.len(), |ui| {
+                for view in views {
+                    let id = ui.make_persistent_id(("view", view.name.as_str()));
+                    let (_t, header, _b) =
+                        egui::collapsing_header::CollapsingState::load_with_default_open(
+                            ui.ctx(),
+                            id,
+                            false,
+                        )
+                        .show_header(ui, |ui| {
+                            icons::show_native(ui, icons::table(), 15.0);
+                            ui.add_space(2.0);
+                            let label = if view.materialized {
+                                format!("{} · materialized", view.name)
+                            } else {
+                                view.name.clone()
+                            };
+                            style::truncated_label(ui, &label, None, false, egui::Sense::click())
+                        })
+                        .body(|ui| {
+                            for col in &view.columns {
+                                ui.horizontal(|ui| {
+                                    icons::show_weak(ui, icons::column(), 13.0);
+                                    ui.add_space(2.0);
+                                    style::truncated_label(
+                                        ui,
+                                        &col.name,
+                                        None,
+                                        false,
+                                        egui::Sense::hover(),
+                                    );
+                                    style::truncated_label(
+                                        ui,
+                                        &col.data_type,
+                                        Some(&col.data_type),
+                                        true,
+                                        egui::Sense::hover(),
+                                    );
+                                });
+                            }
+                        });
+                    let resp = header
+                        .inner
+                        .on_hover_text("Click to preview rows · right-click for actions");
+                    resp.context_menu(|ui| {
+                        ui.set_min_width(170.0);
+                        if icons::button(ui, icons::edit(), "Edit View…", true).clicked() {
+                            actions.push(Action::OpenEditView(view.clone()));
+                            ui.close();
+                        }
+                        if icons::button(ui, icons::trash(), "Drop View…", true)
+                            .on_hover_text("Delete this view")
+                            .clicked()
+                        {
+                            actions.push(Action::DropView(view.clone()));
+                            ui.close();
+                        }
+                    });
+                    if resp.clicked() || resp.double_clicked() {
+                        let source = crate::edit::EditSource {
+                            schema: view.schema.clone(),
+                            table: view.name.clone(),
+                            // Views have no primary key, so the preview grid stays read-only.
+                            pk_cols: Vec::new(),
+                        };
+                        actions.push(Action::OpenTable {
+                            sql: kind.preview_query(&view.qualified(kind), 100),
+                            source,
+                            pin: resp.double_clicked(),
+                        });
+                    }
+                }
+            });
+        }
+
+        // ── Functions & Procedures: leaf rows; click opens the definition for reading. ──
+        for (rk, key, title) in [
+            (dbcore::RoutineKind::Function, "fn_group", "Functions"),
+            (dbcore::RoutineKind::Procedure, "proc_group", "Procedures"),
+        ] {
+            let routines: Vec<&dbcore::RoutineInfo> = active
+                .schema
+                .routines
+                .iter()
+                .filter(|r| r.kind == rk && matches(&r.name))
+                .collect();
+            if routines.is_empty() {
+                continue;
+            }
+            object_group(ui, key, title, routines.len(), |ui| {
+                for r in routines {
+                    let row = object_leaf_row(ui, icons::code(), &r.name, &r.signature());
+                    row.context_menu(|ui| {
+                        ui.set_min_width(170.0);
+                        if icons::button(ui, icons::edit(), "Edit…", true).clicked() {
+                            actions.push(Action::OpenEditRoutine(r.clone()));
+                            ui.close();
+                        }
+                        if icons::button(ui, icons::trash(), "Drop…", true).clicked() {
+                            actions.push(Action::DropRoutine(r.clone()));
+                            ui.close();
+                        }
+                    });
+                    if row.clicked() || row.double_clicked() {
+                        actions.push(Action::OpenDefinition {
+                            title: r.name.clone(),
+                            sql: r.body.clone(),
+                        });
+                    }
+                }
+            });
+        }
+
+        // ── Triggers: leaf rows; click opens the trigger's CREATE text for reading. ──
+        let triggers: Vec<&dbcore::TriggerInfo> = active
+            .schema
+            .triggers
+            .iter()
+            .filter(|t| matches(&t.name))
+            .collect();
+        if !triggers.is_empty() {
+            object_group(ui, "trig_group", "Triggers", triggers.len(), |ui| {
+                for t in triggers {
+                    let row = object_leaf_row(ui, icons::play(), &t.name, &t.display());
+                    row.context_menu(|ui| {
+                        ui.set_min_width(170.0);
+                        if icons::button(ui, icons::edit(), "Edit Trigger…", true).clicked() {
+                            actions.push(Action::OpenEditTrigger(t.clone()));
+                            ui.close();
+                        }
+                        if icons::button(ui, icons::trash(), "Drop Trigger…", true).clicked() {
+                            actions.push(Action::DropTrigger(t.clone()));
+                            ui.close();
+                        }
+                    });
+                    if row.clicked() || row.double_clicked() {
+                        actions.push(Action::OpenDefinition {
+                            title: t.name.clone(),
+                            sql: t.action.clone(),
+                        });
+                    }
+                }
+            });
         }
     }
 
@@ -2773,93 +2984,20 @@ impl DbGuiApp {
     /// it takes the grid's place like the Data/Structure views rather than floating as
     /// a dialog. Only the DDL preview remains a modal (it's a confirm step).
     fn schema_editor_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        use crate::schema::{SchemaEditorMode, SchemaTab};
         let idx = self.active_query_tab;
-        let Some(editor) = self.tabs[idx].schema_editor.as_mut() else {
-            return;
-        };
-
-        let title = match editor.mode {
-            SchemaEditorMode::NewTable => "Create Table".to_string(),
-            SchemaEditorMode::EditTable => {
-                format!("Edit Table — {}", editor.table_name)
+        match self.tabs[idx].schema_editor.as_mut() {
+            Some(crate::schema::ObjectEditor::Table(editor)) => {
+                table_editor_view(ui, actions, editor)
             }
-        };
-
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            style::section_header(ui, &title);
-            // Action buttons on the right of the header, where the eye lands first.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if icons::primary_button(ui, icons::code(), "Preview SQL", true).clicked() {
-                    actions.push(Action::GenerateSchema);
-                }
-                ui.add_space(6.0);
-                if icons::button(ui, icons::close(), "Cancel", true).clicked() {
-                    actions.push(Action::CancelSchema);
-                }
-            });
-        });
-        ui.add_space(6.0);
-
-        // Table name (only editable in NewTable mode; read-only in EditTable).
-        ui.horizontal(|ui| {
-            let pad = egui::Margin::symmetric(10, 5);
-            ui.label("Table name:");
-            let te = egui::TextEdit::singleline(&mut editor.table_name)
-                .hint_text("my_table")
-                .desired_width(200.0)
-                .vertical_align(egui::Align::Center)
-                .margin(pad);
-            ui.add_enabled(editor.mode == SchemaEditorMode::NewTable, te);
-            if !editor.schema_name.is_empty() || editor.mode == SchemaEditorMode::NewTable {
-                ui.label("Schema:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut editor.schema_name)
-                        .hint_text("public")
-                        .desired_width(120.0)
-                        .vertical_align(egui::Align::Center)
-                        .margin(pad),
-                );
+            Some(crate::schema::ObjectEditor::View(editor)) => view_editor_view(ui, actions, editor),
+            Some(crate::schema::ObjectEditor::Trigger(editor)) => {
+                trigger_editor_view(ui, actions, editor)
             }
-        });
-        ui.add_space(6.0);
-
-        // Tab selector: Columns | Indexes | Foreign Keys
-        ui.horizontal(|ui| {
-            for (tab, label) in [
-                (SchemaTab::Columns, "Columns"),
-                (SchemaTab::Indexes, "Indexes"),
-                (SchemaTab::ForeignKeys, "Foreign Keys"),
-            ] {
-                if ui
-                    .selectable_label(
-                        editor.active_tab == tab,
-                        egui::RichText::new(label).size(12.0),
-                    )
-                    .clicked()
-                {
-                    editor.active_tab = tab;
-                }
+            Some(crate::schema::ObjectEditor::Routine(editor)) => {
+                routine_editor_view(ui, actions, editor)
             }
-        });
-        ui.separator();
-        ui.add_space(4.0);
-
-        egui::ScrollArea::vertical()
-            .id_salt("schema_editor_scroll")
-            .auto_shrink([false, false])
-            .show(ui, |ui| match editor.active_tab {
-                SchemaTab::Columns => {
-                    schema_columns_tab(ui, &mut editor.columns, editor.mode, editor.db_kind);
-                }
-                SchemaTab::Indexes => {
-                    schema_indexes_tab(ui, &mut editor.indexes);
-                }
-                SchemaTab::ForeignKeys => {
-                    schema_fk_tab(ui, &mut editor.fks);
-                }
-            });
+            None => {}
+        }
     }
 
     // ─── Schema DDL preview dialog ────────────────────────────────────────────
@@ -2925,6 +3063,533 @@ impl DbGuiApp {
             actions.push(Action::CancelSchema);
         }
     }
+}
+
+/// The header (title + Preview SQL / Cancel buttons) shared by every object editor. Returns
+/// nothing; the buttons push actions directly.
+fn object_editor_header(ui: &mut egui::Ui, actions: &mut Vec<Action>, title: &str) {
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        style::section_header(ui, title);
+        // Action buttons on the right of the header, where the eye lands first.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if icons::primary_button(ui, icons::code(), "Preview SQL", true).clicked() {
+                actions.push(Action::GenerateSchema);
+            }
+            ui.add_space(6.0);
+            if icons::button(ui, icons::close(), "Cancel", true).clicked() {
+                actions.push(Action::CancelSchema);
+            }
+        });
+    });
+    ui.add_space(6.0);
+}
+
+/// Render the table create/edit form (columns, indexes, foreign keys) into the central panel.
+fn table_editor_view(
+    ui: &mut egui::Ui,
+    actions: &mut Vec<Action>,
+    editor: &mut crate::schema::SchemaEditor,
+) {
+    use crate::schema::{SchemaEditorMode, SchemaTab};
+    let title = match editor.mode {
+        SchemaEditorMode::NewTable => "Create Table".to_string(),
+        SchemaEditorMode::EditTable => format!("Edit Table — {}", editor.table_name),
+    };
+    object_editor_header(ui, actions, &title);
+
+    // Table name (only editable in NewTable mode; read-only in EditTable).
+    ui.horizontal(|ui| {
+        let pad = egui::Margin::symmetric(10, 5);
+        ui.label("Table name:");
+        let te = egui::TextEdit::singleline(&mut editor.table_name)
+            .hint_text("my_table")
+            .desired_width(200.0)
+            .vertical_align(egui::Align::Center)
+            .margin(pad);
+        ui.add_enabled(editor.mode == SchemaEditorMode::NewTable, te);
+        if !editor.schema_name.is_empty() || editor.mode == SchemaEditorMode::NewTable {
+            ui.label("Schema:");
+            ui.add(
+                egui::TextEdit::singleline(&mut editor.schema_name)
+                    .hint_text("public")
+                    .desired_width(120.0)
+                    .vertical_align(egui::Align::Center)
+                    .margin(pad),
+            );
+        }
+    });
+    ui.add_space(6.0);
+
+    // Tab selector: Columns | Indexes | Foreign Keys
+    ui.horizontal(|ui| {
+        for (tab, label) in [
+            (SchemaTab::Columns, "Columns"),
+            (SchemaTab::Indexes, "Indexes"),
+            (SchemaTab::ForeignKeys, "Foreign Keys"),
+        ] {
+            if ui
+                .selectable_label(editor.active_tab == tab, egui::RichText::new(label).size(12.0))
+                .clicked()
+            {
+                editor.active_tab = tab;
+            }
+        }
+    });
+    ui.separator();
+    ui.add_space(4.0);
+
+    egui::ScrollArea::vertical()
+        .id_salt("schema_editor_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| match editor.active_tab {
+            SchemaTab::Columns => {
+                schema_columns_tab(ui, &mut editor.columns, editor.mode, editor.db_kind);
+            }
+            SchemaTab::Indexes => schema_indexes_tab(ui, &mut editor.indexes),
+            SchemaTab::ForeignKeys => schema_fk_tab(ui, &mut editor.fks),
+        });
+}
+
+/// Render the view create/edit form: name/schema, an optional materialized toggle (Postgres),
+/// and the defining `SELECT` as a multi-line editor.
+fn view_editor_view(
+    ui: &mut egui::Ui,
+    actions: &mut Vec<Action>,
+    editor: &mut crate::schema::ViewEditor,
+) {
+    use crate::schema::ObjectMode;
+    let title = match editor.mode {
+        ObjectMode::Create => "Create View".to_string(),
+        ObjectMode::Edit => format!("Edit View — {}", editor.name),
+    };
+    object_editor_header(ui, actions, &title);
+
+    ui.horizontal(|ui| {
+        let pad = egui::Margin::symmetric(10, 5);
+        ui.label("View name:");
+        ui.add(
+            egui::TextEdit::singleline(&mut editor.name)
+                .hint_text("my_view")
+                .desired_width(200.0)
+                .vertical_align(egui::Align::Center)
+                .margin(pad),
+        );
+        if !editor.schema_name.is_empty() || editor.mode == ObjectMode::Create {
+            ui.label("Schema:");
+            ui.add(
+                egui::TextEdit::singleline(&mut editor.schema_name)
+                    .hint_text("public")
+                    .desired_width(120.0)
+                    .vertical_align(egui::Align::Center)
+                    .margin(pad),
+            );
+        }
+        // Materialized views are Postgres-only.
+        if editor.db_kind == dbcore::DbKind::Postgres {
+            ui.checkbox(&mut editor.materialized, "Materialized");
+        }
+    });
+    ui.add_space(6.0);
+
+    ui.label(
+        egui::RichText::new("Defining query (the SELECT after AS)")
+            .color(palette::TEXT_WEAK())
+            .size(12.0),
+    );
+    ui.add_space(2.0);
+    egui::ScrollArea::vertical()
+        .id_salt("view_editor_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::multiline(&mut editor.select_body)
+                    .code_editor()
+                    .desired_rows(16)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("SELECT ..."),
+            );
+        });
+}
+
+/// A placeholder body for a trigger, tailored to the dialect's procedural style.
+fn trigger_body_hint(kind: dbcore::DbKind) -> &'static str {
+    match kind {
+        dbcore::DbKind::Postgres => "BEGIN\n  -- NEW / OLD available\n  RETURN NEW;\nEND;",
+        dbcore::DbKind::Sqlite => "INSERT INTO audit(msg) VALUES ('changed');",
+        dbcore::DbKind::SqlServer => "BEGIN\n  SET NOCOUNT ON;\n  -- inserted / deleted tables\nEND",
+        _ => "SET NEW.col = ...;  -- or a BEGIN ... END block",
+    }
+}
+
+/// Render the dialect-adaptive trigger create/edit form. Controls a dialect can't express are
+/// hidden (e.g. row/statement level off Postgres, WHEN off MySQL/SQL Server), so the same
+/// editor serves all four backends.
+fn trigger_editor_view(
+    ui: &mut egui::Ui,
+    actions: &mut Vec<Action>,
+    editor: &mut crate::schema::TriggerEditor,
+) {
+    use crate::schema::ObjectMode;
+    use dbcore::{DbKind, TriggerEvent, TriggerLevel, TriggerTiming};
+
+    let title = match editor.mode {
+        ObjectMode::Create => "Create Trigger".to_string(),
+        ObjectMode::Edit => format!("Edit Trigger — {}", editor.name),
+    };
+    object_editor_header(ui, actions, &title);
+    let kind = editor.db_kind;
+    let pad = egui::Margin::symmetric(10, 5);
+
+    egui::ScrollArea::vertical()
+        .id_salt("trigger_editor_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Name:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut editor.name)
+                        .hint_text("my_trigger")
+                        .desired_width(180.0)
+                        .vertical_align(egui::Align::Center)
+                        .margin(pad),
+                );
+                if !editor.schema_name.is_empty() || editor.mode == ObjectMode::Create {
+                    ui.label("Schema:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut editor.schema_name)
+                            .hint_text("public")
+                            .desired_width(110.0)
+                            .vertical_align(egui::Align::Center)
+                            .margin(pad),
+                    );
+                }
+            });
+            ui.add_space(4.0);
+
+            ui.horizontal(|ui| {
+                ui.label("Table:");
+                let selected = if editor.table.is_empty() {
+                    "select…".to_string()
+                } else {
+                    editor.table.clone()
+                };
+                egui::ComboBox::from_id_salt("trig_table")
+                    .selected_text(selected)
+                    .show_ui(ui, |ui| {
+                        for t in editor.tables.clone() {
+                            ui.selectable_value(&mut editor.table, t.clone(), t);
+                        }
+                    });
+            });
+            ui.add_space(6.0);
+
+            // Timing — the available options depend on the dialect.
+            let timings: &[TriggerTiming] = match kind {
+                DbKind::MySql | DbKind::MariaDb => &[TriggerTiming::Before, TriggerTiming::After],
+                DbKind::SqlServer => &[TriggerTiming::After, TriggerTiming::InsteadOf],
+                _ => TriggerTiming::ALL,
+            };
+            ui.horizontal(|ui| {
+                ui.label("Timing:");
+                for &t in timings {
+                    ui.selectable_value(&mut editor.timing, t, t.label());
+                }
+            });
+            ui.add_space(4.0);
+
+            // Events — MySQL/SQLite fire on one (radio); Postgres/SQL Server allow several.
+            let single = matches!(kind, DbKind::MySql | DbKind::MariaDb | DbKind::Sqlite);
+            ui.horizontal(|ui| {
+                ui.label("Events:");
+                for &e in TriggerEvent::ALL {
+                    let mut on = editor.has_event(e);
+                    if single {
+                        if ui.selectable_label(on, e.label()).clicked() {
+                            editor.events = vec![e];
+                        }
+                    } else if ui.checkbox(&mut on, e.label()).changed() {
+                        editor.set_event(e, on);
+                    }
+                }
+            });
+            if single {
+                ui.label(
+                    egui::RichText::new("This dialect fires on a single event.")
+                        .size(11.0)
+                        .color(palette::TEXT_FAINT()),
+                );
+            }
+            ui.add_space(4.0);
+
+            // Row vs statement — only Postgres lets you choose; the others are fixed.
+            if kind == DbKind::Postgres {
+                ui.horizontal(|ui| {
+                    ui.label("For each:");
+                    ui.selectable_value(&mut editor.level, TriggerLevel::Row, "ROW");
+                    ui.selectable_value(&mut editor.level, TriggerLevel::Statement, "STATEMENT");
+                });
+                ui.add_space(4.0);
+            }
+
+            // WHEN guard — Postgres & SQLite only.
+            if matches!(kind, DbKind::Postgres | DbKind::Sqlite) {
+                ui.horizontal(|ui| {
+                    ui.label("When:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut editor.when_condition)
+                            .hint_text("optional: NEW.col > 0")
+                            .desired_width(320.0)
+                            .vertical_align(egui::Align::Center)
+                            .margin(pad),
+                    );
+                });
+                ui.add_space(6.0);
+            }
+
+            // Body — Postgres can execute an existing function instead of an inline body.
+            if kind == DbKind::Postgres {
+                ui.checkbox(&mut editor.pg_existing_function, "Execute existing function");
+                if editor.pg_existing_function {
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new("Function to execute")
+                            .color(palette::TEXT_WEAK())
+                            .size(12.0),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut editor.body)
+                            .hint_text("my_trigger_fn")
+                            .desired_width(280.0)
+                            .vertical_align(egui::Align::Center)
+                            .margin(pad),
+                    );
+                    return;
+                }
+                ui.label(
+                    egui::RichText::new(
+                        "PL/pgSQL function body (a RETURNS trigger function is generated)",
+                    )
+                    .color(palette::TEXT_WEAK())
+                    .size(12.0),
+                );
+            } else {
+                ui.label(
+                    egui::RichText::new("Trigger body")
+                        .color(palette::TEXT_WEAK())
+                        .size(12.0),
+                );
+            }
+            ui.add_space(2.0);
+            ui.add(
+                egui::TextEdit::multiline(&mut editor.body)
+                    .code_editor()
+                    .desired_rows(12)
+                    .desired_width(f32::INFINITY)
+                    .hint_text(trigger_body_hint(kind)),
+            );
+        });
+}
+
+/// A placeholder routine body, tailored to the dialect and routine kind.
+fn routine_body_hint(kind: dbcore::DbKind, is_function: bool) -> &'static str {
+    use dbcore::DbKind;
+    match (kind, is_function) {
+        (DbKind::Postgres, _) => "BEGIN\n  RETURN ...;\nEND;",
+        (DbKind::SqlServer, true) => "BEGIN\n  RETURN ...;\nEND",
+        (DbKind::SqlServer, false) => "BEGIN\n  SELECT ...;\nEND",
+        (_, true) => "RETURN ...;  -- or a BEGIN ... END block",
+        (_, false) => "BEGIN\n  ...\nEND",
+    }
+}
+
+/// Render the function/procedure create/edit form: a parameter grid plus return type,
+/// language (Postgres), and body. Dialect-adaptive — the mode column is hidden for MySQL
+/// functions, the language picker shows only on Postgres.
+fn routine_editor_view(
+    ui: &mut egui::Ui,
+    actions: &mut Vec<Action>,
+    editor: &mut crate::schema::RoutineEditor,
+) {
+    use crate::schema::{ObjectMode, ParamDraft};
+    use dbcore::{DbKind, ParamMode, RoutineKind};
+
+    let title = match editor.mode {
+        ObjectMode::Create if editor.kind == RoutineKind::Function => "Create Function".to_string(),
+        ObjectMode::Create => "Create Procedure".to_string(),
+        ObjectMode::Edit => format!("Edit {} — {}", editor.kind.label(), editor.name),
+    };
+    object_editor_header(ui, actions, &title);
+    let kind = editor.db_kind;
+    let pad = egui::Margin::symmetric(10, 5);
+    let is_fn = editor.kind == RoutineKind::Function;
+
+    egui::ScrollArea::vertical()
+        .id_salt("routine_editor_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            // Function/Procedure switch (create mode only; the kind is fixed once it exists).
+            if editor.mode == ObjectMode::Create {
+                ui.horizontal(|ui| {
+                    ui.label("Kind:");
+                    ui.selectable_value(&mut editor.kind, RoutineKind::Function, "Function");
+                    ui.selectable_value(&mut editor.kind, RoutineKind::Procedure, "Procedure");
+                });
+                ui.add_space(4.0);
+            }
+
+            ui.horizontal(|ui| {
+                ui.label("Name:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut editor.name)
+                        .hint_text("my_routine")
+                        .desired_width(180.0)
+                        .vertical_align(egui::Align::Center)
+                        .margin(pad),
+                );
+                if !editor.schema_name.is_empty() || editor.mode == ObjectMode::Create {
+                    ui.label("Schema:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut editor.schema_name)
+                            .hint_text("public")
+                            .desired_width(110.0)
+                            .vertical_align(egui::Align::Center)
+                            .margin(pad),
+                    );
+                }
+            });
+            ui.add_space(4.0);
+
+            // Return type (functions) and language (Postgres).
+            if is_fn || kind == DbKind::Postgres {
+                ui.horizontal(|ui| {
+                    if is_fn {
+                        ui.label("Returns:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut editor.return_type)
+                                .hint_text("integer")
+                                .desired_width(150.0)
+                                .vertical_align(egui::Align::Center)
+                                .margin(pad),
+                        );
+                    }
+                    if kind == DbKind::Postgres {
+                        ui.label("Language:");
+                        egui::ComboBox::from_id_salt("routine_lang")
+                            .selected_text(editor.language.clone())
+                            .show_ui(ui, |ui| {
+                                for l in ["plpgsql", "sql"] {
+                                    ui.selectable_value(&mut editor.language, l.to_string(), l);
+                                }
+                            });
+                    }
+                });
+                ui.add_space(6.0);
+            }
+
+            // Parameters grid.
+            ui.label(
+                egui::RichText::new("Parameters")
+                    .color(palette::TEXT_WEAK())
+                    .size(12.0),
+            );
+            ui.add_space(2.0);
+            // MySQL/MariaDB functions take no parameter mode.
+            let show_mode = !(matches!(kind, DbKind::MySql | DbKind::MariaDb) && is_fn);
+            let mut remove: Option<usize> = None;
+            for (i, p) in editor.params.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut p.name)
+                            .hint_text("name")
+                            .desired_width(110.0)
+                            .margin(pad),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut p.data_type)
+                            .hint_text("type")
+                            .desired_width(120.0)
+                            .margin(pad),
+                    );
+                    if show_mode {
+                        egui::ComboBox::from_id_salt(("pmode", i))
+                            .selected_text(p.mode.label())
+                            .width(82.0)
+                            .show_ui(ui, |ui| {
+                                for m in ParamMode::ALL {
+                                    ui.selectable_value(&mut p.mode, *m, m.label());
+                                }
+                            });
+                    }
+                    ui.add(
+                        egui::TextEdit::singleline(&mut p.default)
+                            .hint_text("default")
+                            .desired_width(100.0)
+                            .margin(pad),
+                    );
+                    if icons::button(ui, icons::trash(), "", true).clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                editor.params.remove(i);
+            }
+            if icons::button(ui, icons::plus(), "Add parameter", true).clicked() {
+                editor.params.push(ParamDraft::new_empty());
+            }
+            ui.add_space(6.0);
+
+            ui.label(
+                egui::RichText::new("Body")
+                    .color(palette::TEXT_WEAK())
+                    .size(12.0),
+            );
+            ui.add_space(2.0);
+            ui.add(
+                egui::TextEdit::multiline(&mut editor.body)
+                    .code_editor()
+                    .desired_rows(12)
+                    .desired_width(f32::INFINITY)
+                    .hint_text(routine_body_hint(kind, is_fn)),
+            );
+        });
+}
+
+/// A collapsible group header ("Views (3)", "Triggers (1)", …) for a class of schema objects
+/// in the sidebar tree, with `body` rendering its rows. Collapsed by default to keep the tree
+/// compact when a database has many objects; clicking anywhere on the header toggles it.
+fn object_group(
+    ui: &mut egui::Ui,
+    id_key: &str,
+    title: &str,
+    count: usize,
+    body: impl FnOnce(&mut egui::Ui),
+) {
+    egui::CollapsingHeader::new(
+        egui::RichText::new(format!("{title} ({count})"))
+            .color(palette::TEXT_WEAK())
+            .size(12.0),
+    )
+    .id_salt(id_key)
+    .show(ui, body);
+}
+
+/// A single clickable leaf row (a routine or trigger) in the sidebar tree: an icon, the object
+/// name, and `detail` shown as a hover tooltip. Returns the name label's response so the caller
+/// can react to clicks.
+fn object_leaf_row(
+    ui: &mut egui::Ui,
+    icon: egui::ImageSource<'static>,
+    name: &str,
+    detail: &str,
+) -> egui::Response {
+    ui.horizontal(|ui| {
+        icons::show_weak(ui, icon, 14.0);
+        ui.add_space(2.0);
+        style::truncated_label(ui, name, Some(detail), false, egui::Sense::click())
+    })
+    .inner
 }
 
 /// The Structure view of a table tab: its introspected columns, indexes, and foreign keys

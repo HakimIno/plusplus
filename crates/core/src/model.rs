@@ -888,11 +888,336 @@ impl TableInfo {
     }
 }
 
-/// The full introspected schema of a connected database.
+/// A view as introspected from the schema. Like a table it has columns; it also carries
+/// the `SELECT` body it was defined with.
 #[derive(Debug, Clone)]
+pub struct ViewInfo {
+    /// Schema/namespace the view lives in. `None` for SQLite.
+    pub schema: Option<String>,
+    pub name: String,
+    pub columns: Vec<ColumnInfo>,
+    /// The view's defining query (the text after `AS`), as reported by the backend. Empty
+    /// when the backend won't surface it (e.g. insufficient privileges).
+    pub definition: String,
+    /// Postgres materialized view. Always `false` on the other backends.
+    pub materialized: bool,
+}
+
+impl ViewInfo {
+    /// Fully-qualified, quote-safe name for use in generated SQL, quoted for `kind`.
+    pub fn qualified(&self, kind: DbKind) -> String {
+        match &self.schema {
+            Some(s) => format!("{}.{}", kind.quote_ident(s), kind.quote_ident(&self.name)),
+            None => kind.quote_ident(&self.name),
+        }
+    }
+}
+
+/// Whether a routine is a function (returns a value) or a procedure (called for effect).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RoutineKind {
+    Function,
+    Procedure,
+}
+
+impl RoutineKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            RoutineKind::Function => "Function",
+            RoutineKind::Procedure => "Procedure",
+        }
+    }
+
+    /// SQL keyword for this routine kind (`FUNCTION` / `PROCEDURE`).
+    pub fn keyword(self) -> &'static str {
+        match self {
+            RoutineKind::Function => "FUNCTION",
+            RoutineKind::Procedure => "PROCEDURE",
+        }
+    }
+}
+
+/// Parameter-passing mode for a routine parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ParamMode {
+    #[default]
+    In,
+    Out,
+    InOut,
+    Variadic,
+}
+
+impl ParamMode {
+    pub const ALL: &'static [ParamMode] =
+        &[ParamMode::In, ParamMode::Out, ParamMode::InOut, ParamMode::Variadic];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ParamMode::In => "IN",
+            ParamMode::Out => "OUT",
+            ParamMode::InOut => "INOUT",
+            ParamMode::Variadic => "VARIADIC",
+        }
+    }
+
+    /// Parse a backend-reported parameter mode ("IN", "OUT", "INOUT", "IN OUT", "VARIADIC").
+    pub fn from_keyword(s: &str) -> ParamMode {
+        match s.trim().replace('_', " ").to_ascii_uppercase().as_str() {
+            "OUT" => ParamMode::Out,
+            "INOUT" | "IN OUT" => ParamMode::InOut,
+            "VARIADIC" => ParamMode::Variadic,
+            _ => ParamMode::In,
+        }
+    }
+}
+
+/// A single routine parameter.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoutineParam {
+    pub name: String,
+    pub data_type: String,
+    pub mode: ParamMode,
+    /// Optional default expression, rendered verbatim. `None` when the parameter has none.
+    pub default: Option<String>,
+}
+
+/// A stored function or procedure as introspected from the schema.
+#[derive(Debug, Clone)]
+pub struct RoutineInfo {
+    /// Schema/namespace the routine lives in. `None` for SQLite (which has no routines).
+    pub schema: Option<String>,
+    pub name: String,
+    pub kind: RoutineKind,
+    pub params: Vec<RoutineParam>,
+    /// Return type for functions; `None` for procedures.
+    pub return_type: Option<String>,
+    /// Implementation language (Postgres: "plpgsql"/"sql"; often empty elsewhere).
+    pub language: String,
+    /// The routine body / full definition as reported by the backend. May be empty when the
+    /// backend won't surface it (e.g. insufficient privileges).
+    pub body: String,
+}
+
+impl RoutineInfo {
+    /// Compact `name(mode arg type, …) → ret` signature for tree rows and tooltips.
+    pub fn signature(&self) -> String {
+        let params = self
+            .params
+            .iter()
+            .map(|p| {
+                let mode = if p.mode == ParamMode::In {
+                    String::new()
+                } else {
+                    format!("{} ", p.mode.label())
+                };
+                format!("{mode}{} {}", p.name, p.data_type).trim().to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        match &self.return_type {
+            Some(ret) => format!("{}({params}) → {ret}", self.name),
+            None => format!("{}({params})", self.name),
+        }
+    }
+
+    /// Fully-qualified, quote-safe name for generated SQL, quoted for `kind`.
+    pub fn qualified(&self, kind: DbKind) -> String {
+        match &self.schema {
+            Some(s) => format!("{}.{}", kind.quote_ident(s), kind.quote_ident(&self.name)),
+            None => kind.quote_ident(&self.name),
+        }
+    }
+}
+
+/// When a trigger fires relative to the triggering statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TriggerTiming {
+    #[default]
+    Before,
+    After,
+    InsteadOf,
+}
+
+impl TriggerTiming {
+    pub const ALL: &'static [TriggerTiming] =
+        &[TriggerTiming::Before, TriggerTiming::After, TriggerTiming::InsteadOf];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TriggerTiming::Before => "BEFORE",
+            TriggerTiming::After => "AFTER",
+            TriggerTiming::InsteadOf => "INSTEAD OF",
+        }
+    }
+
+    pub fn from_keyword(s: &str) -> Option<TriggerTiming> {
+        match s.trim().replace('_', " ").to_ascii_uppercase().as_str() {
+            "BEFORE" => Some(TriggerTiming::Before),
+            "AFTER" => Some(TriggerTiming::After),
+            "INSTEAD OF" => Some(TriggerTiming::InsteadOf),
+            _ => None,
+        }
+    }
+}
+
+/// A data-modification event a trigger can fire on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TriggerEvent {
+    Insert,
+    Update,
+    Delete,
+}
+
+impl TriggerEvent {
+    pub const ALL: &'static [TriggerEvent] =
+        &[TriggerEvent::Insert, TriggerEvent::Update, TriggerEvent::Delete];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TriggerEvent::Insert => "INSERT",
+            TriggerEvent::Update => "UPDATE",
+            TriggerEvent::Delete => "DELETE",
+        }
+    }
+
+    pub fn from_keyword(s: &str) -> Option<TriggerEvent> {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "INSERT" => Some(TriggerEvent::Insert),
+            "UPDATE" => Some(TriggerEvent::Update),
+            "DELETE" => Some(TriggerEvent::Delete),
+            _ => None,
+        }
+    }
+}
+
+/// Whether a trigger fires once per affected row or once per statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TriggerLevel {
+    #[default]
+    Row,
+    Statement,
+}
+
+impl TriggerLevel {
+    pub fn label(self) -> &'static str {
+        match self {
+            TriggerLevel::Row => "FOR EACH ROW",
+            TriggerLevel::Statement => "FOR EACH STATEMENT",
+        }
+    }
+
+    /// The bare granularity keyword (`ROW` / `STATEMENT`) following `FOR EACH`.
+    pub fn sql(self) -> &'static str {
+        match self {
+            TriggerLevel::Row => "ROW",
+            TriggerLevel::Statement => "STATEMENT",
+        }
+    }
+}
+
+/// A trigger as introspected from the schema.
+#[derive(Debug, Clone)]
+pub struct TriggerInfo {
+    /// Schema/namespace the trigger lives in. `None` for SQLite.
+    pub schema: Option<String>,
+    pub name: String,
+    /// Table the trigger is attached to.
+    pub table: String,
+    pub timing: TriggerTiming,
+    /// Events the trigger fires on, in declaration order (MySQL allows only one).
+    pub events: Vec<TriggerEvent>,
+    pub level: TriggerLevel,
+    /// `WHEN (...)` guard condition, if any.
+    pub when_condition: Option<String>,
+    /// The action body — an inline statement block, or for Postgres an
+    /// `EXECUTE FUNCTION fn(...)` clause. For SQLite this is the full stored `CREATE TRIGGER`
+    /// text, the only form the backend exposes.
+    pub action: String,
+}
+
+impl TriggerInfo {
+    /// Human-readable `BEFORE INSERT ON table` summary for tree rows and tooltips.
+    pub fn display(&self) -> String {
+        let events = self
+            .events
+            .iter()
+            .map(|e| e.label())
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        format!("{} {} ON {}", self.timing.label(), events, self.table)
+    }
+}
+
+/// Best-effort extraction of `(timing, events, level, when_condition)` from a full
+/// `CREATE TRIGGER` definition — as returned by `pg_get_triggerdef`, SQL Server's
+/// `OBJECT_DEFINITION`, or SQLite's `sqlite_master.sql`. Only the *header* (everything
+/// before the action clause: `WHEN` / `EXECUTE` / `BEGIN` / `AS`) is scanned, so DML
+/// keywords inside the trigger body are never mistaken for the trigger's own events.
+/// Reuses [`keyword_positions`], which already skips string literals, comments, and quoted
+/// identifiers. Callers that know their dialect's firing granularity (SQLite = row,
+/// SQL Server = statement) may override the returned `level`.
+pub fn parse_trigger_header(
+    def: &str,
+) -> (TriggerTiming, Vec<TriggerEvent>, TriggerLevel, Option<String>) {
+    let first = |kw: &str| keyword_positions(def, kw).first().copied();
+    let when_at = first("WHEN");
+    let action_at = ["EXECUTE", "BEGIN", "AS"]
+        .iter()
+        .filter_map(|kw| first(kw))
+        .min();
+    let header_end = [when_at, action_at]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(def.len());
+    let header = &def[..header_end];
+
+    let has = |kw: &str| !keyword_positions(header, kw).is_empty();
+    let timing = if has("INSTEAD") {
+        TriggerTiming::InsteadOf
+    } else if has("AFTER") {
+        TriggerTiming::After
+    } else {
+        TriggerTiming::Before
+    };
+    let events = TriggerEvent::ALL
+        .iter()
+        .copied()
+        .filter(|e| has(e.label()))
+        .collect();
+    let level = if has("STATEMENT") {
+        TriggerLevel::Statement
+    } else {
+        TriggerLevel::Row
+    };
+    let when_condition = when_at.and_then(|w| {
+        let stop = action_at.unwrap_or(def.len());
+        let cond = def.get(w + "WHEN".len()..stop)?.trim();
+        (!cond.is_empty()).then(|| cond.to_string())
+    });
+    (timing, events, level, when_condition)
+}
+
+/// Extract the defining `SELECT` from a `CREATE VIEW … AS <select>` statement: the trimmed
+/// text after the first top-level `AS` keyword, or the whole input when there's no such
+/// separator. Normalises SQL Server's and SQLite's full `CREATE VIEW` text down to the query
+/// body (Postgres and MySQL already report only the body). Skips literals/comments via
+/// [`keyword_positions`].
+pub fn select_body_after_as(create_sql: &str) -> String {
+    match keyword_positions(create_sql, "AS").first() {
+        Some(&pos) => create_sql[pos + "AS".len()..].trim().to_string(),
+        None => create_sql.trim().to_string(),
+    }
+}
+
+/// The full introspected schema of a connected database.
+#[derive(Debug, Clone, Default)]
 pub struct SchemaTree {
     pub database_name: String,
     pub tables: Vec<TableInfo>,
+    pub views: Vec<ViewInfo>,
+    pub routines: Vec<RoutineInfo>,
+    pub triggers: Vec<TriggerInfo>,
 }
 
 /// Metadata for a single result-set column.
@@ -1313,12 +1638,722 @@ pub fn build_drop_index_sql(
     }
 }
 
+// ─── View DDL builders ───────────────────────────────────────────────────────
+
+/// The in-place "replace" keyword for `CREATE … VIEW`, or `""` when the dialect has none.
+/// Postgres/MySQL use `OR REPLACE`; SQL Server uses `OR ALTER` (2016+); SQLite has no such
+/// form (callers drop-then-create). Postgres can't `OR REPLACE` a materialized view, so
+/// `materialized` suppresses it there too.
+fn view_replace_kw(kind: DbKind, materialized: bool) -> &'static str {
+    if materialized {
+        return "";
+    }
+    match kind {
+        DbKind::Postgres | DbKind::MySql | DbKind::MariaDb => "OR REPLACE ",
+        DbKind::SqlServer => "OR ALTER ",
+        DbKind::Sqlite => "",
+    }
+}
+
+/// Build a `CREATE [OR REPLACE] [MATERIALIZED] VIEW … AS <select>` statement.
+///
+/// `or_replace` requests an in-place redefinition where the dialect supports one (see
+/// [`view_supports_replace`]); when it doesn't, the caller must drop the view first.
+/// `materialized` is Postgres-only and ignored on the other backends.
+pub fn build_create_view_sql(
+    kind: DbKind,
+    schema: Option<&str>,
+    name: &str,
+    select_body: &str,
+    materialized: bool,
+    or_replace: bool,
+) -> String {
+    let vref = ddl_table_ref(kind, schema, name);
+    let body = select_body.trim().trim_end_matches(';').trim_end();
+    let mat = if materialized && kind == DbKind::Postgres {
+        "MATERIALIZED "
+    } else {
+        ""
+    };
+    let replace = if or_replace {
+        view_replace_kw(kind, materialized)
+    } else {
+        ""
+    };
+    format!("CREATE {replace}{mat}VIEW {vref} AS\n{body};")
+}
+
+/// Build a `DROP [MATERIALIZED] VIEW` statement. `materialized` is Postgres-only.
+pub fn build_drop_view_sql(
+    kind: DbKind,
+    schema: Option<&str>,
+    name: &str,
+    materialized: bool,
+) -> String {
+    let mat = if materialized && kind == DbKind::Postgres {
+        "MATERIALIZED "
+    } else {
+        ""
+    };
+    format!("DROP {mat}VIEW {};", ddl_table_ref(kind, schema, name))
+}
+
+/// Whether `kind` can redefine a view in place (so an edit is a single statement rather than
+/// a drop-then-create). False for SQLite, and for Postgres materialized views.
+pub fn view_supports_replace(kind: DbKind, materialized: bool) -> bool {
+    !view_replace_kw(kind, materialized).is_empty()
+}
+
+// ─── Trigger DDL builders ────────────────────────────────────────────────────
+
+/// Inputs for [`build_create_trigger_sql`]. Bundled into a struct because a trigger carries
+/// far more dialect-sensitive parts than the other objects.
+pub struct TriggerBuild<'a> {
+    pub schema: Option<&'a str>,
+    pub name: &'a str,
+    pub table: &'a str,
+    pub timing: TriggerTiming,
+    pub events: &'a [TriggerEvent],
+    pub level: TriggerLevel,
+    pub when_condition: Option<&'a str>,
+    /// The trigger action. For MySQL/SQLite/SQL Server this is the statement body. For
+    /// Postgres it is either the name of an existing trigger function (when
+    /// `pg_existing_function`) or a PL/pgSQL body wrapped in a generated `RETURNS trigger`
+    /// function.
+    pub body: &'a str,
+    /// Postgres only: treat `body` as the name of an existing function to `EXECUTE`.
+    pub pg_existing_function: bool,
+}
+
+/// Build the statement(s) creating a trigger. Postgres returns two — a backing function plus
+/// the trigger — when generating a function from an inline body; the other dialects return
+/// one. `Err` is returned for requests a dialect can't express (a `BEFORE` trigger on SQL
+/// Server, multiple events on MySQL, an empty body, …).
+pub fn build_create_trigger_sql(kind: DbKind, t: &TriggerBuild) -> Result<Vec<String>, String> {
+    let name = t.name.trim();
+    if name.is_empty() {
+        return Err("Trigger name is required.".into());
+    }
+    if t.table.trim().is_empty() {
+        return Err("Trigger requires a target table.".into());
+    }
+    if t.events.is_empty() {
+        return Err("Select at least one event (INSERT / UPDATE / DELETE).".into());
+    }
+    let body = t.body.trim();
+    let tref = ddl_table_ref(kind, t.schema, t.table);
+    let nm = kind.quote_ident(name);
+    let when = t.when_condition.map(str::trim).filter(|w| !w.is_empty());
+
+    match kind {
+        DbKind::Postgres => {
+            let events = t
+                .events
+                .iter()
+                .map(|e| e.label())
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            let when_clause = when.map(|w| format!("\nWHEN ({w})")).unwrap_or_default();
+            let mut out = Vec::new();
+            let call = if t.pg_existing_function {
+                if body.is_empty() {
+                    return Err("Enter the trigger function to execute.".into());
+                }
+                if body.ends_with(')') {
+                    body.to_string()
+                } else {
+                    format!("{body}()")
+                }
+            } else {
+                if body.is_empty() {
+                    return Err("Enter the trigger function body.".into());
+                }
+                let fn_ref = match t.schema {
+                    Some(s) => format!(
+                        "{}.{}",
+                        kind.quote_ident(s),
+                        kind.quote_ident(&format!("{name}_trigfn"))
+                    ),
+                    None => kind.quote_ident(&format!("{name}_trigfn")),
+                };
+                out.push(format!(
+                    "CREATE OR REPLACE FUNCTION {fn_ref}()\n\
+                     RETURNS trigger LANGUAGE plpgsql AS $$\n{body}\n$$;"
+                ));
+                format!("{fn_ref}()")
+            };
+            out.push(format!(
+                "CREATE TRIGGER {nm} {} {events} ON {tref}\n\
+                 FOR EACH {}{when_clause}\nEXECUTE FUNCTION {call};",
+                t.timing.label(),
+                t.level.sql(),
+            ));
+            Ok(out)
+        }
+        DbKind::MySql | DbKind::MariaDb => {
+            if t.timing == TriggerTiming::InsteadOf {
+                return Err("MySQL/MariaDB have no INSTEAD OF triggers.".into());
+            }
+            if t.events.len() != 1 {
+                return Err("A MySQL/MariaDB trigger fires on exactly one event.".into());
+            }
+            if body.is_empty() {
+                return Err("Enter the trigger body.".into());
+            }
+            Ok(vec![format!(
+                "CREATE TRIGGER {nm} {} {} ON {tref}\nFOR EACH ROW\n{body};",
+                t.timing.label(),
+                t.events[0].label(),
+            )])
+        }
+        DbKind::Sqlite => {
+            if t.events.len() != 1 {
+                return Err("A SQLite trigger fires on a single event.".into());
+            }
+            if body.is_empty() {
+                return Err("Enter the trigger body.".into());
+            }
+            let when_clause = when.map(|w| format!("\nWHEN ({w})")).unwrap_or_default();
+            Ok(vec![format!(
+                "CREATE TRIGGER {nm} {} {} ON {tref}\n\
+                 FOR EACH ROW{when_clause}\nBEGIN\n{body}\nEND;",
+                t.timing.label(),
+                t.events[0].label(),
+            )])
+        }
+        DbKind::SqlServer => {
+            if t.timing == TriggerTiming::Before {
+                return Err("SQL Server has no BEFORE triggers; use AFTER or INSTEAD OF.".into());
+            }
+            if body.is_empty() {
+                return Err("Enter the trigger body.".into());
+            }
+            let events = t
+                .events
+                .iter()
+                .map(|e| e.label())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Ok(vec![format!(
+                "CREATE TRIGGER {nm} ON {tref}\n{} {events}\nAS\n{body};",
+                t.timing.label(),
+            )])
+        }
+    }
+}
+
+/// Build a `DROP TRIGGER` statement. Postgres needs the owning `table`; the others ignore it.
+pub fn build_drop_trigger_sql(
+    kind: DbKind,
+    schema: Option<&str>,
+    name: &str,
+    table: &str,
+) -> String {
+    let nm = kind.quote_ident(name);
+    match kind {
+        DbKind::Postgres => format!("DROP TRIGGER {nm} ON {};", ddl_table_ref(kind, schema, table)),
+        // MySQL allows database-qualifying the trigger; SQL Server allows schema-qualifying it.
+        DbKind::MySql | DbKind::MariaDb | DbKind::SqlServer => match schema {
+            Some(s) => format!("DROP TRIGGER {}.{nm};", kind.quote_ident(s)),
+            None => format!("DROP TRIGGER {nm};"),
+        },
+        DbKind::Sqlite => format!("DROP TRIGGER {nm};"),
+    }
+}
+
+// ─── Routine (function / procedure) DDL builders ─────────────────────────────
+
+/// Inputs for [`build_create_routine_sql`].
+pub struct RoutineBuild<'a> {
+    pub schema: Option<&'a str>,
+    pub name: &'a str,
+    pub kind: RoutineKind,
+    pub params: &'a [RoutineParam],
+    /// Return type — required for functions, ignored for procedures.
+    pub return_type: Option<&'a str>,
+    /// Postgres: "plpgsql" / "sql". Ignored by the other backends.
+    pub language: &'a str,
+    pub body: &'a str,
+}
+
+/// Format a routine's parameter list (comma-separated, no surrounding parentheses) for `kind`.
+/// MySQL functions take no mode keyword; SQL Server prefixes `@` and uses `OUTPUT`.
+fn routine_params_sql(kind: DbKind, is_function: bool, params: &[RoutineParam]) -> String {
+    params
+        .iter()
+        .map(|p| {
+            let ty = p.data_type.trim();
+            let nm = p.name.trim();
+            let default = p
+                .default
+                .as_deref()
+                .map(str::trim)
+                .filter(|d| !d.is_empty());
+            match kind {
+                DbKind::Postgres => {
+                    let mode = if p.mode == ParamMode::In {
+                        String::new()
+                    } else {
+                        format!("{} ", p.mode.label())
+                    };
+                    let def = default.map(|d| format!(" DEFAULT {d}")).unwrap_or_default();
+                    format!("{mode}{nm} {ty}{def}")
+                }
+                DbKind::MySql | DbKind::MariaDb => {
+                    // Functions take no mode keyword; procedures may.
+                    let mode = if is_function || p.mode == ParamMode::In {
+                        String::new()
+                    } else {
+                        format!("{} ", p.mode.label())
+                    };
+                    format!("{mode}{nm} {ty}")
+                }
+                DbKind::SqlServer => {
+                    let at = if nm.starts_with('@') {
+                        nm.to_string()
+                    } else {
+                        format!("@{nm}")
+                    };
+                    let def = default.map(|d| format!(" = {d}")).unwrap_or_default();
+                    let out = if matches!(p.mode, ParamMode::Out | ParamMode::InOut) {
+                        " OUTPUT"
+                    } else {
+                        ""
+                    };
+                    format!("{at} {ty}{def}{out}")
+                }
+                DbKind::Sqlite => String::new(),
+            }
+        })
+        .filter(|s| !s.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Build a `CREATE [OR REPLACE] FUNCTION|PROCEDURE` statement. SQLite has no routines and
+/// returns `Err`. `or_replace` uses `OR REPLACE` on Postgres / `OR ALTER` on SQL Server; the
+/// MySQL family has no portable inline replace, so the caller drops first (see the editor).
+pub fn build_create_routine_sql(
+    kind: DbKind,
+    r: &RoutineBuild,
+    or_replace: bool,
+) -> Result<Vec<String>, String> {
+    if kind == DbKind::Sqlite {
+        return Err("SQLite has no stored functions or procedures.".into());
+    }
+    let name = r.name.trim();
+    if name.is_empty() {
+        return Err("Routine name is required.".into());
+    }
+    let body = r.body.trim();
+    if body.is_empty() {
+        return Err("Routine body is required.".into());
+    }
+    let is_fn = r.kind == RoutineKind::Function;
+    let ret = r.return_type.map(str::trim).filter(|s| !s.is_empty());
+    if is_fn && ret.is_none() {
+        return Err("A function needs a return type.".into());
+    }
+
+    let rref = ddl_table_ref(kind, r.schema, name);
+    let plist = routine_params_sql(kind, is_fn, r.params);
+    let kw = r.kind.keyword();
+
+    let sql = match kind {
+        DbKind::Postgres => {
+            let repl = if or_replace { "OR REPLACE " } else { "" };
+            let lang = {
+                let l = r.language.trim();
+                if l.is_empty() {
+                    "plpgsql"
+                } else {
+                    l
+                }
+            };
+            let returns = ret.map(|t| format!(" RETURNS {t}")).unwrap_or_default();
+            let returns = if is_fn { returns } else { String::new() };
+            format!("CREATE {repl}{kw} {rref}({plist}){returns}\nLANGUAGE {lang} AS $$\n{body}\n$$;")
+        }
+        DbKind::MySql | DbKind::MariaDb => {
+            let returns = if is_fn {
+                format!(" RETURNS {}", ret.unwrap())
+            } else {
+                String::new()
+            };
+            format!("CREATE {kw} {rref}({plist}){returns}\n{body}")
+        }
+        DbKind::SqlServer => {
+            let repl = if or_replace { "OR ALTER " } else { "" };
+            if is_fn {
+                format!(
+                    "CREATE {repl}FUNCTION {rref}({plist})\nRETURNS {}\nAS\n{body};",
+                    ret.unwrap()
+                )
+            } else {
+                // SQL Server procedures list parameters without parentheses.
+                let params = if plist.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {plist}")
+                };
+                format!("CREATE {repl}PROCEDURE {rref}{params}\nAS\n{body};")
+            }
+        }
+        DbKind::Sqlite => unreachable!("guarded above"),
+    };
+    Ok(vec![sql])
+}
+
+/// Build a `DROP FUNCTION|PROCEDURE` statement. Postgres disambiguates overloads by argument
+/// types (OUT parameters excluded); the others drop by name alone.
+pub fn build_drop_routine_sql(
+    kind: DbKind,
+    schema: Option<&str>,
+    name: &str,
+    routine_kind: RoutineKind,
+    params: &[RoutineParam],
+) -> String {
+    let kw = routine_kind.keyword();
+    let rref = ddl_table_ref(kind, schema, name);
+    match kind {
+        DbKind::Postgres => {
+            let types = params
+                .iter()
+                .filter(|p| p.mode != ParamMode::Out)
+                .map(|p| p.data_type.trim().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("DROP {kw} {rref}({types});")
+        }
+        _ => format!("DROP {kw} {rref};"),
+    }
+}
+
+/// Whether `kind` can redefine a routine in place (an edit is a single statement, not a
+/// drop-then-create). True for Postgres (`OR REPLACE`) and SQL Server (`OR ALTER`).
+pub fn routine_supports_replace(kind: DbKind) -> bool {
+    matches!(kind, DbKind::Postgres | DbKind::SqlServer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn target(sql: &str) -> Option<(Option<String>, String)> {
         simple_select_target(sql)
+    }
+
+    #[test]
+    fn create_view_per_dialect() {
+        // Postgres / MySQL redefine in place with OR REPLACE.
+        assert_eq!(
+            build_create_view_sql(DbKind::Postgres, Some("public"), "v", "SELECT 1", false, true),
+            "CREATE OR REPLACE VIEW \"public\".\"v\" AS\nSELECT 1;"
+        );
+        assert_eq!(
+            build_create_view_sql(DbKind::MySql, None, "v", "SELECT 1;", false, true),
+            "CREATE OR REPLACE VIEW `v` AS\nSELECT 1;"
+        );
+        // SQL Server uses OR ALTER instead.
+        assert_eq!(
+            build_create_view_sql(DbKind::SqlServer, Some("dbo"), "v", "SELECT 1", false, true),
+            "CREATE OR ALTER VIEW \"dbo\".\"v\" AS\nSELECT 1;"
+        );
+        // SQLite has no replace form even when asked (caller drops first).
+        assert_eq!(
+            build_create_view_sql(DbKind::Sqlite, None, "v", "SELECT 1", false, false),
+            "CREATE VIEW \"v\" AS\nSELECT 1;"
+        );
+        // Postgres materialized view: MATERIALIZED, and OR REPLACE is suppressed for it.
+        assert_eq!(
+            build_create_view_sql(DbKind::Postgres, None, "mv", "SELECT 1", true, true),
+            "CREATE MATERIALIZED VIEW \"mv\" AS\nSELECT 1;"
+        );
+    }
+
+    #[test]
+    fn drop_view_per_dialect() {
+        assert_eq!(
+            build_drop_view_sql(DbKind::Postgres, Some("public"), "v", false),
+            "DROP VIEW \"public\".\"v\";"
+        );
+        assert_eq!(
+            build_drop_view_sql(DbKind::Postgres, None, "mv", true),
+            "DROP MATERIALIZED VIEW \"mv\";"
+        );
+        assert_eq!(build_drop_view_sql(DbKind::MySql, None, "v", false), "DROP VIEW `v`;");
+        // Only Postgres has materialized views; the keyword is dropped elsewhere.
+        assert_eq!(build_drop_view_sql(DbKind::MySql, None, "v", true), "DROP VIEW `v`;");
+    }
+
+    #[test]
+    fn view_replace_support_per_dialect() {
+        assert!(view_supports_replace(DbKind::Postgres, false));
+        assert!(view_supports_replace(DbKind::SqlServer, false));
+        assert!(!view_supports_replace(DbKind::Sqlite, false));
+        assert!(!view_supports_replace(DbKind::Postgres, true)); // materialized: no OR REPLACE
+    }
+
+    #[test]
+    fn create_trigger_postgres_generates_function() {
+        let t = TriggerBuild {
+            schema: Some("public"),
+            name: "trg",
+            table: "t",
+            timing: TriggerTiming::Before,
+            events: &[TriggerEvent::Insert, TriggerEvent::Update],
+            level: TriggerLevel::Row,
+            when_condition: Some("NEW.n > 0"),
+            body: "BEGIN NEW.updated := now(); RETURN NEW; END;",
+            pg_existing_function: false,
+        };
+        let sql = build_create_trigger_sql(DbKind::Postgres, &t).unwrap();
+        assert_eq!(sql.len(), 2);
+        assert!(sql[0].starts_with("CREATE OR REPLACE FUNCTION \"public\".\"trg_trigfn\"()"));
+        assert!(sql[1].contains("CREATE TRIGGER \"trg\" BEFORE INSERT OR UPDATE ON \"public\".\"t\""));
+        assert!(sql[1].contains("FOR EACH ROW"));
+        assert!(sql[1].contains("WHEN (NEW.n > 0)"));
+        assert!(sql[1].ends_with("EXECUTE FUNCTION \"public\".\"trg_trigfn\"();"));
+    }
+
+    #[test]
+    fn create_trigger_postgres_existing_function() {
+        let t = TriggerBuild {
+            schema: None,
+            name: "trg",
+            table: "t",
+            timing: TriggerTiming::After,
+            events: &[TriggerEvent::Delete],
+            level: TriggerLevel::Statement,
+            when_condition: None,
+            body: "audit_fn",
+            pg_existing_function: true,
+        };
+        let sql = build_create_trigger_sql(DbKind::Postgres, &t).unwrap();
+        assert_eq!(sql.len(), 1);
+        assert!(sql[0].contains("FOR EACH STATEMENT"));
+        assert!(sql[0].ends_with("EXECUTE FUNCTION audit_fn();"));
+    }
+
+    #[test]
+    fn create_trigger_mysql_single_event_only() {
+        let one = TriggerBuild {
+            schema: None,
+            name: "trg",
+            table: "t",
+            timing: TriggerTiming::Before,
+            events: &[TriggerEvent::Insert],
+            level: TriggerLevel::Row,
+            when_condition: None,
+            body: "SET NEW.created = NOW()",
+            pg_existing_function: false,
+        };
+        assert_eq!(
+            build_create_trigger_sql(DbKind::MySql, &one).unwrap(),
+            vec!["CREATE TRIGGER `trg` BEFORE INSERT ON `t`\nFOR EACH ROW\nSET NEW.created = NOW();"]
+        );
+        let multi = TriggerBuild {
+            events: &[TriggerEvent::Insert, TriggerEvent::Update],
+            ..one
+        };
+        assert!(build_create_trigger_sql(DbKind::MySql, &multi).is_err());
+    }
+
+    #[test]
+    fn create_trigger_sqlite_wraps_begin_end() {
+        let t = TriggerBuild {
+            schema: None,
+            name: "trg",
+            table: "t",
+            timing: TriggerTiming::After,
+            events: &[TriggerEvent::Update],
+            level: TriggerLevel::Row,
+            when_condition: Some("NEW.n <> OLD.n"),
+            body: "INSERT INTO audit VALUES ('u');",
+            pg_existing_function: false,
+        };
+        let sql = build_create_trigger_sql(DbKind::Sqlite, &t).unwrap();
+        assert!(sql[0].contains("CREATE TRIGGER \"trg\" AFTER UPDATE ON \"t\""));
+        assert!(sql[0].contains("WHEN (NEW.n <> OLD.n)"));
+        assert!(sql[0].contains("BEGIN\nINSERT INTO audit VALUES ('u');\nEND;"));
+    }
+
+    #[test]
+    fn create_trigger_sqlserver_rejects_before() {
+        let after = TriggerBuild {
+            schema: Some("dbo"),
+            name: "trg",
+            table: "t",
+            timing: TriggerTiming::After,
+            events: &[TriggerEvent::Insert, TriggerEvent::Delete],
+            level: TriggerLevel::Statement,
+            when_condition: None,
+            body: "BEGIN SET NOCOUNT ON; END",
+            pg_existing_function: false,
+        };
+        let sql = build_create_trigger_sql(DbKind::SqlServer, &after).unwrap();
+        assert!(sql[0].contains("CREATE TRIGGER \"trg\" ON \"dbo\".\"t\""));
+        assert!(sql[0].contains("AFTER INSERT, DELETE"));
+        let before = TriggerBuild {
+            timing: TriggerTiming::Before,
+            ..after
+        };
+        assert!(build_create_trigger_sql(DbKind::SqlServer, &before).is_err());
+    }
+
+    #[test]
+    fn drop_trigger_per_dialect() {
+        assert_eq!(
+            build_drop_trigger_sql(DbKind::Postgres, Some("public"), "trg", "t"),
+            "DROP TRIGGER \"trg\" ON \"public\".\"t\";"
+        );
+        assert_eq!(
+            build_drop_trigger_sql(DbKind::MySql, Some("app"), "trg", "t"),
+            "DROP TRIGGER `app`.`trg`;"
+        );
+        assert_eq!(
+            build_drop_trigger_sql(DbKind::Sqlite, None, "trg", "t"),
+            "DROP TRIGGER \"trg\";"
+        );
+        assert_eq!(
+            build_drop_trigger_sql(DbKind::SqlServer, Some("dbo"), "trg", "t"),
+            "DROP TRIGGER \"dbo\".\"trg\";"
+        );
+    }
+
+    fn param(name: &str, ty: &str, mode: ParamMode, default: Option<&str>) -> RoutineParam {
+        RoutineParam {
+            name: name.into(),
+            data_type: ty.into(),
+            mode,
+            default: default.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn create_function_postgres() {
+        let params = [
+            param("a", "integer", ParamMode::In, None),
+            param("b", "integer", ParamMode::In, Some("0")),
+        ];
+        let r = RoutineBuild {
+            schema: Some("public"),
+            name: "add",
+            kind: RoutineKind::Function,
+            params: &params,
+            return_type: Some("integer"),
+            language: "sql",
+            body: "SELECT a + b;",
+        };
+        assert_eq!(
+            build_create_routine_sql(DbKind::Postgres, &r, true).unwrap()[0],
+            "CREATE OR REPLACE FUNCTION \"public\".\"add\"(a integer, b integer DEFAULT 0) \
+             RETURNS integer\nLANGUAGE sql AS $$\nSELECT a + b;\n$$;"
+        );
+    }
+
+    #[test]
+    fn create_procedure_mysql_with_modes() {
+        let params = [
+            param("x", "INT", ParamMode::In, None),
+            param("y", "INT", ParamMode::Out, None),
+        ];
+        let r = RoutineBuild {
+            schema: None,
+            name: "p",
+            kind: RoutineKind::Procedure,
+            params: &params,
+            return_type: None,
+            language: "",
+            body: "BEGIN SET y = x; END",
+        };
+        assert_eq!(
+            build_create_routine_sql(DbKind::MySql, &r, false).unwrap()[0],
+            "CREATE PROCEDURE `p`(x INT, OUT y INT)\nBEGIN SET y = x; END"
+        );
+    }
+
+    #[test]
+    fn create_routine_sqlserver_function_and_procedure() {
+        let fparams = [param("a", "int", ParamMode::In, None)];
+        let f = RoutineBuild {
+            schema: Some("dbo"),
+            name: "f",
+            kind: RoutineKind::Function,
+            params: &fparams,
+            return_type: Some("int"),
+            language: "",
+            body: "BEGIN RETURN @a; END",
+        };
+        assert_eq!(
+            build_create_routine_sql(DbKind::SqlServer, &f, true).unwrap()[0],
+            "CREATE OR ALTER FUNCTION \"dbo\".\"f\"(@a int)\nRETURNS int\nAS\nBEGIN RETURN @a; END;"
+        );
+        // Procedures list parameters without parentheses.
+        let pparams = [param("id", "int", ParamMode::In, None)];
+        let p = RoutineBuild {
+            schema: None,
+            name: "p",
+            kind: RoutineKind::Procedure,
+            params: &pparams,
+            return_type: None,
+            language: "",
+            body: "BEGIN SELECT 1; END",
+        };
+        assert_eq!(
+            build_create_routine_sql(DbKind::SqlServer, &p, false).unwrap()[0],
+            "CREATE PROCEDURE \"p\" @id int\nAS\nBEGIN SELECT 1; END;"
+        );
+    }
+
+    #[test]
+    fn routine_validation_and_sqlite() {
+        // A function with no return type is rejected.
+        let f = RoutineBuild {
+            schema: None,
+            name: "f",
+            kind: RoutineKind::Function,
+            params: &[],
+            return_type: None,
+            language: "sql",
+            body: "SELECT 1",
+        };
+        assert!(build_create_routine_sql(DbKind::Postgres, &f, false).is_err());
+        // SQLite has no routines at all.
+        let p = RoutineBuild {
+            schema: None,
+            name: "p",
+            kind: RoutineKind::Procedure,
+            params: &[],
+            return_type: None,
+            language: "",
+            body: "x",
+        };
+        assert!(build_create_routine_sql(DbKind::Sqlite, &p, false).is_err());
+    }
+
+    #[test]
+    fn drop_routine_per_dialect() {
+        let params = [
+            param("a", "integer", ParamMode::In, None),
+            param("o", "integer", ParamMode::Out, None),
+        ];
+        // Postgres disambiguates by IN/INOUT arg types (OUT excluded).
+        assert_eq!(
+            build_drop_routine_sql(DbKind::Postgres, Some("public"), "f", RoutineKind::Function, &params),
+            "DROP FUNCTION \"public\".\"f\"(integer);"
+        );
+        assert_eq!(
+            build_drop_routine_sql(DbKind::MySql, None, "p", RoutineKind::Procedure, &params),
+            "DROP PROCEDURE `p`;"
+        );
+        assert_eq!(
+            build_drop_routine_sql(DbKind::SqlServer, Some("dbo"), "f", RoutineKind::Function, &params),
+            "DROP FUNCTION \"dbo\".\"f\";"
+        );
+        assert!(routine_supports_replace(DbKind::Postgres));
+        assert!(routine_supports_replace(DbKind::SqlServer));
+        assert!(!routine_supports_replace(DbKind::MySql));
     }
 
     /// New connections start at Require (encrypted, no plaintext fallback). The bare

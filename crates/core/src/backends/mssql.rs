@@ -13,8 +13,9 @@ use tiberius::{ColumnData, FromSqlOwned, Row};
 use crate::database::{statements_return_rows, Database, ROW_KEYWORDS};
 use crate::error::{CoreError, Result};
 use crate::model::{
-    ColumnInfo, ColumnMeta, ConnectionConfig, DbKind, ForeignKeyInfo, IndexInfo, QueryResult,
-    QueryStats, SchemaTree, SslMode, TableInfo,
+    parse_trigger_header, select_body_after_as, ColumnInfo, ColumnMeta, ConnectionConfig, DbKind,
+    ForeignKeyInfo, IndexInfo, ParamMode, QueryResult, QueryStats, RoutineInfo, RoutineKind,
+    RoutineParam, SchemaTree, SslMode, TableInfo, TriggerInfo, TriggerLevel, TriggerTiming, ViewInfo,
 };
 use crate::value::Value;
 
@@ -135,11 +136,13 @@ impl Database for MsSqlDb {
             .map(|r| get_str(r, 0))
             .unwrap_or_default();
 
-        // Tables and views, keyed by (schema, name) so two schemas can share a table name.
+        // Base tables and views, keyed by (schema, name) so two schemas can share a name.
+        // Columns below populate both buckets.
         let mut tables: BTreeMap<(String, String), TableInfo> = BTreeMap::new();
+        let mut views: BTreeMap<(String, String), ViewInfo> = BTreeMap::new();
         for row in self
             .fetch(
-                "SELECT TABLE_SCHEMA, TABLE_NAME \
+                "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE \
                  FROM INFORMATION_SCHEMA.TABLES \
                  WHERE TABLE_TYPE IN ('BASE TABLE', 'VIEW') \
                  ORDER BY TABLE_SCHEMA, TABLE_NAME",
@@ -148,16 +151,29 @@ impl Database for MsSqlDb {
         {
             let schema = get_str(&row, 0);
             let name = get_str(&row, 1);
-            tables.insert(
-                (schema.clone(), name.clone()),
-                TableInfo {
-                    schema: Some(schema),
-                    name,
-                    columns: Vec::new(),
-                    indexes: Vec::new(),
-                    foreign_keys: Vec::new(),
-                },
-            );
+            if get_str(&row, 2).eq_ignore_ascii_case("VIEW") {
+                views.insert(
+                    (schema.clone(), name.clone()),
+                    ViewInfo {
+                        schema: Some(schema),
+                        name,
+                        columns: Vec::new(),
+                        definition: String::new(),
+                        materialized: false,
+                    },
+                );
+            } else {
+                tables.insert(
+                    (schema.clone(), name.clone()),
+                    TableInfo {
+                        schema: Some(schema),
+                        name,
+                        columns: Vec::new(),
+                        indexes: Vec::new(),
+                        foreign_keys: Vec::new(),
+                    },
+                );
+            }
         }
 
         // Primary-key columns, so we can flag them while loading columns below.
@@ -201,15 +217,16 @@ impl Database for MsSqlDb {
             let schema = get_str(&row, 0);
             let table = get_str(&row, 1);
             let column = get_str(&row, 2);
+            let col = ColumnInfo {
+                name: column.clone(),
+                data_type: get_str(&row, 3),
+                nullable: get_str(&row, 4).eq_ignore_ascii_case("YES"),
+                primary_key: pk.contains(&(schema.clone(), table.clone(), column)),
+            };
             if let Some(info) = tables.get_mut(&(schema.clone(), table.clone())) {
-                let nullable = get_str(&row, 4).eq_ignore_ascii_case("YES");
-                let primary_key = pk.contains(&(schema, table, column.clone()));
-                info.columns.push(ColumnInfo {
-                    name: column,
-                    data_type: get_str(&row, 3),
-                    nullable,
-                    primary_key,
-                });
+                info.columns.push(col);
+            } else if let Some(view) = views.get_mut(&(schema, table)) {
+                view.columns.push(col);
             }
         }
 
@@ -296,9 +313,127 @@ impl Database for MsSqlDb {
             }
         }
 
+        // View definitions (OBJECT_DEFINITION returns the full CREATE; keep just the SELECT).
+        // The object queries degrade gracefully: a privilege error yields no rows, never a
+        // failed introspection.
+        for row in self
+            .fetch(
+                "SELECT s.name, v.name, OBJECT_DEFINITION(v.object_id) \
+                 FROM sys.views v JOIN sys.schemas s ON v.schema_id = s.schema_id",
+            )
+            .await
+            .unwrap_or_default()
+        {
+            let key = (get_str(&row, 0), get_str(&row, 1));
+            if let Some(view) = views.get_mut(&key) {
+                view.definition = select_body_after_as(&get_str(&row, 2));
+            }
+        }
+
+        // Routines: scalar/inline/table functions and procedures; parameters attached below.
+        let mut routines: BTreeMap<(String, String), RoutineInfo> = BTreeMap::new();
+        for row in self
+            .fetch(
+                "SELECT s.name, o.name, o.type, OBJECT_DEFINITION(o.object_id) \
+                 FROM sys.objects o JOIN sys.schemas s ON o.schema_id = s.schema_id \
+                 WHERE o.type IN ('FN', 'IF', 'TF', 'P') \
+                 ORDER BY s.name, o.name",
+            )
+            .await
+            .unwrap_or_default()
+        {
+            let schema = get_str(&row, 0);
+            let name = get_str(&row, 1);
+            let kind = if get_str(&row, 2).trim().eq_ignore_ascii_case("P") {
+                RoutineKind::Procedure
+            } else {
+                RoutineKind::Function
+            };
+            routines.insert(
+                (schema.clone(), name.clone()),
+                RoutineInfo {
+                    schema: Some(schema),
+                    name,
+                    kind,
+                    params: Vec::new(),
+                    return_type: None,
+                    language: String::new(),
+                    body: get_str(&row, 3),
+                },
+            );
+        }
+        // Parameters: parameter_id 0 (empty name) is a scalar function's return type.
+        for row in self
+            .fetch(
+                "SELECT s.name, o.name, p.name, TYPE_NAME(p.user_type_id), p.is_output, \
+                        p.parameter_id \
+                 FROM sys.parameters p \
+                 JOIN sys.objects o ON p.object_id = o.object_id \
+                 JOIN sys.schemas s ON o.schema_id = s.schema_id \
+                 WHERE o.type IN ('FN', 'IF', 'TF', 'P') \
+                 ORDER BY s.name, o.name, p.parameter_id",
+            )
+            .await
+            .unwrap_or_default()
+        {
+            let key = (get_str(&row, 0), get_str(&row, 1));
+            let Some(routine) = routines.get_mut(&key) else {
+                continue;
+            };
+            let param_id = row.try_get::<i32, _>(5).ok().flatten().unwrap_or(0);
+            if param_id == 0 {
+                // The implicit return parameter of a scalar function.
+                routine.return_type = Some(get_str(&row, 3));
+            } else {
+                let is_output = row.try_get::<bool, _>(4).ok().flatten().unwrap_or(false);
+                routine.params.push(RoutineParam {
+                    name: get_str(&row, 2),
+                    data_type: get_str(&row, 3),
+                    mode: if is_output { ParamMode::Out } else { ParamMode::In },
+                    default: None,
+                });
+            }
+        }
+
+        // Triggers: DML triggers only (parent_class = 1). SQL Server fires AFTER / INSTEAD OF,
+        // always statement-level; the events/condition are parsed from the definition.
+        let mut triggers = Vec::new();
+        for row in self
+            .fetch(
+                "SELECT s.name, tb.name, tr.name, OBJECT_DEFINITION(tr.object_id) \
+                 FROM sys.triggers tr \
+                 JOIN sys.tables tb ON tr.parent_id = tb.object_id \
+                 JOIN sys.schemas s ON tb.schema_id = s.schema_id \
+                 WHERE tr.is_ms_shipped = 0 AND tr.parent_class = 1 \
+                 ORDER BY s.name, tb.name, tr.name",
+            )
+            .await
+            .unwrap_or_default()
+        {
+            let def = get_str(&row, 3);
+            let (mut timing, events, _level, when_condition) = parse_trigger_header(&def);
+            // SQL Server has no BEFORE triggers; a non-INSTEAD-OF one is AFTER (incl. `FOR`).
+            if timing != TriggerTiming::InsteadOf {
+                timing = TriggerTiming::After;
+            }
+            triggers.push(TriggerInfo {
+                schema: Some(get_str(&row, 0)),
+                name: get_str(&row, 2),
+                table: get_str(&row, 1),
+                timing,
+                events,
+                level: TriggerLevel::Statement,
+                when_condition,
+                action: def,
+            });
+        }
+
         Ok(SchemaTree {
             database_name,
             tables: tables.into_values().collect(),
+            views: views.into_values().collect(),
+            routines: routines.into_values().collect(),
+            triggers,
         })
     }
 

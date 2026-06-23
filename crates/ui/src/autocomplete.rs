@@ -680,6 +680,9 @@ mod tests {
         };
         SchemaTree {
             database_name: "test".to_string(),
+            views: Vec::new(),
+            routines: Vec::new(),
+            triggers: Vec::new(),
             tables: vec![
                 TableInfo {
                     schema: Some("public".to_string()),
@@ -802,6 +805,9 @@ mod tests {
         // identifiers carry multi-byte text here.
         let s = SchemaTree {
             database_name: "db".to_string(),
+            views: Vec::new(),
+            routines: Vec::new(),
+            triggers: Vec::new(),
             tables: vec![TableInfo {
                 schema: None,
                 name: "ลูกค้า".to_string(),

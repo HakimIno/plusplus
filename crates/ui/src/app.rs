@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use dbcore::{ConnectionColor, ConnectionConfig, Database, DbKind, QueryResult, SchemaTree, TableInfo};
 
-use crate::schema::SchemaEditor;
+use crate::schema::{ObjectEditor, RoutineEditor, SchemaEditor, TriggerEditor, ViewEditor};
 
 mod panels;
 mod widgets;
@@ -156,7 +156,7 @@ struct QueryTab {
     /// Open schema editor (Create/Edit Table) shown in the central panel. Per-tab, so
     /// switching tabs or opening another table never leaves a stale editor on screen —
     /// and in-progress edits survive a tab switch.
-    schema_editor: Option<SchemaEditor>,
+    schema_editor: Option<ObjectEditor>,
 }
 
 impl QueryTab {
@@ -498,6 +498,11 @@ enum Action {
         source: EditSource,
         pin: bool,
     },
+    /// Show a routine/trigger's definition SQL in a preview tab (read-only; not executed).
+    OpenDefinition {
+        title: String,
+        sql: String,
+    },
     SortBy(usize),
     /// Header menu: sort a column in an explicit direction (vs `SortBy`, which toggles).
     SetSort { col: usize, asc: bool },
@@ -534,6 +539,24 @@ enum Action {
     TruncateTable(TableInfo),
     /// Stage a `DROP TABLE` migration for a sidebar table (opens the DDL preview).
     DropTable(TableInfo),
+    /// Open the object editor to create a brand-new view.
+    OpenNewView,
+    /// Open the object editor to modify an existing view.
+    OpenEditView(dbcore::ViewInfo),
+    /// Stage a `DROP VIEW` migration for a sidebar view (opens the DDL preview).
+    DropView(dbcore::ViewInfo),
+    /// Open the object editor to create a brand-new trigger.
+    OpenNewTrigger,
+    /// Open the object editor to modify an existing trigger.
+    OpenEditTrigger(dbcore::TriggerInfo),
+    /// Stage a `DROP TRIGGER` migration for a sidebar trigger (opens the DDL preview).
+    DropTrigger(dbcore::TriggerInfo),
+    /// Open the object editor to create a new function or procedure.
+    OpenNewRoutine(dbcore::RoutineKind),
+    /// Open the object editor to modify an existing function or procedure.
+    OpenEditRoutine(dbcore::RoutineInfo),
+    /// Stage a `DROP FUNCTION/PROCEDURE` migration (opens the DDL preview).
+    DropRoutine(dbcore::RoutineInfo),
     /// Validate editor state and move to the DDL-preview dialog.
     GenerateSchema,
     /// User confirmed the DDL preview: execute the statements and re-introspect.
@@ -1190,17 +1213,7 @@ impl DbGuiApp {
 
         // Pick the target tab: the existing preview slot, else a blank scratch active tab,
         // else a brand-new tab.
-        let idx = if let Some(i) = self.tabs.iter().position(|t| t.preview) {
-            i
-        } else {
-            let cur = &self.tabs[self.active_query_tab];
-            if cur.edits.source.is_none() && cur.result.is_none() && cur.sql.trim().is_empty() {
-                self.active_query_tab
-            } else {
-                self.new_tab();
-                self.active_query_tab
-            }
-        };
+        let idx = self.preview_target_slot();
 
         // Rebuild the tab from scratch (clearing any previous preview's result/filter/edits),
         // keeping its stable id and connection binding.
@@ -1215,6 +1228,44 @@ impl DbGuiApp {
         self.active_query_tab = idx;
         self.workspace_dirty = true;
         self.start_query_for(idx);
+    }
+
+    /// The tab slot a preview should land in: the existing reusable preview slot, else the
+    /// active tab when it's a blank scratch tab, else a freshly opened tab. Shared by
+    /// [`Self::open_table`] and [`Self::open_definition`].
+    fn preview_target_slot(&mut self) -> usize {
+        if let Some(i) = self.tabs.iter().position(|t| t.preview) {
+            i
+        } else {
+            let cur = &self.tabs[self.active_query_tab];
+            if cur.edits.source.is_none() && cur.result.is_none() && cur.sql.trim().is_empty() {
+                self.active_query_tab
+            } else {
+                self.new_tab();
+                self.active_query_tab
+            }
+        }
+    }
+
+    /// Show a database object's definition SQL (a routine body, a trigger's `CREATE` text)
+    /// in a preview tab for reading. Unlike [`Self::open_table`] the SQL is *not* executed —
+    /// re-running a `CREATE` would recreate the object — it's just placed in the editor so the
+    /// user can read, copy, or run it deliberately.
+    fn open_definition(&mut self, title: String, sql: String) {
+        let idx = self.preview_target_slot();
+        let id = self.tabs[idx].id;
+        let conn_id = self.tabs[idx].conn_id.clone();
+        let mut tab = QueryTab::new(id, title);
+        tab.conn_id = conn_id;
+        tab.sql = if sql.trim().is_empty() {
+            "-- No definition available (the backend did not expose this object's source).".into()
+        } else {
+            sql
+        };
+        tab.preview = true;
+        self.tabs[idx] = tab;
+        self.active_query_tab = idx;
+        self.workspace_dirty = true;
     }
 
     /// Bind the active tab to a saved connection. Connects in the background when the
@@ -2350,6 +2401,7 @@ impl DbGuiApp {
             Action::CancelDangerQuery => self.danger_pending = None,
             Action::BeautifySql => self.beautify_sql(),
             Action::OpenTable { sql, source, pin } => self.open_table(sql, source, pin),
+            Action::OpenDefinition { title, sql } => self.open_definition(title, sql),
             Action::SortBy(col) => self.tab_mut().apply_sort(col),
             Action::SetSort { col, asc } => self.tab_mut().set_sort(col, asc),
             Action::ClearSort => self.tab_mut().clear_sort(),
@@ -2368,13 +2420,112 @@ impl DbGuiApp {
                     .and_then(|a| a.schema.tables.first().and_then(|t| t.schema.as_deref()))
                     .map(|s| s.to_string());
                 self.tab_mut().schema_editor =
-                    Some(SchemaEditor::new_table(kind, schema.as_deref()));
+                    Some(ObjectEditor::Table(SchemaEditor::new_table(kind, schema.as_deref())));
                 self.schema_pending = None;
             }
             Action::OpenEditTable(table) => {
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
-                self.tab_mut().schema_editor = Some(SchemaEditor::edit_table(&table, kind));
+                self.tab_mut().schema_editor =
+                    Some(ObjectEditor::Table(SchemaEditor::edit_table(&table, kind)));
                 self.schema_pending = None;
+            }
+            Action::OpenNewView => {
+                let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
+                let schema = self
+                    .active()
+                    .and_then(|a| a.schema.tables.first().and_then(|t| t.schema.as_deref()))
+                    .map(|s| s.to_string());
+                self.tab_mut().schema_editor =
+                    Some(ObjectEditor::View(ViewEditor::new_view(kind, schema.as_deref())));
+                self.schema_pending = None;
+            }
+            Action::OpenEditView(view) => {
+                let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
+                self.tab_mut().schema_editor =
+                    Some(ObjectEditor::View(ViewEditor::edit_view(&view, kind)));
+                self.schema_pending = None;
+            }
+            Action::DropView(view) => {
+                let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
+                self.tab_mut().schema_editor = None;
+                self.schema_pending = Some(vec![dbcore::build_drop_view_sql(
+                    kind,
+                    view.schema.as_deref(),
+                    &view.name,
+                    view.materialized,
+                )]);
+                self.error = None;
+            }
+            Action::OpenNewTrigger => {
+                let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
+                let (schema, tables) = self
+                    .active()
+                    .map(|a| {
+                        let schema = a
+                            .schema
+                            .tables
+                            .first()
+                            .and_then(|t| t.schema.as_deref())
+                            .map(|s| s.to_string());
+                        let tables = a.schema.tables.iter().map(|t| t.name.clone()).collect();
+                        (schema, tables)
+                    })
+                    .unwrap_or_default();
+                self.tab_mut().schema_editor = Some(ObjectEditor::Trigger(
+                    TriggerEditor::new_trigger(kind, schema.as_deref(), tables),
+                ));
+                self.schema_pending = None;
+            }
+            Action::OpenEditTrigger(trg) => {
+                let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
+                let tables = self
+                    .active()
+                    .map(|a| a.schema.tables.iter().map(|t| t.name.clone()).collect())
+                    .unwrap_or_default();
+                self.tab_mut().schema_editor = Some(ObjectEditor::Trigger(
+                    TriggerEditor::edit_trigger(&trg, kind, tables),
+                ));
+                self.schema_pending = None;
+            }
+            Action::DropTrigger(trg) => {
+                let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
+                self.tab_mut().schema_editor = None;
+                self.schema_pending = Some(vec![dbcore::build_drop_trigger_sql(
+                    kind,
+                    trg.schema.as_deref(),
+                    &trg.name,
+                    &trg.table,
+                )]);
+                self.error = None;
+            }
+            Action::OpenNewRoutine(routine_kind) => {
+                let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
+                let schema = self
+                    .active()
+                    .and_then(|a| a.schema.tables.first().and_then(|t| t.schema.as_deref()))
+                    .map(|s| s.to_string());
+                self.tab_mut().schema_editor = Some(ObjectEditor::Routine(
+                    RoutineEditor::new_routine(kind, routine_kind, schema.as_deref()),
+                ));
+                self.schema_pending = None;
+            }
+            Action::OpenEditRoutine(routine) => {
+                let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
+                self.tab_mut().schema_editor =
+                    Some(ObjectEditor::Routine(RoutineEditor::edit_routine(&routine, kind)));
+                self.schema_pending = None;
+            }
+            Action::DropRoutine(routine) => {
+                let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
+                self.tab_mut().schema_editor = None;
+                self.schema_pending = Some(vec![dbcore::build_drop_routine_sql(
+                    kind,
+                    routine.schema.as_deref(),
+                    &routine.name,
+                    routine.kind,
+                    &routine.params,
+                )]);
+                self.error = None;
             }
             Action::CloneTable(table) => {
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
@@ -2774,6 +2925,7 @@ impl DbGuiApp {
                     | Action::Connect(_)
                     | Action::BindConnection(_)
                     | Action::OpenTable { .. }
+                    | Action::OpenDefinition { .. }
                     | Action::DeleteConnection(_)
             )
         });
@@ -2835,6 +2987,9 @@ mod tests {
     fn fake_schema(tables: usize, cols: usize) -> SchemaTree {
         SchemaTree {
             database_name: "testdb".into(),
+            views: Vec::new(),
+            routines: Vec::new(),
+            triggers: Vec::new(),
             tables: (0..tables)
                 .map(|t| TableInfo {
                     schema: None,
@@ -3498,7 +3653,9 @@ mod tests {
             crate::schema::SchemaTab::ForeignKeys,
         ];
         for tab in tabs {
-            app.tab_mut().schema_editor.as_mut().unwrap().active_tab = tab;
+            if let Some(ObjectEditor::Table(e)) = app.tab_mut().schema_editor.as_mut() {
+                e.active_tab = tab;
+            }
             for _ in 0..3 {
                 let raw = egui::RawInput {
                     screen_rect: Some(screen),
@@ -3521,6 +3678,96 @@ mod tests {
         // Cancel returns the central panel to the grid views.
         app.apply_action(Action::CancelSchema);
         assert!(app.tab().schema_editor.is_none());
+    }
+
+    /// Build an app with a live SQLite connection carrying a table, view, and trigger. Returns
+    /// the app and the temp-db path (delete when done). Shared by the screenshot generators.
+    fn demo_app_with_objects() -> (DbGuiApp, std::path::PathBuf) {
+        use std::sync::Arc;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let path =
+            std::env::temp_dir().join(format!("plusplus-snap-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut cfg = dbcore::ConnectionConfig::new(DbKind::Sqlite);
+        cfg.name = "demo".into();
+        cfg.sqlite_path = path.to_string_lossy().into_owned();
+        let (db, schema): (Arc<dyn dbcore::Database>, SchemaTree) = rt.block_on(async {
+            let db = dbcore::connect(&cfg, None, None).await.unwrap();
+            for stmt in [
+                "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT NOT NULL)",
+                "CREATE TABLE audit (id INTEGER PRIMARY KEY, msg TEXT)",
+                "CREATE VIEW active_users AS SELECT id, email FROM users WHERE email IS NOT NULL",
+                "CREATE TRIGGER log_new_user AFTER INSERT ON users FOR EACH ROW \
+                 BEGIN INSERT INTO audit(msg) VALUES ('new user'); END",
+            ] {
+                db.execute(stmt).await.unwrap();
+            }
+            let schema = db.introspect().await.unwrap();
+            (db, schema)
+        });
+        let mut app = DbGuiApp::construct();
+        app.show_schema_panel = true;
+        app.active_connections.push(ActiveConnection {
+            config_id: cfg.id.clone(),
+            name: cfg.name.clone(),
+            db,
+            databases: Vec::new(),
+            schema,
+        });
+        app.tab_mut().conn_id = Some(cfg.id.clone());
+        (app, path)
+    }
+
+    /// Render `app` headlessly and write a PNG snapshot named `name`. Optionally expands the
+    /// sidebar object groups first. The UI animates a button glint (continuous repaint), so we
+    /// step a fixed number of frames rather than running to quiescence.
+    fn render_and_snapshot(mut app: DbGuiApp, name: &str, expand_groups: bool) {
+        use egui_kittest::kittest::Queryable;
+        let mut setup = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1180.0, 760.0))
+            .build_ui(move |ui| {
+                if !setup {
+                    egui_extras::install_image_loaders(ui.ctx());
+                    crate::style::apply(ui.ctx());
+                    setup = true;
+                }
+                app.draw(ui, None);
+            });
+        harness.run_steps(4);
+        if expand_groups {
+            for label in ["Views (1)", "Triggers (1)"] {
+                if harness.query_by_label(label).is_some() {
+                    harness.get_by_label(label).click();
+                    harness.run_steps(4);
+                }
+            }
+        }
+        harness.run_steps(6);
+        harness.snapshot(name);
+    }
+
+    /// Screenshot generator (ignored in normal runs): the schema sidebar with its Views and
+    /// Triggers groups expanded. Run with:
+    /// `UPDATE_SNAPSHOTS=1 cargo test -p plusplus-ui snapshot_ -- --ignored`.
+    #[test]
+    #[ignore = "screenshot generator; run manually with --ignored"]
+    fn snapshot_object_browser() {
+        let (app, path) = demo_app_with_objects();
+        render_and_snapshot(app, "object_browser", true);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Screenshot generator (ignored): the dialect-adaptive visual Trigger editor, opened on
+    /// the demo database's existing trigger.
+    #[test]
+    #[ignore = "screenshot generator; run manually with --ignored"]
+    fn snapshot_trigger_editor() {
+        let (mut app, path) = demo_app_with_objects();
+        let trigger = app.active().unwrap().schema.triggers[0].clone();
+        app.apply_action(Action::OpenEditTrigger(trigger));
+        render_and_snapshot(app, "trigger_editor", false);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Regression: the schema editor must not linger when another table is opened — it

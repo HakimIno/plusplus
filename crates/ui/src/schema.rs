@@ -2,9 +2,13 @@
 
 use dbcore::{
     build_add_column_sql, build_add_fk_sql, build_alter_column_sql, build_create_index_sql,
-    build_create_table_sql, build_drop_column_sql, build_drop_fk_sql, build_drop_index_sql,
-    build_rename_column_sql,
-    ColumnDef, DbKind, FkAction, ForeignKeyDef, ForeignKeyInfo, IndexDef, TableInfo,
+    build_create_routine_sql, build_create_table_sql, build_create_trigger_sql,
+    build_create_view_sql, build_drop_column_sql, build_drop_fk_sql, build_drop_index_sql,
+    build_drop_routine_sql, build_drop_trigger_sql, build_drop_view_sql, build_rename_column_sql,
+    routine_supports_replace, select_body_after_as, view_supports_replace, ColumnDef, DbKind,
+    FkAction, ForeignKeyDef, ForeignKeyInfo, IndexDef, ParamMode, RoutineBuild, RoutineInfo,
+    RoutineKind, RoutineParam, TableInfo, TriggerBuild, TriggerEvent, TriggerInfo, TriggerLevel,
+    TriggerTiming, ViewInfo,
 };
 
 // ─── Draft types (UI working copies) ────────────────────────────────────────
@@ -466,5 +470,534 @@ impl SchemaEditor {
         }
 
         Ok(stmts)
+    }
+}
+
+// ─── Object editors (views, triggers, routines) ──────────────────────────────
+
+/// Whether an object editor is creating a new object or editing an existing one. Distinct
+/// from [`SchemaEditorMode`], which is specific to the table editor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObjectMode {
+    Create,
+    Edit,
+}
+
+/// The schema object being edited in a tab's central panel. One per-tab slot serves every
+/// object editor, so switching tabs never leaves a stale editor on screen. The table editor
+/// keeps its own [`SchemaEditor`] type unchanged; the others are added here.
+pub enum ObjectEditor {
+    Table(SchemaEditor),
+    View(ViewEditor),
+    Trigger(TriggerEditor),
+    Routine(RoutineEditor),
+}
+
+impl ObjectEditor {
+    /// Validate and build the DDL for whichever object this editor holds.
+    pub fn build_ddl(&self) -> Result<Vec<String>, String> {
+        match self {
+            ObjectEditor::Table(e) => e.build_ddl(),
+            ObjectEditor::View(e) => e.build_ddl(),
+            ObjectEditor::Trigger(e) => e.build_ddl(),
+            ObjectEditor::Routine(e) => e.build_ddl(),
+        }
+    }
+}
+
+/// Working copy of a view being created or edited.
+pub struct ViewEditor {
+    pub mode: ObjectMode,
+    pub name: String,
+    pub schema_name: String,
+    /// Postgres materialized view. Only offered on Postgres.
+    pub materialized: bool,
+    /// The defining `SELECT` (the text after `AS`).
+    pub select_body: String,
+    pub db_kind: DbKind,
+    /// In Edit mode, the view's `(name, materialized)` as introspected — needed to DROP the
+    /// old object when a rename or a drop-then-create is required.
+    pub original: Option<(String, bool)>,
+}
+
+impl ViewEditor {
+    pub fn new_view(db_kind: DbKind, default_schema: Option<&str>) -> Self {
+        Self {
+            mode: ObjectMode::Create,
+            name: String::new(),
+            schema_name: default_schema.unwrap_or("").to_string(),
+            materialized: false,
+            select_body: "SELECT ".to_string(),
+            db_kind,
+            original: None,
+        }
+    }
+
+    pub fn edit_view(view: &ViewInfo, db_kind: DbKind) -> Self {
+        Self {
+            mode: ObjectMode::Edit,
+            name: view.name.clone(),
+            schema_name: view.schema.clone().unwrap_or_default(),
+            materialized: view.materialized,
+            select_body: if view.definition.trim().is_empty() {
+                "SELECT ".to_string()
+            } else {
+                view.definition.clone()
+            },
+            db_kind,
+            original: Some((view.name.clone(), view.materialized)),
+        }
+    }
+
+    fn schema(&self) -> Option<&str> {
+        let s = self.schema_name.trim();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    }
+
+    /// Validate and build DDL. An edit becomes a single `CREATE OR REPLACE` where the dialect
+    /// allows it; otherwise (SQLite, a materialized view, or a rename) it's a drop-then-create,
+    /// both statements running in the preview's single transaction.
+    pub fn build_ddl(&self) -> Result<Vec<String>, String> {
+        let name = self.name.trim();
+        if name.is_empty() {
+            return Err("View name is required.".into());
+        }
+        if self.select_body.trim().is_empty() {
+            return Err("The view's SELECT statement is required.".into());
+        }
+
+        let mut stmts = Vec::new();
+        if let (ObjectMode::Edit, Some((orig_name, orig_mat))) = (self.mode, &self.original) {
+            let renamed = orig_name != name;
+            let mat_changed = *orig_mat != self.materialized;
+            if renamed || mat_changed || !view_supports_replace(self.db_kind, self.materialized) {
+                stmts.push(build_drop_view_sql(self.db_kind, self.schema(), orig_name, *orig_mat));
+            }
+        }
+        // Use an in-place replace only in Edit mode when we didn't already drop the old view.
+        let or_replace = self.mode == ObjectMode::Edit && stmts.is_empty();
+        stmts.push(build_create_view_sql(
+            self.db_kind,
+            self.schema(),
+            name,
+            &self.select_body,
+            self.materialized,
+            or_replace,
+        ));
+        Ok(stmts)
+    }
+}
+
+/// Working copy of a trigger being created or edited. Fields the active dialect can't express
+/// are hidden by the form (e.g. `level`/`when_condition` for MySQL), so this single struct
+/// drives all four backends.
+pub struct TriggerEditor {
+    pub mode: ObjectMode,
+    pub name: String,
+    pub schema_name: String,
+    pub table: String,
+    pub timing: TriggerTiming,
+    pub events: Vec<TriggerEvent>,
+    pub level: TriggerLevel,
+    pub when_condition: String,
+    pub body: String,
+    /// Postgres only: execute an existing function (the `body` field holds its name) instead
+    /// of generating one from an inline PL/pgSQL body.
+    pub pg_existing_function: bool,
+    pub db_kind: DbKind,
+    pub original: Option<(String, String)>, // (name, table) when editing — for DROP
+    /// Table names available to attach to, for the target combo. Captured at open time.
+    pub tables: Vec<String>,
+}
+
+impl TriggerEditor {
+    pub fn new_trigger(db_kind: DbKind, default_schema: Option<&str>, tables: Vec<String>) -> Self {
+        // Default to a timing the dialect actually supports.
+        let timing = match db_kind {
+            DbKind::SqlServer => TriggerTiming::After,
+            _ => TriggerTiming::Before,
+        };
+        Self {
+            mode: ObjectMode::Create,
+            name: String::new(),
+            schema_name: default_schema.unwrap_or("").to_string(),
+            table: tables.first().cloned().unwrap_or_default(),
+            timing,
+            events: vec![TriggerEvent::Insert],
+            level: TriggerLevel::Row,
+            when_condition: String::new(),
+            body: String::new(),
+            pg_existing_function: false,
+            db_kind,
+            original: None,
+            tables,
+        }
+    }
+
+    pub fn edit_trigger(trg: &TriggerInfo, db_kind: DbKind, tables: Vec<String>) -> Self {
+        // The body to pre-fill differs by dialect: MySQL's `action` is already the statement
+        // body; SQLite/SQL Server expose the full CREATE, so peel out the inner body; Postgres
+        // keeps its logic in a separate function, so edit in "existing function" mode.
+        let (pg_existing, body) = match db_kind {
+            DbKind::Postgres => (true, extract_pg_trigger_fn(&trg.action)),
+            DbKind::Sqlite => (false, extract_between_begin_end(&trg.action)),
+            DbKind::SqlServer => (false, select_body_after_as(&trg.action)),
+            _ => (false, trg.action.clone()),
+        };
+        Self {
+            mode: ObjectMode::Edit,
+            name: trg.name.clone(),
+            schema_name: trg.schema.clone().unwrap_or_default(),
+            table: trg.table.clone(),
+            timing: trg.timing,
+            events: if trg.events.is_empty() {
+                vec![TriggerEvent::Insert]
+            } else {
+                trg.events.clone()
+            },
+            level: trg.level,
+            when_condition: trg.when_condition.clone().unwrap_or_default(),
+            body,
+            pg_existing_function: pg_existing,
+            db_kind,
+            original: Some((trg.name.clone(), trg.table.clone())),
+            tables,
+        }
+    }
+
+    fn schema(&self) -> Option<&str> {
+        let s = self.schema_name.trim();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    }
+
+    pub fn has_event(&self, e: TriggerEvent) -> bool {
+        self.events.contains(&e)
+    }
+
+    /// Add or remove `e`, keeping `events` in canonical INSERT/UPDATE/DELETE order.
+    pub fn set_event(&mut self, e: TriggerEvent, on: bool) {
+        self.events.retain(|x| *x != e);
+        if on {
+            self.events.push(e);
+        }
+        self.events
+            .sort_by_key(|e| TriggerEvent::ALL.iter().position(|x| x == e).unwrap_or(0));
+    }
+
+    pub fn build_ddl(&self) -> Result<Vec<String>, String> {
+        let name = self.name.trim();
+        if name.is_empty() {
+            return Err("Trigger name is required.".into());
+        }
+        if self.table.trim().is_empty() {
+            return Err("Select the table the trigger fires on.".into());
+        }
+        let when = {
+            let w = self.when_condition.trim();
+            if w.is_empty() {
+                None
+            } else {
+                Some(w)
+            }
+        };
+        let build = TriggerBuild {
+            schema: self.schema(),
+            name,
+            table: self.table.trim(),
+            timing: self.timing,
+            events: &self.events,
+            level: self.level,
+            when_condition: when,
+            body: &self.body,
+            pg_existing_function: self.pg_existing_function && self.db_kind == DbKind::Postgres,
+        };
+        let mut stmts = Vec::new();
+        // Triggers have no portable in-place replace, so an edit is drop-then-create.
+        if let (ObjectMode::Edit, Some((orig_name, orig_table))) = (self.mode, &self.original) {
+            stmts.push(build_drop_trigger_sql(self.db_kind, self.schema(), orig_name, orig_table));
+        }
+        stmts.extend(build_create_trigger_sql(self.db_kind, &build)?);
+        Ok(stmts)
+    }
+}
+
+/// Pull the executed function name out of a Postgres `CREATE TRIGGER … EXECUTE FUNCTION fn(…)`
+/// (or the older `EXECUTE PROCEDURE`) definition, best-effort. Empty when not found.
+fn extract_pg_trigger_fn(action: &str) -> String {
+    let upper = action.to_ascii_uppercase();
+    for kw in ["EXECUTE FUNCTION", "EXECUTE PROCEDURE"] {
+        if let Some(pos) = upper.find(kw) {
+            let rest = action[pos + kw.len()..].trim();
+            let end = rest
+                .find('(')
+                .or_else(|| rest.find(';'))
+                .unwrap_or(rest.len());
+            return rest[..end].trim().to_string();
+        }
+    }
+    String::new()
+}
+
+/// Extract the inner statements of a `BEGIN … END` block, best-effort. Falls back to the whole
+/// input when no block is found.
+fn extract_between_begin_end(sql: &str) -> String {
+    let upper = sql.to_ascii_uppercase();
+    if let (Some(b), Some(e)) = (upper.find("BEGIN"), upper.rfind("END")) {
+        if e > b + "BEGIN".len() {
+            return sql[b + "BEGIN".len()..e].trim().to_string();
+        }
+    }
+    sql.trim().to_string()
+}
+
+/// An editable routine parameter row.
+#[derive(Clone)]
+pub struct ParamDraft {
+    pub name: String,
+    pub data_type: String,
+    pub mode: ParamMode,
+    pub default: String,
+}
+
+impl ParamDraft {
+    pub fn new_empty() -> Self {
+        Self {
+            name: String::new(),
+            data_type: String::new(),
+            mode: ParamMode::In,
+            default: String::new(),
+        }
+    }
+
+    fn to_param(&self) -> RoutineParam {
+        RoutineParam {
+            name: self.name.clone(),
+            data_type: self.data_type.clone(),
+            mode: self.mode,
+            default: {
+                let d = self.default.trim();
+                (!d.is_empty()).then(|| d.to_string())
+            },
+        }
+    }
+}
+
+/// Working copy of a function or procedure being created or edited.
+pub struct RoutineEditor {
+    pub mode: ObjectMode,
+    pub kind: RoutineKind,
+    pub name: String,
+    pub schema_name: String,
+    pub params: Vec<ParamDraft>,
+    /// Return type (functions only).
+    pub return_type: String,
+    /// Implementation language (Postgres: plpgsql/sql).
+    pub language: String,
+    pub body: String,
+    pub db_kind: DbKind,
+    /// In Edit mode, the original `(name, kind, params)` — needed to DROP on a drop-then-create.
+    pub original: Option<(String, RoutineKind, Vec<RoutineParam>)>,
+}
+
+impl RoutineEditor {
+    pub fn new_routine(db_kind: DbKind, kind: RoutineKind, default_schema: Option<&str>) -> Self {
+        Self {
+            mode: ObjectMode::Create,
+            kind,
+            name: String::new(),
+            schema_name: default_schema.unwrap_or("").to_string(),
+            params: Vec::new(),
+            return_type: String::new(),
+            language: if db_kind == DbKind::Postgres {
+                "plpgsql".to_string()
+            } else {
+                String::new()
+            },
+            body: String::new(),
+            db_kind,
+            original: None,
+        }
+    }
+
+    pub fn edit_routine(info: &RoutineInfo, db_kind: DbKind) -> Self {
+        Self {
+            mode: ObjectMode::Edit,
+            kind: info.kind,
+            name: info.name.clone(),
+            schema_name: info.schema.clone().unwrap_or_default(),
+            params: info
+                .params
+                .iter()
+                .map(|p| ParamDraft {
+                    name: p.name.clone(),
+                    data_type: p.data_type.clone(),
+                    mode: p.mode,
+                    default: p.default.clone().unwrap_or_default(),
+                })
+                .collect(),
+            return_type: info.return_type.clone().unwrap_or_default(),
+            language: info.language.clone(),
+            body: extract_routine_body(info, db_kind),
+            db_kind,
+            original: Some((info.name.clone(), info.kind, info.params.clone())),
+        }
+    }
+
+    fn schema(&self) -> Option<&str> {
+        let s = self.schema_name.trim();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    }
+
+    pub fn build_ddl(&self) -> Result<Vec<String>, String> {
+        let name = self.name.trim();
+        if name.is_empty() {
+            return Err("Routine name is required.".into());
+        }
+        let params: Vec<RoutineParam> = self
+            .params
+            .iter()
+            .filter(|p| !p.name.trim().is_empty())
+            .map(ParamDraft::to_param)
+            .collect();
+        let ret = self.return_type.trim();
+        let build = RoutineBuild {
+            schema: self.schema(),
+            name,
+            kind: self.kind,
+            params: &params,
+            return_type: (!ret.is_empty()).then_some(ret),
+            language: &self.language,
+            body: &self.body,
+        };
+        let supports_replace = routine_supports_replace(self.db_kind);
+        let mut stmts = Vec::new();
+        // Drop the old routine when the dialect can't replace in place, or when a rename /
+        // kind change means an in-place replace would leave the old one behind.
+        if let (ObjectMode::Edit, Some((orig_name, orig_kind, orig_params))) =
+            (self.mode, &self.original)
+        {
+            let renamed = orig_name != name || *orig_kind != self.kind;
+            if renamed || !supports_replace {
+                stmts.push(build_drop_routine_sql(
+                    self.db_kind,
+                    self.schema(),
+                    orig_name,
+                    *orig_kind,
+                    orig_params,
+                ));
+            }
+        }
+        let or_replace = self.mode == ObjectMode::Edit && supports_replace && stmts.is_empty();
+        stmts.extend(build_create_routine_sql(self.db_kind, &build, or_replace)?);
+        Ok(stmts)
+    }
+}
+
+/// Best-effort extraction of a routine's editable body from its introspected definition: the
+/// dollar-quoted body on Postgres, the text after `AS` on SQL Server, and MySQL's
+/// already-inner `ROUTINE_DEFINITION` unchanged.
+fn extract_routine_body(info: &RoutineInfo, db_kind: DbKind) -> String {
+    match db_kind {
+        DbKind::Postgres => extract_dollar_quoted(&info.body).unwrap_or_else(|| info.body.clone()),
+        DbKind::SqlServer => select_body_after_as(&info.body),
+        _ => info.body.clone(),
+    }
+}
+
+/// Extract the text inside the first matched `$tag$ … $tag$` dollar-quote of `def`.
+fn extract_dollar_quoted(def: &str) -> Option<String> {
+    let open = def.find('$')?;
+    let rest = &def[open..];
+    let tag_len = rest[1..].find('$')? + 2; // through the closing `$` of the opening tag
+    let tag = &rest[..tag_len];
+    let after = &rest[tag_len..];
+    let close = after.find(tag)?;
+    Some(after[..close].trim().to_string())
+}
+
+#[cfg(test)]
+mod object_editor_tests {
+    use super::*;
+    use dbcore::ViewInfo;
+
+    fn view(schema: Option<&str>, materialized: bool) -> ViewInfo {
+        ViewInfo {
+            schema: schema.map(str::to_string),
+            name: "v".into(),
+            columns: Vec::new(),
+            definition: "SELECT 1".into(),
+            materialized,
+        }
+    }
+
+    #[test]
+    fn view_edit_sqlite_drops_then_creates() {
+        let mut e = ViewEditor::edit_view(&view(None, false), DbKind::Sqlite);
+        e.select_body = "SELECT 2".into();
+        let sql = e.build_ddl().unwrap();
+        assert_eq!(sql.len(), 2);
+        assert!(sql[0].starts_with("DROP VIEW"));
+        assert!(sql[1].starts_with("CREATE VIEW"));
+    }
+
+    #[test]
+    fn view_edit_postgres_replaces_in_place() {
+        let e = ViewEditor::edit_view(&view(Some("public"), false), DbKind::Postgres);
+        let sql = e.build_ddl().unwrap();
+        assert_eq!(sql.len(), 1);
+        assert!(sql[0].contains("CREATE OR REPLACE VIEW"));
+    }
+
+    #[test]
+    fn trigger_postgres_emits_function_and_trigger() {
+        let mut e = TriggerEditor::new_trigger(DbKind::Postgres, Some("public"), vec!["t".into()]);
+        e.name = "trg".into();
+        e.table = "t".into();
+        e.body = "BEGIN RETURN NEW; END;".into();
+        let sql = e.build_ddl().unwrap();
+        assert_eq!(sql.len(), 2);
+        assert!(sql[0].contains("CREATE OR REPLACE FUNCTION"));
+        assert!(sql[1].contains("CREATE TRIGGER"));
+    }
+
+    #[test]
+    fn routine_edit_mysql_drops_then_creates() {
+        let info = RoutineInfo {
+            schema: None,
+            name: "p".into(),
+            kind: RoutineKind::Procedure,
+            params: Vec::new(),
+            return_type: None,
+            language: String::new(),
+            body: "BEGIN END".into(),
+        };
+        let mut e = RoutineEditor::edit_routine(&info, DbKind::MySql);
+        e.body = "BEGIN SELECT 1; END".into();
+        let sql = e.build_ddl().unwrap();
+        assert_eq!(sql.len(), 2);
+        assert!(sql[0].starts_with("DROP PROCEDURE"));
+        assert!(sql[1].starts_with("CREATE PROCEDURE"));
+    }
+
+    #[test]
+    fn routine_function_needs_return_type() {
+        let mut e = RoutineEditor::new_routine(DbKind::Postgres, RoutineKind::Function, None);
+        e.name = "f".into();
+        e.body = "SELECT 1".into();
+        assert!(e.build_ddl().is_err());
+        e.return_type = "integer".into();
+        assert!(e.build_ddl().is_ok());
     }
 }

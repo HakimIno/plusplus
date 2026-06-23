@@ -10,8 +10,9 @@ use sqlx::{AssertSqlSafe, Column, ConnectOptions, Row, TypeInfo, ValueRef};
 use crate::database::{returns_rows, Database};
 use crate::error::Result;
 use crate::model::{
-    ColumnInfo, ColumnMeta, ConnectionConfig, DbKind, ForeignKeyInfo, IndexInfo, QueryResult,
-    QueryStats, SchemaTree, SslMode, TableInfo,
+    ColumnInfo, ColumnMeta, ConnectionConfig, DbKind, ForeignKeyInfo, IndexInfo, ParamMode,
+    QueryResult, QueryStats, RoutineInfo, RoutineKind, RoutineParam, SchemaTree, SslMode,
+    TableInfo, TriggerEvent, TriggerInfo, TriggerLevel, TriggerTiming, ViewInfo,
 };
 use crate::value::Value;
 
@@ -71,9 +72,11 @@ impl Database for MySqlDb {
             .fetch_one(&self.pool)
             .await?;
 
+        // Bucket base tables and views by name; columns below populate both.
         let mut tables: BTreeMap<String, TableInfo> = BTreeMap::new();
-        let table_rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT TABLE_NAME \
+        let mut views: BTreeMap<String, ViewInfo> = BTreeMap::new();
+        let obj_rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT TABLE_NAME, TABLE_TYPE \
              FROM information_schema.TABLES \
              WHERE TABLE_SCHEMA = DATABASE() \
                AND TABLE_TYPE IN ('BASE TABLE', 'VIEW') \
@@ -82,17 +85,30 @@ impl Database for MySqlDb {
         .fetch_all(&self.pool)
         .await?;
 
-        for (name,) in table_rows {
-            tables.insert(
-                name.clone(),
-                TableInfo {
-                    schema: None,
-                    name,
-                    columns: Vec::new(),
-                    indexes: Vec::new(),
-                    foreign_keys: Vec::new(),
-                },
-            );
+        for (name, ty) in obj_rows {
+            if ty.eq_ignore_ascii_case("VIEW") {
+                views.insert(
+                    name.clone(),
+                    ViewInfo {
+                        schema: None,
+                        name,
+                        columns: Vec::new(),
+                        definition: String::new(),
+                        materialized: false,
+                    },
+                );
+            } else {
+                tables.insert(
+                    name.clone(),
+                    TableInfo {
+                        schema: None,
+                        name,
+                        columns: Vec::new(),
+                        indexes: Vec::new(),
+                        foreign_keys: Vec::new(),
+                    },
+                );
+            }
         }
 
         let col_rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
@@ -105,13 +121,16 @@ impl Database for MySqlDb {
         .await?;
 
         for (table, column, data_type, nullable, key) in col_rows {
+            let col = ColumnInfo {
+                name: column,
+                data_type,
+                nullable: nullable.eq_ignore_ascii_case("YES"),
+                primary_key: key.eq_ignore_ascii_case("PRI"),
+            };
             if let Some(info) = tables.get_mut(&table) {
-                info.columns.push(ColumnInfo {
-                    name: column,
-                    data_type,
-                    nullable: nullable.eq_ignore_ascii_case("YES"),
-                    primary_key: key.eq_ignore_ascii_case("PRI"),
-                });
+                info.columns.push(col);
+            } else if let Some(view) = views.get_mut(&table) {
+                view.columns.push(col);
             }
         }
 
@@ -186,9 +205,108 @@ impl Database for MySqlDb {
             }
         }
 
+        // View definitions. Tolerate failure (a restricted role may be denied) — an empty
+        // body just means the editor opens blank, never that introspection fails.
+        let view_defs: Vec<(String, String)> = sqlx::query_as(
+            "SELECT TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS \
+             WHERE TABLE_SCHEMA = DATABASE()",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        for (name, def) in view_defs {
+            if let Some(view) = views.get_mut(&name) {
+                view.definition = def;
+            }
+        }
+
+        // Routines (functions + procedures), keyed by name; parameters attached below.
+        let mut routines: BTreeMap<String, RoutineInfo> = BTreeMap::new();
+        let routine_rows: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT ROUTINE_NAME, ROUTINE_TYPE, DTD_IDENTIFIER, ROUTINE_DEFINITION \
+             FROM information_schema.ROUTINES \
+             WHERE ROUTINE_SCHEMA = DATABASE() \
+             ORDER BY ROUTINE_NAME",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        for (name, rtype, ret, body) in routine_rows {
+            let kind = if rtype.eq_ignore_ascii_case("FUNCTION") {
+                RoutineKind::Function
+            } else {
+                RoutineKind::Procedure
+            };
+            routines.insert(
+                name.clone(),
+                RoutineInfo {
+                    schema: None,
+                    name,
+                    kind,
+                    params: Vec::new(),
+                    return_type: (kind == RoutineKind::Function).then_some(ret).flatten(),
+                    language: String::new(),
+                    body: body.unwrap_or_default(),
+                },
+            );
+        }
+        // Parameters: ORDINAL_POSITION 0 is a function's RETURN slot (NULL name/mode) — skip it.
+        let param_rows: Vec<(String, Option<String>, String, Option<String>, i64)> =
+            sqlx::query_as(
+                "SELECT SPECIFIC_NAME, PARAMETER_NAME, DTD_IDENTIFIER, PARAMETER_MODE, \
+                        ORDINAL_POSITION \
+                 FROM information_schema.PARAMETERS \
+                 WHERE SPECIFIC_SCHEMA = DATABASE() \
+                 ORDER BY SPECIFIC_NAME, ORDINAL_POSITION",
+            )
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_default();
+        for (spec, pname, dtype, mode, ordinal) in param_rows {
+            if ordinal == 0 {
+                continue;
+            }
+            if let Some(routine) = routines.get_mut(&spec) {
+                routine.params.push(RoutineParam {
+                    name: pname.unwrap_or_default(),
+                    data_type: dtype,
+                    mode: ParamMode::from_keyword(mode.as_deref().unwrap_or("IN")),
+                    default: None,
+                });
+            }
+        }
+
+        // Triggers: MySQL fires one event per trigger, always row-level, with no WHEN guard.
+        let mut triggers = Vec::new();
+        let trig_rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+            "SELECT TRIGGER_NAME, ACTION_TIMING, EVENT_MANIPULATION, EVENT_OBJECT_TABLE, \
+                    ACTION_STATEMENT \
+             FROM information_schema.TRIGGERS \
+             WHERE TRIGGER_SCHEMA = DATABASE() \
+             ORDER BY TRIGGER_NAME",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        for (name, timing, event, table, body) in trig_rows {
+            triggers.push(TriggerInfo {
+                schema: None,
+                name,
+                table,
+                timing: TriggerTiming::from_keyword(&timing).unwrap_or(TriggerTiming::Before),
+                events: TriggerEvent::from_keyword(&event).into_iter().collect(),
+                level: TriggerLevel::Row,
+                when_condition: None,
+                action: body,
+            });
+        }
+
         Ok(SchemaTree {
             database_name,
             tables: tables.into_values().collect(),
+            views: views.into_values().collect(),
+            routines: routines.into_values().collect(),
+            triggers,
         })
     }
 
