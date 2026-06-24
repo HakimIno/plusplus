@@ -458,7 +458,7 @@ impl DbGuiApp {
     }
 
     /// Thin status strip pinned to the very bottom edge: row count / selection / errors.
-    pub(super) fn status_bar(&mut self, root: &mut egui::Ui) {
+    pub(super) fn status_bar(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
         egui::Panel::bottom("status_bar").show_inside(root, |ui| {
             ui.add_space(2.0);
             ui.horizontal(|ui| {
@@ -479,6 +479,19 @@ impl DbGuiApp {
 
                             if self.busy == Busy::Querying {
                                 ui.add(style::spinner(11.0));
+                                ui.add_space(4.0);
+                                if ui
+                                    .add(egui::Label::new(
+                                        egui::RichText::new("Cancel")
+                                            .size(11.0)
+                                            .color(palette::DANGER()),
+                                    )
+                                    .sense(egui::Sense::click()))
+                                    .on_hover_text("Abort the running query")
+                                    .clicked()
+                                {
+                                    actions.push(Action::CancelQuery);
+                                }
                                 ui.add_space(4.0);
                             }
                             icons::show_native(ui, icons::table(), 12.0);
@@ -616,12 +629,30 @@ impl DbGuiApp {
                 ui.horizontal(|ui| {
                     style::section_header(ui, "Query");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let can_run = self.active().is_some() && self.busy == Busy::Idle;
-                        if icons::primary_button(ui, icons::play(), "Run", can_run)
-                            .on_hover_text("Cmd/Ctrl+Enter")
-                            .clicked()
-                        {
-                            actions.push(Action::RunQuery);
+                        // While a query runs, the primary button turns into Cancel so a heavy
+                        // query can be aborted without waiting it out.
+                        if self.busy == Busy::Querying {
+                            let resp = ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new("Cancel")
+                                            .color(palette::ON_ACCENT())
+                                            .strong(),
+                                    )
+                                    .fill(palette::DANGER()),
+                                )
+                                .on_hover_text("Abort the running query");
+                            if resp.clicked() {
+                                actions.push(Action::CancelQuery);
+                            }
+                        } else {
+                            let can_run = self.active().is_some() && self.busy == Busy::Idle;
+                            if icons::primary_button(ui, icons::play(), "Run", can_run)
+                                .on_hover_text("Cmd/Ctrl+Enter")
+                                .clicked()
+                            {
+                                actions.push(Action::RunQuery);
+                            }
                         }
                         ui.add_space(6.0);
                         // Beautify formats in the bound connection's dialect; with no live
@@ -641,8 +672,35 @@ impl DbGuiApp {
                         if resp.prefs_changed {
                             self.persist_settings();
                         }
+                        ui.add_space(6.0);
+                        // Saved queries (favorites): a toggle right next to Run/Beautify that
+                        // opens a panel beside the editor — close to where queries are written.
+                        let count = self.favorites_cache.len();
+                        let label = if count > 0 {
+                            format!("Saved ({count})")
+                        } else {
+                            "Saved".to_string()
+                        };
+                        if icons::toggle_button(
+                            ui,
+                            icons::star(),
+                            &label,
+                            true,
+                            self.favorites_open,
+                        )
+                        .on_hover_text("Show saved queries beside the editor")
+                        .clicked()
+                        {
+                            actions.push(Action::ToggleFavoritesPanel);
+                        }
                     });
                 });
+
+                // Favorites panel beside the SQL editor (carved before the editor fills the
+                // rest), shown only while the Saved toggle is on.
+                if self.favorites_open {
+                    self.favorites_side_panel(ui, actions);
+                }
 
                 let font = egui::TextStyle::Monospace.resolve(ui.style());
                 let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
@@ -2329,6 +2387,7 @@ impl DbGuiApp {
 
     /// Right-hand query-history panel (the audit log): every executed statement with its
     /// connection, time, duration, and outcome, newest first. Toggled from the title bar.
+    /// (Favorites live in the query bar's ★ menu, next to where queries are written.)
     pub(super) fn history_panel(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
         egui::Panel::right("history_panel")
             .resizable(true)
@@ -2350,98 +2409,228 @@ impl DbGuiApp {
                     });
                 });
                 ui.add_space(4.0);
+                self.history_list(ui, actions);
+            });
+    }
 
-                if self.history_cache.is_empty() {
+    /// The query-history list (newest first): each executed statement with its connection,
+    /// time, duration, and outcome. Rendered inside [`Self::history_panel`].
+    fn history_list(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        if self.history_cache.is_empty() {
+            ui.label(egui::RichText::new("No queries recorded yet.").color(palette::TEXT_WEAK()));
+            return;
+        }
+
+        let font = egui::TextStyle::Monospace.resolve(ui.style());
+        let body_h = ui.text_style_height(&egui::TextStyle::Body);
+        let spacing = ui.spacing().item_spacing.y;
+        // Each entry stacks three lines plus a separator; keep the estimate in
+        // sync with the layout below so `show_rows` scrolls without jitter.
+        let row_h = 3.0 * (body_h + spacing) + 8.0;
+        let count = self.history_cache.len();
+        egui::ScrollArea::vertical()
+            .id_salt("history_scroll")
+            .auto_shrink([false, false])
+            .show_rows(ui, row_h, count, |ui, range| {
+                for offset in range {
+                    // Newest entries last in the cache; display newest first.
+                    let idx = count - 1 - offset;
+                    let entry = &self.history_cache[idx];
+
+                    // Line 1: status + connection, actions on the right.
+                    ui.horizontal(|ui| {
+                        let (status, color) = if entry.ok {
+                            ("ok", egui::Color32::from_rgb(58, 178, 108))
+                        } else {
+                            ("err", palette::DANGER())
+                        };
+                        ui.label(egui::RichText::new(status).strong().color(color));
+                        ui.label(egui::RichText::new(&entry.conn_name).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .small_button("Use")
+                                .on_hover_text("Put this SQL into the active tab")
+                                .clicked()
+                            {
+                                actions.push(Action::UseHistorySql(idx));
+                            }
+                            if ui.small_button("Copy").clicked() {
+                                ui.ctx().copy_text(entry.sql.clone());
+                            }
+                            if ui
+                                .small_button("Save")
+                                .on_hover_text("Save as a favorite")
+                                .clicked()
+                            {
+                                actions.push(Action::SaveFavoriteFromHistory(idx));
+                            }
+                        });
+                    });
+
+                    // Line 2: when, how many rows, how long.
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(entry.at.replace('T', " ").trim_end_matches('Z'))
+                                .small()
+                                .color(palette::TEXT_WEAK()),
+                        );
+                        if let Some(rows) = entry.rows {
+                            ui.label(
+                                egui::RichText::new(format!("{rows} rows"))
+                                    .small()
+                                    .color(palette::TEXT_WEAK()),
+                            );
+                        }
+                        ui.label(
+                            egui::RichText::new(format!("{:.0} ms", entry.elapsed_ms))
+                                .small()
+                                .color(palette::TEXT_WEAK()),
+                        );
+                    });
+
+                    // Line 3: one truncated line of SQL (or the error); hover for all.
+                    let detail = match &entry.error {
+                        Some(e) => format!("{} — {e}", first_line(&entry.sql)),
+                        None => first_line(&entry.sql).to_string(),
+                    };
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(detail).font(font.clone()).color(
+                            if entry.ok {
+                                palette::TEXT_WEAK()
+                            } else {
+                                palette::DANGER()
+                            },
+                        ))
+                        .truncate(),
+                    )
+                    .on_hover_text(&entry.sql);
+                    ui.separator();
+                }
+            });
+    }
+
+    /// The Favorites panel, carved to the right of the SQL editor inside the query console.
+    /// Toggled by the Saved button so it sits right where queries are written: pick a saved
+    /// query to load it, or save the current one — without leaving the query area.
+    fn favorites_side_panel(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let has_sql = !self.tab().sql.trim().is_empty();
+        egui::Panel::right("favorites_side_panel")
+            .resizable(true)
+            .default_size(280.0)
+            .min_size(200.0)
+            .max_size(460.0)
+            .show_separator_line(true)
+            .show_inside(ui, |ui| {
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    style::section_header(ui, "Saved Queries");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icons::icon_button(ui, icons::close(), "Hide saved queries").clicked() {
+                            actions.push(Action::ToggleFavoritesPanel);
+                        }
+                        if icons::icon_button(ui, icons::save(), "Save the current query").clicked()
+                            && has_sql
+                        {
+                            actions.push(Action::SaveCurrentAsFavorite);
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+
+                if self.favorites_cache.is_empty() {
                     ui.label(
-                        egui::RichText::new("No queries recorded yet.")
-                            .color(palette::TEXT_WEAK()),
+                        egui::RichText::new(
+                            "No saved queries yet.\n\nWrite a query in the editor, then click \
+                             the Save button above to keep it here.",
+                        )
+                        .color(palette::TEXT_WEAK()),
                     );
                     return;
                 }
 
                 let font = egui::TextStyle::Monospace.resolve(ui.style());
-                let body_h = ui.text_style_height(&egui::TextStyle::Body);
-                let spacing = ui.spacing().item_spacing.y;
-                // Each entry stacks three lines plus a separator; keep the estimate in
-                // sync with the layout below so `show_rows` scrolls without jitter.
-                let row_h = 3.0 * (body_h + spacing) + 8.0;
-                let count = self.history_cache.len();
                 egui::ScrollArea::vertical()
-                    .id_salt("history_scroll")
+                    .id_salt("favorites_side_scroll")
                     .auto_shrink([false, false])
-                    .show_rows(ui, row_h, count, |ui, range| {
-                        for offset in range {
-                            // Newest entries last in the cache; display newest first.
-                            let idx = count - 1 - offset;
-                            let entry = &self.history_cache[idx];
+                    .show(ui, |ui| {
+                        for idx in 0..self.favorites_cache.len() {
+                            let fav = &self.favorites_cache[idx];
+                            let name = fav.name.clone();
+                            let sql = fav.sql.clone();
+                            let preview = first_line(&sql).to_string();
 
-                            // Line 1: status + connection, actions on the right.
+                            let is_renaming_this = self.favorite_pending.as_ref()
+                                .and_then(|d| d.editing_id.as_ref())
+                                .is_some_and(|id| id == &fav.id);
+
+                            // Line 1: ★ + name (or inline edit).
                             ui.horizontal(|ui| {
-                                let (status, color) = if entry.ok {
-                                    ("ok", egui::Color32::from_rgb(58, 178, 108))
+                                icons::show_colored(ui, icons::star(), 12.0, palette::ACCENT());
+                                if is_renaming_this {
+                                    if let Some(draft) = self.favorite_pending.as_mut() {
+                                        let resp = ui.add(egui::TextEdit::singleline(&mut draft.name));
+                                        resp.request_focus();
+                                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                            actions.push(Action::ConfirmSaveFavorite);
+                                        } else if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                            actions.push(Action::CancelSaveFavorite);
+                                        }
+                                    }
                                 } else {
-                                    ("err", palette::DANGER())
-                                };
-                                ui.label(egui::RichText::new(status).strong().color(color));
-                                ui.label(egui::RichText::new(&entry.conn_name).strong());
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if ui
-                                            .small_button("Use")
-                                            .on_hover_text("Put this SQL into the active tab")
-                                            .clicked()
-                                        {
-                                            actions.push(Action::UseHistorySql(idx));
-                                        }
-                                        if ui.small_button("Copy").clicked() {
-                                            ui.ctx().copy_text(entry.sql.clone());
-                                        }
-                                    },
-                                );
-                            });
-
-                            // Line 2: when, how many rows, how long.
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new(
-                                        entry.at.replace('T', " ").trim_end_matches('Z'),
-                                    )
-                                    .small()
-                                    .color(palette::TEXT_WEAK()),
-                                );
-                                if let Some(rows) = entry.rows {
-                                    ui.label(
-                                        egui::RichText::new(format!("{rows} rows"))
-                                            .small()
-                                            .color(palette::TEXT_WEAK()),
-                                    );
+                                    ui.label(egui::RichText::new(&name).strong());
                                 }
-                                ui.label(
-                                    egui::RichText::new(format!("{:.0} ms", entry.elapsed_ms))
-                                        .small()
-                                        .color(palette::TEXT_WEAK()),
-                                );
                             });
 
-                            // Line 3: one truncated line of SQL (or the error); hover for all.
-                            let detail = match &entry.error {
-                                Some(e) => format!("{} — {e}", first_line(&entry.sql)),
-                                None => first_line(&entry.sql).to_string(),
-                            };
+                            // Line 2: a dim one-line preview of the SQL; hover for all.
                             ui.add(
                                 egui::Label::new(
-                                    egui::RichText::new(detail).font(font.clone()).color(
-                                        if entry.ok {
-                                            palette::TEXT_WEAK()
-                                        } else {
-                                            palette::DANGER()
-                                        },
-                                    ),
+                                    egui::RichText::new(&preview)
+                                        .font(font.clone())
+                                        .color(palette::TEXT_WEAK()),
                                 )
                                 .truncate(),
                             )
-                            .on_hover_text(&entry.sql);
+                            .on_hover_text(&sql);
+
+                            // Line 3: minimal text links for actions
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                
+                                if is_renaming_this {
+                                    if ui.link(egui::RichText::new("Save").color(palette::SUCCESS())).clicked() {
+                                        actions.push(Action::ConfirmSaveFavorite);
+                                    }
+                                    
+                                    ui.label(egui::RichText::new("·").color(palette::TEXT_WEAK()));
+                                    if ui.link("Cancel").clicked() {
+                                        actions.push(Action::CancelSaveFavorite);
+                                    }
+                                } else {
+                                    if ui
+                                        .link("Use")
+                                        .on_hover_text("Load this query into the editor")
+                                        .clicked()
+                                    {
+                                        actions.push(Action::UseFavorite(idx));
+                                    }
+                                    
+                                    ui.label(egui::RichText::new("·").color(palette::TEXT_WEAK()));
+                                    if ui.link("Rename").clicked() {
+                                        actions.push(Action::RenameFavorite(idx));
+                                    }
+                                    
+                                    ui.label(egui::RichText::new("·").color(palette::TEXT_WEAK()));
+                                    if ui.link("Copy").clicked() {
+                                        ui.ctx().copy_text(sql.clone());
+                                    }
+                                    
+                                    ui.label(egui::RichText::new("·").color(palette::TEXT_WEAK()));
+                                    if ui.link("Delete").clicked() {
+                                        actions.push(Action::DeleteFavorite(idx));
+                                    }
+                                }
+                            });
+                            ui.add_space(2.0);
                             ui.separator();
                         }
                     });
@@ -2509,6 +2698,69 @@ impl DbGuiApp {
 
         if !open {
             actions.push(Action::CancelEdits);
+        }
+    }
+
+    /// Small modal to name a query when saving (or renaming) a favorite. Enter or Save
+    /// commits; Escape / Cancel / closing the window dismisses it.
+    pub(super) fn favorite_name_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        let Some(draft) = self.favorite_pending.as_ref() else {
+            return;
+        };
+        let is_rename = draft.editing_id.is_some();
+        if is_rename {
+            return; // Renaming is done inline in the sidebar list.
+        }
+        let preview = first_line(&draft.sql).to_string();
+        let title = if is_rename {
+            "Rename favorite"
+        } else {
+            "Save query to favorites"
+        };
+
+        let mut open = true;
+        let mut submit = false;
+        let mut cancel = false;
+        style::dialog_window(title)
+            .open(&mut open)
+            .resizable(false)
+            .default_size([440.0, 0.0])
+            .frame(style::dialog_frame(ctx))
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new("Name").color(palette::TEXT_WEAK()));
+                if let Some(draft) = self.favorite_pending.as_mut() {
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut draft.name)
+                            .hint_text("My query")
+                            .desired_width(f32::INFINITY),
+                    );
+                    resp.request_focus();
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        submit = true;
+                    }
+                }
+                ui.add_space(6.0);
+                let font = egui::TextStyle::Monospace.resolve(ui.style());
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(preview).font(font).color(palette::TEXT_FAINT()),
+                    )
+                    .truncate(),
+                );
+                style::dialog_footer(ui, |ui| {
+                    if icons::primary_button(ui, icons::save(), "Save", true).clicked() {
+                        submit = true;
+                    }
+                    if icons::button(ui, icons::close(), "Cancel", true).clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if submit {
+            actions.push(Action::ConfirmSaveFavorite);
+        } else if cancel || !open {
+            actions.push(Action::CancelSaveFavorite);
         }
     }
 

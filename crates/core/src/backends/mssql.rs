@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use tiberius::{ColumnData, FromSqlOwned, Row};
+use tokio_util::sync::CancellationToken;
 
 use crate::database::{statements_return_rows, Database, ROW_KEYWORDS};
 use crate::error::{CoreError, Result};
@@ -119,6 +120,16 @@ impl MsSqlDb {
         let mut conn = self.pool.get().await.map_err(map_pool_err)?;
         let stream = conn.simple_query(sql.to_string()).await?;
         Ok(stream.into_first_result().await?)
+    }
+
+    /// `KILL <spid>` terminates the session running the query, from a fresh pooled
+    /// connection. SQL Server has no "cancel just this statement" SQL (that's the TDS
+    /// attention signal, which tiberius doesn't expose), so this drops the whole session;
+    /// the connection it was on is discarded by the pool. Best-effort.
+    async fn kill_spid(&self, spid: i32) {
+        if let Ok(mut conn) = self.pool.get().await {
+            let _ = conn.simple_query(format!("KILL {spid}")).await;
+        }
     }
 }
 
@@ -511,6 +522,108 @@ impl Database for MsSqlDb {
                 },
                 truncated: false,
             })
+        }
+    }
+
+    async fn execute_capped_cancellable(
+        &self,
+        sql: &str,
+        max_rows: usize,
+        cancel: CancellationToken,
+    ) -> Result<QueryResult> {
+        use futures_util::TryStreamExt;
+        use tiberius::QueryItem;
+        let start = Instant::now();
+        let elapsed = |start: Instant| start.elapsed().as_secs_f64() * 1000.0;
+
+        let mut conn = self.pool.get().await.map_err(map_pool_err)?;
+        // Capture this session's id up front so a cancel can target it with KILL from a
+        // separate connection. @@SPID is a smallint.
+        let spid: i32 = {
+            let rows = conn
+                .simple_query("SELECT @@SPID")
+                .await?
+                .into_first_result()
+                .await?;
+            rows.first()
+                .and_then(|r| r.try_get::<i16, _>(0).ok().flatten())
+                .map(|v| v as i32)
+                .ok_or_else(|| CoreError::Pool("could not read @@SPID".into()))?
+        };
+
+        if mssql_returns_rows(sql) {
+            let mut stream = conn.simple_query(sql.to_string()).await?;
+            let mut columns: Vec<ColumnMeta> = Vec::new();
+            let mut data: Vec<Vec<Value>> = Vec::new();
+            let mut truncated = false;
+            let mut result_sets = 0usize;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        drop(stream);
+                        self.kill_spid(spid).await;
+                        return Err(CoreError::Canceled);
+                    }
+                    item = stream.try_next() => {
+                        let Some(item) = item? else { break };
+                        match item {
+                            QueryItem::Metadata(meta) => {
+                                result_sets += 1;
+                                if result_sets == 1 {
+                                    columns = meta
+                                        .columns()
+                                        .iter()
+                                        .map(|c| ColumnMeta {
+                                            name: c.name().to_string(),
+                                            type_name: format!("{:?}", c.column_type()),
+                                        })
+                                        .collect();
+                                }
+                            }
+                            QueryItem::Row(row) => {
+                                if result_sets > 1 {
+                                    continue;
+                                }
+                                if data.len() >= max_rows {
+                                    truncated = true;
+                                    continue;
+                                }
+                                data.push(row.into_iter().map(|c| decode(&c)).collect());
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(QueryResult {
+                columns,
+                rows: data,
+                stats: QueryStats {
+                    elapsed_ms: elapsed(start),
+                    rows_affected: None,
+                },
+                truncated,
+            })
+        } else {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    self.kill_spid(spid).await;
+                    Err(CoreError::Canceled)
+                }
+                res = conn.execute(sql.to_string(), &[]) => {
+                    let res = res?;
+                    Ok(QueryResult {
+                        columns: Vec::new(),
+                        rows: Vec::new(),
+                        stats: QueryStats {
+                            elapsed_ms: elapsed(start),
+                            rows_affected: Some(res.total()),
+                        },
+                        truncated: false,
+                    })
+                }
+            }
         }
     }
 

@@ -2,6 +2,7 @@
 //! the rest of the app only ever holds an `Arc<dyn Database>`.
 
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::Result;
 use crate::export::RowSink;
@@ -26,6 +27,20 @@ pub trait Database: Send + Sync {
     /// [`QueryResult::truncated`] set. For DML statements the returned rows are empty and
     /// `stats.rows_affected` is populated instead.
     async fn execute_capped(&self, sql: &str, max_rows: usize) -> Result<QueryResult>;
+
+    /// Like [`Database::execute_capped`], but abortable: the backend races the running query
+    /// against `cancel` and, when it fires, kills the statement server-side (where supported)
+    /// and returns [`crate::error::CoreError::Canceled`]. The default ignores the token and
+    /// runs to completion, so backends opt in by overriding this.
+    async fn execute_capped_cancellable(
+        &self,
+        sql: &str,
+        max_rows: usize,
+        cancel: CancellationToken,
+    ) -> Result<QueryResult> {
+        let _ = cancel;
+        self.execute_capped(sql, max_rows).await
+    }
 
     /// Execute with no row cap. Convenience for internal queries that are known-small
     /// (counts, introspection helpers) and for tests.

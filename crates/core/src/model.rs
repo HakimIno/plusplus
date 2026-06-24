@@ -389,7 +389,7 @@ fn keyword_positions(sql: &str, kw: &str) -> Vec<usize> {
                 if is_ident(b)
                     && !prev_ident
                     && i + k <= n
-                    && sql[i..i + k].eq_ignore_ascii_case(kw)
+                    && bytes[i..i + k].eq_ignore_ascii_case(kw.as_bytes())
                     && !bytes.get(i + k).copied().is_some_and(is_ident)
                 {
                     out.push(i);

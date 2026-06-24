@@ -3764,6 +3764,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tiberius",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -3787,6 +3788,7 @@ dependencies = [
  "serde_json",
  "sqlformat",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

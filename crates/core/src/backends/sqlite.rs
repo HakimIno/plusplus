@@ -6,9 +6,10 @@ use std::time::Instant;
 use async_trait::async_trait;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions, SqliteRow};
 use sqlx::{AssertSqlSafe, Column, ConnectOptions, Row, TypeInfo, ValueRef};
+use tokio_util::sync::CancellationToken;
 
 use crate::database::{returns_rows, Database};
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::model::{
     parse_trigger_header, select_body_after_as, ColumnInfo, ColumnMeta, ConnectionConfig, DbKind,
     ForeignKeyInfo, IndexInfo, QueryResult, QueryStats, SchemaTree, TableInfo, TriggerInfo,
@@ -147,6 +148,67 @@ impl Database for SqliteDb {
                 },
                 truncated: false,
             })
+        }
+    }
+
+    async fn execute_capped_cancellable(
+        &self,
+        sql: &str,
+        max_rows: usize,
+        cancel: CancellationToken,
+    ) -> Result<QueryResult> {
+        use futures_util::TryStreamExt;
+        let start = Instant::now();
+        // SQLite runs in-process — there's no remote backend to kill. Cancellation is
+        // client-side: stop pulling and drop the stream, which releases the statement.
+        if returns_rows(sql) {
+            let mut stream = sqlx::query(AssertSqlSafe(sql.to_string())).fetch(&self.pool);
+            let mut columns: Vec<ColumnMeta> = Vec::new();
+            let mut data: Vec<Vec<Value>> = Vec::new();
+            let mut truncated = false;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Err(CoreError::Canceled),
+                    row = stream.try_next() => {
+                        let Some(row) = row? else { break };
+                        if columns.is_empty() {
+                            columns = column_meta(&row);
+                        }
+                        if data.len() >= max_rows {
+                            truncated = true;
+                            break;
+                        }
+                        data.push((0..columns.len()).map(|i| decode(&row, i)).collect());
+                    }
+                }
+            }
+            Ok(QueryResult {
+                columns,
+                rows: data,
+                stats: QueryStats {
+                    elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
+                    rows_affected: None,
+                },
+                truncated,
+            })
+        } else {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => Err(CoreError::Canceled),
+                res = sqlx::query(AssertSqlSafe(sql.to_string())).execute(&self.pool) => {
+                    let res = res?;
+                    Ok(QueryResult {
+                        columns: Vec::new(),
+                        rows: Vec::new(),
+                        stats: QueryStats {
+                            elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
+                            rows_affected: Some(res.rows_affected()),
+                        },
+                        truncated: false,
+                    })
+                }
+            }
         }
     }
 

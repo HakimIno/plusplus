@@ -13,6 +13,7 @@ pub mod config;
 pub mod database;
 pub mod error;
 pub mod export;
+pub mod favorites;
 pub mod history;
 pub mod model;
 pub mod safety;
@@ -25,6 +26,7 @@ use std::sync::Arc;
 pub use database::Database;
 pub use error::{CoreError, Result};
 pub use export::{ExportFormat, RowSink};
+pub use favorites::Favorite;
 pub use model::{
     build_add_column_sql, build_add_fk_sql, build_alter_column_sql, build_count_sql,
     build_create_index_sql,
@@ -109,6 +111,14 @@ impl Database for Tunneled {
     }
     async fn execute_capped(&self, sql: &str, max_rows: usize) -> Result<QueryResult> {
         self.inner.execute_capped(sql, max_rows).await
+    }
+    async fn execute_capped_cancellable(
+        &self,
+        sql: &str,
+        max_rows: usize,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<QueryResult> {
+        self.inner.execute_capped_cancellable(sql, max_rows, cancel).await
     }
     async fn execute_transaction(&self, stmts: &[String]) -> Result<usize> {
         self.inner.execute_transaction(stmts).await

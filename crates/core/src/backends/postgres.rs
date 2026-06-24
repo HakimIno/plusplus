@@ -6,9 +6,10 @@ use std::time::Instant;
 use async_trait::async_trait;
 use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
 use sqlx::{AssertSqlSafe, Column, ConnectOptions, Row, TypeInfo, ValueRef};
+use tokio_util::sync::CancellationToken;
 
 use crate::database::{returns_rows, Database};
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::model::{
     parse_trigger_header, ColumnInfo, ColumnMeta, ConnectionConfig, DbKind, ForeignKeyInfo,
     IndexInfo, ParamMode, QueryResult, QueryStats, RoutineInfo, RoutineKind, RoutineParam,
@@ -60,6 +61,16 @@ impl PostgresDb {
             .connect_with(opts)
             .await?;
         Ok(Self { pool })
+    }
+
+    /// Ask the server to cancel the query running on backend `pid`, from a fresh pooled
+    /// connection. Best-effort: a failure here just means the cancel didn't land (the user
+    /// can retry), so the error is swallowed.
+    async fn cancel_backend(&self, pid: i32) {
+        let _ = sqlx::query("SELECT pg_cancel_backend($1)")
+            .bind(pid)
+            .execute(&self.pool)
+            .await;
     }
 }
 
@@ -396,6 +407,86 @@ impl Database for PostgresDb {
                 },
                 truncated: false,
             })
+        }
+    }
+
+    async fn execute_capped_cancellable(
+        &self,
+        sql: &str,
+        max_rows: usize,
+        cancel: CancellationToken,
+    ) -> Result<QueryResult> {
+        use futures_util::TryStreamExt;
+        let start = Instant::now();
+        // Run on a dedicated connection so we know exactly which backend to cancel; the kill
+        // (pg_cancel_backend) must come from a *different* connection while this one is busy.
+        let mut conn = self.pool.acquire().await?;
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *conn)
+            .await?;
+
+        if returns_rows(sql) {
+            let mut stream = sqlx::query(AssertSqlSafe(sql.to_string())).fetch(&mut *conn);
+            let mut columns: Vec<ColumnMeta> = Vec::new();
+            let mut types: Vec<String> = Vec::new();
+            let mut data: Vec<Vec<Value>> = Vec::new();
+            let mut truncated = false;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        drop(stream);
+                        self.cancel_backend(pid).await;
+                        return Err(CoreError::Canceled);
+                    }
+                    row = stream.try_next() => {
+                        let Some(row) = row? else { break };
+                        if columns.is_empty() {
+                            columns = column_meta(&row);
+                            types = columns
+                                .iter()
+                                .map(|c| c.type_name.to_ascii_uppercase())
+                                .collect();
+                        }
+                        if data.len() >= max_rows {
+                            truncated = true;
+                            break;
+                        }
+                        data.push(
+                            (0..columns.len()).map(|i| decode(&row, i, &types[i])).collect(),
+                        );
+                    }
+                }
+            }
+            Ok(QueryResult {
+                columns,
+                rows: data,
+                stats: QueryStats {
+                    elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
+                    rows_affected: None,
+                },
+                truncated,
+            })
+        } else {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    self.cancel_backend(pid).await;
+                    Err(CoreError::Canceled)
+                }
+                res = sqlx::query(AssertSqlSafe(sql.to_string())).execute(&mut *conn) => {
+                    let res = res?;
+                    Ok(QueryResult {
+                        columns: Vec::new(),
+                        rows: Vec::new(),
+                        stats: QueryStats {
+                            elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
+                            rows_affected: Some(res.rows_affected()),
+                        },
+                        truncated: false,
+                    })
+                }
+            }
         }
     }
 

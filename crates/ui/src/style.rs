@@ -528,79 +528,8 @@ pub fn status_dot(ui: &mut egui::Ui, color: Color32) -> egui::Response {
 }
 
 /// Theme-accent loading spinner.
-pub fn spinner(size: f32) -> SpinnerDots {
-    SpinnerDots::new().size(size).color(palette::ACCENT())
-}
-
-pub struct SpinnerDots {
-    size: f32,
-    color: egui::Color32,
-}
-
-impl SpinnerDots {
-    pub fn new() -> Self {
-        Self {
-            size: 24.0,
-            color: egui::Color32::GRAY,
-        }
-    }
-    pub fn size(mut self, size: f32) -> Self {
-        self.size = size;
-        self
-    }
-    pub fn color(mut self, color: egui::Color32) -> Self {
-        self.color = color;
-        self
-    }
-}
-
-impl egui::Widget for SpinnerDots {
-    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
-        let (rect, response) = ui.allocate_exact_size(egui::vec2(self.size, self.size), egui::Sense::hover());
-
-        if ui.is_rect_visible(rect) {
-            ui.ctx().request_repaint();
-
-            let time = ui.input(|i| i.time);
-            let num_dots = 8;
-            let center = rect.center();
-            // Scale the drawing radius down slightly so the spinner looks smaller overall
-            let radius = (self.size / 2.0) * 0.85;
-            let dot_length = radius * 0.45;
-            let dot_width = (radius * 0.2).max(1.0);
-            let inner_radius = radius - dot_length;
-
-            for i in 0..num_dots {
-                let offset = i as f64 / num_dots as f64;
-                let mut progress = (time * 1.5 - offset).fract() as f32;
-                if progress < 0.0 {
-                    progress += 1.0;
-                }
-                
-                let alpha = (1.0 - progress).powf(1.5);
-                let mut color = self.color;
-                color[3] = (color[3] as f32 * alpha) as u8;
-
-                let angle = (i as f32 * std::f32::consts::TAU / num_dots as f32) - std::f32::consts::FRAC_PI_2;
-                let dir = egui::vec2(angle.cos(), angle.sin());
-
-                let start = center + dir * inner_radius;
-                let end = center + dir * radius;
-
-                // egui's line_segment doesn't support rounded caps by default, 
-                // so we can draw a circle at each end for rounded caps.
-                ui.painter().line_segment(
-                    [start, end],
-                    egui::Stroke::new(dot_width, color),
-                );
-                let half_width = dot_width / 2.0;
-                ui.painter().circle_filled(start, half_width, color);
-                ui.painter().circle_filled(end, half_width, color);
-            }
-        }
-
-        response
-    }
+pub fn spinner(size: f32) -> egui::Spinner {
+    egui::Spinner::new().size(size).color(palette::ACCENT())
 }
 
 /// A centred loading placeholder: spinner plus a short status line.

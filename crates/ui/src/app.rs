@@ -49,6 +49,9 @@ enum AppMessage {
         conn_id: String,
         sql: String,
         result: Result<QueryResult, String>,
+        /// True when the query was aborted via the Cancel button (a `CoreError::Canceled`),
+        /// so the UI shows "Query cancelled" instead of a red error and doesn't log a failure.
+        canceled: bool,
     },
     /// A batch of staged edits was saved (`Ok` carries the number of rows updated).
     Committed {
@@ -99,6 +102,17 @@ enum Busy {
     Idle,
     Connecting,
     Querying,
+}
+
+/// In-progress "save / rename favorite" dialog state: the editable name plus the snapshot of
+/// what's being saved. `editing_id` is `Some` when renaming an existing favorite.
+struct FavoriteDraft {
+    name: String,
+    sql: String,
+    conn_id: Option<String>,
+    conn_name: Option<String>,
+    /// `Some(id)` when renaming an existing favorite; `None` when creating a new one.
+    editing_id: Option<String>,
 }
 
 /// Which view of a table tab the central panel shows: the row data, or the introspected
@@ -321,6 +335,21 @@ fn result_status(res: &QueryResult) -> String {
     }
 }
 
+/// A sensible default name when saving a favorite: the first non-empty line of the SQL,
+/// trimmed and capped so the favorites list stays scannable.
+fn default_favorite_name(sql: &str) -> String {
+    let line = sql
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("Untitled query");
+    let mut name: String = line.chars().take(60).collect();
+    if line.chars().count() > 60 {
+        name.push('…');
+    }
+    name
+}
+
 fn validate_connection_test_config(
     cfg: &ConnectionConfig,
 ) -> std::result::Result<(), (String, Vec<ConnField>)> {
@@ -474,6 +503,22 @@ enum Action {
     CloseSettings,
     /// Show/hide the query-history side panel.
     ToggleHistory,
+    /// Show/hide the Favorites panel beside the SQL editor (the Saved button).
+    ToggleFavoritesPanel,
+    /// Open the name dialog to save the active tab's SQL as a favorite.
+    SaveCurrentAsFavorite,
+    /// Open the name dialog to save a history entry (by cache index) as a favorite.
+    SaveFavoriteFromHistory(usize),
+    /// Open the name dialog to rename an existing favorite (by cache index).
+    RenameFavorite(usize),
+    /// Commit the favorite name dialog (create or rename).
+    ConfirmSaveFavorite,
+    /// Close the favorite name dialog without saving.
+    CancelSaveFavorite,
+    /// Load a favorite's SQL into the active tab (by cache index).
+    UseFavorite(usize),
+    /// Delete a favorite (by cache index).
+    DeleteFavorite(usize),
     /// Open/close the ER diagram of the active connection (takes over the central panel).
     ToggleErd,
     /// Rebuild the open ER diagram from the current schema (after DDL / re-introspection).
@@ -489,6 +534,9 @@ enum Action {
     BrowseSslClientKey,
     BrowseSshKey,
     RunQuery,
+    /// Abort the in-flight query (Cancel button): asks the backend to kill the running
+    /// statement server-side and unblocks the UI.
+    CancelQuery,
     /// Reformat the active tab's SQL in its connection's dialect (Beautify, Cmd/Ctrl+I).
     BeautifySql,
     /// Open a table's rows from the sidebar. `source` makes the result editable. `pin` opens
@@ -624,6 +672,9 @@ pub struct DbGuiApp {
     next_connection_test_id: u64,
     /// Tab id of the in-flight `SELECT` (cleared when [`AppMessage::Queried`] arrives).
     querying_tab_id: Option<u64>,
+    /// Cancellation handle for the in-flight query; firing it asks the backend to abort and
+    /// kill the server-side statement. `None` when no query is running.
+    query_cancel: Option<tokio_util::sync::CancellationToken>,
 
     // --- connection state ---
     /// Pool of live connections (one per connected config), shared across tabs.
@@ -682,9 +733,17 @@ pub struct DbGuiApp {
     danger_pending: Option<Vec<dbcore::safety::DangerousStatement>>,
     /// Record executed statements to the on-disk query history (settings toggle).
     history_enabled: bool,
-    /// Whether the History dialog is open; `history_cache` holds its rows while it is.
+    /// Whether the right-hand panel (History / Favorites) is open; the caches below hold its
+    /// rows while it is.
     history_open: bool,
     history_cache: Vec<dbcore::history::HistoryEntry>,
+    /// All saved queries, kept in memory and mirrored to `favorites.json` on every change.
+    /// Loaded once at startup so the Saved button's count is correct even before it opens.
+    favorites_cache: Vec<dbcore::Favorite>,
+    /// Whether the Favorites panel (beside the SQL editor, toggled by the Saved button) is open.
+    favorites_open: bool,
+    /// Open name-this-favorite dialog. `None` = closed.
+    favorite_pending: Option<FavoriteDraft>,
     /// Open ER diagram (takes over the central panel, like the schema editor).
     /// A snapshot of the schema it was built from; not persisted.
     erd: Option<crate::erd::ErDiagram>,
@@ -736,6 +795,10 @@ impl DbGuiApp {
                 sql: e.sql,
             })
             .collect();
+
+        // Load saved queries so the Favorites toolbar count is right from launch. Also kept
+        // out of `construct` so tests don't read the user's favorites file.
+        app.favorites_cache = dbcore::favorites::load().unwrap_or_default();
 
         #[cfg(target_os = "macos")]
         app.start_update_check();
@@ -809,6 +872,7 @@ impl DbGuiApp {
             busy: Busy::Idle,
             next_connection_test_id: 1,
             querying_tab_id: None,
+            query_cancel: None,
             active_connections: Vec::new(),
             tabs: vec![default_tab],
             active_query_tab: 0,
@@ -840,6 +904,10 @@ impl DbGuiApp {
             history_enabled,
             history_open: false,
             history_cache: Vec::new(),
+            // Loaded from disk in `new` (this builder stays config-dir-free for tests).
+            favorites_cache: Vec::new(),
+            favorites_open: false,
+            favorite_pending: None,
             erd: None,
             show_welcome,
             update: crate::update::UpdatePhase::Idle,
@@ -1311,6 +1379,10 @@ impl DbGuiApp {
                 t.id == qid && t.conn_id.as_deref() == Some(id)
             })
         }) {
+            // Abort the in-flight query on the connection we're dropping.
+            if let Some(cancel) = self.query_cancel.take() {
+                cancel.cancel();
+            }
             self.busy = Busy::Idle;
             self.querying_tab_id = None;
         }
@@ -1405,9 +1477,18 @@ impl DbGuiApp {
                     conn_id,
                     sql,
                     result,
+                    canceled,
                 } => {
                     self.busy = Busy::Idle;
                     self.querying_tab_id = None;
+                    self.query_cancel = None;
+                    // A user cancel isn't a failure: don't log it as a failed statement and
+                    // don't flag a red error — just note it and leave the previous result up.
+                    if canceled {
+                        self.status_msg = "Query cancelled".to_string();
+                        self.error = None;
+                        continue;
+                    }
                     match &result {
                         Ok(res) => {
                             let rows = res.stats.rows_affected.unwrap_or(res.row_count() as u64);
@@ -1766,6 +1847,68 @@ impl DbGuiApp {
         }
     }
 
+    /// The active tab's bound connection id and its saved display name, if any.
+    fn active_conn_id_name(&self) -> (Option<String>, Option<String>) {
+        let conn_id = self.tab().conn_id.clone();
+        let conn_name = conn_id.as_deref().and_then(|id| {
+            self.connections
+                .iter()
+                .find(|c| c.id == id)
+                .map(|c| c.name.clone())
+        });
+        (conn_id, conn_name)
+    }
+
+    /// Commit the favorite name dialog: rename an existing favorite or add a new one, then
+    /// persist. An empty name falls back to a placeholder so the entry is never nameless.
+    fn confirm_save_favorite(&mut self) {
+        let Some(draft) = self.favorite_pending.take() else {
+            return;
+        };
+        let name = {
+            let trimmed = draft.name.trim();
+            if trimmed.is_empty() {
+                "Untitled query".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        };
+        match draft.editing_id {
+            Some(id) => {
+                if let Some(fav) = self.favorites_cache.iter_mut().find(|f| f.id == id) {
+                    fav.name = name;
+                }
+                self.status_msg = "Favorite renamed".to_string();
+            }
+            None => {
+                self.favorites_cache.push(dbcore::Favorite {
+                    id: dbcore::favorites::new_id(),
+                    name,
+                    sql: draft.sql,
+                    conn_id: draft.conn_id,
+                    conn_name: draft.conn_name,
+                    created_at: dbcore::history::now_rfc3339(),
+                });
+                // Reveal the panel so the just-saved query is visible (e.g. when saving from
+                // a history entry while the panel was closed).
+                self.favorites_open = true;
+                self.status_msg = "Saved to favorites".to_string();
+            }
+        }
+        self.persist_favorites();
+    }
+
+    /// Mirror the in-memory favorites to disk. Best effort; skipped under test so unit tests
+    /// never touch the user's favorites file.
+    fn persist_favorites(&mut self) {
+        if cfg!(test) {
+            return;
+        }
+        if let Err(e) = dbcore::favorites::save(&self.favorites_cache) {
+            self.error = Some(format!("Could not save favorites: {e}"));
+        }
+    }
+
     /// Is the tab at `idx` bound to a connection whose saved config is marked production?
     fn tab_connection_is_production(&self, idx: usize) -> bool {
         self.tabs
@@ -1801,20 +1944,23 @@ impl DbGuiApp {
             }
         };
         let tx = self.tx.clone();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        self.query_cancel = Some(cancel.clone());
         self.busy = Busy::Querying;
         self.querying_tab_id = Some(tab_id);
         self.error = None;
         self.status_msg = "Running query…".to_string();
         self.rt.spawn(async move {
-            let result = db
-                .execute_capped(&sql, MAX_FETCH_ROWS)
-                .await
-                .map_err(|e| e.to_string());
+            let res = db.execute_capped_cancellable(&sql, MAX_FETCH_ROWS, cancel).await;
+            // Distinguish a user cancel from a real failure before flattening to a string.
+            let canceled = matches!(res, Err(dbcore::CoreError::Canceled));
+            let result = res.map_err(|e| e.to_string());
             let _ = tx.send(AppMessage::Queried {
                 tab_id,
                 conn_id,
                 sql,
                 result,
+                canceled,
             });
         });
     }
@@ -2317,6 +2463,65 @@ impl DbGuiApp {
                     self.history_open = true;
                 }
             }
+            Action::ToggleFavoritesPanel => {
+                self.favorites_open = !self.favorites_open;
+                // Re-read on open so the list reflects any out-of-band change.
+                if self.favorites_open {
+                    self.favorites_cache = dbcore::favorites::load().unwrap_or_default();
+                }
+            }
+            Action::SaveCurrentAsFavorite => {
+                let sql = self.tab().sql.trim().to_string();
+                if sql.is_empty() {
+                    self.error = Some("Nothing to save — the editor is empty.".into());
+                } else {
+                    let (conn_id, conn_name) = self.active_conn_id_name();
+                    self.favorite_pending = Some(FavoriteDraft {
+                        name: default_favorite_name(&sql),
+                        sql,
+                        conn_id,
+                        conn_name,
+                        editing_id: None,
+                    });
+                }
+            }
+            Action::SaveFavoriteFromHistory(i) => {
+                if let Some(entry) = self.history_cache.get(i) {
+                    self.favorite_pending = Some(FavoriteDraft {
+                        name: default_favorite_name(&entry.sql),
+                        sql: entry.sql.clone(),
+                        conn_id: Some(entry.conn_id.clone()),
+                        conn_name: Some(entry.conn_name.clone()),
+                        editing_id: None,
+                    });
+                }
+            }
+            Action::RenameFavorite(i) => {
+                if let Some(fav) = self.favorites_cache.get(i) {
+                    self.favorite_pending = Some(FavoriteDraft {
+                        name: fav.name.clone(),
+                        sql: fav.sql.clone(),
+                        conn_id: fav.conn_id.clone(),
+                        conn_name: fav.conn_name.clone(),
+                        editing_id: Some(fav.id.clone()),
+                    });
+                }
+            }
+            Action::ConfirmSaveFavorite => self.confirm_save_favorite(),
+            Action::CancelSaveFavorite => self.favorite_pending = None,
+            Action::UseFavorite(i) => {
+                if let Some(fav) = self.favorites_cache.get(i) {
+                    self.tab_mut().sql = fav.sql.clone();
+                    self.workspace_dirty = true;
+                }
+            }
+            Action::DeleteFavorite(i) => {
+                if i < self.favorites_cache.len() {
+                    self.favorites_cache.remove(i);
+                    self.persist_favorites();
+                    self.status_msg = "Favorite deleted".to_string();
+                }
+            }
             Action::ToggleErd => {
                 if self.erd.is_some() {
                     self.erd = None;
@@ -2392,6 +2597,12 @@ impl DbGuiApp {
                     }
                 }
                 self.start_query_for(idx);
+            }
+            Action::CancelQuery => {
+                if let Some(cancel) = self.query_cancel.take() {
+                    cancel.cancel();
+                    self.status_msg = "Cancelling…".to_string();
+                }
             }
             Action::ConfirmDangerQuery => {
                 if self.danger_pending.take().is_some() {
@@ -2881,7 +3092,7 @@ impl DbGuiApp {
         // instead of spanning the whole width and clipping the details/schema panels.
         self.top_bar(ui_root, frame, &mut actions);
         self.query_tab_bar(ui_root, &mut actions);
-        self.status_bar(ui_root);
+        self.status_bar(ui_root, &mut actions);
         if self.show_connection_tabs {
             self.connection_tabs(ui_root, &mut actions);
         }
@@ -2908,6 +3119,7 @@ impl DbGuiApp {
         self.connection_dialog(&ctx, &mut actions);
         self.settings_dialog(&ctx, &mut actions);
         self.commit_preview_dialog(&ctx, &mut actions);
+        self.favorite_name_dialog(&ctx, &mut actions);
         self.danger_confirm_dialog(&ctx, &mut actions);
         self.schema_preview_dialog(&ctx, &mut actions);
         self.update_dialog(&ctx, &mut actions);
@@ -4071,6 +4283,44 @@ mod tests {
             "ID clashes detected:\n{}",
             clashes.join("\n")
         );
+    }
+
+    /// The Favorites panel carves a SidePanel inside the query console after the header row;
+    /// render it open with entries to confirm that nested layout is clash-free and doesn't
+    /// panic (the full-app probe keeps it closed).
+    #[test]
+    fn probe_favorites_panel_open() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::style::apply(&ctx);
+
+        let mut app = DbGuiApp::construct();
+        app.tab_mut().sql = "SELECT * FROM t".into();
+        app.favorites_open = true;
+        for i in 0..3 {
+            app.favorites_cache.push(dbcore::Favorite {
+                id: format!("id-{i}"),
+                name: format!("Saved query {i}"),
+                sql: format!("SELECT {i} FROM t WHERE x = {i}"),
+                conn_id: None,
+                conn_name: Some("test-conn".into()),
+                created_at: "2026-06-24T00:00:00Z".into(),
+            });
+        }
+
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+        let mut clashes: Vec<String> = Vec::new();
+        for _ in 0..4 {
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let out = ctx.run_ui(raw, |ui| app.draw(ui, None));
+            clashes.extend(collect_clash_text(&out.shapes));
+        }
+        clashes.sort();
+        clashes.dedup();
+        assert!(clashes.is_empty(), "ID clashes detected:\n{}", clashes.join("\n"));
     }
 
     /// A small schema with a real FK so ERD tests exercise edges, not just boxes.

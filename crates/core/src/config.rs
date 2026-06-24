@@ -152,7 +152,7 @@ pub fn save_workspace(workspace: &Workspace) -> Result<()> {
 
 /// Serialise `value` to pretty JSON and write it to `path` atomically (temp file + rename),
 /// creating the config directory if needed.
-fn write_json_atomic<T: serde::Serialize + ?Sized>(
+pub(crate) fn write_json_atomic<T: serde::Serialize + ?Sized>(
     path: &std::path::Path,
     value: &T,
 ) -> Result<()> {

@@ -41,6 +41,12 @@ pub enum CoreError {
     /// Establishing or operating the SSH tunnel failed (connect, auth, forward, ...).
     #[error("ssh tunnel error: {0}")]
     Ssh(String),
+
+    /// The query was cancelled by the user (Cancel button). Carried as a distinct variant —
+    /// not a generic failure — so the UI can show "Query cancelled" instead of a red error
+    /// and skip recording it as a failed statement.
+    #[error("query cancelled")]
+    Canceled,
 }
 
 /// Convenience alias used throughout the crate.

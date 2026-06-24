@@ -623,16 +623,11 @@ pub fn show_popup(
                                     egui::pos2(rect.left() + 13.0, rect.center().y),
                                     egui::vec2(16.0, 16.0),
                                 );
-                                ui.painter().rect_filled(
-                                    badge,
-                                    4.0,
-                                    color.gamma_multiply(0.18),
-                                );
                                 ui.painter().text(
                                     badge.center(),
                                     egui::Align2::CENTER_CENTER,
                                     letter,
-                                    small.clone(),
+                                    egui::FontId::proportional(11.0),
                                     color,
                                 );
 

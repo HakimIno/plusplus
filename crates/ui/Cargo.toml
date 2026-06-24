@@ -21,6 +21,8 @@ eframe.workspace = true
 egui.workspace = true
 egui_extras.workspace = true
 tokio.workspace = true
+# CancellationToken handed to the backend so the Cancel button can abort a running query.
+tokio-util.workspace = true
 reqwest.workspace = true
 # Verifies the minisign signature of a downloaded update before it is installed.
 minisign-verify.workspace = true
