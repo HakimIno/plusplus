@@ -29,3 +29,6 @@ examples/*.sqlite-shm
 *.pdb
 
 *desktop
+
+*.key
+*.pub

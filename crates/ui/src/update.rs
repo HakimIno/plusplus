@@ -23,7 +23,7 @@ pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// updates: run `minisign -G` once, paste the public key's second line here, store the
 /// secret key as the CI `MINISIGN_SECRET_KEY`/`MINISIGN_PASSWORD` secrets, and the release
 /// workflow will publish a `<dmg>.minisig` beside each DMG. See docs/RELEASE_SIGNING.md.
-pub const MINISIGN_PUBLIC_KEY: &str = "RWR40dnZktp+HBexENHXDOxI0nDGXpxhV1q++F3Z1nyoYH3poQwkZlR5";
+pub const MINISIGN_PUBLIC_KEY: &str = "RWSI1RaK/u6g2lxVL3YxMT8pRzTnQMP1N46eIBdWDVXH7U5kjtAzYIY4";
 
 /// A newer release found on GitHub.
 #[derive(Clone, Debug)]
