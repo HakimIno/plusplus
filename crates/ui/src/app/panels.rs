@@ -513,9 +513,17 @@ impl DbGuiApp {
                                     );
                                 }
                             }
-                            if let (Some(sel), true) = (tab.selected_row, tab.result.is_some()) {
+                            if tab.result.is_some() && !tab.selection.is_empty() {
                                 ui.colored_label(palette::TEXT_FAINT(), "·");
-                                ui.colored_label(palette::TEXT_WEAK(), format!("row {}", sel + 1));
+                                let n = tab.selection.len();
+                                let label = if n > 1 {
+                                    format!("{n} rows selected")
+                                } else if let Some(lead) = tab.selection.lead() {
+                                    format!("row {}", lead + 1)
+                                } else {
+                                    String::new()
+                                };
+                                ui.colored_label(palette::TEXT_WEAK(), label);
                             }
                         }
                     },
@@ -1074,7 +1082,7 @@ impl DbGuiApp {
         if tab.view == TabView::Structure {
             return;
         }
-        let row_idx = match (tab.result.as_ref(), tab.selected_row) {
+        let row_idx = match (tab.result.as_ref(), tab.selection.lead()) {
             (Some(_), Some(disp)) if disp < tab.row_order.len() => tab.row_order[disp],
             _ => return,
         };
@@ -1920,7 +1928,7 @@ impl DbGuiApp {
             result,
             row_order,
             sort,
-            selected_row,
+            selection,
             edits,
             ..
         } = &mut self.tabs[idx];
@@ -1928,7 +1936,7 @@ impl DbGuiApp {
         egui::CentralPanel::default().show_inside(root, |ui| match result.as_ref() {
             Some(result) if result.column_count() > 0 => {
                 let resp =
-                    results_grid(ui, result, row_order, sort, *selected_row, edits, editable, tab_id);
+                    results_grid(ui, result, row_order, sort, selection, edits, editable, tab_id);
                 if let Some(cmd) = resp.sort {
                     actions.push(match cmd {
                         crate::grid::SortCmd::Toggle(col) => Action::SortBy(col),
@@ -1937,8 +1945,8 @@ impl DbGuiApp {
                         crate::grid::SortCmd::Clear => Action::ClearSort,
                     });
                 }
-                if let Some(row) = resp.selected {
-                    *selected_row = Some(row);
+                if let Some(click) = resp.selected {
+                    selection.apply_click(click);
                 }
                 // The value a cell edit is typed against: NULL for new (insert) rows, which
                 // have no stored value; the stored cell otherwise.
@@ -1998,7 +2006,7 @@ impl DbGuiApp {
                 if resp.add_row {
                     settle_active(edits);
                     let new_id = edits.add_new_row();
-                    *selected_row = Some(row_order.len() + edits.new_rows - 1);
+                    selection.select_one(row_order.len() + edits.new_rows - 1);
                     let first_col = (0..result.column_count())
                         .find(|&c| edits.col_kind(c) != crate::edit::EditorKind::Bool);
                     if let Some(c) = first_col {

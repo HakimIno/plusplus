@@ -156,8 +156,8 @@ struct QueryTab {
     /// Indices into `result.rows` giving the current display order (filter + sort).
     row_order: Vec<usize>,
     sort: Option<(usize, bool)>,
-    /// Currently selected display row (drives the Details panel).
-    selected_row: Option<usize>,
+    /// Current multi-row selection over display rows. Its `lead` drives the Details panel.
+    selection: crate::grid::Selection,
     /// Staged cell edits and the editable source of the current result.
     edits: Edits,
     /// TablePlus-style result filter bar (column / operator / value conditions).
@@ -184,7 +184,7 @@ impl QueryTab {
             result: None,
             row_order: Vec::new(),
             sort: None,
-            selected_row: None,
+            selection: crate::grid::Selection::default(),
             edits: Edits::default(),
             filter: FilterState::default(),
             view: TabView::default(),
@@ -196,7 +196,7 @@ impl QueryTab {
     /// Install a freshly returned result and rebuild the display order.
     fn set_result(&mut self, res: QueryResult) {
         self.sort = None;
-        self.selected_row = None;
+        self.selection.clear();
         // A fresh result may have a different column count; keep filter conditions but stop
         // them indexing past the new columns, then rebuild the display order through the
         // filter (so a still-open filter bar keeps applying).
@@ -228,10 +228,9 @@ impl QueryTab {
             }
         }
         self.row_order = order;
-        // A row that filtered out can't stay selected.
-        if self.selected_row.is_some_and(|s| s >= self.row_order.len()) {
-            self.selected_row = None;
-        }
+        // Rows that filtered out can't stay selected; new (insert) rows live past the stored
+        // rows and are still addressable, so keep them in range.
+        self.selection.clamp(self.row_order.len() + self.edits.new_rows);
     }
 
     fn apply_sort(&mut self, col: usize) {
@@ -1367,7 +1366,7 @@ impl DbGuiApp {
                 tab.result = None;
                 tab.row_order.clear();
                 tab.sort = None;
-                tab.selected_row = None;
+                tab.selection.clear();
                 tab.edits.clear();
                 tab.edits.pending_source = None;
                 // A schema editor against a dropped connection is stale; close it.
@@ -3039,10 +3038,10 @@ impl DbGuiApp {
             self.status_msg = "Discarded unsaved edits".to_string();
             self.error = None;
         }
-        // Backspace/Delete on the selected row (when nothing is being typed) marks a stored
-        // row for deletion (red) or drops a pending new row. `focused()` is `Some` while any
-        // text field — a cell editor, the SQL console, the field filter — has focus, so this
-        // never steals a real backspace keystroke.
+        // Backspace/Delete on the selected rows (when nothing is being typed) marks every
+        // selected stored row for deletion (red) and drops any selected pending new rows.
+        // `focused()` is `Some` while any text field — a cell editor, the SQL console, the
+        // field filter — has focus, so this never steals a real backspace keystroke.
         let typing = ctx.memory(|m| m.focused().is_some());
         if !typing
             && self.tab().edits.editable()
@@ -3050,18 +3049,42 @@ impl DbGuiApp {
             && ctx.input(|i| {
                 i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)
             })
+            && !self.tab().selection.is_empty()
         {
-            if let Some(disp) = self.tab().selected_row {
-                let order_len = self.tab().row_order.len();
+            let order_len = self.tab().row_order.len();
+            let selected: Vec<usize> = self.tab().selection.iter().collect();
+            // Mark stored rows for deletion. New (insert) rows are removed instead, highest
+            // display index first so the renumbering of the rows above each removal never
+            // invalidates an index we still have to process.
+            for &disp in &selected {
                 if disp < order_len {
                     let raw = self.tab().row_order[disp];
                     self.tab_mut().edits.toggle_delete(raw);
-                } else {
-                    let new_id = crate::edit::NEW_ROW_BASE + (disp - order_len);
-                    self.tab_mut().edits.remove_new_row(new_id);
-                    self.tab_mut().selected_row = None;
                 }
             }
+            let mut removed_new = false;
+            for &disp in selected.iter().rev() {
+                if disp >= order_len {
+                    let new_id = crate::edit::NEW_ROW_BASE + (disp - order_len);
+                    self.tab_mut().edits.remove_new_row(new_id);
+                    removed_new = true;
+                }
+            }
+            // Removing new rows shifts the trailing display indices; clear the selection so it
+            // can't point at the wrong (renumbered) rows. Stored-only deletes keep their
+            // selection so the marked rows stay highlighted.
+            if removed_new {
+                self.tab_mut().selection.clear();
+            }
+        }
+        // Cmd/Ctrl+A selects every row in the grid — but only when not typing, so it keeps
+        // its native "select all text" meaning inside the SQL console or any field editor.
+        if !typing
+            && self.tab().result.is_some()
+            && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A))
+        {
+            let len = self.tab().row_order.len() + self.tab().edits.new_rows;
+            self.tab_mut().selection.select_all(len);
         }
         // Cmd/Ctrl+I beautifies the active tab's SQL (TablePlus-style).
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::I)) {
@@ -4078,7 +4101,7 @@ mod tests {
         {
             let tab = app.tab_mut();
             tab.set_result(result);
-            tab.selected_row = Some(0);
+            tab.selection.select_one(0);
             tab.edits.source = Some(crate::edit::EditSource {
                 schema: None,
                 table: "t".into(),
@@ -4088,8 +4111,8 @@ mod tests {
 
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
         let mut clashes: Vec<String> = Vec::new();
-        for row in [Some(0), Some(1)] {
-            app.tab_mut().selected_row = row;
+        for row in [0usize, 1] {
+            app.tab_mut().selection.select_one(row);
             for _ in 0..3 {
                 let raw = egui::RawInput {
                     screen_rect: Some(screen),
@@ -4136,7 +4159,7 @@ mod tests {
         {
             let tab = app.tab_mut();
             tab.set_result(result);
-            tab.selected_row = Some(0);
+            tab.selection.select_one(0);
             tab.edits.source = Some(crate::edit::EditSource {
                 schema: None,
                 table: "t".into(),
@@ -4240,7 +4263,7 @@ mod tests {
             let tab = app.tab_mut();
             tab.row_order = (0..result.rows.len()).collect();
             tab.result = Some(result);
-            tab.selected_row = Some(7); // render the Details panel
+            tab.selection.select_one(7); // render the Details panel
             tab.filter.visible = true; // render the filter bar too
             tab.conn_id = Some("test".into());
         }

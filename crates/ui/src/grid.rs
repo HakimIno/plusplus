@@ -35,13 +35,129 @@ pub enum SortCmd {
     Clear,
 }
 
+/// A row click reported by the grid, carrying the modifier keys held at click time so the
+/// app can resolve it into a plain select, a Cmd/Ctrl toggle, or a Shift range-extend.
+#[derive(Clone, Copy)]
+pub struct RowClick {
+    /// The clicked *display* row index (index into `order`, or a new-row slot past its end).
+    pub disp: usize,
+    /// Shift was held → extend the selection from the anchor to this row.
+    pub shift: bool,
+    /// Cmd (macOS) / Ctrl (elsewhere) was held → toggle this row in/out of the selection.
+    pub cmd: bool,
+}
+
+/// A multi-row selection over *display* indices. Tracks an `anchor` (the fixed end of a Shift
+/// range) and a `lead` (the most recently affected row, which drives the Details panel), so it
+/// behaves like a Finder/Excel/TablePlus list: plain click selects one, Cmd/Ctrl click toggles,
+/// Shift click selects a contiguous range.
+#[derive(Default, Clone)]
+pub struct Selection {
+    rows: std::collections::BTreeSet<usize>,
+    anchor: Option<usize>,
+    lead: Option<usize>,
+}
+
+impl Selection {
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn contains(&self, disp: usize) -> bool {
+        self.rows.contains(&disp)
+    }
+
+    /// The most recently affected row — what the Details panel shows.
+    pub fn lead(&self) -> Option<usize> {
+        self.lead
+    }
+
+    /// The selected display indices, ascending.
+    pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        self.rows.iter().copied()
+    }
+
+    pub fn clear(&mut self) {
+        self.rows.clear();
+        self.anchor = None;
+        self.lead = None;
+    }
+
+    /// Plain click: select exactly `disp` and make it the anchor.
+    pub fn select_one(&mut self, disp: usize) {
+        self.rows.clear();
+        self.rows.insert(disp);
+        self.anchor = Some(disp);
+        self.lead = Some(disp);
+    }
+
+    /// Cmd/Ctrl click: toggle `disp` in/out, keeping the rest, and re-anchor on it.
+    pub fn toggle(&mut self, disp: usize) {
+        if !self.rows.insert(disp) {
+            self.rows.remove(&disp);
+            if self.lead == Some(disp) {
+                self.lead = self.rows.iter().next_back().copied();
+            }
+        } else {
+            self.lead = Some(disp);
+        }
+        self.anchor = Some(disp);
+    }
+
+    /// Shift click: replace the selection with the contiguous range anchor..=disp. The anchor
+    /// stays put so dragging the Shift end back and forth grows/shrinks the same range.
+    pub fn range_to(&mut self, disp: usize) {
+        let anchor = self.anchor.unwrap_or(disp);
+        self.rows.clear();
+        for d in anchor.min(disp)..=anchor.max(disp) {
+            self.rows.insert(d);
+        }
+        self.anchor = Some(anchor);
+        self.lead = Some(disp);
+    }
+
+    /// Select every display row in `0..len` (Cmd/Ctrl+A).
+    pub fn select_all(&mut self, len: usize) {
+        self.rows = (0..len).collect();
+        self.anchor = Some(0);
+        self.lead = len.checked_sub(1);
+    }
+
+    /// Apply a click resolved by its modifiers (see [`RowClick`]).
+    pub fn apply_click(&mut self, click: RowClick) {
+        if click.shift {
+            self.range_to(click.disp);
+        } else if click.cmd {
+            self.toggle(click.disp);
+        } else {
+            self.select_one(click.disp);
+        }
+    }
+
+    /// Drop any selected/anchor/lead index that no longer addresses a row (rows that filtered
+    /// out or were removed). `len` is the number of addressable display rows.
+    pub fn clamp(&mut self, len: usize) {
+        self.rows.retain(|&d| d < len);
+        if self.anchor.is_some_and(|a| a >= len) {
+            self.anchor = None;
+        }
+        if self.lead.is_some_and(|l| l >= len) {
+            self.lead = self.rows.iter().next_back().copied();
+        }
+    }
+}
+
 /// What the grid reports back to the app after a frame.
 #[derive(Default)]
 pub struct GridResponse {
     /// A header sort request (click or menu).
     pub sort: Option<SortCmd>,
-    /// A row was clicked → select this *display* row index (index into `order`).
-    pub selected: Option<usize>,
+    /// A row was clicked → resolve this against the current [`Selection`].
+    pub selected: Option<RowClick>,
     /// A cell was double-clicked → start editing it (raw row index, column index).
     pub begin_edit: Option<(usize, usize)>,
     /// A boolean cell was double-clicked → flip it (raw row index, column index).
@@ -63,7 +179,7 @@ enum RowKind {
 }
 
 /// Render the result set. `order` maps display rows → indices into `result.rows`.
-/// `selected` is the currently selected display row. `grid_id` must be unique per tab so
+/// `selection` is the current multi-row selection. `grid_id` must be unique per tab so
 /// egui's per-widget click-time memory doesn't bleed between tabs.
 #[allow(clippy::too_many_arguments)]
 pub fn results_grid(
@@ -71,7 +187,7 @@ pub fn results_grid(
     result: &QueryResult,
     order: &[usize],
     sort: Option<(usize, bool)>,
-    selected: Option<usize>,
+    selection: &Selection,
     edits: &mut Edits,
     editable: bool,
     grid_id: u64,
@@ -118,7 +234,7 @@ pub fn results_grid(
     ui.scope_builder(egui::UiBuilder::new().max_rect(grid_rect), |ui| {
         if desired_total <= ui.available_width() {
             build_grid(
-                ui, result, order, sort, selected, edits, editable, gutter_w, row_height,
+                ui, result, order, sort, selection, edits, editable, gutter_w, row_height,
                 &mut out, grid_id,
             );
         } else {
@@ -128,8 +244,8 @@ pub fn results_grid(
                 .show(ui, |ui| {
                     ui.set_width(desired_total);
                     build_grid(
-                        ui, result, order, sort, selected, edits, editable, gutter_w,
-                        row_height, &mut out, grid_id,
+                        ui, result, order, sort, selection, edits, editable, gutter_w, row_height,
+                        &mut out, grid_id,
                     );
                 });
         }
@@ -147,7 +263,7 @@ fn build_grid(
     result: &QueryResult,
     order: &[usize],
     sort: Option<(usize, bool)>,
-    selected: Option<usize>,
+    selection: &Selection,
     edits: &mut Edits,
     editable: bool,
     gutter_w: f32,
@@ -156,6 +272,9 @@ fn build_grid(
     grid_id: u64,
 ) {
     let ncols = result.columns.len();
+    // Captured once per frame: a click is reported in the same frame, so these reflect the
+    // modifiers held as the row was clicked (plain vs. Cmd/Ctrl toggle vs. Shift range).
+    let modifiers = ui.input(|i| i.modifiers);
     let mut builder = TableBuilder::new(ui)
         // A stable, unique id keeps the table's internal scroll/resize/row ids consistent
         // across frames — this is what prevents egui's "ID clash" outline from flickering
@@ -210,7 +329,7 @@ fn build_grid(
                     RowKind::Stored(r) | RowKind::New(r) => r,
                 };
                 let state = edits.row_state(r);
-                row.set_selected(selected == Some(disp));
+                row.set_selected(selection.contains(disp));
 
                 // Row-number gutter: number for stored rows, a mark for new rows. Tinted
                 // green (edit/new) or red (delete) like the cells. Double-clicking the gutter
@@ -292,7 +411,11 @@ fn build_grid(
                 }
 
                 if row.response().clicked() {
-                    out.selected = Some(disp);
+                    out.selected = Some(RowClick {
+                        disp,
+                        shift: modifiers.shift,
+                        cmd: modifiers.command,
+                    });
                 }
             });
         });
@@ -476,6 +599,64 @@ mod tests {
     use super::*;
     use dbcore::{ColumnMeta, QueryResult, QueryStats};
 
+    fn rows(sel: &Selection) -> Vec<usize> {
+        sel.iter().collect()
+    }
+
+    /// Plain → Cmd toggle → Shift range mirror the Finder/Excel mental model, and `lead`
+    /// always tracks the most recently affected row (what the Details panel shows).
+    #[test]
+    fn selection_click_modes() {
+        let mut s = Selection::default();
+
+        // Plain click selects exactly one and anchors there.
+        s.apply_click(RowClick { disp: 3, shift: false, cmd: false });
+        assert_eq!(rows(&s), [3]);
+        assert_eq!(s.lead(), Some(3));
+
+        // Cmd/Ctrl click adds without dropping the rest, and re-anchors on the new row.
+        s.apply_click(RowClick { disp: 5, shift: false, cmd: true });
+        assert_eq!(rows(&s), [3, 5]);
+        assert_eq!(s.lead(), Some(5));
+
+        // Cmd/Ctrl click on a selected row removes it; lead falls back to a survivor.
+        s.apply_click(RowClick { disp: 5, shift: false, cmd: true });
+        assert_eq!(rows(&s), [3]);
+        assert_eq!(s.lead(), Some(3));
+
+        // Shift extends from the anchor — the last *non-Shift* click (row 5 above), Finder-style.
+        s.apply_click(RowClick { disp: 6, shift: true, cmd: false });
+        assert_eq!(rows(&s), [5, 6]);
+        assert_eq!(s.lead(), Some(6));
+
+        // A second Shift click re-extends from the *same* anchor (5), not the previous end (6).
+        s.apply_click(RowClick { disp: 1, shift: true, cmd: false });
+        assert_eq!(rows(&s), [1, 2, 3, 4, 5]);
+        assert_eq!(s.lead(), Some(1));
+
+        // A plain click collapses back to one row and re-anchors there.
+        s.apply_click(RowClick { disp: 9, shift: false, cmd: false });
+        assert_eq!(rows(&s), [9]);
+        assert_eq!(s.lead(), Some(9));
+    }
+
+    #[test]
+    fn selection_select_all_and_clamp() {
+        let mut s = Selection::default();
+        s.select_all(4);
+        assert_eq!(rows(&s), [0, 1, 2, 3]);
+        assert_eq!(s.len(), 4);
+
+        // Shrinking the addressable range drops out-of-range rows and re-homes the lead.
+        s.clamp(2);
+        assert_eq!(rows(&s), [0, 1]);
+        assert_eq!(s.lead(), Some(1));
+
+        s.clamp(0);
+        assert!(s.is_empty());
+        assert_eq!(s.lead(), None);
+    }
+
     fn fake_result(rows: usize, cols: usize) -> QueryResult {
         let columns = (0..cols)
             .map(|c| ColumnMeta {
@@ -548,7 +729,7 @@ mod tests {
             let mut edits = Edits::default();
             let out = ctx.run_ui(raw, |ui| {
                 egui::CentralPanel::default().show_inside(ui, |ui| {
-                    let _ = results_grid(ui, &result, &order, None, None, &mut edits, false, 0);
+                    let _ = results_grid(ui, &result, &order, None, &Selection::default(), &mut edits, false, 0);
                 });
             });
             collect_clash_text(&out.shapes, &mut clashes);
@@ -583,7 +764,7 @@ mod tests {
             };
             let out = ctx.run_ui(raw, |ui| {
                 egui::CentralPanel::default().show_inside(ui, |ui| {
-                    let _ = results_grid(ui, &result, &order, None, None, &mut edits, true, 0);
+                    let _ = results_grid(ui, &result, &order, None, &Selection::default(), &mut edits, true, 0);
                 });
             });
             // Any cell text allowed to paint below the strip top means a row is rendered
