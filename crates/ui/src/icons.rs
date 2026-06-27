@@ -1,6 +1,9 @@
-//! Iconoir icons (https://iconoir.com), downloaded as SVG and embedded into the binary.
-//! They are rendered via `egui_extras`' SVG image loader and tinted to the current theme
-//! text colour, so they stay crisp at any size and adapt to light/dark themes.
+//! Fluent UI System Icons (https://github.com/microsoft/fluentui-system-icons), pulled as
+//! SVG from the Iconify API (`api.iconify.design/fluent/<name>.svg?color=%23ffffff`) and
+//! embedded into the binary. Each is downloaded white-filled so the SVG loader's texture can
+//! be `.tint()`-ed to the current theme colour — they stay crisp at any size and adapt to
+//! light/dark themes. The database-vendor logos in `assets/icondb/` are brand marks, not part
+//! of this set, and keep their own colours.
 
 use dbcore::{ConnectionIcon, DbKind};
 use egui::{include_image, ImageSource};
@@ -30,12 +33,12 @@ icon_fns! {
     plus       => "../assets/icons/plus.svg",
     edit       => "../assets/icons/edit.svg",
     trash      => "../assets/icons/trash.svg",
-    database   => "../assets/icons/streamline-plump-color--database.svg",
-    table      => "../assets/icons/streamline-plump-color--table-flat.svg",
-    conn_cloud => "../assets/icons/streamline-plump-color--cloud-data-transfer-flat.svg",
-    conn_storage => "../assets/icons/streamline-plump-color--hard-drive-2-flat.svg",
-    conn_star  => "../assets/icons/streamline-plump-color--star-circle-flat.svg",
-    conn_treasure => "../assets/icons/streamline-plump-color--treasure-chest-flat.svg",
+    database   => "../assets/icons/database.svg",
+    table      => "../assets/icons/table.svg",
+    conn_cloud => "../assets/icons/cloud.svg",
+    conn_storage => "../assets/icons/disk.svg",
+    conn_star  => "../assets/icons/star-emphasis.svg",
+    conn_treasure => "../assets/icons/box.svg",
     code       => "../assets/icons/code.svg",
     column     => "../assets/icons/column.svg",
     diagram    => "../assets/icons/diagram.svg",
@@ -167,24 +170,18 @@ pub fn connection_icon(icon: ConnectionIcon) -> ImageSource<'static> {
     }
 }
 
-/// Connection picker icons are full-colour Streamline assets — never theme-tinted.
-pub fn connection_icon_is_colored(_icon: ConnectionIcon) -> bool {
-    true
-}
-
-/// Paint a connection sidebar icon at `rect`.
+/// Paint a connection sidebar icon at `rect`, tinted to `tint` (Fluent glyphs are
+/// single-colour and adopt the theme like every other icon).
 pub fn paint_connection_icon(
     ui: &egui::Ui,
     icon: ConnectionIcon,
     rect: egui::Rect,
     tint: egui::Color32,
 ) {
-    let img = egui::Image::new(connection_icon(icon)).fit_to_exact_size(rect.size());
-    if connection_icon_is_colored(icon) {
-        img.paint_at(ui, rect);
-    } else {
-        img.tint(tint).paint_at(ui, rect);
-    }
+    egui::Image::new(connection_icon(icon))
+        .fit_to_exact_size(rect.size())
+        .tint(tint)
+        .paint_at(ui, rect);
 }
 
 /// Compact picker tile for the connection dialog.
@@ -222,11 +219,11 @@ pub fn connection_icon_picker_button(
     resp.on_hover_text(icon.label())
 }
 
-/// Full-colour Streamline assets (database, table, …) — keep the SVG's own palette.
+/// Render an inline icon at the theme's primary text colour — the default weight for
+/// schema-tree and toolbar glyphs (database, table, diagram, …).
 pub fn show_native(ui: &mut egui::Ui, src: ImageSource<'static>, size: f32) -> egui::Response {
-    ui.add(
-        egui::Image::new(src).fit_to_exact_size(egui::vec2(size, size)),
-    )
+    let tint = crate::style::palette::TEXT();
+    ui.add(image(ui, src, size, tint))
 }
 
 /// Render a dimmed/weak inline icon (matches `ui.weak`).

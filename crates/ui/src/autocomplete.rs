@@ -562,10 +562,12 @@ pub fn show_popup(
 
     let mono = egui::FontId::monospace(12.0);
     let small = egui::FontId::proportional(10.5);
-    let row_h = 22.0;
-    let visible = state.items.len().min(8);
-    let width: f32 = 320.0;
-    let height = visible as f32 * row_h + 10.0;
+    // Tight rows, small margins — a dense, clean list with no wasted space.
+    let row_h = 20.0;
+    let margin = 3.0_f32;
+    let visible = state.items.len().min(9);
+    let width: f32 = 300.0;
+    let height = visible as f32 * row_h + margin * 2.0;
 
     // Below the cursor line by default; above it when the screen runs out underneath.
     let screen = ctx.content_rect();
@@ -580,15 +582,22 @@ pub fn show_popup(
         .order(egui::Order::Foreground)
         .fixed_pos(pos)
         .show(ctx, |ui| {
+            // A flat panel: hairline border, no shadow, so it reads as part of the editor
+            // rather than a floating card.
             egui::Frame::popup(&ctx.global_style())
                 .fill(palette::PANEL())
                 .stroke(egui::Stroke::new(1.0, palette::BORDER()))
-                .inner_margin(4.0)
+                .shadow(egui::epaint::Shadow::NONE)
+                .corner_radius(egui::CornerRadius::same(6))
+                .inner_margin(margin)
                 .show(ui, |ui| {
                     ui.set_width(width);
+                    // Rows sit flush against each other — the tight, dense list the design calls
+                    // for (egui would otherwise insert `item_spacing.y` between them).
+                    ui.spacing_mut().item_spacing.y = 0.0;
                     egui::ScrollArea::vertical()
                         .id_salt("sql_autocomplete_scroll")
-                        .max_height(8.0 * row_h)
+                        .max_height(9.0 * row_h)
                         .show(ui, |ui| {
                             for (i, item) in state.items.iter().enumerate() {
                                 let (rect, resp) = ui.allocate_exact_size(
@@ -600,11 +609,11 @@ pub fn show_popup(
                                 }
                                 let selected = i == state.selected;
                                 if selected {
-                                    ui.painter().rect_filled(rect, 4.0, palette::SELECTION());
+                                    ui.painter().rect_filled(rect, 3.0, palette::SELECTION());
                                 } else if resp.hovered() {
                                     ui.painter().rect_filled(
                                         rect,
-                                        4.0,
+                                        3.0,
                                         palette::SURFACE_HOVER(),
                                     );
                                 }
@@ -612,27 +621,26 @@ pub fn show_popup(
                                     resp.scroll_to_me(None);
                                 }
 
-                                // Kind badge: a small colour-coded letter chip, so kinds
-                                // scan as a column (T = table, C = column, K = keyword).
-                                let (letter, color) = match item.kind {
-                                    SuggestionKind::Table => ("T", palette::ACCENT()),
-                                    SuggestionKind::Column => ("C", palette::SUCCESS()),
-                                    SuggestionKind::Keyword => ("K", palette::WARNING()),
+                                // Kind icon: a single-colour line glyph (table grid, column,
+                                // `< >` for a keyword) so kinds scan as a quiet left rail
+                                // without adding colour to the list.
+                                let icon = match item.kind {
+                                    SuggestionKind::Table => crate::icons::table(),
+                                    SuggestionKind::Column => crate::icons::column(),
+                                    SuggestionKind::Keyword => crate::icons::code(),
                                 };
-                                let badge = egui::Rect::from_center_size(
-                                    egui::pos2(rect.left() + 13.0, rect.center().y),
-                                    egui::vec2(16.0, 16.0),
+                                const ICON: f32 = 13.0;
+                                let icon_rect = egui::Rect::from_center_size(
+                                    egui::pos2(rect.left() + 11.0, rect.center().y),
+                                    egui::vec2(ICON, ICON),
                                 );
-                                ui.painter().text(
-                                    badge.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    letter,
-                                    egui::FontId::proportional(11.0),
-                                    color,
-                                );
+                                egui::Image::new(icon)
+                                    .fit_to_exact_size(egui::vec2(ICON, ICON))
+                                    .tint(palette::TEXT_FAINT())
+                                    .paint_at(ui, icon_rect);
 
                                 let label_pos =
-                                    egui::pos2(rect.left() + 26.0, rect.center().y);
+                                    egui::pos2(rect.left() + 24.0, rect.center().y);
                                 ui.painter().text(
                                     label_pos,
                                     egui::Align2::LEFT_CENTER,
@@ -642,7 +650,7 @@ pub fn show_popup(
                                 );
                                 // Detail, right-aligned and clipped against the label.
                                 let detail_pos =
-                                    egui::pos2(rect.right() - 6.0, rect.center().y);
+                                    egui::pos2(rect.right() - 7.0, rect.center().y);
                                 ui.painter().text(
                                     detail_pos,
                                     egui::Align2::RIGHT_CENTER,
