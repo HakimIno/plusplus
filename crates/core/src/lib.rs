@@ -9,6 +9,7 @@
 //! Everything here is testable without a window (see the tests at the bottom of this file).
 
 pub mod backends;
+pub mod clipboard;
 pub mod config;
 pub mod database;
 pub mod error;
@@ -23,6 +24,7 @@ pub mod value;
 
 use std::sync::Arc;
 
+pub use clipboard::{copy_rows, CopyFormat};
 pub use database::Database;
 pub use error::{CoreError, Result};
 pub use export::{ExportFormat, RowSink};

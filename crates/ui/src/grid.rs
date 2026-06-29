@@ -158,6 +158,10 @@ pub struct GridResponse {
     pub sort: Option<SortCmd>,
     /// A row was clicked → resolve this against the current [`Selection`].
     pub selected: Option<RowClick>,
+    /// A row's context menu picked "Copy as …": the right-clicked *display* row and the
+    /// chosen format. The app copies the current selection (targeting this row if it wasn't
+    /// already selected).
+    pub copy: Option<(usize, dbcore::CopyFormat)>,
     /// A cell was double-clicked → start editing it (raw row index, column index).
     pub begin_edit: Option<(usize, usize)>,
     /// A boolean cell was double-clicked → flip it (raw row index, column index).
@@ -410,13 +414,34 @@ fn build_grid(
                     }
                 }
 
-                if row.response().clicked() {
+                let row_resp = row.response();
+                if row_resp.clicked() {
                     out.selected = Some(RowClick {
                         disp,
                         shift: modifiers.shift,
                         cmd: modifiers.command,
                     });
                 }
+                // Right-click → "Copy as …". The app copies the whole selection, or just this
+                // row when it was right-clicked while unselected (TablePlus-style).
+                row_resp.context_menu(|ui| {
+                    ui.label(
+                        egui::RichText::new("Copy selected rows")
+                            .small()
+                            .color(palette::TEXT_FAINT()),
+                    );
+                    for fmt in [
+                        dbcore::CopyFormat::Tsv,
+                        dbcore::CopyFormat::Csv,
+                        dbcore::CopyFormat::Json,
+                        dbcore::CopyFormat::Insert,
+                    ] {
+                        if ui.button(format!("Copy as {}", fmt.label())).clicked() {
+                            out.copy = Some((disp, fmt));
+                            ui.close(); // egui 0.34 replacement for the deprecated close_menu()
+                        }
+                    }
+                });
             });
         });
 }

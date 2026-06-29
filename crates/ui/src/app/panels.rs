@@ -1948,6 +1948,14 @@ impl DbGuiApp {
                 if let Some(click) = resp.selected {
                     selection.apply_click(click);
                 }
+                // Right-click "Copy as …": a row right-clicked while outside the selection
+                // becomes the sole target first, then the whole selection is copied.
+                if let Some((disp, fmt)) = resp.copy {
+                    if !selection.contains(disp) {
+                        selection.select_one(disp);
+                    }
+                    actions.push(Action::CopyRows(fmt));
+                }
                 // The value a cell edit is typed against: NULL for new (insert) rows, which
                 // have no stored value; the stored cell otherwise.
                 let original = |r: usize, c: usize| -> Option<dbcore::Value> {

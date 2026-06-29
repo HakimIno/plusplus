@@ -560,6 +560,10 @@ enum Action {
     Page(PageNav),
     /// Pager: switch the page size, staying on the page that holds the current offset.
     SetPageSize(u64),
+    /// Copy the currently selected result rows to the clipboard in the given format.
+    CopyRows(dbcore::CopyFormat),
+    /// Paste clipboard text (TSV) into the active editable table as new (staged) insert rows.
+    PasteRows(String),
     /// Export an entire table (every row, streamed server-side) to a file in the chosen
     /// format, after picking a path from a save dialog. Triggered from the sidebar.
     ExportTable {
@@ -721,6 +725,9 @@ pub struct DbGuiApp {
     ghost_key: Option<(usize, usize)>,
     status_msg: String,
     error: Option<String>,
+    /// Text staged for the OS clipboard this frame (e.g. copied result rows). Flushed to the
+    /// clipboard at the end of `draw`, where the egui `Context` is available.
+    copy_buffer: Option<String>,
     /// SQL statements staged for the commit-preview dialog. `None` = dialog closed;
     /// `Some(stmts)` = dialog open, waiting for the user to confirm or cancel.
     commit_pending: Option<Vec<String>>,
@@ -891,6 +898,7 @@ impl DbGuiApp {
             ghost_key: None,
             status_msg: "Ready".to_string(),
             error: None,
+            copy_buffer: None,
             show_connection_tabs: true,
             show_schema_panel: true,
             show_details_panel: true,
@@ -2033,6 +2041,89 @@ impl DbGuiApp {
         self.run_page(size, offset);
     }
 
+    /// Copy the selected result rows to the clipboard in `format`. Only stored rows are copied
+    /// (unsaved new rows aren't data yet); their cloned values are rendered by
+    /// [`dbcore::copy_rows`] and the text is staged in `copy_buffer` for `draw` to flush.
+    fn copy_selection(&mut self, format: dbcore::CopyFormat) {
+        let idx = self.active_query_tab;
+        // Dialect + table identity for the SQL INSERT form (ignored by CSV/JSON).
+        let kind = self.active().map(|a| a.db.kind()).unwrap_or(dbcore::DbKind::Postgres);
+        let tab = &self.tabs[idx];
+        let Some(result) = tab.result.as_ref() else {
+            return;
+        };
+        let order_len = tab.row_order.len();
+        // Selected stored rows, in display order, cloned so no borrow of `self` outlives them.
+        let rows: Vec<Vec<dbcore::Value>> = tab
+            .selection
+            .iter()
+            .filter(|&d| d < order_len)
+            .map(|d| result.rows[tab.row_order[d]].clone())
+            .collect();
+        if rows.is_empty() {
+            return;
+        }
+        let columns = result.columns.clone();
+        let (schema, table) = match tab.edits.source.as_ref().or(tab.edits.pending_source.as_ref()) {
+            Some(s) => (s.schema.clone(), s.table.clone()),
+            None => (None, "table".to_string()),
+        };
+        let row_refs: Vec<&[dbcore::Value]> = rows.iter().map(|r| r.as_slice()).collect();
+        match dbcore::copy_rows(format, &columns, &row_refs, kind, schema.as_deref(), &table) {
+            Some(text) => {
+                self.status_msg = format!("Copied {} row(s) as {}", rows.len(), format.label());
+                self.error = None;
+                self.copy_buffer = Some(text);
+            }
+            // Only the INSERT path fails — on binary cells with no SQL literal form.
+            None => self.error = Some("Can't copy binary values as SQL INSERT.".to_string()),
+        }
+    }
+
+    /// Paste clipboard `text` (TSV: one row per line, tab-separated fields) into the active
+    /// table as new staged insert rows — the counterpart to "Copy". Fields map to columns by
+    /// position; each is typed by its column's editor kind (empty → NULL). Nothing touches the
+    /// database until the user reviews and Saves. Only works on an editable (PK-bearing) table.
+    fn paste_rows(&mut self, text: &str) {
+        let idx = self.active_query_tab;
+        if !self.tabs[idx].edits.editable() {
+            self.status_msg = "Paste needs an editable table (open one with a primary key).".into();
+            return;
+        }
+        let ncols = match self.tabs[idx].result.as_ref() {
+            Some(r) => r.column_count(),
+            None => return,
+        };
+        // TSV → rows of fields. Skip blank lines so a trailing newline doesn't add an empty row.
+        let parsed: Vec<Vec<&str>> = text
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.split('\t').collect())
+            .collect();
+        if parsed.is_empty() {
+            return;
+        }
+        let added = parsed.len();
+        for fields in parsed {
+            let id = self.tabs[idx].edits.add_new_row();
+            for (c, field) in fields.into_iter().enumerate().take(ncols) {
+                if !field.is_empty() {
+                    self.tabs[idx].edits.stage_text(id, c, field);
+                }
+            }
+        }
+        // Select the freshly pasted rows (they sit just past the stored rows) so they're
+        // highlighted and scrolled into view, ready to review before saving.
+        let order_len = self.tabs[idx].row_order.len();
+        let total = order_len + self.tabs[idx].edits.new_rows;
+        let sel = &mut self.tabs[idx].selection;
+        sel.select_one(total - added);
+        sel.range_to(total - 1);
+        self.status_msg = format!("Pasted {added} row(s) — review, then Save to insert.");
+        self.error = None;
+        self.workspace_dirty = true;
+    }
+
     /// Export a whole table to a file. Streams every row server-side (no row cap, never
     /// materialized) straight into the chosen format, on the background runtime. Opens a save
     /// dialog seeded with the table name first; a cancelled dialog is a no-op.
@@ -2100,9 +2191,12 @@ impl DbGuiApp {
             .filter(|c| c.primary_key)
             .map(|c| c.name.clone())
             .collect();
-        if pk_cols.is_empty() {
-            return None;
-        }
+        // Keep the table identity even when the table has no primary key. The result isn't
+        // *editable* (`EditSource::editable()` is false for empty `pk_cols`, so the grid stays
+        // read-only and no PK-less UPDATE is ever generated), but it's still a genuine table
+        // tab — the pager, Structure view, and server-side row count all key off the source.
+        // Dropping it here was the bug behind the pager vanishing on Next / page-size for
+        // PK-less tables (e.g. imported dumps), while the sidebar-open path kept the source.
         Some(EditSource {
             schema: info.schema.clone(),
             table: info.name.clone(),
@@ -2617,6 +2711,8 @@ impl DbGuiApp {
             Action::ClearSort => self.tab_mut().clear_sort(),
             Action::Page(nav) => self.page_nav(nav),
             Action::SetPageSize(n) => self.set_page_size(n),
+            Action::CopyRows(format) => self.copy_selection(format),
+            Action::PasteRows(text) => self.paste_rows(&text),
             Action::ExportTable { table, format } => self.export_table(&table, format),
             Action::PreviewEdits => self.commit_edits(),
             Action::ConfirmEdits => self.confirm_edits(),
@@ -3086,6 +3182,30 @@ impl DbGuiApp {
             let len = self.tab().row_order.len() + self.tab().edits.new_rows;
             self.tab_mut().selection.select_all(len);
         }
+        // Cmd/Ctrl+C copies the selected rows as TSV (spreadsheet-native, and what paste reads
+        // back). The OS turns the copy shortcut into an `Event::Copy` (a raw `Key::C` press
+        // never arrives for it on macOS), so match the event — and only when not typing, so a
+        // focused text field keeps its native copy.
+        if !typing
+            && !self.tab().selection.is_empty()
+            && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)))
+        {
+            actions.push(Action::CopyRows(dbcore::CopyFormat::Tsv));
+        }
+        // Cmd/Ctrl+V pastes clipboard rows (TSV) as new insert rows in an editable table. Paste
+        // also arrives as an `Event::Paste(text)`; `!typing` lets a focused cell/field paste
+        // its text natively instead.
+        if !typing {
+            let pasted = ctx.input(|i| {
+                i.events.iter().find_map(|e| match e {
+                    egui::Event::Paste(text) => Some(text.clone()),
+                    _ => None,
+                })
+            });
+            if let Some(text) = pasted {
+                actions.push(Action::PasteRows(text));
+            }
+        }
         // Cmd/Ctrl+I beautifies the active tab's SQL (TablePlus-style).
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::I)) {
             actions.push(Action::BeautifySql);
@@ -3166,6 +3286,12 @@ impl DbGuiApp {
         });
         for action in actions {
             self.apply_action(action);
+        }
+
+        // Flush any text an action staged for the clipboard (e.g. copied result rows) now that
+        // the egui Context is in hand.
+        if let Some(text) = self.copy_buffer.take() {
+            ctx.copy_text(text);
         }
 
         if self.pending_quit {
@@ -3369,6 +3495,173 @@ mod tests {
         assert_eq!(app.tab().sql, "SELECT * FROM table_0 LIMIT 500;");
         // The rewrite keeps the tab editable (a fresh pending source is derived).
         assert!(app.tab().edits.pending_source.is_some());
+    }
+
+    /// A primary-key-less table (e.g. an imported dump) is browsable but read-only. Paging it
+    /// must keep working: the source *identity* the pager keys off has to survive a page flip,
+    /// even though the rows can't be edited. (Regression: `derive_edit_source` dropped the
+    /// source for PK-less tables, so the pager — gated on `source.is_some()` — vanished the
+    /// moment you pressed Next or changed the page size, after showing fine on page one.)
+    #[test]
+    fn pager_survives_on_pk_less_table() {
+        let mut app = DbGuiApp::construct();
+        let mut schema = fake_schema(1, 2);
+        for col in &mut schema.tables[0].columns {
+            col.primary_key = false; // imported dump: no primary key at all
+        }
+        app.active_connections.push(ActiveConnection {
+            config_id: "c1".into(),
+            name: "conn".into(),
+            db: std::sync::Arc::new(DummyDb),
+            schema,
+            databases: Vec::new(),
+        });
+        {
+            let tab = app.tab_mut();
+            tab.conn_id = Some("c1".into());
+            tab.sql = "SELECT * FROM table_0 LIMIT 100;".into();
+            // Opened from the sidebar: source present but PK-less, so the grid is read-only.
+            tab.edits.source = Some(EditSource {
+                schema: None,
+                table: "table_0".into(),
+                pk_cols: Vec::new(),
+            });
+            tab.total_rows = Some(250);
+        }
+        assert!(!app.tab().edits.editable(), "a PK-less table must not be editable");
+
+        app.busy = Busy::Idle;
+        app.apply_action(Action::Page(PageNav::Next));
+        // The page advanced …
+        assert_eq!(app.tab().sql, "SELECT * FROM table_0 LIMIT 100 OFFSET 100;");
+        // … and the source survived, so the pager stays visible on page two and beyond.
+        let src = app.tab().edits.pending_source.as_ref();
+        assert!(
+            src.is_some(),
+            "paging a PK-less table must keep its source so the pager stays visible"
+        );
+        // Keeping the identity must not make a PK-less table editable.
+        assert!(src.is_some_and(|s| !s.editable()));
+    }
+
+    /// Copy-as-CSV wiring: a multi-row selection routed through `Action::CopyRows` stages the
+    /// CSV (header + the selected rows, in display order) in `copy_buffer` for `draw` to flush.
+    #[test]
+    fn copy_rows_action_stages_csv_for_selection() {
+        let mut app = DbGuiApp::construct();
+        let result = QueryResult {
+            columns: vec![
+                ColumnMeta { name: "id".into(), type_name: "INTEGER".into() },
+                ColumnMeta { name: "name".into(), type_name: "TEXT".into() },
+            ],
+            rows: vec![
+                vec![Value::Int(1), Value::Text("a".into())],
+                vec![Value::Int(2), Value::Text("b".into())],
+                vec![Value::Int(3), Value::Text("c".into())],
+            ],
+            stats: QueryStats::default(),
+            truncated: false,
+        };
+        app.tab_mut().set_result(result);
+        // Select rows 0 and 2 (Cmd-click style), skipping row 1.
+        app.tab_mut().selection.select_one(0);
+        app.tab_mut().selection.toggle(2);
+
+        app.apply_action(Action::CopyRows(dbcore::CopyFormat::Csv));
+
+        let buf = app.copy_buffer.clone().expect("clipboard text staged");
+        assert_eq!(buf, "id,name\r\n1,a\r\n3,c\r\n");
+        assert!(app.status_msg.contains("Copied 2"));
+    }
+
+    /// End-to-end: the OS delivers Cmd/Ctrl+C as an `Event::Copy` (never a raw `Key::C` press on
+    /// macOS), so a real frame fed that event must actually push the selected rows to the
+    /// clipboard. (Regression: the handler matched `key_pressed(Key::C)` and so never fired.)
+    #[test]
+    fn copy_event_pushes_selection_to_clipboard() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::style::apply(&ctx);
+
+        let mut app = DbGuiApp::construct();
+        let result = QueryResult {
+            columns: vec![
+                ColumnMeta { name: "id".into(), type_name: "INTEGER".into() },
+                ColumnMeta { name: "name".into(), type_name: "TEXT".into() },
+            ],
+            rows: vec![
+                vec![Value::Int(1), Value::Text("a".into())],
+                vec![Value::Int(2), Value::Text("b".into())],
+            ],
+            stats: QueryStats::default(),
+            truncated: false,
+        };
+        app.tab_mut().set_result(result);
+        app.tab_mut().selection.select_all(2);
+
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+        let raw = egui::RawInput {
+            screen_rect: Some(screen),
+            events: vec![egui::Event::Copy],
+            ..Default::default()
+        };
+        let out = ctx.run_ui(raw, |ui| app.draw(ui, None));
+
+        let copied = out.platform_output.commands.iter().find_map(|c| match c {
+            egui::OutputCommand::CopyText(t) => Some(t.clone()),
+            _ => None,
+        });
+        // Cmd/Ctrl+C copies TSV (no header, no trailing newline) for clean spreadsheet round-trip.
+        assert_eq!(copied.as_deref(), Some("1\ta\n2\tb"));
+    }
+
+    /// Paste round-trips a copy: TSV clipboard text becomes new staged insert rows on an
+    /// editable table, fields typed by column kind (id parses to an int) and mapped by position.
+    #[test]
+    fn paste_rows_adds_typed_insert_rows() {
+        let mut app = DbGuiApp::construct();
+        let result = QueryResult {
+            columns: vec![
+                ColumnMeta { name: "id".into(), type_name: "INTEGER".into() },
+                ColumnMeta { name: "name".into(), type_name: "TEXT".into() },
+            ],
+            rows: vec![vec![Value::Int(1), Value::Text("a".into())]],
+            stats: QueryStats::default(),
+            truncated: false,
+        };
+        app.tab_mut().set_result(result);
+        // Make the table editable (a PK column is what unlocks inserts).
+        app.tab_mut().edits.source = Some(crate::edit::EditSource {
+            schema: None,
+            table: "t".into(),
+            pk_cols: vec!["id".into()],
+        });
+
+        app.apply_action(Action::PasteRows("2\tb\n3\tc".to_string()));
+
+        // Two new (insert) rows were staged …
+        assert_eq!(app.tab().edits.new_rows, 2);
+        // … with the id column parsed to an Int (not left as text) and the name as text.
+        let first = crate::edit::NEW_ROW_BASE;
+        assert_eq!(app.tab().edits.staged(first, 0), Some(&Value::Int(2)));
+        assert_eq!(app.tab().edits.staged(first, 1), Some(&Value::Text("b".into())));
+        // … and the pasted rows are selected for review.
+        assert_eq!(app.tab().selection.len(), 2);
+    }
+
+    /// Paste into a read-only result is a no-op with a hint (no phantom rows).
+    #[test]
+    fn paste_rows_ignored_when_not_editable() {
+        let mut app = DbGuiApp::construct();
+        let result = QueryResult {
+            columns: vec![ColumnMeta { name: "x".into(), type_name: "TEXT".into() }],
+            rows: vec![vec![Value::Text("a".into())]],
+            stats: QueryStats::default(),
+            truncated: false,
+        };
+        app.tab_mut().set_result(result); // no edit source → read-only
+        app.apply_action(Action::PasteRows("b\nc".to_string()));
+        assert_eq!(app.tab().edits.new_rows, 0);
     }
 
     fn collect_clash_text(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {

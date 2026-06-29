@@ -428,6 +428,15 @@ impl Edits {
         }
     }
 
+    /// Stage `text` into `(row, col)` as a value typed by the column's kind (empty → NULL),
+    /// without opening an editor. Used by paste-to-insert to fill a new row's cells from
+    /// clipboard text. New rows have no stored value, so NULL is the baseline (a non-NULL
+    /// value stages; NULL clears).
+    pub fn stage_text(&mut self, row: usize, col: usize, text: &str) {
+        let value = self.col_kind(col).parse(text);
+        self.stage(row, col, value, &Value::Null);
+    }
+
     /// Flip a boolean cell and stage the result immediately (no text editor needed).
     pub fn toggle_bool(&mut self, row: usize, col: usize, original: &Value) {
         let current = self.staged(row, col).map(as_bool).unwrap_or(as_bool(original));

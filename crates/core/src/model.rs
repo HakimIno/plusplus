@@ -198,6 +198,43 @@ pub fn build_insert_sql(
     ))
 }
 
+/// Build one multi-row `INSERT` covering every column, for every row in `rows` (each row's
+/// length matching `columns`). Used by "Copy as SQL INSERT". Returns `None` if there are no
+/// columns/rows or any value has no literal form (binary — [`Value::Bytes`]). Identifiers and
+/// string values are escaped for `kind`.
+pub fn build_multi_insert_sql(
+    kind: DbKind,
+    schema: Option<&str>,
+    table: &str,
+    columns: &[ColumnMeta],
+    rows: &[&[Value]],
+) -> Option<String> {
+    if columns.is_empty() || rows.is_empty() {
+        return None;
+    }
+    let table_ref = match schema {
+        Some(s) => format!("{}.{}", kind.quote_ident(s), kind.quote_ident(table)),
+        None => kind.quote_ident(table),
+    };
+    let col_list = columns
+        .iter()
+        .map(|c| kind.quote_ident(&c.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let tuples = rows
+        .iter()
+        .map(|row| {
+            let vals = row
+                .iter()
+                .map(|v| value_to_literal(v, kind))
+                .collect::<Option<Vec<_>>>()?;
+            Some(format!("({})", vals.join(", ")))
+        })
+        .collect::<Option<Vec<_>>>()?
+        .join(",\n  ");
+    Some(format!("INSERT INTO {table_ref} ({col_list}) VALUES\n  {tuples};"))
+}
+
 /// Strip `kw` (case-insensitively) off the front of `s`, requiring a non-identifier
 /// character after it so `FROMx` doesn't match `FROM`. Returns the trimmed remainder.
 fn strip_keyword<'a>(s: &'a str, kw: &str) -> Option<&'a str> {
