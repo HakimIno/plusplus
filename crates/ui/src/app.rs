@@ -81,19 +81,19 @@ enum AppMessage {
         table: String,
         result: Result<(std::path::PathBuf, u64), String>,
     },
-    /// Background GitHub Releases check finished. (macOS-only updater; see [`crate::update`].)
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    /// Background GitHub Releases check finished.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     UpdateChecked {
         result: Result<Option<crate::update::UpdateOffer>, String>,
     },
-    /// DMG download progress (bytes received, total if known).
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    /// Update package download progress (bytes received, total if known).
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     UpdateProgress {
         downloaded: u64,
         total: Option<u64>,
     },
-    /// DMG download finished.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    /// Update package download finished.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     UpdateDownloaded {
         result: Result<(crate::update::UpdateOffer, std::path::PathBuf), String>,
     },
@@ -814,8 +814,10 @@ impl DbGuiApp {
         // out of `construct` so tests don't read the user's favorites file.
         app.favorites_cache = dbcore::favorites::load().unwrap_or_default();
 
-        #[cfg(target_os = "macos")]
-        app.start_update_check();
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        if crate::update::automatic_updates_supported() {
+            app.start_update_check();
+        }
 
         // Theme + SVG icon loader (Iconoir icons are embedded SVGs).
         crate::style::apply(&cc.egui_ctx);
@@ -933,7 +935,7 @@ impl DbGuiApp {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn start_update_check(&mut self) {
         if !matches!(self.update, crate::update::UpdatePhase::Idle) {
             return;
@@ -946,7 +948,7 @@ impl DbGuiApp {
         });
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn start_update_download(&mut self) {
         let offer = match &self.update {
             crate::update::UpdatePhase::Available(o) => o.clone(),
@@ -1680,8 +1682,8 @@ impl DbGuiApp {
                     }
                 }
                 AppMessage::UpdateDownloaded { result } => match result {
-                    Ok((offer, dmg_path)) => {
-                        self.update = crate::update::UpdatePhase::Ready { offer, dmg_path };
+                    Ok((offer, package_path)) => {
+                        self.update = crate::update::UpdatePhase::Ready { offer, package_path };
                         self.status_msg = "Update downloaded — ready to install".to_string();
                         self.error = None;
                     }
@@ -2938,13 +2940,13 @@ impl DbGuiApp {
                 self.update_dialog_open = false;
             }
             Action::DownloadUpdate => {
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
                 self.start_update_download();
             }
             Action::InstallUpdate => {
-                #[cfg(target_os = "macos")]
-                if let crate::update::UpdatePhase::Ready { dmg_path, .. } = &self.update {
-                    match crate::update::schedule_install_and_quit(dmg_path) {
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                if let crate::update::UpdatePhase::Ready { package_path, .. } = &self.update {
+                    match crate::update::schedule_install_and_quit(package_path) {
                         Ok(()) => self.pending_quit = true,
                         Err(e) => self.error = Some(e),
                     }

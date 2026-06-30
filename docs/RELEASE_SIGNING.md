@@ -1,9 +1,10 @@
 # Release signing (required for in-app updates)
 
 plusplus verifies every downloaded update before installing it. The in-app updater
-downloads a release DMG **and** its detached [minisign](https://jedisct1.github.io/minisign/)
-signature (`<dmg>.minisig`), then checks the signature against a public key compiled into
-the app (`MINISIGN_PUBLIC_KEY` in `crates/ui/src/update.rs`). An update that is unsigned,
+downloads a release package (DMG on macOS, AppImage on Linux) **and** its detached
+[minisign](https://jedisct1.github.io/minisign/) signature (`<package>.minisig`), then
+checks the signature against a public key compiled into the app (`MINISIGN_PUBLIC_KEY` in
+`crates/ui/src/update.rs`). An update that is unsigned,
 tampered with, or signed by any other key is **refused** — even if a release or the GitHub
 account is compromised, an attacker can't forge a signature without the private key.
 
@@ -51,9 +52,9 @@ In the GitHub repo: **Settings → Secrets and variables → Actions → New rep
 | `MINISIGN_SECRET_KEY` | full contents of `plusplus.key`                    |
 | `MINISIGN_PASSWORD`   | the key's password (omit if you created one with `-W`) |
 
-The release workflow (`.github/workflows/release.yml`) signs each DMG and uploads the
-`.minisig` automatically. It fails the release if `MINISIGN_SECRET_KEY` is missing, so a
-release can never ship unsigned.
+The release workflow (`.github/workflows/release.yml`) signs each DMG and AppImage and
+uploads every `.minisig` automatically. It fails the release if `MINISIGN_SECRET_KEY` is
+missing, so a release can never ship an unsigned update.
 
 ## Signing a DMG manually (local release)
 
@@ -65,6 +66,20 @@ minisign -S -s plusplus.key -m target/dist/plusplus-<version>.dmg
 ```
 
 Upload **both** the `.dmg` and the `.dmg.minisig` to the GitHub release.
+
+## Signing a Linux AppImage manually
+
+Build the release binary and package it, then sign the resulting AppImage:
+
+```sh
+cargo build --release --bin plusplus
+packaging/linux/make-appimage.sh
+minisign -S -s plusplus.key -m target/dist/plusplus-<version>-x86_64.AppImage
+```
+
+Upload both the `.AppImage` and `.AppImage.minisig` to the GitHub release. Automatic
+replacement is available only when plusplus itself is running from that AppImage; distro
+packages remain under the control of their package manager.
 
 ## Rotating or revoking the key
 

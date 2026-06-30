@@ -73,7 +73,7 @@ sqlformat = "0.5"
 # --- supporting crates ---
 # Stream combinators for row-by-row fetches (both sqlx and tiberius already pull this in).
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-# GitHub Releases check + streamed DMG download for in-app updates.
+# GitHub Releases check + streamed native-package download for in-app updates.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 # Verify the Ed25519 (minisign) signature of a downloaded update before installing it.
 # Tiny, single-purpose, no_std-friendly — pairs with the `minisign` CLI used to sign releases.

@@ -47,10 +47,82 @@ jobs:
           done
           ls -l target/dist/plusplus-*.dmg.minisig
 
+      - name: Stage macOS release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: |
+            target/dist/plusplus-*.dmg
+            target/dist/plusplus-*.dmg.minisig
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-latest
+    container: debian:12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and smoke-run
+        run: scripts/linux-build.sh --install-deps --install-rust --release --smoke
+
+      - name: Build AppImage
+        run: packaging/linux/make-appimage.sh
+
+      - name: Smoke-run AppImage
+        shell: bash
+        run: |
+          set +e
+          APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a timeout 8s target/dist/plusplus-*-x86_64.AppImage
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
+            echo "AppImage smoke run failed with exit code ${status}" >&2
+            exit "$status"
+          fi
+
+      - name: Sign AppImage (minisign)
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+            echo "::error::MINISIGN_SECRET_KEY secret is not set — releases must be signed. See docs/RELEASE_SIGNING.md"
+            exit 1
+          fi
+          apt-get update
+          apt-get install -y --no-install-recommends minisign
+          KEYFILE="$(mktemp)"
+          trap 'rm -f "${KEYFILE}"' EXIT
+          printf '%s\n' "${MINISIGN_SECRET_KEY}" > "${KEYFILE}"
+          for appimage in target/dist/plusplus-*.AppImage; do
+            echo "→ signing ${appimage}"
+            printf '%s' "${MINISIGN_PASSWORD:-}" | minisign -S -s "${KEYFILE}" -m "${appimage}"
+          done
+
+      - name: Stage Linux release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: |
+            target/dist/plusplus-*.AppImage
+            target/dist/plusplus-*.AppImage.minisig
+          if-no-files-found: error
+
+  publish:
+    needs: [macos, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            target/dist/plusplus-*.dmg
-            target/dist/plusplus-*.dmg.minisig
+          files: release-assets/*
+          fail_on_unmatched_files: true
           generate_release_notes: true

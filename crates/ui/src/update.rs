@@ -1,24 +1,38 @@
-//! In-app update checks against GitHub Releases and macOS install helpers.
+//! In-app update checks against GitHub Releases and native install helpers.
 //!
-//! Flow: background check → tab-bar badge → download DMG → quit → replace
-//! `/Applications/plusplus.app` → relaunch.
-//!
-//! The whole updater is macOS-only — its driver methods on `DbGuiApp` are
-//! `#[cfg(target_os = "macos")]` — so off-macOS everything here is intentionally unused.
-//! Silence dead-code lints there rather than littering each item with its own `allow`.
-#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+//! Flow: background check → tab-bar badge → download signed package → quit → replace →
+//! relaunch. macOS consumes a DMG; Linux consumes the AppImage that is currently running.
+#![cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// GitHub repository that publishes release DMGs (`owner/repo`).
+/// GitHub repository that publishes release packages (`owner/repo`).
 pub const GITHUB_REPO: &str = "HakimIno/plusplus";
 
 /// Workspace version baked in at compile time.
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Whether this installation can safely replace itself. Linux updates are enabled only
+/// inside an AppImage; binaries owned by a distro package manager must not overwrite
+/// themselves behind that package manager's back.
+#[cfg(target_os = "macos")]
+pub fn automatic_updates_supported() -> bool {
+    true
+}
+
+#[cfg(target_os = "linux")]
+pub fn automatic_updates_supported() -> bool {
+    std::env::var_os("APPIMAGE").is_some()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn automatic_updates_supported() -> bool {
+    false
+}
+
 /// Minisign public key (the **second**, non-comment line of a `minisign -G` public-key
-/// file) that genuine release DMGs are signed with. A downloaded update is installed only
+/// file) that genuine release packages are signed with. A downloaded update is installed only
 /// if its detached `.minisig` signature verifies against this key, which roots trust in a
 /// private key the maintainer holds offline rather than in GitHub: a tampered or
 /// substituted DMG — even on a compromised release or account — can't be signed and is
@@ -27,15 +41,17 @@ pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// **Empty = no key configured → every update is refused (fail closed).** To enable signed
 /// updates: run `minisign -G` once, paste the public key's second line here, store the
 /// secret key as the CI `MINISIGN_SECRET_KEY`/`MINISIGN_PASSWORD` secrets, and the release
-/// workflow will publish a `<dmg>.minisig` beside each DMG. See docs/RELEASE_SIGNING.md.
+/// workflow publishes a `<package>.minisig` beside each package. See
+/// docs/RELEASE_SIGNING.md.
 pub const MINISIGN_PUBLIC_KEY: &str = "RWSI1RaK/u6g2lxVL3YxMT8pRzTnQMP1N46eIBdWDVXH7U5kjtAzYIY4";
 
 /// A newer release found on GitHub.
 #[derive(Clone, Debug)]
 pub struct UpdateOffer {
     pub version: String,
+    pub asset_name: String,
     pub download_url: String,
-    /// URL of the DMG's detached minisign signature (`<dmg>.minisig`). Empty when the
+    /// URL of the package's detached minisign signature (`<asset>.minisig`). Empty when the
     /// release published no signature — such an update fails verification and is refused.
     pub signature_url: String,
     pub notes: String,
@@ -54,7 +70,7 @@ pub enum UpdatePhase {
     },
     Ready {
         offer: UpdateOffer,
-        dmg_path: PathBuf,
+        package_path: PathBuf,
     },
     Failed(String),
 }
@@ -112,7 +128,30 @@ fn normalize_version(tag: &str) -> String {
     tag.trim().trim_start_matches('v').to_string()
 }
 
-/// Query GitHub Releases for a DMG newer than [`CURRENT_VERSION`].
+#[cfg(target_os = "macos")]
+fn release_asset_name(version: &str) -> String {
+    format!("plusplus-{version}.dmg")
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn release_asset_name(version: &str) -> String {
+    format!("plusplus-{version}-x86_64.AppImage")
+}
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+fn release_asset_name(version: &str) -> String {
+    format!("plusplus-{version}-aarch64.AppImage")
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64"))
+)))]
+fn release_asset_name(version: &str) -> String {
+    format!("plusplus-{version}-unsupported")
+}
+
+/// Query GitHub Releases for a native package newer than [`CURRENT_VERSION`].
 pub async fn check_for_update() -> Result<Option<UpdateOffer>, String> {
     let client = http_client()?;
     let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
@@ -143,22 +182,17 @@ pub async fn check_for_update() -> Result<Option<UpdateOffer>, String> {
         return Ok(None);
     }
 
-    let dmg = release
+    let expected_name = release_asset_name(&version);
+    let package = release
         .assets
         .iter()
-        .find(|a| a.name.starts_with("plusplus-") && a.name.ends_with(".dmg"))
-        .or_else(|| {
-            release
-                .assets
-                .iter()
-                .find(|a| a.name.ends_with(".dmg"))
-        })
-        .ok_or_else(|| format!("release v{version} has no .dmg asset"))?;
+        .find(|a| a.name == expected_name)
+        .ok_or_else(|| format!("release v{version} has no {expected_name} asset"))?;
 
-    // The detached signature is published as `<dmg-name>.minisig`. A missing one leaves
+    // The detached signature is published as `<asset-name>.minisig`. A missing one leaves
     // `signature_url` empty; verification then refuses the update at download time rather
     // than installing something unsigned.
-    let sig_name = format!("{}.minisig", dmg.name);
+    let sig_name = format!("{}.minisig", package.name);
     let signature_url = release
         .assets
         .iter()
@@ -168,7 +202,8 @@ pub async fn check_for_update() -> Result<Option<UpdateOffer>, String> {
 
     Ok(Some(UpdateOffer {
         version,
-        download_url: dmg.browser_download_url.clone(),
+        asset_name: package.name.clone(),
+        download_url: package.browser_download_url.clone(),
         signature_url,
         notes: release.body.unwrap_or_default(),
     }))
@@ -200,7 +235,7 @@ fn verify_signature(public_key_b64: &str, data: &[u8], minisig: &str) -> Result<
     })
 }
 
-/// Stream a release DMG into the system temp directory, reporting byte progress.
+/// Stream a release package into the system temp directory, reporting byte progress.
 pub async fn download_update(
     offer: &UpdateOffer,
     mut on_progress: impl FnMut(u64, Option<u64>) + Send,
@@ -211,8 +246,12 @@ pub async fn download_update(
         .build()
         .map_err(|e| e.to_string())?;
 
-    let dest = std::env::temp_dir().join(format!("plusplus-{}.dmg", offer.version));
-    let partial = dest.with_extension("dmg.partial");
+    let safe_name = Path::new(&offer.asset_name)
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "release has an invalid asset name".to_string())?;
+    let dest = std::env::temp_dir().join(safe_name);
+    let partial = dest.with_file_name(format!("{}.partial", safe_name.to_string_lossy()));
 
     let resp = client
         .get(&offer.download_url)
@@ -256,7 +295,7 @@ pub async fn download_update(
     }
 
     // Verify the signature before the file is ever promoted to its final path, so a failed
-    // (or absent) signature leaves nothing installable behind. The DMG stays at `.partial`
+    // (or absent) signature leaves nothing installable behind. The package stays at `.partial`
     // until it is proven authentic.
     if let Err(e) = verify_download(&partial, &offer.signature_url, &client).await {
         let _ = tokio::fs::remove_file(&partial).await;
@@ -270,11 +309,11 @@ pub async fn download_update(
     Ok(dest)
 }
 
-/// Fetch the detached signature at `signature_url` and verify the file at `dmg_path`
+/// Fetch the detached signature at `signature_url` and verify the file at `package_path`
 /// against it with the built-in key. A release that published no signature
 /// (`signature_url` empty) is rejected — an unsigned update is never installed.
 async fn verify_download(
-    dmg_path: &Path,
+    package_path: &Path,
     signature_url: &str,
     client: &reqwest::Client,
 ) -> Result<(), String> {
@@ -293,7 +332,7 @@ async fn verify_download(
         .text()
         .await
         .map_err(|e| format!("could not read update signature: {e}"))?;
-    let bytes = tokio::fs::read(dmg_path)
+    let bytes = tokio::fs::read(package_path)
         .await
         .map_err(|e| format!("could not re-read downloaded update: {e}"))?;
     verify_signature(MINISIGN_PUBLIC_KEY, &bytes, &minisig)
@@ -301,8 +340,8 @@ async fn verify_download(
 
 /// Spawn a detached installer that waits for this process to exit, then replaces the app.
 #[cfg(target_os = "macos")]
-pub fn schedule_install_and_quit(dmg_path: &Path) -> Result<(), String> {
-    let dmg = dmg_path
+pub fn schedule_install_and_quit(package_path: &Path) -> Result<(), String> {
+    let dmg = package_path
         .to_str()
         .ok_or_else(|| "invalid DMG path".to_string())?;
     let pid = std::process::id();
@@ -343,9 +382,73 @@ open -a /Applications/plusplus.app
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn schedule_install_and_quit(_dmg_path: &Path) -> Result<(), String> {
-    Err("in-app updates are only supported on macOS".into())
+/// Atomically replace the AppImage that launched this process, then relaunch it after the
+/// current process exits. Refuse non-AppImage installs: distro packages must be upgraded by
+/// their package manager and a development binary has no stable install location.
+#[cfg(target_os = "linux")]
+pub fn schedule_install_and_quit(package_path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let current = std::env::var_os("APPIMAGE")
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            "automatic install requires the AppImage build; update this installation with its package manager"
+                .to_string()
+        })?;
+    let current = current
+        .canonicalize()
+        .map_err(|e| format!("could not locate the running AppImage: {e}"))?;
+    if !current.is_file() {
+        return Err("the running AppImage path is not a regular file".into());
+    }
+
+    let file_name = current
+        .file_name()
+        .ok_or_else(|| "the running AppImage has an invalid path".to_string())?;
+    let staged = current.with_file_name(format!("{}.update", file_name.to_string_lossy()));
+    std::fs::copy(package_path, &staged)
+        .map_err(|e| format!("could not stage update beside the current AppImage: {e}"))?;
+    let install_result = (|| -> Result<(), String> {
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("could not make the update executable: {e}"))?;
+        std::fs::rename(&staged, &current)
+            .map_err(|e| format!("could not replace the current AppImage: {e}"))?;
+        Ok(())
+    })();
+    if install_result.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    install_result?;
+
+    let script_path = std::env::temp_dir().join("plusplus-relaunch-update.sh");
+    std::fs::write(
+        &script_path,
+        r#"#!/bin/sh
+pid="$1"
+appimage="$2"
+while kill -0 "$pid" 2>/dev/null; do sleep 0.25; done
+rm -f -- "$0"
+exec "$appimage"
+"#,
+    )
+    .map_err(|e| format!("could not create update relaunch helper: {e}"))?;
+
+    std::process::Command::new("nohup")
+        .arg("/bin/sh")
+        .arg(&script_path)
+        .arg(std::process::id().to_string())
+        .arg(&current)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("could not start update relaunch helper: {e}"))?;
+
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn schedule_install_and_quit(_package_path: &Path) -> Result<(), String> {
+    Err("in-app updates are not supported on this platform".into())
 }
 
 #[cfg(test)]
@@ -359,6 +462,15 @@ mod tests {
         assert!(!version_gt("0.1.0", "0.1.0"));
         assert!(!version_gt("0.1.0", "0.2.0"));
         assert!(version_gt("1.0.0", "0.9.9"));
+    }
+
+    #[test]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn linux_release_uses_versioned_x86_64_appimage() {
+        assert_eq!(
+            release_asset_name("1.2.3"),
+            "plusplus-1.2.3-x86_64.AppImage"
+        );
     }
 
     // A real positive vector would require a minisign keypair + signature generated with the
