@@ -1,0 +1,23 @@
+{
+  "name": "Dracula",
+  "author": "Dracula Theme (adapted)",
+  "is_dark": true,
+  "base": "#21222c",
+  "panel": "#282a36",
+  "surface": "#343746",
+  "surface_hover": "#424450",
+  "code_bg": "#1a1b23",
+  "stripe": "#2b2d3a",
+  "selection": "#44475a",
+  "border": "#363948",
+  "border_strong": "#4a4d5e",
+  "text": "#f8f8f2",
+  "text_weak": "#bcc0d0",
+  "text_faint": "#6272a4",
+  "accent": "#bd93f9",
+  "accent_hover": "#caa9fa",
+  "on_accent": "#21222c",
+  "success": "#50fa7b",
+  "danger": "#ff5555",
+  "warning": "#f1fa8c"
+}

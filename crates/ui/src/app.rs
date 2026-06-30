@@ -17,7 +17,7 @@ mod widgets;
 
 use crate::edit::{EditSource, Edits};
 use crate::filter::{self, FilterState};
-use crate::theme::ThemeId;
+use crate::theme::ThemeRegistry;
 
 /// The most rows a single query will materialize in memory. A `SELECT` over a bigger
 /// result streams up to the cap and comes back marked truncated — browse the rest with
@@ -81,16 +81,19 @@ enum AppMessage {
         table: String,
         result: Result<(std::path::PathBuf, u64), String>,
     },
-    /// Background GitHub Releases check finished.
+    /// Background GitHub Releases check finished. (macOS-only updater; see [`crate::update`].)
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     UpdateChecked {
         result: Result<Option<crate::update::UpdateOffer>, String>,
     },
     /// DMG download progress (bytes received, total if known).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     UpdateProgress {
         downloaded: u64,
         total: Option<u64>,
     },
     /// DMG download finished.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     UpdateDownloaded {
         result: Result<(crate::update::UpdateOffer, std::path::PathBuf), String>,
     },
@@ -763,8 +766,11 @@ pub struct DbGuiApp {
     show_query_console: bool,
 
     // --- preferences ---
-    /// Currently selected colour theme (persisted to settings.json).
-    theme: ThemeId,
+    /// Stable key of the currently selected colour theme (persisted to settings.json).
+    /// Resolved against [`themes`](Self::themes) — built-in key or a custom theme's file stem.
+    theme: String,
+    /// All themes the picker can offer: built-ins plus user-installed `*.json` files.
+    themes: ThemeRegistry,
     /// SQL beautifier preferences (persisted to settings.json).
     beautify: crate::format::BeautifyPrefs,
 
@@ -834,13 +840,11 @@ impl DbGuiApp {
         let connections = dbcore::config::load_connections().unwrap_or_default();
 
         // Restore the saved theme (falling back to the default), and make it active.
+        // The registry merges the built-ins with any user-installed theme files on disk.
         let settings = dbcore::config::load_settings();
-        let theme = settings
-            .theme
-            .as_deref()
-            .and_then(ThemeId::from_key)
-            .unwrap_or(ThemeId::DEFAULT);
-        crate::theme::set_current(theme);
+        let themes = ThemeRegistry::load();
+        let theme = themes.resolve_key(settings.theme.as_deref().unwrap_or(""));
+        crate::theme::set_current(themes.theme_of(&theme));
         let beautify_defaults = crate::format::BeautifyPrefs::default();
         let beautify = crate::format::BeautifyPrefs {
             uppercase: settings
@@ -907,6 +911,7 @@ impl DbGuiApp {
             show_details_panel: true,
             show_query_console: true,
             theme,
+            themes,
             beautify,
             commit_pending: None,
             schema_pending: None,
@@ -1039,9 +1044,9 @@ impl DbGuiApp {
     }
 
     /// Switch the active theme, re-apply the egui style, and persist the choice.
-    fn set_theme(&mut self, ctx: &egui::Context, id: ThemeId) {
-        self.theme = id;
-        crate::theme::set_current(id);
+    fn set_theme(&mut self, ctx: &egui::Context, key: String) {
+        crate::theme::set_current(self.themes.theme_of(&key));
+        self.theme = key;
         crate::style::apply(ctx);
         self.persist_settings();
     }
@@ -1049,7 +1054,7 @@ impl DbGuiApp {
     /// Flush all settings.json-backed preferences (theme, beautifier, welcomed) to disk.
     fn persist_settings(&mut self) {
         let mut settings = dbcore::config::load_settings();
-        settings.theme = Some(self.theme.key().to_string());
+        settings.theme = Some(self.theme.clone());
         settings.beautify_uppercase = Some(self.beautify.uppercase);
         settings.beautify_indent = Some(self.beautify.indent);
         settings.welcomed = Some(!self.show_welcome);

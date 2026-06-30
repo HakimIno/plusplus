@@ -2,6 +2,11 @@
 //!
 //! Flow: background check → tab-bar badge → download DMG → quit → replace
 //! `/Applications/plusplus.app` → relaunch.
+//!
+//! The whole updater is macOS-only — its driver methods on `DbGuiApp` are
+//! `#[cfg(target_os = "macos")]` — so off-macOS everything here is intentionally unused.
+//! Silence dead-code lints there rather than littering each item with its own `allow`.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

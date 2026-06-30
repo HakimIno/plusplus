@@ -36,7 +36,7 @@ case "$ids" in
       ca-certificates curl tar xz-utils build-essential pkg-config \
       libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxkbcommon-dev libwayland-dev \
       libgl1-mesa-dev libegl1-mesa-dev libfontconfig1-dev libdbus-1-dev \
-      libxkbcommon-x11-0 xvfb mesa-utils
+      libxkbcommon-x11-0 xvfb xauth mesa-utils
     ;;
   *" fedora "*|*" rhel "*|*" centos "*)
     run_as_root dnf install -y \

@@ -3,7 +3,6 @@ use crate::filter::{self, FilterEvent};
 use crate::grid::results_grid;
 use crate::icons;
 use crate::style::{self, palette};
-use crate::theme::ThemeId;
 use crate::title_bar;
 
 /// The ER diagram is hidden for now (not ready to ship); flip to `true` to bring
@@ -2005,8 +2004,13 @@ impl DbGuiApp {
                         edits.begin(r, c, &seed, crate::edit::EditOrigin::Grid);
                     }
                 }
-                // A boolean cell flips in place rather than opening an editor.
+                // A boolean cell flips in place rather than opening an editor. If another
+                // cell's editor is still open (e.g. the user clicked straight from it onto this
+                // bool), settle that first so its typed value isn't silently dropped.
                 if let Some((r, c)) = resp.toggle {
+                    if edits.active.as_ref().is_some_and(|a| (a.row, a.col) != (r, c)) {
+                        settle_active(edits);
+                    }
                     if let Some(orig) = original(r, c) {
                         edits.toggle_bool(r, c, &orig);
                     }
@@ -2154,9 +2158,17 @@ impl DbGuiApp {
                 // --- Theme picker ---
                 style::section_header(ui, "Choose a theme");
                 ui.add_space(10.0);
-                let mut chosen = self.theme;
-                for id in ThemeId::ALL {
-                    ui.radio_value(&mut chosen, id, id.label());
+                // Snapshot (key, label) so the picker holds no borrow on `self` while we may
+                // call `set_theme(&mut self, …)` right after.
+                let options: Vec<(String, String)> = self
+                    .themes
+                    .entries()
+                    .iter()
+                    .map(|e| (e.key.clone(), e.name.clone()))
+                    .collect();
+                let mut chosen = self.theme.clone();
+                for (key, label) in &options {
+                    ui.radio_value(&mut chosen, key.clone(), label.as_str());
                     ui.add_space(3.0);
                 }
                 if chosen != self.theme {
@@ -2358,7 +2370,18 @@ impl DbGuiApp {
 
         let mut open = true;
         let mut close = false;
-        let mut chosen = self.theme;
+        let mut reload_themes = false;
+        let mut chosen = self.theme.clone();
+        // Snapshot (key, label, builtin, author) so the picker holds no borrow on `self`.
+        let options: Vec<(String, String, bool, Option<String>)> = self
+            .themes
+            .entries()
+            .iter()
+            .map(|e| (e.key.clone(), e.name.clone(), e.builtin, e.author.clone()))
+            .collect();
+        let themes_dir = dbcore::config::themes_dir()
+            .ok()
+            .map(|p| p.display().to_string());
 
         style::dialog_window("Settings")
             .open(&mut open)
@@ -2370,9 +2393,34 @@ impl DbGuiApp {
                 ui.label(egui::RichText::new("Theme").color(palette::TEXT_WEAK()));
                 ui.add_space(6.0);
 
-                for id in ThemeId::ALL {
-                    ui.radio_value(&mut chosen, id, id.label());
+                for (key, label, builtin, author) in &options {
+                    let resp = ui.radio_value(&mut chosen, key.clone(), label.as_str());
+                    let tooltip = if *builtin {
+                        "Built-in theme".to_string()
+                    } else {
+                        match author {
+                            Some(author) => format!("Custom theme · by {author}"),
+                            None => "Custom theme".to_string(),
+                        }
+                    };
+                    resp.on_hover_text(tooltip);
                 }
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .small_button("Reload themes")
+                        .on_hover_text(
+                            themes_dir
+                                .as_deref()
+                                .map(|d| format!("Drop *.json theme files in:\n{d}"))
+                                .unwrap_or_else(|| "Re-scan the themes folder".to_string()),
+                        )
+                        .clicked()
+                    {
+                        reload_themes = true;
+                    }
+                });
 
                 ui.add_space(10.0);
                 style::section_header(ui, "Privacy");
@@ -2395,6 +2443,15 @@ impl DbGuiApp {
                 });
             });
 
+        if reload_themes {
+            self.themes.reload();
+            // A previously-selected custom theme may have been removed; re-resolve so the
+            // active colours and the persisted key stay valid.
+            let resolved = self.themes.resolve_key(&self.theme);
+            if resolved != self.theme {
+                self.set_theme(ctx, resolved);
+            }
+        }
         if chosen != self.theme {
             self.set_theme(ctx, chosen);
         }

@@ -33,6 +33,14 @@ pub fn connections_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("connections.json"))
 }
 
+/// Directory where user-installed theme files live, e.g. `~/.config/plusplus/themes`.
+/// Each `*.json` file in here is a colour palette the theme picker offers alongside the
+/// built-in themes (see `ui`'s `ThemeRegistry`). The directory may not exist — callers
+/// treat a missing/unreadable directory as "no custom themes".
+pub fn themes_dir() -> Result<PathBuf> {
+    Ok(config_dir()?.join("themes"))
+}
+
 /// Load saved connections. A missing file is not an error — it yields an empty list.
 pub fn load_connections() -> Result<Vec<ConnectionConfig>> {
     let path = connections_path()?;
@@ -59,7 +67,8 @@ pub fn settings_path() -> Result<PathBuf> {
 /// User-facing application preferences that aren't tied to a specific connection.
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
-    /// Stable key of the selected theme (see `ui`'s `ThemeId`). `None` = use the default.
+    /// Stable key of the selected theme (built-in key or a custom theme's file stem; see
+    /// `ui`'s `ThemeRegistry`). `None` = use the default.
     #[serde(default)]
     pub theme: Option<String>,
     /// SQL beautifier: convert reserved keywords to ALL CAPS. `None` = the default (on).

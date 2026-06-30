@@ -5,10 +5,18 @@
 //! single-threaded on the UI side, so a cheap `Cell` is all we need. UI code reads
 //! colours through `palette::*` accessors, which forward to [`current`]; switching themes
 //! is just [`set_current`] followed by re-applying the style.
+//!
+//! Themes come from two places, both surfaced through a [`ThemeRegistry`]:
+//!   * the built-in palettes ([`carbon`], [`midnight`], [`daylight`]), compiled in; and
+//!   * user-installed `*.json` files dropped into [`dbcore::config::themes_dir`] — these
+//!     deserialize into a [`ThemeFile`] (hex colours) and let anyone ship a theme without
+//!     touching the binary. This is the first plugin "contribution point".
 
 use std::cell::Cell;
+use std::path::Path;
 
 use egui::Color32;
+use serde::{Deserialize, Serialize};
 
 /// A complete set of colour tokens. `Copy` so it can live in a `Cell` and be read freely.
 #[derive(Clone, Copy)]
@@ -45,59 +53,274 @@ pub struct Theme {
     pub warning: Color32,
 }
 
-/// One of the built-in themes the user can choose from.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ThemeId {
-    /// Near-black, neutral. The default — deep blacks in the spirit of an OLED editor.
-    Carbon,
-    /// A calm, slightly-cool dark palette (the original plusplus look).
-    Midnight,
-    /// A clean light theme for bright environments.
-    Daylight,
+/// The on-disk form of a [`Theme`]: a human-authored JSON file with `#rrggbb` colours, a
+/// display `name`, and an optional `author`. Mirrors [`Theme`] field-for-field so a custom
+/// theme is just data — no code, no recompile. Drop one in [`dbcore::config::themes_dir`].
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ThemeFile {
+    /// Display name shown in the picker, e.g. `"Dracula"`.
+    pub name: String,
+    /// Optional attribution, shown as a hint in the picker.
+    #[serde(default)]
+    pub author: Option<String>,
+    /// Dark vs light base — picks egui's `Visuals::dark()`/`light()`.
+    pub is_dark: bool,
+
+    #[serde(with = "hex")]
+    pub base: Color32,
+    #[serde(with = "hex")]
+    pub panel: Color32,
+    #[serde(with = "hex")]
+    pub surface: Color32,
+    #[serde(with = "hex")]
+    pub surface_hover: Color32,
+    #[serde(with = "hex")]
+    pub code_bg: Color32,
+    #[serde(with = "hex")]
+    pub stripe: Color32,
+    #[serde(with = "hex")]
+    pub selection: Color32,
+    #[serde(with = "hex")]
+    pub border: Color32,
+    #[serde(with = "hex")]
+    pub border_strong: Color32,
+    #[serde(with = "hex")]
+    pub text: Color32,
+    #[serde(with = "hex")]
+    pub text_weak: Color32,
+    #[serde(with = "hex")]
+    pub text_faint: Color32,
+    #[serde(with = "hex")]
+    pub accent: Color32,
+    #[serde(with = "hex")]
+    pub accent_hover: Color32,
+    #[serde(with = "hex")]
+    pub on_accent: Color32,
+    #[serde(with = "hex")]
+    pub success: Color32,
+    #[serde(with = "hex")]
+    pub danger: Color32,
+    #[serde(with = "hex")]
+    pub warning: Color32,
 }
 
-impl ThemeId {
-    /// All themes, in the order they should appear in a picker.
-    pub const ALL: [ThemeId; 3] = [ThemeId::Carbon, ThemeId::Midnight, ThemeId::Daylight];
+impl ThemeFile {
+    /// Flatten into the runtime [`Theme`] the rest of the app reads.
+    fn to_theme(&self) -> Theme {
+        Theme {
+            is_dark: self.is_dark,
+            base: self.base,
+            panel: self.panel,
+            surface: self.surface,
+            surface_hover: self.surface_hover,
+            code_bg: self.code_bg,
+            stripe: self.stripe,
+            selection: self.selection,
+            border: self.border,
+            border_strong: self.border_strong,
+            text: self.text,
+            text_weak: self.text_weak,
+            text_faint: self.text_faint,
+            accent: self.accent,
+            accent_hover: self.accent_hover,
+            on_accent: self.on_accent,
+            success: self.success,
+            danger: self.danger,
+            warning: self.warning,
+        }
+    }
+}
 
-    /// The default theme used on first run (and when a saved choice can't be parsed).
-    pub const DEFAULT: ThemeId = ThemeId::Carbon;
+/// serde adapter: (de)serialize a [`Color32`]'s RGB as a `#rrggbb` hex string. Alpha is not
+/// represented — themes are opaque palettes — so colours round-trip through their RGB only.
+mod hex {
+    use egui::Color32;
+    use serde::{de::Error, Deserialize, Deserializer, Serializer};
 
+    pub fn serialize<S: Serializer>(c: &Color32, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b()))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Color32, D::Error> {
+        let s = String::deserialize(d)?;
+        parse(&s).ok_or_else(|| D::Error::custom(format!("invalid hex colour: {s:?}")))
+    }
+
+    /// Parse `#rrggbb` / `rrggbb` / `#rgb` / `rgb` into an opaque [`Color32`].
+    fn parse(s: &str) -> Option<Color32> {
+        let s = s.strip_prefix('#').unwrap_or(s);
+        let (r, g, b) = match s.len() {
+            6 => (
+                u8::from_str_radix(&s[0..2], 16).ok()?,
+                u8::from_str_radix(&s[2..4], 16).ok()?,
+                u8::from_str_radix(&s[4..6], 16).ok()?,
+            ),
+            // Shorthand #rgb expands each nibble (e.g. "f80" -> ff8800).
+            3 => {
+                let n = |i: usize| u8::from_str_radix(&s[i..=i], 16).ok().map(|v| v * 17);
+                (n(0)?, n(1)?, n(2)?)
+            }
+            _ => return None,
+        };
+        Some(Color32::from_rgb(r, g, b))
+    }
+}
+
+/// Stable key of the built-in default theme (also the fallback when a saved choice can't be
+/// resolved). Matches `Carbon`'s entry in [`builtins`].
+pub const DEFAULT_KEY: &str = "carbon";
+
+/// One selectable theme — a resolved [`Theme`] plus the metadata the picker needs.
+#[derive(Clone)]
+pub struct ThemeEntry {
+    /// Stable identifier persisted to settings.json. Built-ins use fixed keys
+    /// (`"carbon"`, …); custom themes use their file stem (e.g. `dracula.json` → `"dracula"`).
+    pub key: String,
     /// Human-readable name for the picker.
-    pub fn label(self) -> &'static str {
-        match self {
-            ThemeId::Carbon => "Carbon",
-            ThemeId::Midnight => "Midnight",
-            ThemeId::Daylight => "Daylight",
+    pub name: String,
+    /// Optional attribution for custom themes (built-ins are `None`).
+    pub author: Option<String>,
+    /// `true` for compiled-in themes, `false` for ones loaded from disk.
+    pub builtin: bool,
+    /// The concrete colour set.
+    pub theme: Theme,
+}
+
+/// All themes available to the picker: the built-ins, followed by any user-installed ones.
+///
+/// Loaded once at startup (and on demand via [`reload`](Self::reload)). Built-ins always come
+/// first and can't be shadowed — a custom file whose stem collides with a built-in key is
+/// skipped, so the defaults are always present and stable.
+pub struct ThemeRegistry {
+    entries: Vec<ThemeEntry>,
+}
+
+impl Default for ThemeRegistry {
+    fn default() -> Self {
+        Self::load()
+    }
+}
+
+impl ThemeRegistry {
+    /// Build the registry: built-ins plus every readable `*.json` in the themes directory.
+    pub fn load() -> Self {
+        let mut entries = builtins();
+
+        if let Ok(dir) = dbcore::config::themes_dir() {
+            let mut customs = load_custom_themes(&dir);
+            // Stable, name-sorted order so the picker doesn't jump around between launches.
+            customs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            for entry in customs {
+                // Built-ins win on key collision — never let a file hide a default.
+                if !entries.iter().any(|e| e.key == entry.key) {
+                    entries.push(entry);
+                }
+            }
         }
+
+        Self { entries }
     }
 
-    /// Stable identifier used when persisting the choice to disk.
-    pub fn key(self) -> &'static str {
-        match self {
-            ThemeId::Carbon => "carbon",
-            ThemeId::Midnight => "midnight",
-            ThemeId::Daylight => "daylight",
-        }
+    /// Re-scan the themes directory. Lets the user install a theme and pick it up without a
+    /// restart (the Settings dialog exposes this).
+    pub fn reload(&mut self) {
+        *self = Self::load();
     }
 
-    /// Parse a persisted [`key`](Self::key) back into a `ThemeId`.
-    pub fn from_key(s: &str) -> Option<ThemeId> {
-        ThemeId::ALL.into_iter().find(|t| t.key() == s)
+    /// Every selectable theme, in picker order (built-ins first).
+    pub fn entries(&self) -> &[ThemeEntry] {
+        &self.entries
     }
 
-    /// The concrete colour set for this theme.
-    pub fn theme(self) -> Theme {
-        match self {
-            ThemeId::Carbon => carbon(),
-            ThemeId::Midnight => midnight(),
-            ThemeId::Daylight => daylight(),
+    /// Look up an entry by its stable key.
+    pub fn get(&self, key: &str) -> Option<&ThemeEntry> {
+        self.entries.iter().find(|e| e.key == key)
+    }
+
+    /// The default entry — the built-in [`DEFAULT_KEY`] theme, which is always present.
+    pub fn default_entry(&self) -> &ThemeEntry {
+        self.get(DEFAULT_KEY)
+            .or_else(|| self.entries.first())
+            .expect("registry always has at least the built-in themes")
+    }
+
+    /// Resolve a saved key to its colour set, falling back to the default if it's unknown
+    /// (e.g. a custom theme file the user has since deleted).
+    pub fn theme_of(&self, key: &str) -> Theme {
+        self.get(key)
+            .map(|e| e.theme)
+            .unwrap_or_else(|| self.default_entry().theme)
+    }
+
+    /// Resolve a saved key to a valid key — the key itself if known, else [`DEFAULT_KEY`].
+    pub fn resolve_key(&self, key: &str) -> String {
+        if self.get(key).is_some() {
+            key.to_string()
+        } else {
+            self.default_entry().key.clone()
         }
     }
+}
+
+/// Read and parse every `*.json` theme in `dir`. A missing directory or an individual bad
+/// file is silently skipped — a broken theme should never stop the app from starting.
+fn load_custom_themes(dir: &Path) -> Vec<ThemeEntry> {
+    let read_dir = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return Vec::new(),
+    };
+
+    read_dir
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                return None;
+            }
+            let stem = path.file_stem()?.to_str()?.to_string();
+            let bytes = std::fs::read(&path).ok()?;
+            let file: ThemeFile = serde_json::from_slice(&bytes).ok()?;
+            Some(ThemeEntry {
+                key: stem,
+                name: file.name.clone(),
+                author: file.author.clone(),
+                builtin: false,
+                theme: file.to_theme(),
+            })
+        })
+        .collect()
 }
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
     Color32::from_rgb(r, g, b)
+}
+
+/// The compiled-in themes, in picker order. Their keys are stable and reserved (custom
+/// files can't shadow them).
+fn builtins() -> Vec<ThemeEntry> {
+    vec![
+        ThemeEntry {
+            key: "carbon".into(),
+            name: "Carbon".into(),
+            author: None,
+            builtin: true,
+            theme: carbon(),
+        },
+        ThemeEntry {
+            key: "midnight".into(),
+            name: "Midnight".into(),
+            author: None,
+            builtin: true,
+            theme: midnight(),
+        },
+        ThemeEntry {
+            key: "daylight".into(),
+            name: "Daylight".into(),
+            author: None,
+            builtin: true,
+            theme: daylight(),
+        },
+    ]
 }
 
 /// Near-black, neutral. Editor wells fall all the way to true black; panels lift just
@@ -177,7 +400,7 @@ fn daylight() -> Theme {
 }
 
 thread_local! {
-    static CURRENT: Cell<Theme> = Cell::new(ThemeId::DEFAULT.theme());
+    static CURRENT: Cell<Theme> = Cell::new(carbon());
 }
 
 /// The colour set in effect right now. Cheap (a `Cell` read of a `Copy` struct).
@@ -185,8 +408,86 @@ pub fn current() -> Theme {
     CURRENT.with(Cell::get)
 }
 
-/// Switch the active theme. Callers should re-run [`crate::style::apply`] afterwards so
-/// egui's `Visuals` pick up the new colours.
-pub fn set_current(id: ThemeId) {
-    CURRENT.with(|c| c.set(id.theme()));
+/// Switch the active theme to a resolved colour set. Callers should re-run
+/// [`crate::style::apply`] afterwards so egui's `Visuals` pick up the new colours.
+pub fn set_current(theme: Theme) {
+    CURRENT.with(|c| c.set(theme));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The default key always resolves to a built-in entry.
+    #[test]
+    fn default_key_is_a_builtin() {
+        let reg = ThemeRegistry { entries: builtins() };
+        let entry = reg.get(DEFAULT_KEY).expect("default present");
+        assert!(entry.builtin);
+        assert_eq!(entry.key, DEFAULT_KEY);
+    }
+
+    /// An unknown key falls back to the default colour set, never panics.
+    #[test]
+    fn unknown_key_falls_back_to_default() {
+        let reg = ThemeRegistry { entries: builtins() };
+        assert_eq!(reg.resolve_key("does-not-exist"), DEFAULT_KEY);
+        // theme_of returns the default's colours (compare a token).
+        assert_eq!(
+            reg.theme_of("does-not-exist").base,
+            reg.default_entry().theme.base
+        );
+    }
+
+    /// A ThemeFile round-trips through JSON with hex colours intact.
+    #[test]
+    fn theme_file_round_trips_through_json() {
+        // Author a minimal theme by serializing a built-in via ThemeFile.
+        let json = r##"{
+            "name": "Test",
+            "author": "me",
+            "is_dark": true,
+            "base": "#0a0a0b",
+            "panel": "#0e0e10",
+            "surface": "#1b1b1e",
+            "surface_hover": "#26262a",
+            "code_bg": "#000000",
+            "stripe": "#141416",
+            "selection": "#212e52",
+            "border": "#232327",
+            "border_strong": "#34343a",
+            "text": "#e8e8ea",
+            "text_weak": "#9a9aa0",
+            "text_faint": "#5f5f66",
+            "accent": "#6e8eff",
+            "accent_hover": "#849fff",
+            "on_accent": "#f6f8ff",
+            "success": "#4acf8b",
+            "danger": "#ee6a6a",
+            "warning": "#e0af68"
+        }"##;
+        let file: ThemeFile = serde_json::from_str(json).unwrap();
+        assert_eq!(file.name, "Test");
+        assert_eq!(file.author.as_deref(), Some("me"));
+        let theme = file.to_theme();
+        assert_eq!(theme.accent, Color32::from_rgb(0x6e, 0x8e, 0xff));
+        assert_eq!(theme.code_bg, Color32::from_rgb(0, 0, 0));
+
+        // Re-serialize and parse again; colours survive.
+        let back: ThemeFile = serde_json::from_str(&serde_json::to_string(&file).unwrap()).unwrap();
+        assert_eq!(back.accent, file.accent);
+    }
+
+    /// `#rgb` shorthand expands to the full byte form.
+    #[test]
+    fn short_hex_expands() {
+        let json = r##"{ "c": "#f80" }"##;
+        #[derive(serde::Deserialize)]
+        struct W {
+            #[serde(with = "hex")]
+            c: Color32,
+        }
+        let w: W = serde_json::from_str(json).unwrap();
+        assert_eq!(w.c, Color32::from_rgb(0xff, 0x88, 0x00));
+    }
 }

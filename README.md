@@ -85,7 +85,9 @@ whole while the app stays responsive.
   connection, result, sort, and filter — and they all persist across restarts.
 - **Thai-friendly.** A Thai-capable font is embedded everywhere; everything is UTF-8 end
   to end.
-- **Themes.** Carbon, Midnight, and Daylight, remembered across runs.
+- **Themes.** Carbon, Midnight, and Daylight built in and remembered across runs — plus
+  custom themes: drop a `*.json` palette into the themes folder and pick it in Settings.
+  See [docs/THEMES.md](docs/THEMES.md).
 
 ### Keyboard-first
 

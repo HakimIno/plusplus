@@ -368,7 +368,6 @@ fn build_grid(
                         RowKind::Stored(r) => &result.rows[r][c],
                         _ => &null,
                     };
-                    let mut label_resp = None;
                     let (_, col_resp) = row.col(|ui| {
                         tint_row(ui, state);
                         // Skip text layout, HashMap lookups, and widget allocation for
@@ -394,19 +393,31 @@ fn build_grid(
                         } else {
                             // Show the staged value if present, else the stored one.
                             let staged = edits.staged(r, c);
-                            label_resp =
-                                Some(cell(ui, staged.unwrap_or(stored), staged.is_some(), emoji));
+                            cell(ui, staged.unwrap_or(stored), staged.is_some(), emoji);
                         }
                     });
 
-                    // Double-click to edit (binary cells aren't editable; deleted rows are
-                    // on their way out). Booleans toggle in place; everything else opens the
-                    // inline editor. The label must sense clicks (see `cell`) — plain labels
-                    // only hover, so double-click on the text itself would otherwise be lost.
-                    let dbl = col_resp.double_clicked()
-                        || label_resp.is_some_and(|r| r.double_clicked());
+                    // Entering cell-edit (binary cells aren't editable; deleted rows are on
+                    // their way out). Booleans toggle in place; everything else opens the inline
+                    // editor. `col_resp` is the egui_extras cell `Ui` response, which senses
+                    // clicks across the entire cell rect (it calls `set_min_size` on the cell) —
+                    // a single, stable hit target, so clicks register reliably anywhere.
+                    //
+                    // From idle it takes a double-click (a single click selects). But once any
+                    // editor is already open, a *single* click moves the editor straight to the
+                    // clicked cell — spreadsheet-style, so editing many cells in a row stays
+                    // fluid and never depends on landing a clean double-click on a moving target.
+                    // Never re-trigger on the cell already being edited — a stray click on its
+                    // border would otherwise reset the editor buffer mid-typing.
+                    let active_here = edits
+                        .active
+                        .as_ref()
+                        .is_some_and(|a| a.row == r && a.col == c);
+                    let start_edit = !active_here
+                        && (col_resp.double_clicked()
+                            || (edits.active.is_some() && col_resp.clicked()));
                     if editable
-                        && dbl
+                        && start_edit
                         && state != crate::edit::RowState::Deleted
                         && !matches!(stored, Value::Bytes(_))
                     {
@@ -828,8 +839,13 @@ fn cell(ui: &mut egui::Ui, value: &Value, staged: bool, emoji: &EmojiAtlas) -> e
     } else {
         palette::TEXT()
     };
+    // The label is deliberately non-interactive (no click sense, not selectable). The whole
+    // cell is one click-sensing surface — the egui_extras cell `Ui` itself (see the row loop).
+    // A click-sensing or selectable label here would be a second, text-width-only hit target
+    // overlapping the cell, and double-clicks landing astride the text/empty boundary would
+    // split across two widget ids and silently fail to register. One surface = reliable.
     let label = |ui: &mut egui::Ui, text: egui::RichText| {
-        ui.add(egui::Label::new(text.color(color)).sense(egui::Sense::click()))
+        ui.add(egui::Label::new(text.color(color)).selectable(false))
     };
     match value {
         Value::Null => label(ui, egui::RichText::new("NULL").italics()),
@@ -847,9 +863,9 @@ fn cell(ui: &mut egui::Ui, value: &Value, staged: bool, emoji: &EmojiAtlas) -> e
 }
 
 /// Render a text value that contains emoji: plain runs as labels, each emoji grapheme as an
-/// inline colour image sized to the line height. Returns a click-sensing response over the
-/// whole run so double-click-to-edit still works anywhere in the cell. When the atlas has no
-/// colour glyph (or isn't available), that grapheme falls back to monochrome text.
+/// inline colour image sized to the line height. Like [`cell`], every piece is non-interactive
+/// so the cell `Ui` stays the single click-sensing surface; the returned response is unused.
+/// When the atlas has no colour glyph (or isn't available), that grapheme falls back to text.
 fn emoji_cell(
     ui: &mut egui::Ui,
     text: &str,
@@ -862,7 +878,7 @@ fn emoji_cell(
         for run in emoji::segment(text) {
             match run {
                 emoji::Run::Text(t) if !t.is_empty() => {
-                    ui.label(egui::RichText::new(t).color(color));
+                    ui.add(egui::Label::new(egui::RichText::new(t).color(color)).selectable(false));
                 }
                 emoji::Run::Text(_) => {}
                 emoji::Run::Emoji(g) => match emoji.texture(ui.ctx(), g) {
@@ -873,11 +889,13 @@ fn emoji_cell(
                         )));
                     }
                     None => {
-                        ui.label(egui::RichText::new(g).color(color));
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(g).color(color)).selectable(false),
+                        );
                     }
                 },
             }
         }
     });
-    inner.response.interact(egui::Sense::click())
+    inner.response
 }
