@@ -728,6 +728,8 @@ pub struct DbGuiApp {
     /// Text staged for the OS clipboard this frame (e.g. copied result rows). Flushed to the
     /// clipboard at the end of `draw`, where the egui `Context` is available.
     copy_buffer: Option<String>,
+    /// Rasterizes colour emoji from the OS font for inline display in grid cells (lazy; macOS).
+    emoji: crate::emoji::EmojiAtlas,
     /// SQL statements staged for the commit-preview dialog. `None` = dialog closed;
     /// `Some(stmts)` = dialog open, waiting for the user to confirm or cancel.
     commit_pending: Option<Vec<String>>,
@@ -899,6 +901,7 @@ impl DbGuiApp {
             status_msg: "Ready".to_string(),
             error: None,
             copy_buffer: None,
+            emoji: crate::emoji::EmojiAtlas::default(),
             show_connection_tabs: true,
             show_schema_panel: true,
             show_details_panel: true,

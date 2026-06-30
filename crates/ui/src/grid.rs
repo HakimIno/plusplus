@@ -4,6 +4,7 @@
 //! Only the visible rows are rendered each frame, so it stays smooth at 100k+ rows.
 
 use crate::edit::{EditOutcome, EditorKind, Edits};
+use crate::emoji::{self, EmojiAtlas};
 use crate::style::{self, palette};
 use dbcore::{QueryResult, Value};
 use egui_extras::{Column, TableBuilder};
@@ -195,6 +196,7 @@ pub fn results_grid(
     edits: &mut Edits,
     editable: bool,
     grid_id: u64,
+    emoji: &EmojiAtlas,
 ) -> GridResponse {
     let mut out = GridResponse::default();
     let ncols = result.columns.len();
@@ -239,7 +241,7 @@ pub fn results_grid(
         if desired_total <= ui.available_width() {
             build_grid(
                 ui, result, order, sort, selection, edits, editable, gutter_w, row_height,
-                &mut out, grid_id,
+                &mut out, grid_id, emoji,
             );
         } else {
             egui::ScrollArea::horizontal()
@@ -249,7 +251,7 @@ pub fn results_grid(
                     ui.set_width(desired_total);
                     build_grid(
                         ui, result, order, sort, selection, edits, editable, gutter_w, row_height,
-                        &mut out, grid_id,
+                        &mut out, grid_id, emoji,
                     );
                 });
         }
@@ -274,6 +276,7 @@ fn build_grid(
     row_height: f32,
     out: &mut GridResponse,
     grid_id: u64,
+    emoji: &EmojiAtlas,
 ) {
     let ncols = result.columns.len();
     // Captured once per frame: a click is reported in the same frame, so these reflect the
@@ -391,7 +394,8 @@ fn build_grid(
                         } else {
                             // Show the staged value if present, else the stored one.
                             let staged = edits.staged(r, c);
-                            label_resp = Some(cell(ui, staged.unwrap_or(stored), staged.is_some()));
+                            label_resp =
+                                Some(cell(ui, staged.unwrap_or(stored), staged.is_some(), emoji));
                         }
                     });
 
@@ -754,7 +758,7 @@ mod tests {
             let mut edits = Edits::default();
             let out = ctx.run_ui(raw, |ui| {
                 egui::CentralPanel::default().show_inside(ui, |ui| {
-                    let _ = results_grid(ui, &result, &order, None, &Selection::default(), &mut edits, false, 0);
+                    let _ = results_grid(ui, &result, &order, None, &Selection::default(), &mut edits, false, 0, &EmojiAtlas::default());
                 });
             });
             collect_clash_text(&out.shapes, &mut clashes);
@@ -789,7 +793,7 @@ mod tests {
             };
             let out = ctx.run_ui(raw, |ui| {
                 egui::CentralPanel::default().show_inside(ui, |ui| {
-                    let _ = results_grid(ui, &result, &order, None, &Selection::default(), &mut edits, true, 0);
+                    let _ = results_grid(ui, &result, &order, None, &Selection::default(), &mut edits, true, 0, &EmojiAtlas::default());
                 });
             });
             // Any cell text allowed to paint below the strip top means a row is rendered
@@ -814,29 +818,66 @@ mod tests {
 }
 
 /// Render a single cell, dimming NULLs and monospacing numbers. A `staged` value (an edit
-/// not yet saved) is drawn in the success colour so it stands out from stored data.
-fn cell(ui: &mut egui::Ui, value: &Value, staged: bool) -> egui::Response {
-    let (text, color) = if staged {
-        let text = match value {
-            Value::Null => egui::RichText::new("NULL").italics(),
-            other => egui::RichText::new(other.display()),
-        };
-        (text, palette::SUCCESS())
+/// not yet saved) is drawn in the success colour so it stands out from stored data. Free-text
+/// values that contain emoji are drawn through [`emoji_cell`] so the emoji show in colour.
+fn cell(ui: &mut egui::Ui, value: &Value, staged: bool, emoji: &EmojiAtlas) -> egui::Response {
+    let color = if staged {
+        palette::SUCCESS()
+    } else if value.is_null() {
+        palette::TEXT_FAINT()
     } else {
-        match value {
-            Value::Null => (
-                egui::RichText::new("NULL").italics(),
-                palette::TEXT_FAINT(),
-            ),
-            Value::Int(_) | Value::Float(_) => (
-                egui::RichText::new(value.display()).monospace(),
-                palette::TEXT(),
-            ),
-            other => (egui::RichText::new(other.display()), palette::TEXT()),
-        }
+        palette::TEXT()
     };
-    ui.add(
-        egui::Label::new(text.color(color))
-            .sense(egui::Sense::click()),
-    )
+    let label = |ui: &mut egui::Ui, text: egui::RichText| {
+        ui.add(egui::Label::new(text.color(color)).sense(egui::Sense::click()))
+    };
+    match value {
+        Value::Null => label(ui, egui::RichText::new("NULL").italics()),
+        Value::Int(_) | Value::Float(_) => label(ui, egui::RichText::new(value.display()).monospace()),
+        // Only free text can carry emoji, so only this path consults the atlas.
+        other => {
+            let text = other.display();
+            if emoji::contains_emoji(&text) {
+                emoji_cell(ui, &text, color, emoji)
+            } else {
+                label(ui, egui::RichText::new(text))
+            }
+        }
+    }
+}
+
+/// Render a text value that contains emoji: plain runs as labels, each emoji grapheme as an
+/// inline colour image sized to the line height. Returns a click-sensing response over the
+/// whole run so double-click-to-edit still works anywhere in the cell. When the atlas has no
+/// colour glyph (or isn't available), that grapheme falls back to monochrome text.
+fn emoji_cell(
+    ui: &mut egui::Ui,
+    text: &str,
+    color: egui::Color32,
+    emoji: &EmojiAtlas,
+) -> egui::Response {
+    let h = ui.text_style_height(&egui::TextStyle::Body);
+    let inner = ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for run in emoji::segment(text) {
+            match run {
+                emoji::Run::Text(t) if !t.is_empty() => {
+                    ui.label(egui::RichText::new(t).color(color));
+                }
+                emoji::Run::Text(_) => {}
+                emoji::Run::Emoji(g) => match emoji.texture(ui.ctx(), g) {
+                    Some(id) => {
+                        ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                            id,
+                            egui::vec2(h, h),
+                        )));
+                    }
+                    None => {
+                        ui.label(egui::RichText::new(g).color(color));
+                    }
+                },
+            }
+        }
+    });
+    inner.response.interact(egui::Sense::click())
 }

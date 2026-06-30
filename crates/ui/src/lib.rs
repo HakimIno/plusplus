@@ -6,6 +6,7 @@
 mod app;
 mod autocomplete;
 mod edit;
+mod emoji;
 mod erd;
 mod filter;
 mod format;

@@ -37,3 +37,10 @@ chrono.workspace = true
 sqlformat.workspace = true
 # Date type consumed by egui_extras' DatePickerButton (the Details panel date picker).
 jiff.workspace = true
+# Rasterizes colour-emoji glyphs (sbix/COLR) from the OS emoji font to RGBA for inline grid
+# display — egui's own text engine only does monochrome outlines.
+swash = "0.2"
+# Memory-maps the (large) OS emoji font instead of reading it all into the heap.
+memmap2 = "0.9"
+# Splits cell text into grapheme clusters so emoji sequences (ZWJ, skin tones) stay intact.
+unicode-segmentation = "1"

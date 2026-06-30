@@ -1922,6 +1922,7 @@ impl DbGuiApp {
         }
         let editable = self.tabs[idx].edits.editable();
         let status_msg = &self.status_msg;
+        let emoji = &self.emoji;
         let tab_id = self.tabs[idx].id;
         let loading = self.querying_tab_id == Some(tab_id);
         let QueryTab {
@@ -1935,8 +1936,9 @@ impl DbGuiApp {
         let sort = *sort;
         egui::CentralPanel::default().show_inside(root, |ui| match result.as_ref() {
             Some(result) if result.column_count() > 0 => {
-                let resp =
-                    results_grid(ui, result, row_order, sort, selection, edits, editable, tab_id);
+                let resp = results_grid(
+                    ui, result, row_order, sort, selection, edits, editable, tab_id, emoji,
+                );
                 if let Some(cmd) = resp.sort {
                     actions.push(match cmd {
                         crate::grid::SortCmd::Toggle(col) => Action::SortBy(col),
