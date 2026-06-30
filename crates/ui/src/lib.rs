@@ -14,6 +14,7 @@ mod ghost;
 mod grid;
 mod highlight;
 mod icons;
+mod pet;
 mod schema;
 mod style;
 mod theme;

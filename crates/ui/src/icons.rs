@@ -52,7 +52,6 @@ icon_fns! {
     save       => "../assets/icons/save.svg",
     star       => "../assets/icons/star.svg",
     settings   => "../assets/icons/settings.svg",
-    empty_results => "../assets/empty-results.svg",
     db_postgres_dark => "../assets/icondb/skill-icons--postgresql-dark.svg",
     db_postgres_light => "../assets/icondb/skill-icons--postgresql-light.svg",
     db_mysql_dark => "../assets/icondb/skill-icons--mysql-dark.svg",

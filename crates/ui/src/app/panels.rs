@@ -2035,7 +2035,7 @@ impl DbGuiApp {
                 style::loading_state(ui, status_msg);
             }
             None => {
-                style::empty_illustration(ui, icons::empty_results());
+                style::empty_illustration(ui);
             }
         });
     }
