@@ -419,6 +419,86 @@ pub fn section_header(ui: &mut egui::Ui, text: &str) {
     ui.add_space(3.0);
 }
 
+/// A full-width segmented switch: a rounded track split into equal pills, the active one
+/// filled like a selected row (accent-tinted with a hairline edge). Each pill carries an
+/// icon and a left-aligned label. Returns the index that should be selected after this
+/// frame — the same value unless a pill was clicked. Used for the schema explorer's
+/// Tables / Pinned switch so the two lists no longer stack.
+pub fn segmented(
+    ui: &mut egui::Ui,
+    items: &[(egui::ImageSource<'_>, &str)],
+    selected: usize,
+) -> usize {
+    let n = items.len().max(1);
+    let height = 28.0;
+    let (rect, _) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), height), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(8), palette::SURFACE());
+    }
+    let seg_w = rect.width() / n as f32;
+    let mut result = selected;
+    for (i, (icon, label)) in items.iter().enumerate() {
+        let seg = egui::Rect::from_min_size(
+            Pos2::new(rect.min.x + seg_w * i as f32, rect.min.y),
+            Vec2::new(seg_w, height),
+        );
+        let resp = ui.interact(
+            seg,
+            ui.make_persistent_id(("segmented", i, *label)),
+            egui::Sense::click(),
+        );
+        let active = i == selected;
+        if ui.is_rect_visible(seg) {
+            if active {
+                ui.painter().rect_filled(
+                    seg.shrink(3.0),
+                    CornerRadius::same(6),
+                    palette::SELECTION(),
+                );
+            } else if resp.hovered() {
+                ui.painter().rect_filled(
+                    seg.shrink(3.0),
+                    CornerRadius::same(6),
+                    palette::SURFACE_HOVER(),
+                );
+            }
+            let color = if active {
+                palette::TEXT()
+            } else {
+                palette::TEXT_WEAK()
+            };
+            // Icon + label as one group, centred within the pill.
+            let icon_sz = 14.0;
+            let gap = 6.0;
+            let galley = ui.painter().layout_no_wrap(
+                label.to_string(),
+                FontId::new(12.0, FontFamily::Proportional),
+                color,
+            );
+            let group_w = icon_sz + gap + galley.size().x;
+            let start_x = seg.center().x - group_w / 2.0;
+            let icon_rect = egui::Rect::from_min_size(
+                Pos2::new(start_x, seg.center().y - icon_sz / 2.0),
+                Vec2::splat(icon_sz),
+            );
+            egui::Image::new(icon.clone())
+                .tint(color)
+                .paint_at(ui, icon_rect);
+            ui.painter().galley(
+                Pos2::new(icon_rect.max.x + gap, seg.center().y - galley.size().y / 2.0),
+                galley,
+                color,
+            );
+        }
+        if resp.clicked() {
+            result = i;
+        }
+    }
+    result
+}
+
 /// Centered modal window — shared baseline for Settings, connection editor, previews, etc.
 pub fn dialog_window(title: impl Into<egui::WidgetText>) -> egui::Window<'static> {
     egui::Window::new(title)
@@ -567,8 +647,8 @@ pub fn empty_state(ui: &mut egui::Ui, icon: egui::ImageSource<'static>, title: &
     });
 }
 
-/// A centred, decorative empty-state: a draggable pixel-art slime that idles, blinks and can be
-/// flung around its box. See [`crate::pet`].
+/// A decorative empty-state: a draggable pixel-art cat that idles, blinks and can be poked or
+/// flung around the whole panel. See [`crate::pet`].
 pub fn empty_illustration(ui: &mut egui::Ui) {
     crate::pet::show(ui);
 }

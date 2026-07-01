@@ -1,40 +1,42 @@
-//! A cute, draggable pixel-art slime that fills empty states (e.g. before a query is run).
+//! A cute, draggable pixel-art cat that fills empty states (e.g. before a query is run).
 //!
 //! Everything here is drawn procedurally with [`egui::Painter`] — each "pixel" is one small
-//! filled rectangle — so there is no sprite-sheet asset and no extra dependency. The blob has
+//! filled rectangle — so there is no sprite-sheet asset and no extra dependency. The cat has
 //! a tiny bit of life: it idles with a breathing bob, blinks, follows the cursor with its
-//! pupils, and can be grabbed and thrown around its box, bouncing off the floor and walls with
-//! a squash-and-stretch. State lives in egui's per-widget temp memory so it persists across
-//! frames without touching the rest of the app.
+//! pupils, twitches its whiskers, and can be grabbed and thrown around its box (or poked with
+//! a click to make it hop), bouncing off the floor and walls with a squash-and-stretch. State
+//! lives in egui's per-widget temp memory so it persists across frames without touching the
+//! rest of the app.
 
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Vec2};
 
-/// One row of the 16×16 sprite. Characters map to palette slots in [`pixel_color`]:
-/// `.` transparent · `o` outline · `b` body · `h` highlight · `s` shadow · `w` eye-white ·
-/// `c` cheek. The mouth and pupils are painted on top so they can animate.
+/// One row of the 16×16 sprite — a cat's head with two pointy ears and a little body.
+/// Characters map to palette slots in [`pixel_color`]: `.` transparent · `o` outline ·
+/// `b` body · `h` highlight · `s` shadow · `w` eye-white · `c` cheek. The nose, mouth,
+/// whiskers and pupils are painted on top so they can animate.
 const SPRITE: [&str; 16] = [
-    "................",
-    "......oooo......",
-    "....oobbbboo....",
-    "...obbbbbbbbo...",
-    "..obbhhbbbbbbo..",
-    "..obbhbbbbbbbo..",
+    "...o........o...",
+    "..obo......obo..",
+    "..obbo....obbo..",
+    ".oobbboooobbboo.",
     ".obbbbbbbbbbbbo.",
+    ".obbhbbbbbbbbbo.",
+    ".obwwbbbbbbwwbo.",
+    ".obwwbbbbbbwwbo.",
     ".obbbbbbbbbbbbo.",
-    "obbwwbbbbbbwwbbo",
-    "obbwwbbbbbbwwbbo",
-    "obbccbbbbbbccbbo",
-    "obbbbbbbbbbbbbbo",
+    ".obbccbbbbccbbo.",
     ".obbbbbbbbbbbbo.",
-    ".obbbssssssbbbo.",
-    "..obbssssssbbo..",
-    "...osssssssso...",
+    "..obbbbbbbbbbo..",
+    "..obbbbbbbbbbo..",
+    ".obbbbbbbbbbbbo.",
+    ".obbssssssssbbo.",
+    "..osssssssssso..",
 ];
 
 const GRID: f32 = 16.0;
 /// Eye-white blocks in grid coords (top-left pixel of each 2×2 eye).
-const LEFT_EYE: (f32, f32) = (3.0, 8.0);
-const RIGHT_EYE: (f32, f32) = (11.0, 8.0);
+const LEFT_EYE: (f32, f32) = (3.0, 6.0);
+const RIGHT_EYE: (f32, f32) = (11.0, 6.0);
 
 /// Persisted, per-frame physics + animation state for the blob.
 #[derive(Clone)]
@@ -105,21 +107,28 @@ fn pixel_color(ch: char, accent: Color32) -> Option<Color32> {
 
 /// Draw the empty-state pixel pet: a draggable, animated slime centred in the available area.
 pub fn show(ui: &mut egui::Ui) {
-    let accent = crate::style::palette::ACCENT();
+    // Soften the accent toward the panel background so the cat reads as a gentle, faded pastel
+    // rather than a vivid block of colour.
+    let accent = blend(
+        crate::style::palette::ACCENT(),
+        crate::style::palette::PANEL(),
+        0.4,
+    );
     let dark = blend(accent, Color32::from_rgb(40, 32, 54), 0.62);
 
-    ui.add_space((ui.available_height() * 0.18).max(16.0));
-    ui.vertical_centered(|ui| {
-        let width = ui.available_width().min(300.0);
-        let height = (width * 0.62).min(ui.available_height().max(60.0));
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
+    ui.scope(|ui| {
+        // Claim the whole panel as the playground so there's plenty of room to fling the cat.
+        let rect = ui.available_rect_before_wrap();
+        ui.allocate_rect(rect, Sense::hover());
         if !ui.is_rect_visible(rect) {
             return;
         }
 
-        // Pixel size so the blob is roughly half the box height; the playable floor sits a
-        // little above the bottom edge.
-        let px = (height * 0.5 / GRID).floor().max(2.0);
+        // Pixel size scaled to the smaller side for a comfortable medium cat — big enough to
+        // read clearly, small enough to leave room to play; the floor sits above the bottom.
+        let px = (rect.width().min(rect.height()) * 0.22 / GRID)
+            .floor()
+            .clamp(3.0, 8.0);
         let half = GRID * px / 2.0;
         let floor_y = rect.bottom() - half - px * 1.5;
         let id = ui.id().with("empty_pet");
@@ -167,6 +176,14 @@ pub fn show(ui: &mut egui::Ui) {
             pet.grabbed = false;
             // Cap the throw so a fast flick doesn't rocket it off-box.
             pet.vel = pet.vel.clamp(Vec2::splat(-900.0), Vec2::splat(900.0));
+        }
+        // A poke (plain click) makes the cat perk up and hop happily.
+        if resp.clicked() {
+            pet.vel.y = -430.0;
+            pet.vel.x = (rand01(t as f32 + 2.0) - 0.5) * 220.0;
+            pet.squash = 1.2;
+            pet.blink = 0.001;
+            pet.next_hop = t + 2.5;
         }
 
         // --- physics when free ----------------------------------------------------------
@@ -246,7 +263,7 @@ pub fn show(ui: &mut egui::Ui) {
         let painter = ui.painter_at(rect);
         paint_shadow(&painter, pet.pos, floor_y, half, px, dark, pet.squash);
         paint_sprite(&painter, &pet, accent, half, px);
-        paint_face(&painter, &pet, half, px, dark, lid);
+        paint_face(&painter, &pet, accent, half, px, dark, lid);
 
         ui.data_mut(|d| d.insert_temp(id, pet));
         ui.ctx().request_repaint();
@@ -297,8 +314,17 @@ fn paint_sprite(painter: &egui::Painter, pet: &Pet, accent: Color32, half: f32, 
     }
 }
 
-/// Pupils (tracking the cursor), eye-shine, blink lids and a small smile, drawn over the body.
-fn paint_face(painter: &egui::Painter, pet: &Pet, half: f32, px: f32, dark: Color32, lid: f32) {
+/// Pupils (tracking the cursor), eye-shine, blink lids, and the cat muzzle — pink nose, an
+/// "ω" mouth and whiskers — drawn over the body.
+fn paint_face(
+    painter: &egui::Painter,
+    pet: &Pet,
+    accent: Color32,
+    half: f32,
+    px: f32,
+    dark: Color32,
+    lid: f32,
+) {
     let sy = pet.squash;
     let sx = 1.0 + (1.0 - sy) * 0.6;
     let pw = px * sx;
@@ -333,21 +359,52 @@ fn paint_face(painter: &egui::Painter, pet: &Pet, half: f32, px: f32, dark: Colo
         }
     }
 
-    // A small smile centred under the eyes (hidden when squished flat).
+    // Cat muzzle: a pink nose, a soft "ω" mouth, and whiskers — hidden while blinking so the
+    // closed-eye arcs read as a happy squint.
     if lid <= 0.55 {
-        let mouth = Pos2::new(pet.pos.x, top + 11.5 * ph);
-        let w = pw * 2.2;
+        let nose_c = Pos2::new(pet.pos.x, top + 9.0 * ph);
+        painter.rect_filled(
+            Rect::from_center_size(nose_c, egui::vec2(pw * 1.4, ph * 1.0)),
+            egui::CornerRadius::same((ph * 0.5) as u8),
+            Color32::from_rgb(255, 150, 170),
+        );
+
+        // Stem from the nose, then the two humps of the "ω".
+        let mouth = Stroke::new((ph * 0.42).max(1.0), dark);
+        let my = nose_c.y + ph * 1.1;
         painter.line_segment(
-            [Pos2::new(mouth.x - w / 2.0, mouth.y), Pos2::new(mouth.x - w * 0.2, mouth.y + ph * 0.6)],
-            Stroke::new(ph * 0.5, dark),
+            [Pos2::new(nose_c.x, nose_c.y + ph * 0.4), Pos2::new(nose_c.x, my)],
+            mouth,
         );
         painter.line_segment(
-            [Pos2::new(mouth.x - w * 0.2, mouth.y + ph * 0.6), Pos2::new(mouth.x + w * 0.2, mouth.y + ph * 0.6)],
-            Stroke::new(ph * 0.5, dark),
+            [Pos2::new(nose_c.x, my), Pos2::new(nose_c.x - pw * 1.0, my - ph * 0.4)],
+            mouth,
         );
         painter.line_segment(
-            [Pos2::new(mouth.x + w * 0.2, mouth.y + ph * 0.6), Pos2::new(mouth.x + w / 2.0, mouth.y)],
-            Stroke::new(ph * 0.5, dark),
+            [Pos2::new(nose_c.x, my), Pos2::new(nose_c.x + pw * 1.0, my - ph * 0.4)],
+            mouth,
         );
+
+        // Whiskers: two thin strokes fanning out from each cheek, with a tiny cursor-driven
+        // twitch so they feel alive.
+        let wh = Stroke::new((ph * 0.28).max(1.0), blend(dark, accent, 0.35));
+        let twitch = pet.look.y * ph * 0.3;
+        for side in [-1.0_f32, 1.0] {
+            let bx = pet.pos.x + side * pw * 2.2;
+            painter.line_segment(
+                [
+                    Pos2::new(bx, nose_c.y - ph * 0.2),
+                    Pos2::new(bx + side * pw * 2.6, nose_c.y - ph * 0.9 + twitch),
+                ],
+                wh,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(bx, nose_c.y + ph * 0.5),
+                    Pos2::new(bx + side * pw * 2.6, nose_c.y + ph * 0.7 + twitch),
+                ],
+                wh,
+            );
+        }
     }
 }

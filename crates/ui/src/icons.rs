@@ -51,6 +51,7 @@ icon_fns! {
     close      => "../assets/icons/close.svg",
     save       => "../assets/icons/save.svg",
     star       => "../assets/icons/star.svg",
+    star_filled => "../assets/icons/star-filled.svg",
     settings   => "../assets/icons/settings.svg",
     db_postgres_dark => "../assets/icondb/skill-icons--postgresql-dark.svg",
     db_postgres_light => "../assets/icondb/skill-icons--postgresql-light.svg",

@@ -1485,12 +1485,32 @@ impl DbGuiApp {
                     )
             })
             .collect();
+        // With bookmarks present, a "Pinned / Tables" segmented switch replaces the old
+        // stacked groups: only one list shows at a time, so a pinned table is never drawn
+        // (and highlighted) twice at once. The choice persists in egui memory across frames;
+        // it falls back to the full list whenever nothing is pinned.
+        let mut show_pinned = false;
         if !pinned.is_empty() {
-            style::section_header(ui, "Pinned");
+            let tab_id = ui.make_persistent_id("schema_pinned_tab");
+            show_pinned = ui.data(|d| d.get_temp::<bool>(tab_id).unwrap_or(false));
+            let choice = style::segmented(
+                ui,
+                &[
+                    (icons::table(), "Tables"),
+                    (icons::star_filled(), "Pinned"),
+                ],
+                usize::from(show_pinned),
+            );
+            show_pinned = choice == 1;
+            ui.data_mut(|d| d.insert_temp(tab_id, show_pinned));
+            ui.add_space(4.0);
+        }
+
+        if show_pinned {
             for table in &pinned {
                 self.schema_table_row(ui, active, table, true, "pin", actions);
             }
-            style::section_header(ui, "Tables");
+            return;
         }
 
         for table in &active.schema.tables {
@@ -1539,18 +1559,12 @@ impl DbGuiApp {
             ui.allocate_exact_size(egui::vec2(full_w, ROW_H), egui::Sense::click());
         let row_resp = row_resp.on_hover_text("Click to preview · double-click to open");
 
-        // Pill background: a filled accent-tinted selection (with a hairline accent edge that
-        // reads as a soft glow) when selected, a plain raised fill on hover.
+        // Pill background: a soft accent-tinted selection fill when selected (no border), a
+        // plain raised fill on hover.
         if ui.is_rect_visible(row_rect) {
             let r = egui::CornerRadius::same(7);
             if selected {
-                ui.painter().rect(
-                    row_rect,
-                    r,
-                    palette::SELECTION(),
-                    egui::Stroke::new(1.0, palette::ACCENT()),
-                    egui::StrokeKind::Inside,
-                );
+                ui.painter().rect_filled(row_rect, r, palette::SELECTION());
             } else if row_resp.hovered() {
                 ui.painter().rect_filled(row_rect, r, palette::SURFACE_HOVER());
             }
@@ -1588,19 +1602,41 @@ impl DbGuiApp {
                         egui::Rect::from_center_size(icon_rect.center(), egui::vec2(15.0, 15.0)),
                     );
 
-                    // Name, truncated, leaving a constant slot for the trailing pin so hovering
-                    // never reflows the row.
-                    let label_w = (ui.available_width() - 22.0).max(10.0);
-                    ui.add_sized(
-                        [label_w, ROW_H],
-                        egui::Label::new(egui::RichText::new(&table.name).color(palette::TEXT()))
-                            .truncate()
-                            .selectable(false),
+                    // Split the strip left of the row edge: the pin sits flush right, the name
+                    // fills everything to its left (left-aligned right after the icon). Computing
+                    // the rects directly keeps the star pinned to the edge regardless of name
+                    // length, and reserves its slot so hovering never reflows the row.
+                    let rest = ui.available_rect_before_wrap();
+                    ui.allocate_rect(rest, egui::Sense::hover());
+                    let star_rect = egui::Rect::from_min_size(
+                        egui::pos2(rest.right() - 20.0, rest.top()),
+                        egui::vec2(20.0, ROW_H),
+                    );
+                    let label_rect = egui::Rect::from_min_max(
+                        rest.min,
+                        egui::pos2(star_rect.left() - 4.0, rest.bottom()),
+                    );
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(label_rect)
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                        |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&table.name).color(palette::TEXT()),
+                                )
+                                .truncate()
+                                .selectable(false),
+                            );
+                        },
                     );
 
                     // Pin (star) toggle: always shown when pinned, otherwise only on hover.
-                    let (star_rect, star_resp) =
-                        ui.allocate_exact_size(egui::vec2(20.0, ROW_H), egui::Sense::click());
+                    let star_resp = ui.interact(
+                        star_rect,
+                        ui.make_persistent_id((id_salt, "star", table.name.as_str())),
+                        egui::Sense::click(),
+                    );
                     if (pinned || selected || row_resp.hovered()) && ui.is_rect_visible(star_rect) {
                         let color = if pinned {
                             palette::ACCENT()
@@ -1609,7 +1645,14 @@ impl DbGuiApp {
                         } else {
                             palette::TEXT_FAINT()
                         };
-                        egui::Image::new(icons::star()).tint(color).paint_at(
+                        // Solid star once pinned so the "on" state reads at a glance; a hollow
+                        // outline for the hover-to-pin affordance.
+                        let star = if pinned {
+                            icons::star_filled()
+                        } else {
+                            icons::star()
+                        };
+                        egui::Image::new(star).tint(color).paint_at(
                             ui,
                             egui::Rect::from_center_size(
                                 star_rect.center(),
@@ -1655,7 +1698,28 @@ impl DbGuiApp {
         if toggle_open {
             state.toggle(ui);
         }
-        state.show_body_indented(&row_resp, ui, |ui| schema_table_body(ui, table));
+        // Children (columns / indexes / FKs) as a proper tree: indented well past the parent
+        // and connected by a subtle vertical guide line, so the nesting reads at a glance.
+        const CHILD_INDENT: f32 = 28.0;
+        let guide_x = row_rect.left() + 17.0;
+        let body = state.show_body_unindented(ui, |ui| {
+            ui.horizontal_top(|ui| {
+                ui.add_space(CHILD_INDENT);
+                ui.vertical(|ui| {
+                    ui.add_space(1.0);
+                    schema_table_body(ui, table);
+                    ui.add_space(1.0);
+                });
+            });
+        });
+        if let Some(inner) = body {
+            let rect = inner.response.rect;
+            ui.painter().vline(
+                guide_x,
+                egui::Rangef::new(rect.top(), (rect.bottom() - 5.0).max(rect.top())),
+                egui::Stroke::new(1.0, palette::BORDER()),
+            );
+        }
     }
 
     /// Render the non-table schema objects — views, functions, procedures, triggers — as
