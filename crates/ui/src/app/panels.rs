@@ -1,4 +1,6 @@
-use super::{Action, Busy, ConnField, ConnTestState, DbGuiApp, PageNav, QueryTab, TabView};
+use super::{
+    ActiveConnection, Action, Busy, ConnField, ConnTestState, DbGuiApp, PageNav, QueryTab, TabView,
+};
 use crate::filter::{self, FilterEvent};
 use crate::grid::results_grid;
 use crate::icons;
@@ -1461,172 +1463,199 @@ impl DbGuiApp {
         });
         ui.add_space(2.0);
 
+        let conn_id = active.config_id.as_str();
         let filter = self.schema_filter.to_lowercase();
+        let visible =
+            |t: &dbcore::TableInfo| filter.is_empty() || t.name.to_lowercase().contains(&filter);
+
+        // Pinned tables first: any bookmarked table for this connection that is present in the
+        // current schema and matches the filter, shown as a small "Pinned" group so the tables
+        // you actually use sit one click away at the top.
+        let pinned: Vec<&dbcore::TableInfo> = active
+            .schema
+            .tables
+            .iter()
+            .filter(|t| {
+                visible(t)
+                    && dbcore::bookmarks::is_pinned(
+                        &self.bookmarks,
+                        conn_id,
+                        t.schema.as_deref(),
+                        &t.name,
+                    )
+            })
+            .collect();
+        if !pinned.is_empty() {
+            style::section_header(ui, "Pinned");
+            for table in &pinned {
+                self.schema_table_row(ui, active, table, true, "pin", actions);
+            }
+            style::section_header(ui, "Tables");
+        }
+
         for table in &active.schema.tables {
-            if !filter.is_empty() && !table.name.to_lowercase().contains(&filter) {
+            if !visible(table) {
                 continue;
             }
-            let id = ui.make_persistent_id(("tbl", table.name.as_str()));
-            let (_toggle, header, _body) =
-                egui::collapsing_header::CollapsingState::load_with_default_open(
-                    ui.ctx(),
-                    id,
-                    false,
-                )
-                .show_header(ui, |ui| {
-                    icons::show_native(ui, icons::table(), 15.0);
-                    ui.add_space(2.0);
-                    style::truncated_label(ui, &table.name, None, false, egui::Sense::click())
-                })
-                .body(|ui| {
-                    for col in &table.columns {
-                        ui.horizontal(|ui| {
-                            let glyph = if col.primary_key {
-                                icons::key()
-                            } else {
-                                icons::column()
-                            };
-                            icons::show_weak(ui, glyph, 13.0);
-                            ui.add_space(2.0);
-                            style::truncated_label(
-                                ui,
-                                &col.name,
-                                None,
-                                false,
-                                egui::Sense::hover(),
-                            );
-                            let nn = if col.nullable { "" } else { " · not null" };
-                            let meta = format!("{}{nn}", col.data_type);
-                            style::truncated_label(
-                                ui,
-                                &meta,
-                                Some(&meta),
-                                true,
-                                egui::Sense::hover(),
-                            );
-                        });
-                    }
-                    if !table.indexes.is_empty() {
-                        ui.add_space(3.0);
-                        for idx in &table.indexes {
-                            ui.horizontal(|ui| {
-                                icons::show_weak(ui, icons::index(), 13.0);
-                                ui.add_space(2.0);
-                                let u = if idx.unique { "unique " } else { "" };
-                                let detail =
-                                    format!("{u}{} ({})", idx.name, idx.columns.join(", "));
-                                style::truncated_label(
-                                    ui,
-                                    &detail,
-                                    Some(&detail),
-                                    true,
-                                    egui::Sense::hover(),
-                                );
-                            });
-                        }
-                    }
-                    if !table.foreign_keys.is_empty() {
-                        ui.add_space(3.0);
-                        for fk in &table.foreign_keys {
-                            ui.horizontal(|ui| {
-                                icons::show_weak(ui, icons::connect(), 13.0);
-                                ui.add_space(2.0);
-                                let detail = fk.display();
-                                let hover = if fk.name.is_empty() {
-                                    format!("{detail} · on delete {}", fk.on_delete)
-                                } else {
-                                    format!(
-                                        "{} · {detail} · on delete {}",
-                                        fk.name, fk.on_delete
-                                    )
-                                };
-                                style::truncated_label(
-                                    ui,
-                                    &detail,
-                                    Some(&hover),
-                                    true,
-                                    egui::Sense::hover(),
-                                );
-                            });
-                        }
-                    }
-                });
-
-            let resp = header
-                .inner
-                .on_hover_text("Click to preview · double-click to open");
-            resp.context_menu(|ui| {
-                ui.set_min_width(180.0);
-                if icons::button(ui, icons::edit(), "Edit Table…", true).clicked() {
-                    actions.push(Action::OpenEditTable(table.clone()));
-                    ui.close();
-                }
-                if icons::button(ui, icons::table(), "Clone Table…", true)
-                    .on_hover_text("Copy this table's structure and rows into a new table")
-                    .clicked()
-                {
-                    actions.push(Action::CloneTable(table.clone()));
-                    ui.close();
-                }
-                let export_label = egui::Image::new(icons::save())
-                    .fit_to_exact_size(egui::vec2(icons::SIZE, icons::SIZE))
-                    .tint(ui.visuals().widgets.inactive.fg_stroke.color);
-                ui.menu_button((export_label, "Export Table…"), |ui| {
-                    ui.set_min_width(160.0);
-                    for fmt in [dbcore::ExportFormat::Csv, dbcore::ExportFormat::Json] {
-                        if ui
-                            .button(format!("Export as {}…", fmt.label()))
-                            .on_hover_text("Stream every row of this table to a file")
-                            .clicked()
-                        {
-                            actions.push(Action::ExportTable {
-                                table: table.clone(),
-                                format: fmt,
-                            });
-                            ui.close();
-                        }
-                    }
-                });
-                ui.separator();
-                if icons::button(ui, icons::warning(), "Truncate Table…", true)
-                    .on_hover_text("Remove all rows but keep the table")
-                    .clicked()
-                {
-                    actions.push(Action::TruncateTable(table.clone()));
-                    ui.close();
-                }
-                if icons::button(ui, icons::trash(), "Drop Table…", true)
-                    .on_hover_text("Delete this table and all of its data")
-                    .clicked()
-                {
-                    actions.push(Action::DropTable(table.clone()));
-                    ui.close();
-                }
-            });
-            // Single-click previews (reuses the italic preview tab); double-click pins.
-            let pin = resp.double_clicked();
-            if resp.clicked() || pin {
-                // Carry the table + its primary key so the previewed rows become editable.
-                let source = crate::edit::EditSource {
-                    schema: table.schema.clone(),
-                    table: table.name.clone(),
-                    pk_cols: table
-                        .columns
-                        .iter()
-                        .filter(|c| c.primary_key)
-                        .map(|c| c.name.clone())
-                        .collect(),
-                };
-                actions.push(Action::OpenTable {
-                    sql: active.db.kind().preview_query(&table.qualified(active.db.kind()), 100),
-                    source,
-                    pin,
-                });
-            }
+            let is_pinned = dbcore::bookmarks::is_pinned(
+                &self.bookmarks,
+                conn_id,
+                table.schema.as_deref(),
+                &table.name,
+            );
+            self.schema_table_row(ui, active, table, is_pinned, "tbl", actions);
         }
 
         // Views, functions, procedures, and triggers follow the tables.
         self.schema_object_tree(ui, actions);
+    }
+
+    /// One table entry in the schema explorer: a modern full-width row — a rounded
+    /// selection/hover pill, an accent table icon, the name, and a pin (star) toggle — with
+    /// the table's columns / indexes / foreign keys as a collapsible body. Used by both the
+    /// "Pinned" group and the main table list; `id_salt` keeps their expand state independent.
+    fn schema_table_row(
+        &self,
+        ui: &mut egui::Ui,
+        active: &ActiveConnection,
+        table: &dbcore::TableInfo,
+        pinned: bool,
+        id_salt: &str,
+        actions: &mut Vec<Action>,
+    ) {
+        use egui::collapsing_header::CollapsingState;
+        const ROW_H: f32 = 26.0;
+
+        // Selected = this table is what the active tab is currently showing.
+        let selected = self.tab().edits.source.as_ref().is_some_and(|s| {
+            s.schema.as_deref() == table.schema.as_deref() && s.table == table.name
+        });
+
+        let id = ui.make_persistent_id((id_salt, table.name.as_str()));
+        let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, false);
+
+        let full_w = ui.available_width();
+        let (row_rect, row_resp) =
+            ui.allocate_exact_size(egui::vec2(full_w, ROW_H), egui::Sense::click());
+        let row_resp = row_resp.on_hover_text("Click to preview · double-click to open");
+
+        // Pill background: a filled accent-tinted selection (with a hairline accent edge that
+        // reads as a soft glow) when selected, a plain raised fill on hover.
+        if ui.is_rect_visible(row_rect) {
+            let r = egui::CornerRadius::same(7);
+            if selected {
+                ui.painter().rect(
+                    row_rect,
+                    r,
+                    palette::SELECTION(),
+                    egui::Stroke::new(1.0, palette::ACCENT()),
+                    egui::StrokeKind::Inside,
+                );
+            } else if row_resp.hovered() {
+                ui.painter().rect_filled(row_rect, r, palette::SURFACE_HOVER());
+            }
+        }
+
+        // Row content, painted on top of the pill. The chevron and the star are their own
+        // interactive widgets layered above `row_resp`, so they capture their own clicks while
+        // the rest of the row drives preview/open.
+        let mut toggle_open = false;
+        ui.scope_builder(
+            egui::UiBuilder::new().max_rect(row_rect.shrink2(egui::vec2(6.0, 0.0))),
+            |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+
+                    // Disclosure chevron — rotates from ▸ to ▾ as the body opens.
+                    let (chev_rect, chev_resp) =
+                        ui.allocate_exact_size(egui::vec2(12.0, ROW_H), egui::Sense::click());
+                    paint_chevron(
+                        ui.painter(),
+                        chev_rect.center(),
+                        state.openness(ui.ctx()),
+                        palette::TEXT_FAINT(),
+                    );
+                    if chev_resp.clicked() {
+                        toggle_open = true;
+                    }
+
+                    // Accent table icon (neutral on the selected pill for contrast).
+                    let icon_color = if selected { palette::TEXT() } else { palette::ACCENT() };
+                    let (icon_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(16.0, ROW_H), egui::Sense::hover());
+                    egui::Image::new(icons::table()).tint(icon_color).paint_at(
+                        ui,
+                        egui::Rect::from_center_size(icon_rect.center(), egui::vec2(15.0, 15.0)),
+                    );
+
+                    // Name, truncated, leaving a constant slot for the trailing pin so hovering
+                    // never reflows the row.
+                    let label_w = (ui.available_width() - 22.0).max(10.0);
+                    ui.add_sized(
+                        [label_w, ROW_H],
+                        egui::Label::new(egui::RichText::new(&table.name).color(palette::TEXT()))
+                            .truncate()
+                            .selectable(false),
+                    );
+
+                    // Pin (star) toggle: always shown when pinned, otherwise only on hover.
+                    let (star_rect, star_resp) =
+                        ui.allocate_exact_size(egui::vec2(20.0, ROW_H), egui::Sense::click());
+                    if (pinned || selected || row_resp.hovered()) && ui.is_rect_visible(star_rect) {
+                        let color = if pinned {
+                            palette::ACCENT()
+                        } else if star_resp.hovered() {
+                            palette::TEXT()
+                        } else {
+                            palette::TEXT_FAINT()
+                        };
+                        egui::Image::new(icons::star()).tint(color).paint_at(
+                            ui,
+                            egui::Rect::from_center_size(
+                                star_rect.center(),
+                                egui::vec2(14.0, 14.0),
+                            ),
+                        );
+                    }
+                    if star_resp.clicked() {
+                        actions.push(Action::ToggleBookmark {
+                            schema: table.schema.clone(),
+                            table: table.name.clone(),
+                        });
+                    }
+                    let _ = star_resp.on_hover_text(if pinned { "Unpin" } else { "Pin to top" });
+                });
+            },
+        );
+
+        // Right-click anywhere on the row opens the full table actions menu.
+        row_resp.context_menu(|ui| table_actions_menu(ui, table, pinned, actions));
+
+        // Single-click previews (reuses the italic preview tab); double-click pins a tab.
+        let open_pin = row_resp.double_clicked();
+        if row_resp.clicked() || open_pin {
+            // Carry the table + its primary key so the previewed rows become editable.
+            let source = crate::edit::EditSource {
+                schema: table.schema.clone(),
+                table: table.name.clone(),
+                pk_cols: table
+                    .columns
+                    .iter()
+                    .filter(|c| c.primary_key)
+                    .map(|c| c.name.clone())
+                    .collect(),
+            };
+            actions.push(Action::OpenTable {
+                sql: active.db.kind().preview_query(&table.qualified(active.db.kind()), 100),
+                source,
+                pin: open_pin,
+            });
+        }
+
+        if toggle_open {
+            state.toggle(ui);
+        }
+        state.show_body_indented(&row_resp, ui, |ui| schema_table_body(ui, table));
     }
 
     /// Render the non-table schema objects — views, functions, procedures, triggers — as
@@ -3881,6 +3910,135 @@ fn routine_editor_view(
                     .hint_text(routine_body_hint(kind, is_fn)),
             );
         });
+}
+
+/// Paint a small disclosure triangle centred at `center`, rotating from right-pointing
+/// (`openness == 0`) to down-pointing (`openness == 1`) so it animates with the body.
+fn paint_chevron(painter: &egui::Painter, center: egui::Pos2, openness: f32, color: egui::Color32) {
+    let a = openness * std::f32::consts::FRAC_PI_2;
+    let (s, c) = a.sin_cos();
+    let rot = |p: egui::Vec2| egui::vec2(p.x * c - p.y * s, p.x * s + p.y * c);
+    const R: f32 = 3.5;
+    let pts = [
+        egui::vec2(-R * 0.5, -R),
+        egui::vec2(R * 0.9, 0.0),
+        egui::vec2(-R * 0.5, R),
+    ];
+    let poly: Vec<egui::Pos2> = pts.iter().map(|p| center + rot(*p)).collect();
+    painter.add(egui::Shape::convex_polygon(poly, color, egui::Stroke::NONE));
+}
+
+/// The expandable body of a table row in the explorer: its columns (PK marked), then any
+/// indexes and foreign keys. Shared by the "Pinned" group and the main table list.
+fn schema_table_body(ui: &mut egui::Ui, table: &dbcore::TableInfo) {
+    for col in &table.columns {
+        ui.horizontal(|ui| {
+            let glyph = if col.primary_key {
+                icons::key()
+            } else {
+                icons::column()
+            };
+            icons::show_weak(ui, glyph, 13.0);
+            ui.add_space(2.0);
+            style::truncated_label(ui, &col.name, None, false, egui::Sense::hover());
+            let nn = if col.nullable { "" } else { " · not null" };
+            let meta = format!("{}{nn}", col.data_type);
+            style::truncated_label(ui, &meta, Some(&meta), true, egui::Sense::hover());
+        });
+    }
+    if !table.indexes.is_empty() {
+        ui.add_space(3.0);
+        for idx in &table.indexes {
+            ui.horizontal(|ui| {
+                icons::show_weak(ui, icons::index(), 13.0);
+                ui.add_space(2.0);
+                let u = if idx.unique { "unique " } else { "" };
+                let detail = format!("{u}{} ({})", idx.name, idx.columns.join(", "));
+                style::truncated_label(ui, &detail, Some(&detail), true, egui::Sense::hover());
+            });
+        }
+    }
+    if !table.foreign_keys.is_empty() {
+        ui.add_space(3.0);
+        for fk in &table.foreign_keys {
+            ui.horizontal(|ui| {
+                icons::show_weak(ui, icons::connect(), 13.0);
+                ui.add_space(2.0);
+                let detail = fk.display();
+                let hover = if fk.name.is_empty() {
+                    format!("{detail} · on delete {}", fk.on_delete)
+                } else {
+                    format!("{} · {detail} · on delete {}", fk.name, fk.on_delete)
+                };
+                style::truncated_label(ui, &detail, Some(&hover), true, egui::Sense::hover());
+            });
+        }
+    }
+}
+
+/// The table actions menu (pin, edit, clone, export, truncate, drop) shared by the row's
+/// right-click context menu. `pinned` selects the pin/unpin wording.
+fn table_actions_menu(
+    ui: &mut egui::Ui,
+    table: &dbcore::TableInfo,
+    pinned: bool,
+    actions: &mut Vec<Action>,
+) {
+    ui.set_min_width(180.0);
+    let pin_label = if pinned { "Unpin from Top" } else { "Pin to Top" };
+    if icons::button(ui, icons::star(), pin_label, true).clicked() {
+        actions.push(Action::ToggleBookmark {
+            schema: table.schema.clone(),
+            table: table.name.clone(),
+        });
+        ui.close();
+    }
+    ui.separator();
+    if icons::button(ui, icons::edit(), "Edit Table…", true).clicked() {
+        actions.push(Action::OpenEditTable(table.clone()));
+        ui.close();
+    }
+    if icons::button(ui, icons::table(), "Clone Table…", true)
+        .on_hover_text("Copy this table's structure and rows into a new table")
+        .clicked()
+    {
+        actions.push(Action::CloneTable(table.clone()));
+        ui.close();
+    }
+    let export_label = egui::Image::new(icons::save())
+        .fit_to_exact_size(egui::vec2(icons::SIZE, icons::SIZE))
+        .tint(ui.visuals().widgets.inactive.fg_stroke.color);
+    ui.menu_button((export_label, "Export Table…"), |ui| {
+        ui.set_min_width(160.0);
+        for fmt in [dbcore::ExportFormat::Csv, dbcore::ExportFormat::Json] {
+            if ui
+                .button(format!("Export as {}…", fmt.label()))
+                .on_hover_text("Stream every row of this table to a file")
+                .clicked()
+            {
+                actions.push(Action::ExportTable {
+                    table: table.clone(),
+                    format: fmt,
+                });
+                ui.close();
+            }
+        }
+    });
+    ui.separator();
+    if icons::button(ui, icons::warning(), "Truncate Table…", true)
+        .on_hover_text("Remove all rows but keep the table")
+        .clicked()
+    {
+        actions.push(Action::TruncateTable(table.clone()));
+        ui.close();
+    }
+    if icons::button(ui, icons::trash(), "Drop Table…", true)
+        .on_hover_text("Delete this table and all of its data")
+        .clicked()
+    {
+        actions.push(Action::DropTable(table.clone()));
+        ui.close();
+    }
 }
 
 /// A collapsible group header ("Views (3)", "Triggers (1)", …) for a class of schema objects

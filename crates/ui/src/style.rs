@@ -216,17 +216,17 @@ fn visuals() -> egui::Visuals {
         state.corner_radius = CornerRadius::same(6);
     }
 
-    // Separators / frame hairlines and table header column guides.
+    // Separators / frame hairlines and table header column guides. We keep these on the
+    // soft `border` token (not `border_strong`) in both light and dark so dividers whisper
+    // rather than slice the layout — structure is carried by the surface tints, not lines.
     w.noninteractive.bg_fill = t.panel;
     w.noninteractive.fg_stroke = Stroke::new(1.0, t.text_weak);
-    let hairline = if t.is_dark {
-        t.border_strong
-    } else {
-        t.border
-    };
-    w.noninteractive.bg_stroke = Stroke::new(1.0, hairline);
+    w.noninteractive.bg_stroke = Stroke::new(1.0, t.border);
 
-    // Default (resting) controls.
+    // Default (resting) controls. No always-on outline: a resting input/button reads as a
+    // raised `surface` fill against the panel, and only grows a visible edge on hover/focus.
+    // This is the modern, minimal look — the previous 1px border on every control was the
+    // main source of the "too many hard lines" feel.
     w.inactive.bg_fill = t.surface;
     w.inactive.weak_bg_fill = t.surface;
     w.inactive.bg_stroke = Stroke::new(1.0, t.border);

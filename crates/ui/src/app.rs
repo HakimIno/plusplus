@@ -593,6 +593,12 @@ enum Action {
     TruncateTable(TableInfo),
     /// Stage a `DROP TABLE` migration for a sidebar table (opens the DDL preview).
     DropTable(TableInfo),
+    /// Pin/unpin a table in the schema explorer (toggles its "Pinned" bookmark for the
+    /// active connection). Carries the table's schema and bare name.
+    ToggleBookmark {
+        schema: Option<String>,
+        table: String,
+    },
     /// Open the object editor to create a brand-new view.
     OpenNewView,
     /// Open the object editor to modify an existing view.
@@ -751,6 +757,9 @@ pub struct DbGuiApp {
     /// All saved queries, kept in memory and mirrored to `favorites.json` on every change.
     /// Loaded once at startup so the Saved button's count is correct even before it opens.
     favorites_cache: Vec<dbcore::Favorite>,
+    /// Pinned tables, kept in memory and mirrored to `bookmarks.json` on every change. Loaded
+    /// once at startup so the schema explorer's "Pinned" group is populated from launch.
+    bookmarks: Vec<dbcore::Bookmark>,
     /// Whether the Favorites panel (beside the SQL editor, toggled by the Saved button) is open.
     favorites_open: bool,
     /// Open name-this-favorite dialog. `None` = closed.
@@ -813,6 +822,10 @@ impl DbGuiApp {
         // Load saved queries so the Favorites toolbar count is right from launch. Also kept
         // out of `construct` so tests don't read the user's favorites file.
         app.favorites_cache = dbcore::favorites::load().unwrap_or_default();
+
+        // Load pinned tables so the explorer's "Pinned" group is right from launch. Kept out
+        // of `construct` so tests don't read the user's bookmarks file.
+        app.bookmarks = dbcore::bookmarks::load().unwrap_or_default();
 
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         if crate::update::automatic_updates_supported() {
@@ -923,6 +936,7 @@ impl DbGuiApp {
             history_cache: Vec::new(),
             // Loaded from disk in `new` (this builder stays config-dir-free for tests).
             favorites_cache: Vec::new(),
+            bookmarks: Vec::new(),
             favorites_open: false,
             favorite_pending: None,
             erd: None,
@@ -2874,6 +2888,21 @@ impl DbGuiApp {
                 )]);
                 self.error = None;
             }
+            Action::ToggleBookmark { schema, table } => {
+                // Bookmarks are keyed by the active connection's config id; ignore the toggle
+                // if (somehow) there's no live connection to attribute it to.
+                if let Some(conn_id) = self.active().map(|a| a.config_id.clone()) {
+                    dbcore::bookmarks::toggle(
+                        &mut self.bookmarks,
+                        &conn_id,
+                        schema.as_deref(),
+                        &table,
+                    );
+                    if let Err(e) = dbcore::bookmarks::save(&self.bookmarks) {
+                        self.error = Some(format!("Couldn't save bookmarks: {e}"));
+                    }
+                }
+            }
             Action::GenerateSchema => {
                 let Some(editor) = &self.tab().schema_editor else {
                     return;
@@ -4216,6 +4245,59 @@ mod tests {
         // Cancel returns the central panel to the grid views.
         app.apply_action(Action::CancelSchema);
         assert!(app.tab().schema_editor.is_none());
+    }
+
+    /// The schema explorer renders pinned + unpinned table rows without id clashes. A pinned
+    /// table appears both in the "Pinned" group and the main list, so the two rows must key
+    /// their collapsing state independently (different `id_salt`).
+    #[test]
+    fn probe_schema_explorer_bookmarks() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::style::apply(&ctx);
+
+        let mut app = DbGuiApp::construct();
+        let db: std::sync::Arc<dyn dbcore::Database> = std::sync::Arc::new(DummyDb);
+        app.active_connections.push(ActiveConnection {
+            config_id: "c1".into(),
+            name: "one".into(),
+            db,
+            databases: Vec::new(),
+            schema: fake_schema(3, 4),
+        });
+        app.tab_mut().conn_id = Some("c1".into());
+        // Pin one table so it shows in both the "Pinned" group and the main list, and make it
+        // the active tab's table so the selection pill draws too.
+        app.bookmarks = vec![dbcore::Bookmark {
+            conn_id: "c1".into(),
+            schema: None,
+            table: "table_0".into(),
+        }];
+        app.tab_mut().edits.source = Some(EditSource {
+            schema: None,
+            table: "table_0".into(),
+            pk_cols: vec!["field_0".into()],
+        });
+
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+        let mut clashes: Vec<String> = Vec::new();
+        for _ in 0..4 {
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                // Hover near the top of the tree to exercise the hover fill + star paint.
+                events: vec![egui::Event::PointerMoved(egui::pos2(120.0, 120.0))],
+                ..Default::default()
+            };
+            let out = ctx.run_ui(raw, |ui| app.draw(ui, None));
+            clashes.extend(collect_clash_text(&out.shapes));
+        }
+        clashes.sort();
+        clashes.dedup();
+        assert!(
+            clashes.is_empty(),
+            "ID clashes in schema explorer:\n{}",
+            clashes.join("\n")
+        );
     }
 
     /// Build an app with a live SQLite connection carrying a table, view, and trigger. Returns
