@@ -516,6 +516,7 @@ pub fn render_editor(
 ) -> EditOutcome {
     let valid = active.kind.is_valid(&active.buf);
     let embedded = fill.is_some();
+    let is_details = active.origin == EditOrigin::Details;
     let mut field = egui::TextEdit::singleline(&mut active.buf)
         .hint_text(active.kind.hint())
         .id_salt((active.row, active.col, active.origin))
@@ -523,7 +524,7 @@ pub fn render_editor(
     if !valid {
         field = field.text_color(palette::DANGER());
     }
-    if embedded && active.origin == EditOrigin::Details {
+    if embedded && is_details {
         // Margin on the builder is ignored when a custom frame is set — use inner_margin
         // on a frameless frame so text lines up with display mode (left + DETAILS_VALUE_PAD_X).
         field = field
@@ -541,20 +542,36 @@ pub fn render_editor(
         } else {
             palette::DANGER()
         };
-        let cr = egui::CornerRadius::same(3);
+        let cr = egui::CornerRadius::ZERO;
+        // In the grid the editor is given the whole cell size, but a singleline field is only
+        // as tall as its text — `add_sized` would then centre a short pill inside the cell,
+        // leaving a gap above and below. Grow the frame's vertical padding to the cell height
+        // so the border hugs the cell edges exactly.
+        let mut inner = egui::Margin::symmetric(4, 0);
+        if let Some(size) = fill {
+            let text_h = ui.text_style_height(&egui::TextStyle::Body);
+            let vpad = ((size.y - text_h) / 2.0).clamp(0.0, 24.0).round() as i8;
+            inner.top = vpad;
+            inner.bottom = vpad;
+        }
         field = field.frame(
             egui::Frame::new()
                 .fill(palette::CODE_BG())
                 .stroke(egui::Stroke::new(1.0, border))
                 .corner_radius(cr)
-                .inner_margin(egui::Margin::symmetric(4, 0)),
+                .inner_margin(inner),
         );
         if !embedded {
             field = field.margin(egui::Margin::symmetric(6, 3));
         }
     }
     let resp = match fill {
-        Some(size) => ui.add_sized(size, field),
+        // Details keeps its centred fixed-size placement. The grid cell instead lets the field
+        // stretch to the full cell width (infinite desired width → clamps to the cell) with its
+        // height already grown to the cell via the frame padding above, so the border sits flush
+        // with all four cell edges instead of floating as a smaller centred pill.
+        Some(size) if is_details => ui.add_sized(size, field),
+        Some(_) => ui.add(field.desired_width(f32::INFINITY)),
         None => ui.add(field.desired_width(f32::INFINITY)),
     };
     // An open editor owns keyboard focus: re-request it any frame it doesn't have it.

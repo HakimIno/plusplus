@@ -383,8 +383,27 @@ fn build_grid(
                             // (An edit begun in the Details panel renders its editor there,
                             // not here — two editors would fight over keyboard focus.)
                             if let Some(active) = edits.active.as_mut() {
-                                let size = ui.available_size();
-                                match crate::edit::render_editor(ui, active, Some(size)) {
+                                // egui_extras paints the cell background (stripe/selection) over
+                                // `max_rect` expanded by half the item spacing, so the visible
+                                // cell is larger than this content rect. Render the editor onto
+                                // that same expanded rect — and widen the clip to match — so its
+                                // border hugs all four edges of the cell instead of floating
+                                // inset by half the spacing on every side.
+                                let full = ui
+                                    .max_rect()
+                                    .expand2(0.5 * ui.spacing().item_spacing);
+                                let mut outcome = EditOutcome::Continue;
+                                ui.scope_builder(
+                                    egui::UiBuilder::new().max_rect(full).layout(
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                    ),
+                                    |ui| {
+                                        ui.set_clip_rect(full);
+                                        outcome =
+                                            crate::edit::render_editor(ui, active, Some(full.size()));
+                                    },
+                                );
+                                match outcome {
                                     EditOutcome::Commit => out.commit_edit = true,
                                     EditOutcome::Cancel => out.cancel_edit = true,
                                     EditOutcome::Continue => {}

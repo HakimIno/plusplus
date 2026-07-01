@@ -103,24 +103,24 @@ pub fn breadcrumb(ui: &mut Ui, text: &str, fill: Option<Color32>) -> egui::Respo
     );
 
     if ui.is_rect_visible(rect) {
-        // Inside stroke stays within the clip rect so corner radii are not squared off.
-        ui.painter().rect(
-            rect,
-            radius,
-            fill.unwrap_or_else(palette::SURFACE),
-            Stroke::new(1.0, palette::BORDER()),
-            egui::StrokeKind::Inside,
-        );
+        // Borderless and flat: transparent at rest so it doesn't read as a heavy bar; only a
+        // soft tint when a connection marker colour is set. Text is centred.
+        if let Some(fill) = fill {
+            ui.painter().rect_filled(rect, radius, fill);
+        }
 
         let text_rect = rect.shrink2(egui::vec2(10.0, 0.0));
         ui.scope_builder(UiBuilder::new().max_rect(text_rect), |ui| {
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.add(
-                    egui::Label::new(egui::RichText::new(text).font(font).color(text_color))
-                        .truncate()
-                        .selectable(false),
-                );
-            });
+            ui.with_layout(
+                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                |ui| {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(text).font(font).color(text_color))
+                            .truncate()
+                            .selectable(false),
+                    );
+                },
+            );
         });
     }
 
@@ -232,8 +232,8 @@ fn window_button(ui: &mut Ui, kind: WindowButton, hover: &str) -> egui::Response
 #[cfg(not(target_os = "macos"))]
 pub fn linux_group_separator(ui: &mut Ui) {
     ui.add_space(2.0);
-    let h = 14.0;
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(9.0, h), egui::Sense::hover());
+    let h = 12.0;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, h), egui::Sense::hover());
     if ui.is_rect_visible(rect) {
         ui.painter().vline(
             rect.center().x,

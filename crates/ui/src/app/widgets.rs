@@ -5,9 +5,9 @@ use crate::style::palette;
 
 /// Shared footprint for every button in the top title bar (icon buttons and layout toggles)
 /// so they line up at a uniform size.
-const TOOLBAR_BUTTON_SIZE: egui::Vec2 = egui::vec2(26.0, 22.0);
+const TOOLBAR_BUTTON_SIZE: egui::Vec2 = egui::vec2(22.0, 22.0);
 /// Breathing room between adjacent title-bar icon buttons.
-const TOOLBAR_ICON_GAP: f32 = 4.0;
+const TOOLBAR_ICON_GAP: f32 = 0.0;
 
 fn compact_connection_label(name: &str) -> String {
     let trimmed = name.trim();
@@ -398,36 +398,22 @@ pub(super) fn layout_toggle(
 ) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(TOOLBAR_BUTTON_SIZE, egui::Sense::click());
 
-    let fill = if active {
-        palette::SURFACE()
-    } else if resp.hovered() {
-        palette::SURFACE_HOVER()
-    } else {
-        egui::Color32::TRANSPARENT
-    };
-    let stroke = if active {
-        egui::Stroke::new(1.0, palette::ACCENT())
-    } else if resp.hovered() {
-        egui::Stroke::new(1.0, palette::BORDER())
-    } else {
-        egui::Stroke::NONE
-    };
-
     if ui.is_rect_visible(rect) {
-        ui.painter().rect(
-            rect,
-            egui::CornerRadius::same(4),
-            fill,
-            stroke,
-            egui::StrokeKind::Outside,
-        );
+        // Flat and borderless: a soft rounded backdrop only on hover. The on/off state reads
+        // from the glyph colour (accent when the panel is shown) rather than a boxed frame.
+        if resp.hovered() {
+            ui.painter()
+                .rect_filled(rect, egui::CornerRadius::same(5), palette::SURFACE_HOVER());
+        }
 
         // VS Code-style layout glyph: thin outer frame + filled bar on one edge.
-        let icon = rect.shrink(5.0);
+        let icon = rect.shrink(6.0);
         let bar_w = 2.5;
         let gap = 1.0;
         let color = if active {
             palette::ACCENT()
+        } else if resp.hovered() {
+            palette::TEXT()
         } else {
             palette::TEXT_WEAK()
         };
@@ -508,29 +494,21 @@ pub(super) fn toolbar_icon_button(
 ) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(TOOLBAR_BUTTON_SIZE, egui::Sense::click());
 
-    let fill = if resp.hovered() {
-        palette::SURFACE_HOVER()
-    } else {
-        egui::Color32::TRANSPARENT
-    };
-    let stroke = if resp.hovered() {
-        egui::Stroke::new(1.0, palette::BORDER())
-    } else {
-        egui::Stroke::NONE
-    };
-
     if ui.is_rect_visible(rect) {
-        ui.painter().rect(
-            rect,
-            egui::CornerRadius::same(4),
-            fill,
-            stroke,
-            egui::StrokeKind::Outside,
-        );
+        // Flat and borderless: only a soft rounded backdrop on hover, no frame at rest.
+        if resp.hovered() {
+            ui.painter()
+                .rect_filled(rect, egui::CornerRadius::same(5), palette::SURFACE_HOVER());
+        }
 
-        let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(14.0, 14.0));
+        let color = if resp.hovered() {
+            palette::TEXT()
+        } else {
+            palette::TEXT_WEAK()
+        };
+        let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(13.0, 13.0));
         ui.scope_builder(egui::UiBuilder::new().max_rect(icon_rect), |ui| {
-            icons::show_colored(ui, src, 14.0, palette::TEXT_WEAK());
+            icons::show_colored(ui, src, 13.0, color);
         });
     }
 
@@ -709,7 +687,7 @@ pub(super) fn beautify_button(
 
 /// Hairline separator between toolbar icon groups.
 pub(super) fn toolbar_sep(ui: &mut egui::Ui) {
-    let h = 14.0;
+    let h = 12.0;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(5.0, h), egui::Sense::hover());
     if ui.is_rect_visible(rect) {
         let x = rect.center().x;

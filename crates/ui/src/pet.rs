@@ -107,13 +107,7 @@ fn pixel_color(ch: char, accent: Color32) -> Option<Color32> {
 
 /// Draw the empty-state pixel pet: a draggable, animated slime centred in the available area.
 pub fn show(ui: &mut egui::Ui) {
-    // Soften the accent toward the panel background so the cat reads as a gentle, faded pastel
-    // rather than a vivid block of colour.
-    let accent = blend(
-        crate::style::palette::ACCENT(),
-        crate::style::palette::PANEL(),
-        0.4,
-    );
+    let accent = crate::style::palette::ACCENT();
     let dark = blend(accent, Color32::from_rgb(40, 32, 54), 0.62);
 
     ui.scope(|ui| {
