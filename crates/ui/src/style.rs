@@ -377,6 +377,61 @@ pub fn accent_checkbox(
     resp
 }
 
+/// Circular radio styled to match [`accent_checkbox`]: an accent ring with a filled centre
+/// dot when selected, an empty bordered circle otherwise. Clicking the dot or its label
+/// selects `value` into `current`; the returned response reports `.changed()` when the
+/// selection actually moves.
+pub fn accent_radio<T: PartialEq>(
+    ui: &mut egui::Ui,
+    current: &mut T,
+    value: T,
+    label: &str,
+) -> egui::Response {
+    const SIZE: f32 = 16.0;
+
+    let selected = *current == value;
+    let sense = egui::Sense::click();
+    let (rect, mut resp) = ui.allocate_exact_size(egui::vec2(SIZE, SIZE), sense);
+
+    let label_resp = ui.add(
+        egui::Label::new(egui::RichText::new(label).size(11.5).color(palette::TEXT_WEAK()))
+            .sense(sense),
+    );
+
+    if (resp.clicked() || label_resp.clicked()) && !selected {
+        *current = value;
+        resp.mark_changed();
+    }
+
+    if ui.is_rect_visible(rect) {
+        let accent = palette::ACCENT();
+        let painter = ui.painter();
+        let center = rect.center();
+        let outer_r = SIZE * 0.5 - 0.5;
+        if selected {
+            painter.circle(
+                center,
+                outer_r,
+                accent.linear_multiply(0.12),
+                Stroke::new(1.5, accent),
+            );
+            painter.circle_filled(center, outer_r * 0.42, accent);
+        } else {
+            let (fill, border) = if resp.hovered() {
+                (
+                    accent.linear_multiply(0.10),
+                    Stroke::new(1.5, accent.linear_multiply(0.65)),
+                )
+            } else {
+                (Color32::TRANSPARENT, Stroke::new(1.5, palette::BORDER_STRONG()))
+            };
+            painter.circle(center, outer_r, fill, border);
+        }
+    }
+
+    resp
+}
+
 /// Single-line label that truncates with "…" when it doesn't fit the panel width.
 /// Pass `tooltip` to show the full text on hover (defaults to `text`).
 pub fn truncated_label(

@@ -669,14 +669,26 @@ pub(super) fn beautify_button(
             );
             ui.separator();
             if ui
-                .checkbox(&mut prefs.uppercase, "Uppercase keywords")
+                .horizontal(|ui| {
+                    crate::style::accent_checkbox(
+                        ui,
+                        true,
+                        &mut prefs.uppercase,
+                        Some("Uppercase keywords"),
+                    )
+                })
+                .inner
                 .changed()
             {
                 out.prefs_changed = true;
             }
             ui.separator();
             for (width, label) in [(2u8, "Indent: 2 spaces"), (4u8, "Indent: 4 spaces")] {
-                if ui.radio_value(&mut prefs.indent, width, label).changed() {
+                if ui
+                    .horizontal(|ui| crate::style::accent_radio(ui, &mut prefs.indent, width, label))
+                    .inner
+                    .changed()
+                {
                     out.prefs_changed = true;
                 }
             }

@@ -173,6 +173,10 @@ pub struct GridResponse {
     pub cancel_edit: bool,
     /// Empty table space was double-clicked → append a new (insert) row.
     pub add_row: bool,
+    /// The active cell editor's outline: `(rect, valid)`. Painted *after* the whole table so
+    /// the next column's selection/stripe background can't clip its right edge. `valid`
+    /// picks the colour (accent when the input is committable, danger when not).
+    edit_border: Option<(egui::Rect, bool)>,
 }
 
 /// What a body row at a given display index represents.
@@ -256,6 +260,18 @@ pub fn results_grid(
                 });
         }
     });
+    // Paint the active editor's outline last, over every cell, so the next column's
+    // selection/stripe background (drawn after the edited cell) can't clip its right edge.
+    // Clipped to the grid so an edge cell's outline can't stray onto a neighbouring panel.
+    if let Some((rect, valid)) = out.edit_border {
+        let color = if valid { palette::ACCENT() } else { palette::DANGER() };
+        ui.painter().with_clip_rect(grid_rect).rect_stroke(
+            rect,
+            egui::CornerRadius::ZERO,
+            egui::Stroke::new(1.0, color),
+            egui::StrokeKind::Inside,
+        );
+    }
     capture_empty_table_double_click(ui, table_rect, rendered_rows, row_height, editable, grid_id, &mut out);
 
     out
@@ -282,6 +298,9 @@ fn build_grid(
     // Captured once per frame: a click is reported in the same frame, so these reflect the
     // modifiers held as the row was clicked (plain vs. Cmd/Ctrl toggle vs. Shift range).
     let modifiers = ui.input(|i| i.modifiers);
+    // The grid's visible bounds, grabbed before the table narrows the clip per column. Used to
+    // keep the active editor (and its outline) from spilling over adjacent panels/scrollbars.
+    let grid_clip = ui.clip_rect();
     let mut builder = TableBuilder::new(ui)
         // A stable, unique id keeps the table's internal scroll/resize/row ids consistent
         // across frames — this is what prevents egui's "ID clash" outline from flickering
@@ -386,12 +405,14 @@ fn build_grid(
                                 // egui_extras paints the cell background (stripe/selection) over
                                 // `max_rect` expanded by half the item spacing, so the visible
                                 // cell is larger than this content rect. Render the editor onto
-                                // that same expanded rect — and widen the clip to match — so its
-                                // border hugs all four edges of the cell instead of floating
-                                // inset by half the spacing on every side.
+                                // that same expanded rect so its fill covers the whole visible
+                                // cell — clamped to the grid so it never spills over an adjacent
+                                // panel or the scrollbar.
                                 let full = ui
                                     .max_rect()
-                                    .expand2(0.5 * ui.spacing().item_spacing);
+                                    .expand2(0.5 * ui.spacing().item_spacing)
+                                    .intersect(grid_clip);
+                                let valid = active.kind.is_valid(&active.buf);
                                 let mut outcome = EditOutcome::Continue;
                                 ui.scope_builder(
                                     egui::UiBuilder::new().max_rect(full).layout(
@@ -403,6 +424,10 @@ fn build_grid(
                                             crate::edit::render_editor(ui, active, Some(full.size()));
                                     },
                                 );
+                                // Defer the outline to a post-table pass: the next column's
+                                // selection/stripe background is painted *after* this cell and
+                                // would otherwise cover the right edge, leaving only three sides.
+                                out.edit_border = Some((full, valid));
                                 match outcome {
                                     EditOutcome::Commit => out.commit_edit = true,
                                     EditOutcome::Cancel => out.cancel_edit = true,
@@ -799,6 +824,51 @@ mod tests {
             "ID clashes detected in results grid:\n{}",
             clashes.join("\n")
         );
+    }
+
+    /// The active editor's accent border must be painted on top of every cell so the next
+    /// column's (selection/stripe) background can't clip its right edge — the regression that
+    /// left the edited cell with only three visible sides.
+    #[test]
+    fn editor_border_is_painted_on_top() {
+        let ctx = egui::Context::default();
+        let result = fake_result(10, 3);
+        let order: Vec<usize> = (0..result.rows.len()).collect();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0));
+        let mut sel = Selection::default();
+        sel.select_one(0); // edited row selected → its cells paint a selection background
+        let mut edits = Edits::default();
+        edits.set_columns(&result.columns);
+        edits.begin(0, 1, &Value::Int(1), crate::edit::EditOrigin::Grid);
+
+        let raw = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        let out = ctx.run_ui(raw, |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
+                let _ = results_grid(ui, &result, &order, None, &sel, &mut edits, true, 0, &EmojiAtlas::default());
+            });
+        });
+
+        let accent = palette::ACCENT();
+        // Last accent-stroked rect = the on-top border. No filled cell background may be
+        // painted after it that would cover its right edge.
+        let border = out.shapes.iter().enumerate().rev().find_map(|(i, cs)| match &cs.shape {
+            egui::epaint::Shape::Rect(r) if r.stroke.color == accent && r.stroke.width > 0.0 => {
+                Some((i, r.rect))
+            }
+            _ => None,
+        });
+        let (bi, brect) = border.expect("accent editor border must be painted");
+        let covered_after = out.shapes.iter().skip(bi + 1).any(|cs| match &cs.shape {
+            egui::epaint::Shape::Rect(r) => {
+                r.fill.a() > 0
+                    && r.rect.left() <= brect.right()
+                    && r.rect.right() >= brect.right() - 1.0
+                    && r.rect.top() <= brect.center().y
+                    && r.rect.bottom() >= brect.center().y
+            }
+            _ => false,
+        });
+        assert!(!covered_after, "editor right border is overpainted by a later cell background");
     }
 
     /// With an editable, scrollable result the table must stop above the add-row strip.

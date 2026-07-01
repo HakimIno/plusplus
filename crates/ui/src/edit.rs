@@ -535,10 +535,11 @@ pub fn render_editor(
                 0,
             )));
     } else {
-        // Invalid input gets a danger-coloured border (not just red text) so the editor
-        // reads as "blocked" at a glance.
+        // A thin accent border marks the cell under edit — it reads as "active/primary"
+        // against the grid. Invalid input swaps to the danger colour (not just red text) so
+        // the editor reads as "blocked" at a glance.
         let border = if valid {
-            palette::BORDER()
+            palette::ACCENT()
         } else {
             palette::DANGER()
         };
