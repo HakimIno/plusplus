@@ -33,27 +33,27 @@ case "$ids" in
   *" debian "*|*" ubuntu "*)
     run_as_root apt-get update
     run_as_root apt-get install -y --no-install-recommends \
-      ca-certificates curl tar xz-utils build-essential pkg-config \
+      ca-certificates curl file tar xz-utils build-essential pkg-config \
       libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxkbcommon-dev libwayland-dev \
       libgl1-mesa-dev libegl1-mesa-dev libfontconfig1-dev libdbus-1-dev \
       libxkbcommon-x11-0 xvfb xauth mesa-utils
     ;;
   *" fedora "*|*" rhel "*|*" centos "*)
     run_as_root dnf install -y \
-      ca-certificates curl tar xz gcc gcc-c++ make pkgconf-pkg-config \
+      ca-certificates curl file tar xz gcc gcc-c++ make pkgconf-pkg-config \
       libX11-devel libXi-devel libXcursor-devel libXrandr-devel libxkbcommon-devel wayland-devel \
       mesa-libGL-devel mesa-libEGL-devel fontconfig-devel dbus-devel \
       libxkbcommon-x11 xorg-x11-server-Xvfb mesa-dri-drivers
     ;;
   *" arch "*)
     run_as_root pacman -Sy --noconfirm --needed \
-      ca-certificates curl tar xz base-devel pkgconf \
+      ca-certificates curl file tar xz base-devel pkgconf \
       libx11 libxi libxcursor libxrandr libxkbcommon wayland mesa fontconfig dbus \
       xorg-server-xvfb
     ;;
   *" opensuse "*|*" suse "*)
     run_as_root zypper --non-interactive install \
-      ca-certificates curl tar xz gcc gcc-c++ make pkg-config \
+      ca-certificates curl file tar xz gcc gcc-c++ make pkg-config \
       libX11-devel libXi-devel libXcursor-devel libXrandr-devel libxkbcommon-devel wayland-devel \
       Mesa-libGL-devel Mesa-libEGL-devel fontconfig-devel dbus-1-devel \
       xorg-x11-server-extra Mesa-dri

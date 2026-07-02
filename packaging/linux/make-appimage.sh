@@ -16,6 +16,12 @@ if [ "$(uname -m)" != "x86_64" ]; then
   exit 1
 fi
 
+# appimagetool (run by linuxdeploy) hard-requires the `file` utility.
+command -v file >/dev/null 2>&1 || {
+  echo "the 'file' command is required by appimagetool — run scripts/linux-deps.sh or install it (e.g. apt-get install file)" >&2
+  exit 1
+}
+
 VERSION="$(plusplus_read_version "$REPO_ROOT")"
 BINARY="${REPO_ROOT}/target/release/plusplus"
 DIST="${REPO_ROOT}/target/dist"
