@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="crates/app/assets/icon/png/icon-256.png" alt="plusplus logo" width="120">
+  <img src=".github/readme-banner.jpg" alt="plusplus — fast, native database GUI" width="100%">
 </p>
 
 <p align="center"><strong>plusplus</strong> is a fast, native database GUI in the spirit of TablePlus — written in Rust.
