@@ -29,6 +29,7 @@ examples/*.sqlite-shm
 *.pdb
 
 *desktop
+!packaging/linux/plusplus.desktop
 
 *.key
 *.pub
