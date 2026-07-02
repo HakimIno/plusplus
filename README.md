@@ -1,17 +1,13 @@
-<div align="center">
+<p align="center">
+  <img src="crates/app/assets/icon/png/icon-256.png" alt="plusplus logo" width="120">
+</p>
 
-<img src="crates/app/assets/icon/png/icon-256.png" alt="plusplus logo" width="120">
+<p align="center"><strong>plusplus</strong> is a fast, native database GUI in the spirit of TablePlus — written in Rust.
+<br />One window for everything: browse your schema, run SQL, and edit results — without ever waiting on the network.</p>
 
-# plusplus
+<p align="center"><sub>PostgreSQL · MySQL / MariaDB · SQL Server · SQLite</sub></p>
 
-**A fast, native database GUI in the spirit of TablePlus — written in Rust.**
-
-One window for everything: browse your schema, run SQL, and edit results —
-without ever waiting on the network.
-
-PostgreSQL · MySQL / MariaDB · SQL Server · SQLite
-
-</div>
+<p align="center">Grab a build from <a href="https://github.com/HakimIno/plusplus/releases">GitHub Releases</a>, or build from source — see <a href="#try-it">Try it</a> below.</p>
 
 ---
 
