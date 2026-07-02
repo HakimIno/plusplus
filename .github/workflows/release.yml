@@ -59,6 +59,10 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     container: debian:12
+    # Container jobs default to `sh`, which rejects `set -o pipefail` — force bash.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -69,7 +73,6 @@ jobs:
         run: packaging/linux/make-appimage.sh
 
       - name: Smoke-run AppImage
-        shell: bash
         run: |
           set +e
           APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a timeout 8s target/dist/plusplus-*-x86_64.AppImage
