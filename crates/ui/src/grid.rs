@@ -3,9 +3,10 @@
 //! dense rows, click-to-select with row highlight, and click-to-sort headers.
 //! Only the visible rows are rendered each frame, so it stays smooth at 100k+ rows.
 
+use crate::components;
 use crate::edit::{EditOutcome, EditorKind, Edits};
 use crate::emoji::{self, EmojiAtlas};
-use crate::style::{self, palette};
+use crate::style::palette;
 use dbcore::{QueryResult, Value};
 use egui_extras::{Column, TableBuilder};
 
@@ -328,7 +329,7 @@ fn build_grid(
     builder
         .header(HEADER_H, |mut header| {
             header.col(|ui| {
-                style::paint_table_header_cell(ui);
+                components::paint_table_header_cell(ui);
                 ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new("#")
@@ -515,7 +516,7 @@ fn header_cell(
     sort: Option<(usize, bool)>,
     out: &mut GridResponse,
 ) {
-    style::paint_table_header_cell(ui);
+    components::paint_table_header_cell(ui);
     let sorted_dir = match sort {
         Some((c, asc)) if c == i => Some(asc),
         _ => None,

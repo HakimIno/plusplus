@@ -1,0 +1,197 @@
+//! Button primitives for the app's shared control language.
+
+use egui::{ImageSource, Response, RichText, Ui};
+
+use crate::icons;
+use crate::style::palette;
+
+/// Visual treatment for a shared app button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ButtonVariant {
+    Primary,
+    Default,
+    Ghost,
+    Danger,
+}
+
+/// Fluent builder for text, icon, toggle, and toolbar buttons.
+pub(crate) struct Btn<'a> {
+    label: String,
+    icon: Option<ImageSource<'static>>,
+    variant: ButtonVariant,
+    enabled: bool,
+    active: bool,
+    tooltip: Option<&'a str>,
+    icon_only: bool,
+}
+
+impl<'a> Btn<'a> {
+    pub(crate) fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            icon: None,
+            variant: ButtonVariant::Default,
+            enabled: true,
+            active: false,
+            tooltip: None,
+            icon_only: false,
+        }
+    }
+
+    pub(crate) fn primary(label: impl Into<String>) -> Self {
+        Self::new(label).variant(ButtonVariant::Primary)
+    }
+
+    pub(crate) fn danger(label: impl Into<String>) -> Self {
+        Self::new(label).variant(ButtonVariant::Danger)
+    }
+
+    pub(crate) fn ghost_icon(src: ImageSource<'static>) -> Self {
+        Self::new("").icon(src).variant(ButtonVariant::Ghost).icon_only()
+    }
+
+    pub(crate) fn variant(mut self, variant: ButtonVariant) -> Self {
+        self.variant = variant;
+        self
+    }
+
+    pub(crate) fn icon(mut self, src: ImageSource<'static>) -> Self {
+        self.icon = Some(src);
+        self
+    }
+
+    pub(crate) fn enabled(mut self, on: bool) -> Self {
+        self.enabled = on;
+        self
+    }
+
+    pub(crate) fn active(mut self, on: bool) -> Self {
+        self.active = on;
+        self
+    }
+
+    pub(crate) fn tooltip(mut self, text: &'a str) -> Self {
+        self.tooltip = Some(text);
+        self
+    }
+
+    pub(crate) fn icon_only(mut self) -> Self {
+        self.icon_only = true;
+        self
+    }
+
+    pub(crate) fn show(self, ui: &mut Ui) -> Response {
+        let text_color = match self.variant {
+            ButtonVariant::Primary => palette::ON_ACCENT(),
+            ButtonVariant::Danger => palette::DANGER(),
+            ButtonVariant::Default | ButtonVariant::Ghost => {
+                if self.active {
+                    palette::ACCENT()
+                } else {
+                    ui.visuals().widgets.inactive.fg_stroke.color
+                }
+            }
+        };
+        let icon_tint = match self.variant {
+            ButtonVariant::Primary => palette::ON_ACCENT(),
+            ButtonVariant::Danger => palette::DANGER(),
+            ButtonVariant::Default | ButtonVariant::Ghost => {
+                if self.active {
+                    palette::ACCENT()
+                } else {
+                    text_color
+                }
+            }
+        };
+
+        let mut label = RichText::new(self.label).color(text_color);
+        if matches!(self.variant, ButtonVariant::Primary) || self.active {
+            label = label.strong();
+        }
+
+        let mut btn = match (self.icon, self.icon_only) {
+            (Some(src), true) => {
+                let img = icon_image(src, icons::SIZE, icon_tint);
+                egui::Button::image(img)
+            }
+            (Some(src), false) => {
+                let img = icon_image(src, icons::SIZE, icon_tint);
+                egui::Button::image_and_text(img, label)
+            }
+            (None, _) => egui::Button::new(label),
+        };
+
+        btn = match self.variant {
+            ButtonVariant::Primary => btn
+                .fill(palette::ACCENT())
+                .stroke(egui::Stroke::new(1.0, palette::ACCENT_HOVER())),
+            ButtonVariant::Danger => btn.stroke(egui::Stroke::new(1.0, palette::DANGER())),
+            ButtonVariant::Ghost => btn
+                .fill(egui::Color32::TRANSPARENT)
+                .frame(self.active)
+                .frame_when_inactive(false),
+            ButtonVariant::Default => btn,
+        };
+        if self.active {
+            btn = btn
+                .fill(palette::SELECTION())
+                .stroke(egui::Stroke::new(1.0, palette::ACCENT()));
+        }
+        let resp = ui.add_enabled(self.enabled, btn);
+        if let Some(text) = self.tooltip {
+            resp.on_hover_text(text)
+        } else {
+            resp
+        }
+    }
+}
+
+fn icon_image(
+    src: ImageSource<'static>,
+    size: f32,
+    tint: egui::Color32,
+) -> egui::Image<'static> {
+    egui::Image::new(src)
+        .fit_to_exact_size(egui::vec2(size, size))
+        .tint(tint)
+}
+
+pub(crate) fn button(
+    ui: &mut Ui,
+    src: ImageSource<'static>,
+    text: &str,
+    enabled: bool,
+) -> Response {
+    let destructive = ["Delete", "Drop", "Truncate"]
+        .iter()
+        .any(|word| text.contains(word));
+    let btn = if destructive {
+        Btn::danger(text)
+    } else {
+        Btn::new(text)
+    };
+    btn.icon(src).enabled(enabled).show(ui)
+}
+
+pub(crate) fn primary_button(
+    ui: &mut Ui,
+    src: ImageSource<'static>,
+    text: &str,
+    enabled: bool,
+) -> Response {
+    Btn::primary(text).icon(src).enabled(enabled).show(ui)
+}
+
+pub(crate) fn toggle_button(
+    ui: &mut Ui,
+    src: ImageSource<'static>,
+    text: &str,
+    enabled: bool,
+    active: bool,
+) -> Response {
+    Btn::new(text).icon(src).enabled(enabled).active(active).show(ui)
+}
+
+pub(crate) fn icon_button(ui: &mut Ui, src: ImageSource<'static>, hover: &str) -> Response {
+    Btn::ghost_icon(src).tooltip(hover).show(ui)
+}

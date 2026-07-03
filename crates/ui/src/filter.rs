@@ -365,7 +365,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut FilterState, columns: &[String]) -> Opt
             ui.add_space(2.0);
 
             // On/off toggle — same accent checkbox as the schema editor table.
-            crate::style::accent_checkbox(ui, true, &mut cond.enabled, None)
+            crate::components::accent_checkbox(ui, true, &mut cond.enabled, None)
                 .on_hover_text("Enable / disable this condition");
 
             // Column picker.
@@ -422,7 +422,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut FilterState, columns: &[String]) -> Opt
                 let resp = ui
                     .add_enabled_ui(needs_value, |ui| {
                         let hint = if needs_value { cond.op.value_hint() } else { "" };
-                        crate::style::text_input(ui, &mut cond.value, hint, width)
+                        crate::components::text_input(ui, &mut cond.value, hint, width)
                     })
                     .inner;
                 if needs_value
@@ -458,7 +458,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut FilterState, columns: &[String]) -> Opt
         ui.colored_label(palette::TEXT_FAINT(), "of the following");
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if crate::icons::primary_button(ui, crate::icons::filter(), "Apply All", true)
+            if crate::components::primary_button(ui, crate::icons::filter(), "Apply All", true)
                 .on_hover_text("Apply filter  (Enter)")
                 .clicked()
             {

@@ -13,7 +13,6 @@ use dbcore::{ConnectionColor, ConnectionConfig, Database, DbKind, QueryResult, S
 use crate::schema::{ObjectEditor, RoutineEditor, SchemaEditor, TriggerEditor, ViewEditor};
 
 mod panels;
-mod widgets;
 
 use crate::edit::{EditSource, Edits};
 use crate::filter::{self, FilterState};
@@ -1164,15 +1163,15 @@ impl DbGuiApp {
 
     /// Icon kind for the tab strip: table tabs carry a sidebar table name; the rest are
     /// plain query editors.
-    fn tab_kind(&self, idx: usize) -> widgets::QueryTabKind {
+    fn tab_kind(&self, idx: usize) -> crate::components::QueryTabKind {
         if self
             .tabs
             .get(idx)
             .is_some_and(|t| !t.title.trim().is_empty())
         {
-            widgets::QueryTabKind::Table
+            crate::components::QueryTabKind::Table
         } else {
-            widgets::QueryTabKind::Query
+            crate::components::QueryTabKind::Query
         }
     }
 
@@ -3512,7 +3511,7 @@ mod tests {
             tab.total_rows = Some(250);
         }
 
-        let mut go = |app: &mut DbGuiApp, action: Action| {
+        let go = |app: &mut DbGuiApp, action: Action| {
             app.busy = Busy::Idle; // each page flip leaves a query in flight
             app.apply_action(action);
         };
@@ -3877,6 +3876,7 @@ mod tests {
     #[test]
     fn beautify_reformats_active_tab() {
         let mut app = DbGuiApp::construct();
+        app.beautify = crate::format::BeautifyPrefs::default();
         app.tab_mut().sql = "select id, name from users where id = 1".into();
         app.workspace_dirty = false;
         app.beautify_sql();
