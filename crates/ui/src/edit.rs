@@ -250,12 +250,20 @@ pub struct ActiveEdit {
     pub origin: EditOrigin,
 }
 
+/// Where the cell cursor should move after a commit (Tab / Shift+Tab advance).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CursorDir {
+    Left,
+    Right,
+}
+
 /// What [`render_editor`] decided this frame.
 pub enum EditOutcome {
     /// Keep editing.
     Continue,
-    /// Finish and stage the value.
-    Commit,
+    /// Finish and stage the value; `advance` asks the caller to move the cell cursor and
+    /// continue editing there (Tab/Shift+Tab), `None` commits in place.
+    Commit { advance: Option<CursorDir> },
     /// Abandon the edit.
     Cancel,
 }
@@ -515,11 +523,30 @@ pub fn render_editor(
     fill: Option<egui::Vec2>,
 ) -> EditOutcome {
     let valid = active.kind.is_valid(&active.buf);
+    // Tab / Shift+Tab: commit and advance to the neighbouring cell, spreadsheet-style.
+    // Consumed *before* the TextEdit is built so egui's focus traversal never sees it.
+    // Invalid input swallows the Tab and stays put — same rule as Enter-on-invalid below.
+    let advance = ui.input_mut(|i| {
+        if i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab) {
+            Some(CursorDir::Left)
+        } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
+            Some(CursorDir::Right)
+        } else {
+            None
+        }
+    });
+    if advance.is_some() && valid {
+        return EditOutcome::Commit { advance };
+    }
     let embedded = fill.is_some();
     let is_details = active.origin == EditOrigin::Details;
     let mut field = egui::TextEdit::singleline(&mut active.buf)
         .hint_text(active.kind.hint())
         .id_salt((active.row, active.col, active.origin))
+        // Keep Tab out of egui's focus traversal (which latches it at frame start, before
+        // the consume_key above could run): the editor's event filter absorbs it, and the
+        // consume_key prevents a literal '\t' from reaching the field.
+        .lock_focus(true)
         .vertical_align(egui::Align::Center);
     if !valid {
         field = field.text_color(palette::DANGER());
@@ -590,7 +617,7 @@ pub fn render_editor(
     }
     if resp.lost_focus() {
         if valid {
-            return EditOutcome::Commit;
+            return EditOutcome::Commit { advance: None };
         }
         // Enter on invalid input keeps the editor open so it can be fixed (the focus
         // re-request above grabs it back next frame); losing focus by clicking elsewhere
@@ -601,6 +628,61 @@ pub fn render_editor(
         return EditOutcome::Cancel;
     }
     EditOutcome::Continue
+}
+
+/// Map a *display* row index to the raw row id it addresses: an index into `order` for
+/// stored rows, or a [`NEW_ROW_BASE`] slot for the new (insert) rows past its end.
+pub fn disp_to_raw(order: &[usize], new_rows: usize, disp: usize) -> Option<usize> {
+    if disp < order.len() {
+        Some(order[disp])
+    } else if disp < order.len() + new_rows {
+        Some(NEW_ROW_BASE + (disp - order.len()))
+    } else {
+        None
+    }
+}
+
+/// The value a cell edit is typed against: NULL for new (insert) rows, which have no stored
+/// value; the stored cell otherwise.
+pub fn original_value(result: &dbcore::QueryResult, raw: usize, col: usize) -> Option<Value> {
+    if is_new_row(raw) {
+        Some(Value::Null)
+    } else {
+        result.rows.get(raw).and_then(|row| row.get(col)).cloned()
+    }
+}
+
+/// Commit the open editor into the staged set, typing the value against the stored cell;
+/// invalid input matches the click-away rule and is discarded. No-op when nothing is open.
+pub fn settle_active(edits: &mut Edits, result: &dbcore::QueryResult) {
+    let Some((ar, ac)) = edits.active.as_ref().map(|a| (a.row, a.col)) else {
+        return;
+    };
+    match original_value(result, ar, ac) {
+        Some(orig) => {
+            if !edits.commit_active(&orig) {
+                edits.cancel_active();
+            }
+        }
+        None => edits.cancel_active(),
+    }
+}
+
+/// Open a grid-origin editor on `(raw, col)`, settling any *other* open editor first (its
+/// cell may have scrolled out of the virtualized grid without ever reporting lost_focus —
+/// dropping it silently would lose the typed value). Seeds from the staged value if present,
+/// else the original.
+pub fn begin_cell_edit(edits: &mut Edits, result: &dbcore::QueryResult, raw: usize, col: usize) {
+    if edits.active.as_ref().is_some_and(|a| (a.row, a.col) != (raw, col)) {
+        settle_active(edits, result);
+    }
+    let seed = edits
+        .staged(raw, col)
+        .cloned()
+        .or_else(|| original_value(result, raw, col));
+    if let Some(seed) = seed {
+        edits.begin(raw, col, &seed, EditOrigin::Grid);
+    }
 }
 
 #[cfg(test)]

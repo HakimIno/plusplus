@@ -2051,13 +2051,15 @@ impl DbGuiApp {
             sort,
             selection,
             edits,
+            pending_scroll,
             ..
         } = &mut self.tabs[idx];
         let sort = *sort;
         egui::CentralPanel::default().show_inside(root, |ui| match result.as_ref() {
             Some(result) if result.column_count() > 0 => {
                 let resp = results_grid(
-                    ui, result, row_order, sort, selection, edits, editable, tab_id, emoji,
+                    ui, result, row_order, sort, selection, edits, editable, tab_id,
+                    pending_scroll.take(), emoji,
                 );
                 if let Some(cmd) = resp.sort {
                     actions.push(match cmd {
@@ -2078,74 +2080,73 @@ impl DbGuiApp {
                     }
                     actions.push(Action::CopyRows(fmt));
                 }
-                // The value a cell edit is typed against: NULL for new (insert) rows, which
-                // have no stored value; the stored cell otherwise.
-                let original = |r: usize, c: usize| -> Option<dbcore::Value> {
-                    if crate::edit::is_new_row(r) {
-                        Some(dbcore::Value::Null)
-                    } else {
-                        result.rows.get(r).and_then(|row| row.get(c)).cloned()
-                    }
-                };
-                // Commit the open editor into the staged set, typing the value against the
-                // stored cell; invalid input matches the click-away rule and is discarded.
-                let settle_active = |edits: &mut crate::edit::Edits| {
-                    let Some((ar, ac)) = edits.active.as_ref().map(|a| (a.row, a.col)) else {
-                        return;
-                    };
-                    match original(ar, ac) {
-                        Some(orig) => {
-                            if !edits.commit_active(&orig) {
-                                edits.cancel_active();
+                use crate::edit::{begin_cell_edit, disp_to_raw, original_value, settle_active};
+                if let Some(advance) = resp.commit_edit {
+                    settle_active(edits, result);
+                    // Tab/Shift+Tab: the commit landed → move the cursor and keep editing
+                    // there (skipping bools/binary — the cursor still parks on them).
+                    if edits.active.is_none() {
+                        if let Some(dir) = advance {
+                            let (dr, dc) = match dir {
+                                crate::edit::CursorDir::Left => (0, -1),
+                                crate::edit::CursorDir::Right => (0, 1),
+                            };
+                            let len = row_order.len() + edits.new_rows;
+                            if selection.move_cursor(dr, dc, len, result.column_count(), false) {
+                                if let Some((nd, nc)) = selection.cursor() {
+                                    *pending_scroll = Some(nd);
+                                    if let Some(raw) = disp_to_raw(row_order, edits.new_rows, nd)
+                                    {
+                                        let bytes = original_value(result, raw, nc).is_some_and(
+                                            |v| matches!(v, dbcore::Value::Bytes(_)),
+                                        );
+                                        if edits.col_kind(nc) != crate::edit::EditorKind::Bool
+                                            && !bytes
+                                        {
+                                            begin_cell_edit(edits, result, raw, nc);
+                                        }
+                                    }
+                                }
                             }
                         }
-                        None => edits.cancel_active(),
                     }
-                };
-                if resp.commit_edit {
-                    settle_active(edits);
                 }
                 if resp.cancel_edit {
                     edits.cancel_active();
                 }
-                if let Some((r, c)) = resp.begin_edit {
-                    // An editor can still be open on another cell without ever having
-                    // reported lost_focus (its cell may have scrolled out of the virtualized
-                    // grid, so the widget wasn't rendered) — settle it first instead of
-                    // silently dropping the typed value when `begin` replaces it.
-                    if edits.active.as_ref().is_some_and(|a| (a.row, a.col) != (r, c)) {
-                        settle_active(edits);
-                    }
-                    // Continue editing from the staged value if present, else the original.
-                    let seed = edits
-                        .staged(r, c)
-                        .cloned()
-                        .or_else(|| original(r, c));
-                    if let Some(seed) = seed {
-                        edits.begin(r, c, &seed, crate::edit::EditOrigin::Grid);
+                if let Some((disp, c)) = resp.begin_edit {
+                    if let Some(raw) = disp_to_raw(row_order, edits.new_rows, disp) {
+                        begin_cell_edit(edits, result, raw, c);
+                        // The cursor tracks the editor so Tab-advance moves relative to it.
+                        selection.set_cursor(disp, c);
                     }
                 }
                 // A boolean cell flips in place rather than opening an editor. If another
                 // cell's editor is still open (e.g. the user clicked straight from it onto this
                 // bool), settle that first so its typed value isn't silently dropped.
-                if let Some((r, c)) = resp.toggle {
-                    if edits.active.as_ref().is_some_and(|a| (a.row, a.col) != (r, c)) {
-                        settle_active(edits);
-                    }
-                    if let Some(orig) = original(r, c) {
-                        edits.toggle_bool(r, c, &orig);
+                if let Some((disp, c)) = resp.toggle {
+                    if let Some(raw) = disp_to_raw(row_order, edits.new_rows, disp) {
+                        if edits.active.as_ref().is_some_and(|a| (a.row, a.col) != (raw, c)) {
+                            settle_active(edits, result);
+                        }
+                        if let Some(orig) = original_value(result, raw, c) {
+                            edits.toggle_bool(raw, c, &orig);
+                        }
+                        selection.set_cursor(disp, c);
                     }
                 }
                 // Double-clicking empty table space appends a new (insert) row, selects it,
                 // and opens an editor on the first text-editable column right away.
                 if resp.add_row {
-                    settle_active(edits);
+                    settle_active(edits, result);
                     let new_id = edits.add_new_row();
-                    selection.select_one(row_order.len() + edits.new_rows - 1);
+                    let disp = row_order.len() + edits.new_rows - 1;
+                    selection.select_one(disp);
                     let first_col = (0..result.column_count())
                         .find(|&c| edits.col_kind(c) != crate::edit::EditorKind::Bool);
                     if let Some(c) = first_col {
                         edits.begin(new_id, c, &dbcore::Value::Null, crate::edit::EditOrigin::Grid);
+                        selection.set_cursor(disp, c);
                     }
                 }
             }
@@ -4805,7 +4806,8 @@ fn details_value_box(
             },
         );
         match outcome {
-            crate::edit::EditOutcome::Commit => {
+            // Tab-advance is a grid affordance; in the Details panel it just commits.
+            crate::edit::EditOutcome::Commit { .. } => {
                 let _ = edits.commit_active(value);
             }
             crate::edit::EditOutcome::Cancel => edits.cancel_active(),

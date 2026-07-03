@@ -173,6 +173,9 @@ struct QueryTab {
     /// switching tabs or opening another table never leaves a stale editor on screen —
     /// and in-progress edits survive a tab switch.
     schema_editor: Option<ObjectEditor>,
+    /// One-shot request to scroll this display row into view next frame (keyboard cursor
+    /// moves). Consumed by `central_panel` when it renders the grid.
+    pending_scroll: Option<usize>,
 }
 
 impl QueryTab {
@@ -192,6 +195,7 @@ impl QueryTab {
             view: TabView::default(),
             total_rows: None,
             schema_editor: None,
+            pending_scroll: None,
         }
     }
 
@@ -232,7 +236,8 @@ impl QueryTab {
         self.row_order = order;
         // Rows that filtered out can't stay selected; new (insert) rows live past the stored
         // rows and are still addressable, so keep them in range.
-        self.selection.clamp(self.row_order.len() + self.edits.new_rows);
+        self.selection
+            .clamp(self.row_order.len() + self.edits.new_rows, result.column_count());
     }
 
     fn apply_sort(&mut self, col: usize) {
@@ -3211,6 +3216,80 @@ impl DbGuiApp {
                 self.tab_mut().selection.clear();
             }
         }
+        // Arrow keys drive the grid's cell cursor, spreadsheet-style, when nothing is being
+        // typed: ↑/↓ move rows (Shift extends the selection from the anchor), ←/→ move
+        // columns. Enter or F2 opens the editor on the cursor cell (Enter toggles booleans
+        // in place). All keys are *consumed* so nothing else — in particular the freshly
+        // opened editor, which would otherwise see this very Enter press later in the same
+        // frame and instantly commit itself — reacts to them.
+        if !typing
+            && self.tab().result.is_some()
+            && self.tab().edits.active.is_none()
+            && self.tab().view == TabView::Data
+            && self.tab().schema_editor.is_none()
+        {
+            let (mut dr, mut dc, mut extend) = (0isize, 0isize, false);
+            ctx.input_mut(|i| {
+                if i.consume_key(egui::Modifiers::SHIFT, egui::Key::ArrowDown) {
+                    dr += 1;
+                    extend = true;
+                }
+                if i.consume_key(egui::Modifiers::SHIFT, egui::Key::ArrowUp) {
+                    dr -= 1;
+                    extend = true;
+                }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                    dr += 1;
+                }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                    dr -= 1;
+                }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft) {
+                    dc -= 1;
+                }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight) {
+                    dc += 1;
+                }
+            });
+            if dr != 0 || dc != 0 {
+                let tab = self.tab_mut();
+                let len = tab.row_order.len() + tab.edits.new_rows;
+                let ncols = tab.result.as_ref().map_or(0, |r| r.column_count());
+                if tab.selection.move_cursor(dr, dc, len, ncols, extend) {
+                    tab.pending_scroll = tab.selection.cursor().map(|(r, _)| r);
+                }
+            }
+            let open_editor = ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                    || i.consume_key(egui::Modifiers::NONE, egui::Key::F2)
+            });
+            if open_editor && self.tab().edits.editable() {
+                let tab = self.tab_mut();
+                if let (Some((disp, col)), Some(result)) =
+                    (tab.selection.cursor(), tab.result.as_ref())
+                {
+                    if let Some(raw) =
+                        crate::edit::disp_to_raw(&tab.row_order, tab.edits.new_rows, disp)
+                    {
+                        let deleted =
+                            tab.edits.row_state(raw) == crate::edit::RowState::Deleted;
+                        let bytes = crate::edit::original_value(result, raw, col)
+                            .is_some_and(|v| matches!(v, dbcore::Value::Bytes(_)));
+                        if !deleted && !bytes {
+                            if tab.edits.col_kind(col) == crate::edit::EditorKind::Bool {
+                                if let Some(orig) =
+                                    crate::edit::original_value(result, raw, col)
+                                {
+                                    tab.edits.toggle_bool(raw, col, &orig);
+                                }
+                            } else {
+                                crate::edit::begin_cell_edit(&mut tab.edits, result, raw, col);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // Cmd/Ctrl+A selects every row in the grid — but only when not typing, so it keeps
         // its native "select all text" meaning inside the SQL console or any field editor.
         if !typing
@@ -4628,6 +4707,184 @@ mod tests {
             buf.contains('Y'),
             "typing after an in-editor click should still work, buf = {buf:?}"
         );
+    }
+
+    fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    /// Set up an app with an editable rows×cols result and return it with a frame-runner
+    /// context.
+    fn grid_nav_app(rows: usize, cols: usize) -> (egui::Context, DbGuiApp) {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::style::apply(&ctx);
+        let mut app = DbGuiApp::construct();
+        let tab = app.tab_mut();
+        tab.set_result(fake_result(rows, cols));
+        tab.edits.source = Some(crate::edit::EditSource {
+            schema: None,
+            table: "t".into(),
+            pk_cols: vec!["col0".into()],
+        });
+        (ctx, app)
+    }
+
+    fn run_frame(
+        ctx: &egui::Context,
+        app: &mut DbGuiApp,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+        let raw = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            ..Default::default()
+        };
+        ctx.run_ui(raw, |ui| app.draw(ui, None))
+    }
+
+    /// Arrow keys drive the grid's cell cursor when nothing has keyboard focus: ↑/↓ move
+    /// and re-select rows, ←/→ move columns, Shift+↓ extends the range from the anchor.
+    #[test]
+    fn arrow_keys_move_cursor_and_selection() {
+        let (ctx, mut app) = grid_nav_app(5, 3);
+        app.tab_mut().selection.select_one(0);
+
+        run_frame(&ctx, &mut app, vec![key(egui::Key::ArrowDown, egui::Modifiers::NONE)]);
+        assert_eq!(app.tab().selection.lead(), Some(1));
+        assert_eq!(app.tab().selection.cursor(), Some((1, 0)));
+
+        run_frame(&ctx, &mut app, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
+        assert_eq!(app.tab().selection.cursor(), Some((1, 1)));
+        assert_eq!(app.tab().selection.lead(), Some(1), "column move keeps the row");
+
+        run_frame(&ctx, &mut app, vec![key(egui::Key::ArrowDown, egui::Modifiers::SHIFT)]);
+        let rows: Vec<usize> = app.tab().selection.iter().collect();
+        assert_eq!(rows, [1, 2], "Shift+Down extends from the anchor");
+        assert_eq!(app.tab().selection.cursor(), Some((2, 1)), "cursor keeps its column");
+    }
+
+    /// Enter opens the editor on the cursor cell — and the very same Enter press must not
+    /// leak into the freshly opened editor and instantly commit it.
+    #[test]
+    fn enter_opens_editor_at_cursor() {
+        let (ctx, mut app) = grid_nav_app(5, 3);
+        app.tab_mut().selection.select_one(1);
+        app.tab_mut().selection.set_cursor(1, 1);
+
+        run_frame(&ctx, &mut app, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+        {
+            let active = app.tab().edits.active.as_ref().expect("Enter opens the editor");
+            assert_eq!((active.row, active.col), (1, 1));
+            assert_eq!(active.origin, crate::edit::EditOrigin::Grid);
+            assert_eq!(active.buf, "4"); // row 1 col 1 of fake_result(5, 3)
+        }
+        run_frame(&ctx, &mut app, vec![]);
+        assert!(
+            app.tab().edits.is_active(1, 1),
+            "editor must survive the frame after opening (Enter must not self-commit)"
+        );
+        assert!(!app.tab().edits.has_pending(), "nothing staged yet");
+    }
+
+    /// Tab commits the open editor and moves it one cell right, spreadsheet-style.
+    #[test]
+    fn tab_commits_and_advances() {
+        let (ctx, mut app) = grid_nav_app(5, 3);
+        app.tab_mut().selection.select_one(0); // cursor lands on (0, 0)
+
+        run_frame(&ctx, &mut app, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+        assert!(app.tab().edits.is_active(0, 0), "editor open at the cursor");
+        run_frame(&ctx, &mut app, vec![]); // editor takes focus
+        run_frame(&ctx, &mut app, vec![egui::Event::Text("7".into())]);
+        let buf = app.tab().edits.active.as_ref().unwrap().buf.clone();
+        assert!(buf.contains('7'), "typed text reaches the editor, buf = {buf:?}");
+
+        run_frame(&ctx, &mut app, vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
+        assert!(
+            app.tab().edits.staged(0, 0).is_some(),
+            "Tab commits the edited cell"
+        );
+        assert!(
+            app.tab().edits.is_active(0, 1),
+            "Tab moves the editor to the next column"
+        );
+        assert_eq!(app.tab().selection.cursor(), Some((0, 1)));
+    }
+
+    /// Keyboard cursor moves must scroll the grid to keep the cursor visible — vertically
+    /// via the table's `scroll_to_row`, and horizontally via the wide-grid ScrollArea (whose
+    /// scroll request must be issued outside the table: egui scroll areas swallow pending
+    /// scroll targets for *both* axes, so a request set inside the table never escapes its
+    /// internal vertical scroll area).
+    #[test]
+    fn keyboard_cursor_scrolls_into_view() {
+        fn painted(shapes: &[egui::epaint::ClippedShape], needle: &str) -> bool {
+            fn walk(shape: &egui::epaint::Shape, needle: &str) -> bool {
+                match shape {
+                    egui::epaint::Shape::Text(t) => t.galley.text() == needle,
+                    egui::epaint::Shape::Vec(v) => v.iter().any(|s| walk(s, needle)),
+                    _ => false,
+                }
+            }
+            shapes.iter().any(|cs| walk(&cs.shape, needle))
+        }
+
+        // Vertical: 200 rows × 3 cols (fits horizontally). Rows are virtualized, so row
+        // 151's first cell ("453" = 151*3) is only ever painted once the table scrolled
+        // down to it.
+        let (ctx, mut app) = grid_nav_app(200, 3);
+        app.tab_mut().selection.select_one(150);
+        let out = run_frame(&ctx, &mut app, vec![]);
+        assert!(!painted(&out.shapes, "453"), "row 151 must start out of view");
+        run_frame(&ctx, &mut app, vec![key(egui::Key::ArrowDown, egui::Modifiers::NONE)]);
+        let seen = (0..30).any(|_| {
+            let out = run_frame(&ctx, &mut app, vec![]);
+            painted(&out.shapes, "453")
+        });
+        assert!(seen, "ArrowDown past the viewport must scroll the row into view");
+
+        // Horizontal: 5 rows × 30 cols → wider than the panel → wrapped in the horizontal
+        // ScrollArea. Off-screen columns skip their cell text, so cell (0, 25) ("25") is
+        // only painted once the grid scrolled sideways to the cursor's column.
+        let (ctx, mut app) = grid_nav_app(5, 30);
+        app.tab_mut().selection.select_one(0);
+        let out = run_frame(&ctx, &mut app, vec![]);
+        assert!(!painted(&out.shapes, "25"), "column 25 must start out of view");
+        for _ in 0..25 {
+            run_frame(&ctx, &mut app, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
+        }
+        let seen = (0..30).any(|_| {
+            let out = run_frame(&ctx, &mut app, vec![]);
+            painted(&out.shapes, "25")
+        });
+        assert!(seen, "ArrowRight past the viewport must scroll the column into view");
+    }
+
+    /// While a cell editor has focus, arrow keys belong to the text field — the grid cursor
+    /// must not move underneath it.
+    #[test]
+    fn arrows_ignored_while_typing() {
+        let (ctx, mut app) = grid_nav_app(5, 3);
+        app.tab_mut().selection.select_one(1);
+        app.tab_mut().selection.set_cursor(1, 1);
+
+        run_frame(&ctx, &mut app, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+        run_frame(&ctx, &mut app, vec![]); // editor takes focus
+        run_frame(&ctx, &mut app, vec![key(egui::Key::ArrowDown, egui::Modifiers::NONE)]);
+        assert_eq!(
+            app.tab().selection.cursor(),
+            Some((1, 1)),
+            "grid cursor must not move while the editor is open"
+        );
+        assert!(app.tab().edits.is_active(1, 1), "editor stays open");
     }
 
     /// Drive the full app layout headlessly while scrolling, and capture egui "ID clash"
