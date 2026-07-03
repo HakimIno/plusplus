@@ -17,25 +17,20 @@ struct SqlColors {
 
 fn sql_colors() -> SqlColors {
     let t = crate::theme::current();
-    if t.is_dark {
-        SqlColors {
-            keyword: Color32::from_rgb(0x7a, 0xa2, 0xf7),
-            string: Color32::from_rgb(0x9e, 0xce, 0x6a),
-            number: Color32::from_rgb(0xe0, 0xaf, 0x68),
-            comment: Color32::from_rgb(0x60, 0x68, 0x79),
-            punct: Color32::from_rgb(0x89, 0xdd, 0xff),
-            ident: Color32::from_rgb(0xc6, 0xcc, 0xd6),
-        }
-    } else {
-        SqlColors {
-            keyword: t.accent,
-            string: t.success,
-            number: t.warning,
-            comment: t.text_faint,
-            punct: Color32::from_rgb(0x0e, 0x6e, 0x82),
-            ident: t.text,
-        }
+    SqlColors {
+        keyword: t.accent,
+        string: t.success,
+        number: t.warning,
+        comment: t.text_faint,
+        punct: mix(t.accent, t.text_weak, if t.is_dark { 0.62 } else { 0.45 }),
+        ident: t.text,
     }
+}
+
+fn mix(a: Color32, b: Color32, amount_b: f32) -> Color32 {
+    let amount_a = 1.0 - amount_b;
+    let ch = |x: u8, y: u8| (x as f32 * amount_a + y as f32 * amount_b).round() as u8;
+    Color32::from_rgb(ch(a.r(), b.r()), ch(a.g(), b.g()), ch(a.b(), b.b()))
 }
 
 /// Build a coloured layout job for `text`, using `font` for every run.

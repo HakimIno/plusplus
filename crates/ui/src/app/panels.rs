@@ -282,31 +282,32 @@ impl DbGuiApp {
                         .id_salt("query_tab_scroll")
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                            // Rects collected per frame so the drag handler below can map
-                            // the pointer to an insertion slot.
-                            let mut rects = Vec::with_capacity(self.tabs.len());
-                            let pointer_x = ui.ctx().pointer_interact_pos().map(|p| p.x);
-                            for idx in 0..self.tabs.len() {
-                                let selected = idx == self.active_query_tab;
-                                let label = self.tab_label(idx);
-                                let kind = self.tab_kind(idx);
-                                let preview = self.tabs[idx].preview;
-                                // While this tab is dragged, its chip floats with its
-                                // left edge tracking the pointer (minus the grab offset).
-                                let drag_float_x = match (self.tab_drag, pointer_x) {
-                                    (Some(drag), Some(px)) if drag.id == self.tabs[idx].id => {
-                                        Some(px - drag.grab_x)
-                                    }
-                                    _ => None,
-                                };
-                                let resp = components::query_tab_item(
-                                    ui,
-                                    &label,
-                                    kind,
-                                    selected,
-                                    preview,
-                                    drag_float_x,
-                                );
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                // Rects collected per frame so the drag handler below can map
+                                // the pointer to an insertion slot.
+                                let mut rects = Vec::with_capacity(self.tabs.len());
+                                let pointer_x = ui.ctx().pointer_interact_pos().map(|p| p.x);
+                                for idx in 0..self.tabs.len() {
+                                    let selected = idx == self.active_query_tab;
+                                    let label = self.tab_label(idx);
+                                    let kind = self.tab_kind(idx);
+                                    let preview = self.tabs[idx].preview;
+                                    // While this tab is dragged, its chip floats with its
+                                    // left edge tracking the pointer (minus the grab offset).
+                                    let drag_float_x = match (self.tab_drag, pointer_x) {
+                                        (Some(drag), Some(px)) if drag.id == self.tabs[idx].id => {
+                                            Some(px - drag.grab_x)
+                                        }
+                                        _ => None,
+                                    };
+                                    let resp = components::query_tab_item(
+                                        ui,
+                                        &label,
+                                        kind,
+                                        selected,
+                                        preview,
+                                        drag_float_x,
+                                    );
                                 let tab_count = self.tabs.len();
                                 let can_close_others = tab_count > 1;
                                 let can_close_right = idx + 1 < tab_count;
@@ -632,79 +633,99 @@ impl DbGuiApp {
     pub(super) fn query_console(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
         egui::Panel::bottom("query_console")
             .resizable(true)
-            .default_size(150.0)
-            .min_size(72.0)
+            .default_size(190.0)
+            .min_size(96.0)
             .show_inside(root, |ui| {
                 ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    components::section_header(ui, "Query");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // While a query runs, the primary button turns into Cancel so a heavy
-                        // query can be aborted without waiting it out.
-                        if self.busy == Busy::Querying {
-                            let resp = ui
-                                .add(
-                                    egui::Button::new(
-                                        egui::RichText::new("Cancel")
-                                            .color(palette::ON_ACCENT())
-                                            .strong(),
-                                    )
-                                    .fill(palette::DANGER()),
-                                )
-                                .on_hover_text("Abort the running query");
-                            if resp.clicked() {
-                                actions.push(Action::CancelQuery);
-                            }
-                        } else {
-                            let can_run = self.active().is_some() && self.busy == Busy::Idle;
-                            if components::primary_button(ui, icons::play(), "Run", can_run)
-                                .on_hover_text("Cmd/Ctrl+Enter")
-                                .clicked()
-                            {
-                                actions.push(Action::RunQuery);
-                            }
-                        }
-                        ui.add_space(6.0);
-                        // Beautify formats in the bound connection's dialect; with no live
-                        // connection it still works, falling back to generic SQL.
-                        let dialect_label =
-                            self.active().map(|a| a.db.kind().label()).unwrap_or("SQL");
-                        let has_sql = !self.tab().sql.trim().is_empty();
-                        let resp = components::beautify_button(
-                            ui,
-                            &mut self.beautify,
-                            has_sql,
-                            dialect_label,
+                let dialect_label = self.active().map(|a| a.db.kind().label()).unwrap_or("SQL");
+                let has_sql = !self.tab().sql.trim().is_empty();
+                let row_h = 24.0;
+                let (bar_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), row_h),
+                    egui::Sense::hover(),
+                );
+                ui.scope_builder(egui::UiBuilder::new().max_rect(bar_rect), |ui| {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.label(
+                            egui::RichText::new("Query Console")
+                                .size(12.0)
+                                .strong()
+                                .color(palette::TEXT()),
                         );
-                        if resp.clicked {
-                            actions.push(Action::BeautifySql);
-                        }
-                        if resp.prefs_changed {
-                            self.persist_settings();
-                        }
-                        ui.add_space(6.0);
-                        // Saved queries (favorites): a toggle right next to Run/Beautify that
-                        // opens a panel beside the editor — close to where queries are written.
-                        let count = self.favorites_cache.len();
-                        let label = if count > 0 {
-                            format!("Saved ({count})")
+                        ui.label(
+                            egui::RichText::new(format!("{dialect_label} workspace"))
+                                .size(11.0)
+                                .color(palette::TEXT_FAINT()),
+                        );
+                        let dot = if self.active().is_some() {
+                            palette::SUCCESS()
                         } else {
-                            "Saved".to_string()
+                            palette::TEXT_FAINT()
                         };
-                        if components::toggle_button(
-                            ui,
-                            icons::star(),
-                            &label,
-                            true,
-                            self.favorites_open,
-                        )
-                        .on_hover_text("Show saved queries beside the editor")
-                        .clicked()
-                        {
-                            actions.push(Action::ToggleFavoritesPanel);
-                        }
+                        let (dot_rect, _) =
+                            ui.allocate_exact_size(egui::vec2(8.0, row_h), egui::Sense::hover());
+                        ui.painter()
+                            .circle_filled(dot_rect.center(), 3.0, dot);
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if self.busy == Busy::Querying {
+                                let resp = ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new("Cancel")
+                                                .color(palette::ON_ACCENT())
+                                                .strong(),
+                                        )
+                                        .fill(palette::DANGER()),
+                                    )
+                                    .on_hover_text("Abort the running query");
+                                if resp.clicked() {
+                                    actions.push(Action::CancelQuery);
+                                }
+                            } else {
+                                let can_run = self.active().is_some() && self.busy == Busy::Idle;
+                                if components::primary_button(ui, icons::play(), "Run", can_run)
+                                    .on_hover_text("Cmd/Ctrl+Enter")
+                                    .clicked()
+                                {
+                                    actions.push(Action::RunQuery);
+                                }
+                            }
+                            let resp = components::beautify_button(
+                                ui,
+                                &mut self.beautify,
+                                has_sql,
+                                dialect_label,
+                            );
+                            if resp.clicked {
+                                actions.push(Action::BeautifySql);
+                            }
+                            if resp.prefs_changed {
+                                self.persist_settings();
+                            }
+                            let count = self.favorites_cache.len();
+                            let label = if count > 0 {
+                                format!("Saved ({count})")
+                            } else {
+                                "Saved".to_string()
+                            };
+                            if components::toggle_button(
+                                ui,
+                                icons::star(),
+                                &label,
+                                true,
+                                self.favorites_open,
+                            )
+                            .on_hover_text("Show saved queries beside the editor")
+                            .clicked()
+                            {
+                                actions.push(Action::ToggleFavoritesPanel);
+                            }
+                        });
                     });
                 });
+                ui.add_space(2.0);
 
                 // Favorites panel beside the SQL editor (carved before the editor fills the
                 // rest), shown only while the Saved toggle is on.
@@ -745,10 +766,14 @@ impl DbGuiApp {
                 // query would grow the scroll area and push the whole panel taller, fighting
                 // the size the user dragged it to. With `auto_shrink` off the editor keeps the
                 // panel's height and scrolls its content internally.
-                egui::ScrollArea::vertical()
-                    .id_salt("sql_scroll")
-                    .auto_shrink(false)
+                egui::Frame::new()
+                    .fill(palette::CODE_BG())
+                    .inner_margin(egui::Margin::symmetric(6, 4))
                     .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("sql_scroll")
+                            .auto_shrink(false)
+                            .show(ui, |ui| {
                         // Size the editor to fill the panel: a `TextEdit` only grows to its
                         // `desired_rows` (or its content), so a fixed row count would leave the
                         // dragged-open panel mostly empty. Derive the row count from the space the
@@ -763,10 +788,11 @@ impl DbGuiApp {
                         // anchor under the caret and we can move the caret after an insertion.
                         let output = egui::TextEdit::multiline(&mut self.tabs[self.active_query_tab].sql)
                             .code_editor()
+                            .frame(egui::Frame::NONE)
                             .desired_rows(rows)
                             .desired_width(f32::INFINITY)
                             .layouter(&mut layouter)
-                            .hint_text("Write SQL here, then press Run (Cmd/Ctrl+Enter)")
+                            .hint_text("SELECT ...")
                             .show(ui);
 
                         let resp = &output.response.response;
@@ -816,6 +842,7 @@ impl DbGuiApp {
                             &font,
                             accept_ghost,
                         );
+                            });
                     });
             });
     }

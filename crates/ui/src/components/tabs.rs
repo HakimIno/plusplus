@@ -154,8 +154,24 @@ pub(crate) enum QueryTabKind {
     Table,
 }
 
-const TAB_ICON_SIZE: f32 = 12.0;
-const TAB_ICON_GAP: f32 = 4.0;
+const TAB_ICON_SIZE: f32 = 13.0;
+const TAB_ICON_GAP: f32 = 6.0;
+
+fn tab_icon_color(kind: QueryTabKind, selected: bool) -> egui::Color32 {
+    let color = match kind {
+        QueryTabKind::Query => palette::WARNING(),
+        QueryTabKind::Table => palette::ACCENT(),
+    };
+    if selected {
+        color
+    } else {
+        color.linear_multiply(0.78)
+    }
+}
+
+fn translucent(color: egui::Color32, alpha: u8) -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
+}
 
 /// Paint one tab chip (background pill, kind icon, title, × glyph). Shared by the in-strip
 /// chip and its pointer-following twin during drag-to-reorder.
@@ -172,37 +188,59 @@ fn paint_tab_chip(
     close_color: egui::Color32,
     pad: f32,
     close_w: f32,
+    selected: bool,
+    close_hovered: bool,
 ) {
-    painter.rect(
-        rect,
+    let rounding = egui::CornerRadius {
+        nw: 4,
+        ne: 4,
+        sw: 0,
+        se: 0,
+    };
+    painter.rect_filled(rect, rounding, fill);
+    if stroke != egui::Stroke::NONE {
+        painter.hline(rect.x_range(), rect.top(), stroke);
+    }
+    if selected {
+        painter.hline(
+            rect.x_range(),
+            rect.top(),
+            egui::Stroke::new(1.0, palette::ACCENT()),
+        );
+    }
+
+    let icon_color = tab_icon_color(kind, selected);
+    let badge_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + pad + 7.0, rect.center().y),
+        egui::vec2(16.0, 16.0),
+    );
+    painter.rect_filled(
+        badge_rect,
         egui::CornerRadius::same(4),
-        fill,
-        stroke,
-        egui::StrokeKind::Outside,
+        translucent(icon_color, if selected { 34 } else { 20 }),
     );
     let icon_rect = egui::Rect::from_center_size(
-        egui::pos2(
-            rect.left() + pad + TAB_ICON_SIZE * 0.5,
-            rect.center().y,
-        ),
+        badge_rect.center(),
         egui::vec2(TAB_ICON_SIZE, TAB_ICON_SIZE),
     );
     let icon_src = match kind {
         QueryTabKind::Table => icons::table(),
         QueryTabKind::Query => icons::code(),
     };
-    let img = egui::Image::new(icon_src).fit_to_exact_size(icon_rect.size());
-    if matches!(kind, QueryTabKind::Table) {
-        img.paint_at(ui, icon_rect);
-    } else {
-        img.tint(text_color).paint_at(ui, icon_rect);
-    }
-    let text_x = rect.left() + pad + TAB_ICON_SIZE + TAB_ICON_GAP;
+    egui::Image::new(icon_src)
+        .fit_to_exact_size(icon_rect.size())
+        .tint(icon_color)
+        .paint_at(ui, icon_rect);
+    let text_x = badge_rect.right() + TAB_ICON_GAP;
     let pos = egui::pos2(text_x, rect.center().y - galley.size().y * 0.5);
     painter.galley(pos, galley.clone(), text_color);
+
     let c = egui::pos2(rect.right() - pad - close_w * 0.5, rect.center().y);
-    let r = 3.5;
-    let s = egui::Stroke::new(1.3, close_color);
+    if close_hovered {
+        painter.circle_filled(c, 7.0, translucent(palette::DANGER(), 28));
+    }
+    let r = 3.25;
+    let s = egui::Stroke::new(1.4, close_color);
     painter.line_segment([c + egui::vec2(-r, -r), c + egui::vec2(r, r)], s);
     painter.line_segment([c + egui::vec2(r, -r), c + egui::vec2(-r, r)], s);
 }
@@ -255,11 +293,11 @@ pub(crate) fn query_tab_item(
             },
         ));
     let text_w = galley.size().x;
-    let close_w = 14.0;
-    let pad = 8.0;
+    let close_w = 16.0;
+    let pad = 9.0;
     let size = egui::vec2(
-        pad + TAB_ICON_SIZE + TAB_ICON_GAP + text_w + 4.0 + close_w + pad,
-        26.0,
+        pad + 16.0 + TAB_ICON_GAP + text_w + 8.0 + close_w + pad,
+        29.0,
     );
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
 
@@ -279,11 +317,26 @@ pub(crate) fn query_tab_item(
         },
     );
 
-    let colors = super::interaction_colors(&resp, selected, dragging);
-    let fill = colors.fill;
-    let stroke = colors.stroke;
+    let fill = if selected || dragging {
+        palette::SURFACE()
+    } else if resp.hovered() {
+        palette::SURFACE_HOVER()
+    } else {
+        palette::PANEL()
+    };
+    let stroke = if dragging {
+        egui::Stroke::new(1.0, palette::ACCENT())
+    } else if selected {
+        egui::Stroke::NONE
+    } else if resp.hovered() {
+        egui::Stroke::NONE
+    } else {
+        egui::Stroke::NONE
+    };
     let close_color = if close_resp.hovered() && !dragging {
         palette::DANGER()
+    } else if selected || resp.hovered() {
+        palette::TEXT_WEAK()
     } else {
         palette::TEXT_FAINT()
     };
@@ -322,6 +375,8 @@ pub(crate) fn query_tab_item(
                         close_color,
                         pad,
                         close_w,
+                        selected,
+                        close_resp.hovered() && !dragging,
                     );
                 });
         } else {
@@ -337,6 +392,8 @@ pub(crate) fn query_tab_item(
                 close_color,
                 pad,
                 close_w,
+                selected,
+                close_resp.hovered() && !dragging,
             );
         }
     }
@@ -350,4 +407,3 @@ pub(crate) fn query_tab_item(
         response: resp,
     }
 }
-
