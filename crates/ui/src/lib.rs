@@ -24,34 +24,27 @@ mod update;
 
 pub use app::DbGuiApp;
 
-/// The custom font family used for headings, rendered with SF Pro Text Semibold.
+/// The custom font family used for headings, rendered with Inter Semibold.
 ///
 /// Register it via [`install_fonts`] and select it from a [`egui::FontId`] with
 /// `FontFamily::Name(HEADING_FAMILY.into())`.
 pub const HEADING_FAMILY: &str = "heading";
 
-/// Raw bytes of the fonts the app embeds. SF Pro Text (Apple's system UI typeface) has no
-/// Thai glyphs, so the Thai script is covered by Anuphan — a loopless, geometric Thai face
-/// that pairs cleanly with SF Pro — in matching Regular and Semibold weights.
+/// Raw bytes of the fonts the app embeds.
 pub struct AppFonts<'a> {
-    /// SF Pro Text Regular — the primary proportional/UI font for Latin.
-    pub sf_regular: &'a [u8],
-    /// SF Pro Text Semibold — the Latin weight for the [`HEADING_FAMILY`] family.
-    pub sf_semibold: &'a [u8],
-    /// Anuphan Regular — Thai fallback for the proportional and monospace families.
+    /// Inter Regular — the primary UI font.
+    pub ui_regular: &'a [u8],
+    /// Inter Semibold — the weight for the [`HEADING_FAMILY`] family.
+    pub ui_semibold: &'a [u8],
+    /// JetBrains Mono Regular — SQL/code font.
+    pub code_regular: &'a [u8],
+    /// Anuphan Regular — Thai fallback for proportional and monospace families.
     pub thai_regular: &'a [u8],
     /// Anuphan Semibold — Thai weight for the [`HEADING_FAMILY`] family.
     pub thai_semibold: &'a [u8],
 }
 
-/// Install the app's fonts, making SF Pro Text the primary proportional typeface so the
-/// UI gets a native, macOS-like look, with Anuphan as the Thai fallback so Thai glyphs
-/// still render in headers, cells, and the SQL editor.
-///
-/// SF Pro replaces egui's default proportional font; the monospace family keeps egui's
-/// built-in monospace (the repo we vendor from ships no SF Mono) and only gains the Thai
-/// fallback. A dedicated [`HEADING_FAMILY`] family is registered with the Semibold weight
-/// of both SF Pro (Latin) and Anuphan (Thai).
+/// Install Inter for UI, JetBrains Mono for SQL/code, and Anuphan as Thai fallback.
 pub fn install_fonts(ctx: &egui::Context, app_fonts: &AppFonts) {
     use egui::{FontData, FontDefinitions, FontFamily};
     use std::sync::Arc;
@@ -59,12 +52,16 @@ pub fn install_fonts(ctx: &egui::Context, app_fonts: &AppFonts) {
     let mut fonts = FontDefinitions::default();
 
     fonts.font_data.insert(
-        "sf_pro".to_owned(),
-        Arc::new(FontData::from_owned(app_fonts.sf_regular.to_vec())),
+        "inter".to_owned(),
+        Arc::new(FontData::from_owned(app_fonts.ui_regular.to_vec())),
     );
     fonts.font_data.insert(
-        "sf_pro_semibold".to_owned(),
-        Arc::new(FontData::from_owned(app_fonts.sf_semibold.to_vec())),
+        "inter_semibold".to_owned(),
+        Arc::new(FontData::from_owned(app_fonts.ui_semibold.to_vec())),
+    );
+    fonts.font_data.insert(
+        "jetbrains_mono".to_owned(),
+        Arc::new(FontData::from_owned(app_fonts.code_regular.to_vec())),
     );
     fonts.font_data.insert(
         "thai".to_owned(),
@@ -75,26 +72,22 @@ pub fn install_fonts(ctx: &egui::Context, app_fonts: &AppFonts) {
         Arc::new(FontData::from_owned(app_fonts.thai_semibold.to_vec())),
     );
 
-    // SF Pro Text leads the proportional family; Anuphan trails as the Thai fallback.
+    // Inter leads the proportional family; Anuphan trails as the Thai fallback.
     let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
-    proportional.insert(0, "sf_pro".to_owned());
+    proportional.insert(0, "inter".to_owned());
     proportional.push("thai".to_owned());
 
-    // Monospace keeps egui's default font and just gains the Thai fallback.
-    fonts
-        .families
-        .entry(FontFamily::Monospace)
-        .or_default()
-        .push("thai".to_owned());
+    let monospace = fonts.families.entry(FontFamily::Monospace).or_default();
+    monospace.insert(0, "jetbrains_mono".to_owned());
+    monospace.push("thai".to_owned());
 
-    // A heavier family for headings: SF Pro Semibold for Latin, Anuphan Semibold for Thai,
-    // falling back to the regular weights.
+    // A heavier family for headings: Inter Semibold first, Anuphan Semibold for Thai.
     fonts.families.insert(
         FontFamily::Name(HEADING_FAMILY.into()),
         vec![
-            "sf_pro_semibold".to_owned(),
+            "inter_semibold".to_owned(),
             "thai_semibold".to_owned(),
-            "sf_pro".to_owned(),
+            "inter".to_owned(),
             "thai".to_owned(),
         ],
     );

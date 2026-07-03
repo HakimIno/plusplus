@@ -166,9 +166,8 @@ mod hex {
     }
 }
 
-/// Stable key of the built-in default theme (also the fallback when a saved choice can't be
-/// resolved). Matches `Carbon`'s entry in [`builtins`].
-pub const DEFAULT_KEY: &str = "carbon";
+/// Stable key of the built-in default theme.
+pub const DEFAULT_KEY: &str = "midnight-conversational";
 
 /// One selectable theme — a resolved [`Theme`] plus the metadata the picker needs.
 #[derive(Clone)]
@@ -300,6 +299,13 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
 fn builtins() -> Vec<ThemeEntry> {
     vec![
         ThemeEntry {
+            key: "midnight-conversational".into(),
+            name: "Midnight Conversational IDE".into(),
+            author: None,
+            builtin: true,
+            theme: midnight_conversational(),
+        },
+        ThemeEntry {
             key: "carbon".into(),
             name: "Carbon".into(),
             author: None,
@@ -321,6 +327,31 @@ fn builtins() -> Vec<ThemeEntry> {
             theme: daylight(),
         },
     ]
+}
+
+/// Deep, conversational IDE palette: near-black editor wells, soft panels, clear cyan accent.
+fn midnight_conversational() -> Theme {
+    Theme {
+        is_dark: true,
+        base: rgb(0x08, 0x09, 0x0d),
+        panel: rgb(0x0f, 0x12, 0x18),
+        surface: rgb(0x17, 0x1b, 0x24),
+        surface_hover: rgb(0x21, 0x27, 0x33),
+        code_bg: rgb(0x06, 0x07, 0x0a),
+        stripe: rgb(0x0c, 0x10, 0x16),
+        selection: rgb(0x1d, 0x36, 0x46),
+        border: rgb(0x1b, 0x21, 0x2b),
+        border_strong: rgb(0x31, 0x3b, 0x4b),
+        text: rgb(0xea, 0xef, 0xf6),
+        text_weak: rgb(0xa6, 0xb1, 0xc0),
+        text_faint: rgb(0x68, 0x74, 0x84),
+        accent: rgb(0x66, 0xd9, 0xef),
+        accent_hover: rgb(0x8b, 0xe8, 0xf7),
+        on_accent: rgb(0x05, 0x12, 0x17),
+        success: rgb(0x67, 0xd3, 0x91),
+        danger: rgb(0xff, 0x6b, 0x7a),
+        warning: rgb(0xf2, 0xc9, 0x72),
+    }
 }
 
 /// Near-black, neutral. Editor wells fall all the way to true black; panels lift just
@@ -400,7 +431,7 @@ fn daylight() -> Theme {
 }
 
 thread_local! {
-    static CURRENT: Cell<Theme> = Cell::new(carbon());
+    static CURRENT: Cell<Theme> = Cell::new(midnight_conversational());
 }
 
 /// The colour set in effect right now. Cheap (a `Cell` read of a `Copy` struct).

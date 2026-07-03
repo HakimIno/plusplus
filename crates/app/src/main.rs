@@ -4,14 +4,15 @@
 // On Windows, don't pop up a console window alongside the GUI in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-/// SF Pro Text (Apple's system UI typeface), embedded as the primary proportional font so
-/// the UI looks native and crisp at small sizes regardless of the host's installed fonts.
-const SF_PRO_REGULAR: &[u8] = include_bytes!("../assets/SF-Pro-Text-Regular.otf");
-/// SF Pro Text Semibold, used for headings.
-const SF_PRO_SEMIBOLD: &[u8] = include_bytes!("../assets/SF-Pro-Text-Semibold.otf");
+/// Inter, embedded as the primary UI font so the interface stays crisp and portable.
+const INTER_REGULAR: &[u8] = include_bytes!("../assets/Inter-Regular.ttf");
+/// Inter Semibold, used for headings and compact emphasis.
+const INTER_SEMIBOLD: &[u8] = include_bytes!("../assets/Inter-SemiBold.ttf");
 
-/// Anuphan (loopless Thai, OFL-licensed) — SF Pro has no Thai glyphs, so these cover the
-/// Thai script and pair cleanly with SF Pro. Embedded so the binary is self-contained.
+/// JetBrains Mono, embedded for SQL editors, result values, and code-like metadata.
+const JETBRAINS_MONO_REGULAR: &[u8] = include_bytes!("../assets/JetBrainsMono-Regular.ttf");
+
+/// Anuphan (loopless Thai, OFL-licensed) covers Thai glyphs and pairs cleanly with Inter.
 const THAI_REGULAR: &[u8] = include_bytes!("../assets/Anuphan-Regular.ttf");
 const THAI_SEMIBOLD: &[u8] = include_bytes!("../assets/Anuphan-SemiBold.ttf");
 
@@ -140,8 +141,9 @@ fn main() -> eframe::Result<()> {
             ui::install_fonts(
                 &cc.egui_ctx,
                 &ui::AppFonts {
-                    sf_regular: SF_PRO_REGULAR,
-                    sf_semibold: SF_PRO_SEMIBOLD,
+                    ui_regular: INTER_REGULAR,
+                    ui_semibold: INTER_SEMIBOLD,
+                    code_regular: JETBRAINS_MONO_REGULAR,
                     thai_regular: THAI_REGULAR,
                     thai_semibold: THAI_SEMIBOLD,
                 },
