@@ -2,6 +2,8 @@ name: Windows
 
 on:
   push:
+    branches:
+      - develop
     tags:
       - "v*"
   pull_request:
@@ -17,14 +19,34 @@ jobs:
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          # Save the compiled deps even when a later step fails — a red test run must
+          # not force the next run to rebuild the whole dependency graph cold.
+          cache-on-failure: true
 
       # Compile every workspace crate (including tests/benches) so a cfg hole on
       # Windows fails here, not at release time.
       - name: Check workspace
         run: cargo check --workspace --all-targets
 
+      # --no-fail-fast so one broken test doesn't hide the rest; the log is kept for
+      # the failure-reporting step below.
       - name: Test
-        run: cargo test --workspace
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace --no-fail-fast 2>&1 | tee test.log
+
+      # Surface every failing test and panic message as ::error:: annotations, which
+      # are readable through the public checks API (raw job logs are admin-only).
+      - name: Report test failures as annotations
+        if: failure()
+        shell: bash
+        run: |
+          grep -E "^test .* \.\.\. FAILED|panicked at|^---- .* stdout ----|^error(\[[A-Z0-9]+\])?:" test.log \
+            | head -40 \
+            | while IFS= read -r line; do echo "::error::${line}"; done
+          exit 0
 
       - name: Build release binary
         run: cargo build --release -p plusplus-app
