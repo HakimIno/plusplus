@@ -1,0 +1,37 @@
+name: Windows
+
+on:
+  push:
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: Windows (MSVC)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      # Compile every workspace crate (including tests/benches) so a cfg hole on
+      # Windows fails here, not at release time.
+      - name: Check workspace
+        run: cargo check --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build release binary
+        run: cargo build --release -p plusplus-app
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plusplus-windows-x86_64
+          path: target/release/plusplus.exe
+          if-no-files-found: error

@@ -129,6 +129,16 @@ impl DbGuiApp {
             .exact_size(bar_height)
             .show_inside(root, |ui| {
                 let bar_rect = ui.max_rect();
+                // The whole bar is a drag surface (move window, double-click to maximize) —
+                // the OS-native expectation on Windows/Linux where we draw our own chrome.
+                // Registered before the clusters so the buttons drawn on top of it still
+                // win hit-testing (same pattern as egui's custom_window_frame example).
+                let bar_resp = ui.interact(
+                    bar_rect,
+                    ui.id().with("title_bar_drag"),
+                    egui::Sense::click_and_drag(),
+                );
+                title_bar::handle_chrome_response(ui, &bar_resp);
                 let connected = self.active().is_some();
                 let has_result = self.tab().result.is_some();
                 let breadcrumb = self.breadcrumb_text();
@@ -180,7 +190,7 @@ impl DbGuiApp {
                         #[cfg(not(target_os = "macos"))]
                         {
                             title_bar::window_controls(ui);
-                            title_bar::linux_group_separator(ui);
+                            title_bar::group_separator(ui);
                         }
                         #[cfg(target_os = "macos")]
                         ui.add_space(6.0);
@@ -191,7 +201,7 @@ impl DbGuiApp {
                             actions.push(Action::OpenSettings);
                         }
                         #[cfg(not(target_os = "macos"))]
-                        title_bar::linux_group_separator(ui);
+                        title_bar::group_separator(ui);
                         if components::toolbar_icon_button(ui, icons::code(), "Query history")
                             .clicked()
                         {
@@ -208,7 +218,7 @@ impl DbGuiApp {
                             actions.push(Action::ToggleErd);
                         }
                         #[cfg(not(target_os = "macos"))]
-                        title_bar::linux_group_separator(ui);
+                        title_bar::group_separator(ui);
                         if components::layout_toggle(
                             ui,
                             self.show_details_panel,

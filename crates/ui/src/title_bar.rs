@@ -11,10 +11,11 @@ const MAC_TRAFFIC_LIGHTS_INSET: f32 = 78.0;
 
 /// Horizontal breathing room between the side clusters and the centre breadcrumb.
 const CLUSTER_GAP: f32 = 8.0;
+/// Size of one self-drawn window-control button (Linux/Windows undecorated chrome).
 #[cfg(not(target_os = "macos"))]
-const LINUX_WINDOW_BUTTON_SIZE: egui::Vec2 = egui::vec2(26.0, 22.0);
+const WINDOW_BUTTON_SIZE: egui::Vec2 = egui::vec2(26.0, 22.0);
 #[cfg(not(target_os = "macos"))]
-const LINUX_TITLE_GAP: f32 = 4.0;
+const WINDOW_BUTTON_GAP: f32 = 4.0;
 
 /// Left inset to clear native macOS traffic lights when drawing into the titlebar space.
 pub fn traffic_lights_inset(ctx: &egui::Context, frame: Option<&eframe::Frame>) -> f32 {
@@ -37,7 +38,10 @@ fn toggle_zoom(ui: &Ui) {
         .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
 }
 
-fn handle_chrome_response(ui: &Ui, resp: &egui::Response) {
+/// Standard title-bar chrome behaviour for any surface acting as empty header space:
+/// double-click toggles maximize, drag starts a native window move (which also gives
+/// Aero Snap on Windows and compositor edge-snapping elsewhere).
+pub(crate) fn handle_chrome_response(ui: &Ui, resp: &egui::Response) {
     if resp.double_clicked() {
         toggle_zoom(ui);
     } else if resp.drag_started() {
@@ -139,7 +143,7 @@ enum WindowButton {
 
 #[cfg(not(target_os = "macos"))]
 fn window_button(ui: &mut Ui, kind: WindowButton, hover: &str) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(LINUX_WINDOW_BUTTON_SIZE, egui::Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(WINDOW_BUTTON_SIZE, egui::Sense::click());
     let danger = matches!(kind, WindowButton::Close);
 
     let fill = if danger && resp.hovered() {
@@ -224,13 +228,14 @@ fn window_button(ui: &mut Ui, kind: WindowButton, hover: &str) -> egui::Response
         }
     }
 
-    ui.add_space(LINUX_TITLE_GAP);
+    ui.add_space(WINDOW_BUTTON_GAP);
     resp.on_hover_text(hover)
 }
 
-/// Hairline separator between Linux title-bar groups. Kept here so macOS chrome is untouched.
+/// Hairline separator between title-bar groups on platforms that draw their own chrome
+/// (Linux/Windows). Kept here so macOS chrome is untouched.
 #[cfg(not(target_os = "macos"))]
-pub fn linux_group_separator(ui: &mut Ui) {
+pub fn group_separator(ui: &mut Ui) {
     ui.add_space(2.0);
     let h = 12.0;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, h), egui::Sense::hover());
