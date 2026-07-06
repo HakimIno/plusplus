@@ -2074,6 +2074,42 @@ impl DbGuiApp {
                             actions.push(Action::OpenEditTable(info));
                         }
                     }
+                    // Undo/redo of staged cell edits, mirroring Cmd/Ctrl+Z — a visible affordance
+                    // for the keyboard shortcut, greyed out when there's nothing to step through.
+                    if self.tabs[idx].edits.editable() {
+                        ui.separator();
+                        let (can_undo, can_redo) = {
+                            let e = &self.tabs[idx].edits;
+                            (e.can_undo(), e.can_redo())
+                        };
+                        let hint = |ui: &egui::Ui, shift: bool| {
+                            let mods = if shift {
+                                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT
+                            } else {
+                                egui::Modifiers::COMMAND
+                            };
+                            ui.ctx()
+                                .format_shortcut(&egui::KeyboardShortcut::new(mods, egui::Key::Z))
+                        };
+                        let btn = |glyph: &str| {
+                            egui::Button::new(egui::RichText::new(glyph).size(13.0))
+                                .frame(false)
+                        };
+                        if ui
+                            .add_enabled(can_undo, btn("↶"))
+                            .on_hover_text(format!("Undo  ({})", hint(ui, false)))
+                            .clicked()
+                        {
+                            actions.push(Action::Undo);
+                        }
+                        if ui
+                            .add_enabled(can_redo, btn("↷"))
+                            .on_hover_text(format!("Redo  ({})", hint(ui, true)))
+                            .clicked()
+                        {
+                            actions.push(Action::Redo);
+                        }
+                    }
                     // The server-side pager lives on the right, directly under the grid.
                     self.pager(ui, actions);
                 });
@@ -2157,6 +2193,39 @@ impl DbGuiApp {
                     actions.push(Action::CopyRows(fmt));
                 }
                 use crate::edit::{begin_cell_edit, disp_to_raw, original_value, settle_active};
+                if let Some(fill) = resp.fill {
+                    settle_active(edits, result);
+                    if let Some(src_raw) = disp_to_raw(row_order, edits.new_rows, fill.from_disp) {
+                        let source = edits
+                            .staged(src_raw, fill.col)
+                            .cloned()
+                            .or_else(|| original_value(result, src_raw, fill.col));
+                        if let Some(value) = source {
+                            // One undo group so the whole fill-drag takes a single Cmd/Ctrl+Z.
+                            edits.begin_undo_group();
+                            for disp in
+                                fill.from_disp.min(fill.to_disp)..=fill.from_disp.max(fill.to_disp)
+                            {
+                                if disp == fill.from_disp {
+                                    continue;
+                                }
+                                if let Some(raw) = disp_to_raw(row_order, edits.new_rows, disp) {
+                                    if edits.deleted.contains(&raw) {
+                                        continue;
+                                    }
+                                    if let Some(orig) = original_value(result, raw, fill.col) {
+                                        edits.stage(raw, fill.col, value.clone(), &orig);
+                                    }
+                                }
+                            }
+                            edits.end_undo_group();
+                            selection.select_one(fill.from_disp);
+                            selection.range_to(fill.to_disp);
+                            selection.set_cursor(fill.to_disp, fill.col);
+                            *pending_scroll = Some(fill.to_disp);
+                        }
+                    }
+                }
                 if let Some(advance) = resp.commit_edit {
                     settle_active(edits, result);
                     // Tab/Shift+Tab: the commit landed → move the cursor and keep editing

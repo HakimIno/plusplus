@@ -52,6 +52,22 @@ pub struct RowClick {
     pub cmd: bool,
 }
 
+/// A spreadsheet fill-handle drag: copy the source cell's current value through the target
+/// display row range in the same column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FillRequest {
+    pub from_disp: usize,
+    pub to_disp: usize,
+    pub col: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FillDrag {
+    from_disp: usize,
+    target_disp: usize,
+    col: usize,
+}
+
 /// A multi-row selection over *display* indices. Tracks an `anchor` (the fixed end of a Shift
 /// range) and a `lead` (the most recently affected row, which drives the Details panel), so it
 /// behaves like a Finder/Excel/TablePlus list: plain click selects one, Cmd/Ctrl click toggles,
@@ -255,6 +271,8 @@ pub struct GridResponse {
     pub begin_edit: Option<(usize, usize)>,
     /// A boolean cell was double-clicked → flip it (*display* row index, column index).
     pub toggle: Option<(usize, usize)>,
+    /// A fill handle drag completed.
+    pub fill: Option<FillRequest>,
     /// The open editor should be committed (Enter pressed or focus lost). The inner value
     /// is a Tab/Shift+Tab advance request: move the cursor that way and keep editing.
     pub commit_edit: Option<Option<crate::edit::CursorDir>>,
@@ -269,6 +287,11 @@ pub struct GridResponse {
     /// The cell cursor's outline rect, painted in the same post-table pass as `edit_border`
     /// so column stripes/selection backgrounds can't clip it.
     cursor_border: Option<egui::Rect>,
+    /// Fill-handle square for the cursor/fill range. Painted after the cursor border so it is
+    /// always visible at the lower-right corner.
+    fill_handle: Option<egui::Rect>,
+    fill_handle_source: Option<(usize, usize)>,
+    fill_range_border: Option<egui::Rect>,
 }
 
 /// What a body row at a given display index represents.
@@ -365,9 +388,16 @@ pub fn results_grid(
                 });
         }
     });
-    // The cell cursor's outline, painted over the cells for the same clipping reason as the
-    // editor border below (which wins visually when both exist — they never share a cell).
-    if let Some(rect) = out.cursor_border {
+    // While filling, draw one clean outside border around the whole target range. Otherwise
+    // draw the normal active-cell cursor border.
+    if let Some(rect) = out.fill_range_border {
+        ui.painter().with_clip_rect(grid_rect).rect_stroke(
+            rect,
+            egui::CornerRadius::ZERO,
+            egui::Stroke::new(1.5, palette::ACCENT()),
+            egui::StrokeKind::Inside,
+        );
+    } else if let Some(rect) = out.cursor_border {
         ui.painter().with_clip_rect(grid_rect).rect_stroke(
             rect,
             egui::CornerRadius::ZERO,
@@ -375,11 +405,29 @@ pub fn results_grid(
             egui::StrokeKind::Inside,
         );
     }
+    let handle_to_paint = out
+        .fill_range_border
+        .map(fill_handle_rect)
+        .or(out.fill_handle);
+    if let Some(rect) = handle_to_paint {
+        let painter = ui.painter().with_clip_rect(grid_rect);
+        painter.rect_filled(rect, egui::CornerRadius::same(1), palette::ACCENT());
+        painter.rect_stroke(
+            rect,
+            egui::CornerRadius::same(1),
+            egui::Stroke::new(1.0, palette::CODE_BG()),
+            egui::StrokeKind::Inside,
+        );
+    }
     // Paint the active editor's outline last, over every cell, so the next column's
     // selection/stripe background (drawn after the edited cell) can't clip its right edge.
     // Clipped to the grid so an edge cell's outline can't stray onto a neighbouring panel.
     if let Some((rect, valid)) = out.edit_border {
-        let color = if valid { palette::ACCENT() } else { palette::DANGER() };
+        let color = if valid {
+            palette::ACCENT()
+        } else {
+            palette::DANGER()
+        };
         ui.painter().with_clip_rect(grid_rect).rect_stroke(
             rect,
             egui::CornerRadius::ZERO,
@@ -387,7 +435,15 @@ pub fn results_grid(
             egui::StrokeKind::Inside,
         );
     }
-    capture_empty_table_double_click(ui, table_rect, rendered_rows, row_height, editable, grid_id, &mut out);
+    capture_empty_table_double_click(
+        ui,
+        table_rect,
+        rendered_rows,
+        row_height,
+        editable,
+        grid_id,
+        &mut out,
+    );
 
     out
 }
@@ -411,6 +467,11 @@ fn build_grid(
     emoji: &EmojiAtlas,
 ) {
     let ncols = result.columns.len();
+    let fill_id = egui::Id::new(("results_grid_fill_handle", grid_id));
+    let mut fill_drag = ui.data_mut(|d| d.get_temp::<FillDrag>(fill_id));
+    let pointer_pos = ui.input(|i| i.pointer.hover_pos());
+    let cursor = selection.cursor();
+    let active_cell = edits.active.as_ref().map(|a| (a.row, a.col, a.origin));
     // Captured once per frame: a click is reported in the same frame, so these reflect the
     // modifiers held as the row was clicked (plain vs. Cmd/Ctrl toggle vs. Shift range).
     let modifiers = ui.input(|i| i.modifiers);
@@ -475,6 +536,7 @@ fn build_grid(
                     RowKind::Stored(r) | RowKind::New(r) => r,
                 };
                 let state = edits.row_state(r);
+                let cursor_col = cursor.and_then(|(row, col)| (row == disp).then_some(col));
                 row.set_selected(selection.contains(disp));
 
                 // Row-number gutter: number for stored rows, a mark for new rows. Tinted
@@ -492,9 +554,17 @@ fn build_grid(
                         ui.weak(egui::RichText::new(label).monospace());
                     });
                 });
-                if editable && gutter_resp.double_clicked() && state != crate::edit::RowState::Deleted {
-                    let first_editable = (0..ncols)
-                        .find(|&c| edits.col_kind(c) != EditorKind::Bool);
+                if let (Some(fill), Some(pointer)) = (fill_drag.as_mut(), pointer_pos) {
+                    if gutter_resp.rect.y_range().contains(pointer.y) {
+                        fill.target_disp = disp;
+                    }
+                }
+                if editable
+                    && gutter_resp.double_clicked()
+                    && state != crate::edit::RowState::Deleted
+                {
+                    let first_editable =
+                        (0..ncols).find(|&c| edits.col_kind(c) != EditorKind::Bool);
                     if let Some(c) = first_editable {
                         out.begin_edit = Some((disp, c));
                     }
@@ -502,6 +572,7 @@ fn build_grid(
 
                 let null = Value::Null;
                 let mut clicked_col = None;
+                let filling = fill_drag.is_some();
                 for c in 0..ncols {
                     // The original/stored value behind this cell (NULL for new rows).
                     let stored = match kind {
@@ -515,9 +586,31 @@ fn build_grid(
                         // visibility early-return below and unclipped: a cursor cell that
                         // scrolled off the side is exactly the one whose rect the scroll
                         // needs (painting is clipped to the grid separately).
-                        if selection.cursor() == Some((disp, c)) {
-                            out.cursor_border =
-                                Some(ui.max_rect().expand2(0.5 * ui.spacing().item_spacing));
+                        if cursor_col == Some(c) {
+                            let full = ui.max_rect().expand2(0.5 * ui.spacing().item_spacing);
+                            out.cursor_border = Some(full);
+                            if editable
+                                && state != crate::edit::RowState::Deleted
+                                && !active_cell.is_some_and(|(row, col, _)| row == r && col == c)
+                                && ui.is_rect_visible(full)
+                                && !matches!(stored, Value::Bytes(_))
+                            {
+                                let handle = fill_handle_rect(full);
+                                out.fill_handle = Some(handle);
+                                out.fill_handle_source = Some((disp, c));
+                            }
+                        }
+                        if let Some(fill) = fill_drag {
+                            if fill.col == c
+                                && in_fill_range(fill.from_disp, fill.target_disp, disp)
+                            {
+                                let rect = ui.max_rect().expand2(0.5 * ui.spacing().item_spacing);
+                                out.fill_range_border = Some(match out.fill_range_border {
+                                    Some(acc) => acc.union(rect),
+                                    None => rect,
+                                });
+                                out.fill_handle = Some(fill_handle_rect(rect));
+                            }
                         }
                         // Skip text layout, HashMap lookups, and widget allocation for
                         // columns outside the visible horizontal viewport. The cell rect is
@@ -526,7 +619,10 @@ fn build_grid(
                         if !ui.is_rect_visible(ui.max_rect()) {
                             return;
                         }
-                        if edits.is_active_from(r, c, crate::edit::EditOrigin::Grid) {
+                        let active_from_grid = active_cell.is_some_and(|(row, col, origin)| {
+                            row == r && col == c && origin == crate::edit::EditOrigin::Grid
+                        });
+                        if active_from_grid {
                             // The cell under edit fills the whole cell; the editor is
                             // type-aware and validates numbers/dates before they can commit.
                             // (An edit begun in the Details panel renders its editor there,
@@ -545,13 +641,16 @@ fn build_grid(
                                 let valid = active.kind.is_valid(&active.buf);
                                 let mut outcome = EditOutcome::Continue;
                                 ui.scope_builder(
-                                    egui::UiBuilder::new().max_rect(full).layout(
-                                        egui::Layout::left_to_right(egui::Align::Center),
-                                    ),
+                                    egui::UiBuilder::new()
+                                        .max_rect(full)
+                                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
                                     |ui| {
                                         ui.set_clip_rect(full);
-                                        outcome =
-                                            crate::edit::render_editor(ui, active, Some(full.size()));
+                                        outcome = crate::edit::render_editor(
+                                            ui,
+                                            active,
+                                            Some(full.size()),
+                                        );
                                     },
                                 );
                                 // Defer the outline to a post-table pass: the next column's
@@ -585,7 +684,7 @@ fn build_grid(
                     // fluid and never depends on landing a clean double-click on a moving target.
                     // Never re-trigger on the cell already being edited — a stray click on its
                     // border would otherwise reset the editor buffer mid-typing.
-                    if col_resp.clicked() || col_resp.double_clicked() {
+                    if !filling && (col_resp.clicked() || col_resp.double_clicked()) {
                         clicked_col = Some(c);
                     }
                     // Our own double-click detection, keyed on *cell identity* instead of
@@ -594,7 +693,7 @@ fn build_grid(
                     // selection change shifted the layout or the pointer drifted across the
                     // cell. Cleared after firing so a triple click can't fire twice.
                     let mut manual_dbl = false;
-                    if col_resp.clicked() && edits.active.is_none() {
+                    if !filling && col_resp.clicked() && edits.active.is_none() {
                         let id = egui::Id::new(("grid_last_click", grid_id));
                         let ctx = &col_resp.ctx;
                         let now = ctx.input(|i| i.time);
@@ -608,11 +707,9 @@ fn build_grid(
                             ctx.data_mut(|d| d.insert_temp(id, (disp, c, now)));
                         }
                     }
-                    let active_here = edits
-                        .active
-                        .as_ref()
-                        .is_some_and(|a| a.row == r && a.col == c);
+                    let active_here = active_cell.is_some_and(|(row, col, _)| row == r && col == c);
                     let start_edit = !active_here
+                        && !filling
                         && (col_resp.double_clicked()
                             || manual_dbl
                             || (edits.active.is_some() && col_resp.clicked()));
@@ -630,7 +727,7 @@ fn build_grid(
                 }
 
                 let row_resp = row.response();
-                if row_resp.clicked() {
+                if !filling && row_resp.clicked() {
                     out.selected = Some(RowClick {
                         disp,
                         col: clicked_col,
@@ -660,6 +757,50 @@ fn build_grid(
                 });
             });
         });
+
+    if let (Some(handle), Some((disp, col))) = (out.fill_handle, out.fill_handle_source) {
+        let resp = ui.interact(
+            handle,
+            egui::Id::new(("grid_fill_handle", grid_id, disp, col)),
+            egui::Sense::drag(),
+        );
+        if resp.drag_started() {
+            fill_drag = Some(FillDrag {
+                from_disp: disp,
+                target_disp: disp,
+                col,
+            });
+        }
+    }
+
+    if let Some(fill) = fill_drag {
+        if ui.input(|i| i.pointer.any_released()) {
+            if fill.target_disp != fill.from_disp {
+                out.fill = Some(FillRequest {
+                    from_disp: fill.from_disp,
+                    to_disp: fill.target_disp,
+                    col: fill.col,
+                });
+            }
+            ui.data_mut(|d| d.remove::<FillDrag>(fill_id));
+        } else {
+            ui.data_mut(|d| d.insert_temp(fill_id, fill));
+        }
+    } else {
+        ui.data_mut(|d| d.remove::<FillDrag>(fill_id));
+    }
+}
+
+fn fill_handle_rect(cell: egui::Rect) -> egui::Rect {
+    const SIZE: f32 = 8.0;
+    egui::Rect::from_min_size(
+        egui::pos2(cell.right() - SIZE - 2.0, cell.bottom() - SIZE - 2.0),
+        egui::vec2(SIZE, SIZE),
+    )
+}
+
+fn in_fill_range(from: usize, to: usize, row: usize) -> bool {
+    row >= from.min(to) && row <= from.max(to)
 }
 
 /// One column header: the name (click to toggle sort), an accent underline + arrow when it's
@@ -851,32 +992,62 @@ mod tests {
         let mut s = Selection::default();
 
         // Plain click selects exactly one and anchors there.
-        s.apply_click(RowClick { disp: 3, col: None, shift: false, cmd: false });
+        s.apply_click(RowClick {
+            disp: 3,
+            col: None,
+            shift: false,
+            cmd: false,
+        });
         assert_eq!(rows(&s), [3]);
         assert_eq!(s.lead(), Some(3));
 
         // Cmd/Ctrl click adds without dropping the rest, and re-anchors on the new row.
-        s.apply_click(RowClick { disp: 5, col: None, shift: false, cmd: true });
+        s.apply_click(RowClick {
+            disp: 5,
+            col: None,
+            shift: false,
+            cmd: true,
+        });
         assert_eq!(rows(&s), [3, 5]);
         assert_eq!(s.lead(), Some(5));
 
         // Cmd/Ctrl click on a selected row removes it; lead falls back to a survivor.
-        s.apply_click(RowClick { disp: 5, col: None, shift: false, cmd: true });
+        s.apply_click(RowClick {
+            disp: 5,
+            col: None,
+            shift: false,
+            cmd: true,
+        });
         assert_eq!(rows(&s), [3]);
         assert_eq!(s.lead(), Some(3));
 
         // Shift extends from the anchor — the last *non-Shift* click (row 5 above), Finder-style.
-        s.apply_click(RowClick { disp: 6, col: None, shift: true, cmd: false });
+        s.apply_click(RowClick {
+            disp: 6,
+            col: None,
+            shift: true,
+            cmd: false,
+        });
         assert_eq!(rows(&s), [5, 6]);
         assert_eq!(s.lead(), Some(6));
 
         // A second Shift click re-extends from the *same* anchor (5), not the previous end (6).
-        s.apply_click(RowClick { disp: 1, col: None, shift: true, cmd: false });
+        s.apply_click(RowClick {
+            disp: 1,
+            col: None,
+            shift: true,
+            cmd: false,
+        });
         assert_eq!(rows(&s), [1, 2, 3, 4, 5]);
         assert_eq!(s.lead(), Some(1));
 
         // A plain click collapses back to one row and re-anchors there.
-        s.apply_click(RowClick { disp: 9, col: None, shift: false, cmd: false });
+        s.apply_click(RowClick {
+            disp: 9,
+            col: None,
+            shift: false,
+            cmd: false,
+        });
         assert_eq!(rows(&s), [9]);
         assert_eq!(s.lead(), Some(9));
     }
@@ -887,10 +1058,20 @@ mod tests {
     fn cursor_follows_clicks_and_moves() {
         let mut s = Selection::default();
         // A data-cell click pins the cursor to the exact cell.
-        s.apply_click(RowClick { disp: 2, col: Some(1), shift: false, cmd: false });
+        s.apply_click(RowClick {
+            disp: 2,
+            col: Some(1),
+            shift: false,
+            cmd: false,
+        });
         assert_eq!(s.cursor(), Some((2, 1)));
         // A gutter click (no column) moves the row but keeps the column.
-        s.apply_click(RowClick { disp: 4, col: None, shift: false, cmd: false });
+        s.apply_click(RowClick {
+            disp: 4,
+            col: None,
+            shift: false,
+            cmd: false,
+        });
         assert_eq!(s.cursor(), Some((4, 1)));
 
         // Arrow moves update the cursor and re-select its row (10 rows × 3 cols).
@@ -1020,7 +1201,18 @@ mod tests {
             let mut edits = Edits::default();
             let out = ctx.run_ui(raw, |ui| {
                 egui::CentralPanel::default().show_inside(ui, |ui| {
-                    let _ = results_grid(ui, &result, &order, None, &Selection::default(), &mut edits, false, 0, None, &EmojiAtlas::default());
+                    let _ = results_grid(
+                        ui,
+                        &result,
+                        &order,
+                        None,
+                        &Selection::default(),
+                        &mut edits,
+                        false,
+                        0,
+                        None,
+                        &EmojiAtlas::default(),
+                    );
                 });
             });
             collect_clash_text(&out.shapes, &mut clashes);
@@ -1048,22 +1240,43 @@ mod tests {
         edits.set_columns(&result.columns);
         edits.begin(0, 1, &Value::Int(1), crate::edit::EditOrigin::Grid);
 
-        let raw = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        let raw = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
         let out = ctx.run_ui(raw, |ui| {
             egui::CentralPanel::default().show_inside(ui, |ui| {
-                let _ = results_grid(ui, &result, &order, None, &sel, &mut edits, true, 0, None, &EmojiAtlas::default());
+                let _ = results_grid(
+                    ui,
+                    &result,
+                    &order,
+                    None,
+                    &sel,
+                    &mut edits,
+                    true,
+                    0,
+                    None,
+                    &EmojiAtlas::default(),
+                );
             });
         });
 
         let accent = palette::ACCENT();
         // Last accent-stroked rect = the on-top border. No filled cell background may be
         // painted after it that would cover its right edge.
-        let border = out.shapes.iter().enumerate().rev().find_map(|(i, cs)| match &cs.shape {
-            egui::epaint::Shape::Rect(r) if r.stroke.color == accent && r.stroke.width > 0.0 => {
-                Some((i, r.rect))
-            }
-            _ => None,
-        });
+        let border = out
+            .shapes
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(i, cs)| match &cs.shape {
+                egui::epaint::Shape::Rect(r)
+                    if r.stroke.color == accent && r.stroke.width > 0.0 =>
+                {
+                    Some((i, r.rect))
+                }
+                _ => None,
+            });
         let (bi, brect) = border.expect("accent editor border must be painted");
         let covered_after = out.shapes.iter().skip(bi + 1).any(|cs| match &cs.shape {
             egui::epaint::Shape::Rect(r) => {
@@ -1075,7 +1288,10 @@ mod tests {
             }
             _ => false,
         });
-        assert!(!covered_after, "editor right border is overpainted by a later cell background");
+        assert!(
+            !covered_after,
+            "editor right border is overpainted by a later cell background"
+        );
     }
 
     fn find_text_pos(shapes: &[egui::epaint::ClippedShape], needle: &str) -> Option<egui::Pos2> {
@@ -1104,9 +1320,10 @@ mod tests {
         let selection = Selection::default();
 
         let mut begin: Option<(usize, usize)> = None;
-        let mut run = |events: Vec<egui::Event>, time: f64,
-                       edits: &mut Edits,
-                       begin: &mut Option<(usize, usize)>| {
+        let run = |events: Vec<egui::Event>,
+                   time: f64,
+                   edits: &mut Edits,
+                   begin: &mut Option<(usize, usize)>| {
             let raw = egui::RawInput {
                 screen_rect: Some(screen),
                 time: Some(time),
@@ -1116,7 +1333,15 @@ mod tests {
             ctx.run_ui(raw, |ui| {
                 egui::CentralPanel::default().show_inside(ui, |ui| {
                     let out = results_grid(
-                        ui, &result, &order, None, &selection, edits, true, 0, None,
+                        ui,
+                        &result,
+                        &order,
+                        None,
+                        &selection,
+                        edits,
+                        true,
+                        0,
+                        None,
                         &EmojiAtlas::default(),
                     );
                     if out.begin_edit.is_some() {
@@ -1139,10 +1364,20 @@ mod tests {
             pressed,
             modifiers: egui::Modifiers::default(),
         };
-        run(vec![egui::Event::PointerMoved(p1)], 0.01, &mut edits, &mut begin);
+        run(
+            vec![egui::Event::PointerMoved(p1)],
+            0.01,
+            &mut edits,
+            &mut begin,
+        );
         run(vec![press(p1, true)], 0.02, &mut edits, &mut begin);
         run(vec![press(p1, false)], 0.03, &mut edits, &mut begin);
-        run(vec![egui::Event::PointerMoved(p2)], 0.05, &mut edits, &mut begin);
+        run(
+            vec![egui::Event::PointerMoved(p2)],
+            0.05,
+            &mut edits,
+            &mut begin,
+        );
         run(vec![press(p2, true)], 0.06, &mut edits, &mut begin);
         run(vec![press(p2, false)], 0.07, &mut edits, &mut begin);
 
@@ -1167,11 +1402,22 @@ mod tests {
         let mut edits = Edits::default();
         edits.set_columns(&result.columns);
 
-        let raw = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        let raw = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
         let out = ctx.run_ui(raw, |ui| {
             egui::CentralPanel::default().show_inside(ui, |ui| {
                 let _ = results_grid(
-                    ui, &result, &order, None, &sel, &mut edits, true, 0, None,
+                    ui,
+                    &result,
+                    &order,
+                    None,
+                    &sel,
+                    &mut edits,
+                    true,
+                    0,
+                    None,
                     &EmojiAtlas::default(),
                 );
             });
@@ -1207,7 +1453,18 @@ mod tests {
             };
             let out = ctx.run_ui(raw, |ui| {
                 egui::CentralPanel::default().show_inside(ui, |ui| {
-                    let _ = results_grid(ui, &result, &order, None, &Selection::default(), &mut edits, true, 0, None, &EmojiAtlas::default());
+                    let _ = results_grid(
+                        ui,
+                        &result,
+                        &order,
+                        None,
+                        &Selection::default(),
+                        &mut edits,
+                        true,
+                        0,
+                        None,
+                        &EmojiAtlas::default(),
+                    );
                 });
             });
             // Any cell text allowed to paint below the strip top means a row is rendered
@@ -1252,16 +1509,13 @@ fn cell(ui: &mut egui::Ui, value: &Value, staged: bool, emoji: &EmojiAtlas) -> e
     };
     match value {
         Value::Null => label(ui, egui::RichText::new("NULL").italics()),
-        Value::Int(_) | Value::Float(_) => label(ui, egui::RichText::new(value.display()).monospace()),
-        // Only free text can carry emoji, so only this path consults the atlas.
-        other => {
-            let text = other.display();
-            if emoji::contains_emoji(&text) {
-                emoji_cell(ui, &text, color, emoji)
-            } else {
-                label(ui, egui::RichText::new(text))
-            }
+        Value::Bool(v) => label(ui, egui::RichText::new(if *v { "true" } else { "false" })),
+        Value::Int(_) | Value::Float(_) => {
+            label(ui, egui::RichText::new(value.display()).monospace())
         }
+        Value::Text(text) if emoji::contains_emoji(text) => emoji_cell(ui, text, color, emoji),
+        Value::Text(text) => label(ui, egui::RichText::new(text)),
+        Value::Bytes(bytes) => label(ui, egui::RichText::new(format!("[{} bytes]", bytes.len()))),
     }
 }
 

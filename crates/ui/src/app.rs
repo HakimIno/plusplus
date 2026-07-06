@@ -579,6 +579,9 @@ enum Action {
     },
     /// Build staged edits into SQL and open the preview dialog.
     PreviewEdits,
+    /// Undo / redo the last staged-edit change (cell edit, delete mark, new row, fill, paste).
+    Undo,
+    Redo,
     /// User confirmed the preview: execute the statements transactionally.
     ConfirmEdits,
     /// User cancelled the preview dialog without committing.
@@ -2228,6 +2231,8 @@ impl DbGuiApp {
             return;
         }
         let added = parsed.len();
+        // One undo group so the whole paste takes a single Cmd/Ctrl+Z.
+        self.tabs[idx].edits.begin_undo_group();
         for fields in parsed {
             let id = self.tabs[idx].edits.add_new_row();
             for (c, field) in fields.into_iter().enumerate().take(ncols) {
@@ -2236,6 +2241,7 @@ impl DbGuiApp {
                 }
             }
         }
+        self.tabs[idx].edits.end_undo_group();
         // Select the freshly pasted rows (they sit just past the stored rows) so they're
         // highlighted and scrolled into view, ready to review before saving.
         let order_len = self.tabs[idx].row_order.len();
@@ -2403,6 +2409,34 @@ impl DbGuiApp {
                 result,
             });
         });
+    }
+
+    /// Undo the last staged-edit change, refreshing the view and selection to match.
+    fn undo_edits(&mut self) {
+        // Commit or drop whatever's in the open editor first — undo acts on staged state,
+        // not on a half-typed buffer — then step back.
+        self.tab_mut().flush_active_edit();
+        if self.tab_mut().edits.undo() {
+            self.tab_mut().recompute_view();
+            self.status_msg = "Undo".to_string();
+            self.error = None;
+            self.workspace_dirty = true;
+        } else {
+            self.status_msg = "Nothing to undo".to_string();
+        }
+    }
+
+    /// Redo the change undone most recently.
+    fn redo_edits(&mut self) {
+        self.tab_mut().flush_active_edit();
+        if self.tab_mut().edits.redo() {
+            self.tab_mut().recompute_view();
+            self.status_msg = "Redo".to_string();
+            self.error = None;
+            self.workspace_dirty = true;
+        } else {
+            self.status_msg = "Nothing to redo".to_string();
+        }
     }
 
     /// Validate staged edits and build UPDATE/DELETE/INSERT statements. Returns `None`
@@ -2868,6 +2902,8 @@ impl DbGuiApp {
             Action::PasteRows(text) => self.paste_rows(&text),
             Action::ExportTable { table, format } => self.export_table(&table, format),
             Action::PreviewEdits => self.commit_edits(),
+            Action::Undo => self.undo_edits(),
+            Action::Redo => self.redo_edits(),
             Action::ConfirmEdits => self.confirm_edits(),
             Action::CancelEdits => {
                 self.commit_pending = None;
@@ -3298,14 +3334,37 @@ impl DbGuiApp {
         // Esc discards unsaved cell edits (revert to the stored values) when no cell editor
         // is open — the open-editor case is handled inside `render_editor` (cancel that
         // cell only). Skipped while the filter bar is up, which uses Esc to close itself.
+        // Recorded as one undo step so an accidental discard can be taken back with Cmd/Ctrl+Z.
         if ctx.input(|i| i.key_pressed(egui::Key::Escape))
             && self.tab().edits.active.is_none()
             && self.tab().edits.has_pending()
             && !self.tab().filter.visible
         {
-            self.tab_mut().edits.clear();
-            self.status_msg = "Discarded unsaved edits".to_string();
+            self.tab_mut().edits.discard_all();
+            self.tab_mut().recompute_view();
+            self.status_msg = "Discarded unsaved edits (⌘Z to undo)".to_string();
             self.error = None;
+            self.workspace_dirty = true;
+        }
+        // Cmd/Ctrl+Z undoes, Cmd/Ctrl+Shift+Z redoes, the last staged-edit change (cell edit,
+        // delete mark, new row, fill, paste, discard). Only when no text field is focused —
+        // an open cell editor / SQL console handles its own in-field undo. Shift+Z is matched
+        // first so a redo isn't also read as an undo.
+        let typing_now = ctx.memory(|m| m.focused().is_some());
+        if !typing_now && self.tab().edits.editable() {
+            let (undo, redo) = ctx.input_mut(|i| {
+                let redo = i.consume_key(
+                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                    egui::Key::Z,
+                );
+                let undo = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
+                (undo, redo)
+            });
+            if redo {
+                actions.push(Action::Redo);
+            } else if undo {
+                actions.push(Action::Undo);
+            }
         }
         // Backspace/Delete on the selected rows (when nothing is being typed) marks every
         // selected stored row for deletion (red) and drops any selected pending new rows.
@@ -3322,6 +3381,8 @@ impl DbGuiApp {
         {
             let order_len = self.tab().row_order.len();
             let selected: Vec<usize> = self.tab().selection.iter().collect();
+            // One undo group so the whole multi-row delete takes a single Cmd/Ctrl+Z.
+            self.tab_mut().edits.begin_undo_group();
             // Mark stored rows for deletion. New (insert) rows are removed instead, highest
             // display index first so the renumbering of the rows above each removal never
             // invalidates an index we still have to process.
@@ -3339,6 +3400,7 @@ impl DbGuiApp {
                     removed_new = true;
                 }
             }
+            self.tab_mut().edits.end_undo_group();
             // Removing new rows shifts the trailing display indices; clear the selection so it
             // can't point at the wrong (renumbered) rows. Stored-only deletes keep their
             // selection so the marked rows stay highlighted.
@@ -3956,6 +4018,58 @@ mod tests {
         assert_eq!(app.tab().edits.staged(first, 1), Some(&Value::Text("b".into())));
         // … and the pasted rows are selected for review.
         assert_eq!(app.tab().selection.len(), 2);
+    }
+
+    /// Undo/redo run through the app the same way the Cmd/Ctrl+Z shortcut does: a whole paste
+    /// is one undo step, and redo replays it. Exercises the `Action::Undo`/`Action::Redo` path
+    /// (flush editor → step history → recompute view) end to end.
+    #[test]
+    fn undo_redo_actions_step_staged_edits() {
+        let mut app = DbGuiApp::construct();
+        let result = QueryResult {
+            columns: vec![
+                ColumnMeta { name: "id".into(), type_name: "INTEGER".into() },
+                ColumnMeta { name: "name".into(), type_name: "TEXT".into() },
+            ],
+            rows: vec![vec![Value::Int(1), Value::Text("a".into())]],
+            stats: QueryStats::default(),
+            truncated: false,
+        };
+        app.tab_mut().set_result(result);
+        app.tab_mut().edits.source = Some(crate::edit::EditSource {
+            schema: None,
+            table: "t".into(),
+            pk_cols: vec!["id".into()],
+        });
+
+        // A stored-cell edit, then a two-row paste — two separate undo steps.
+        app.tab_mut()
+            .edits
+            .stage(0, 1, Value::Text("edited".into()), &Value::Text("a".into()));
+        app.apply_action(Action::PasteRows("2\tb\n3\tc".to_string()));
+        assert_eq!(app.tab().edits.new_rows, 2);
+
+        // Undo drops the whole paste in one step; the cell edit survives.
+        app.apply_action(Action::Undo);
+        assert_eq!(app.tab().edits.new_rows, 0, "paste undone in a single step");
+        assert_eq!(
+            app.tab().edits.staged(0, 1),
+            Some(&Value::Text("edited".into()))
+        );
+
+        // A second undo reverts the cell edit; nothing pending remains.
+        app.apply_action(Action::Undo);
+        assert_eq!(app.tab().edits.staged(0, 1), None);
+        assert!(!app.tab().edits.has_pending());
+
+        // Redo replays the cell edit, then the paste.
+        app.apply_action(Action::Redo);
+        assert_eq!(
+            app.tab().edits.staged(0, 1),
+            Some(&Value::Text("edited".into()))
+        );
+        app.apply_action(Action::Redo);
+        assert_eq!(app.tab().edits.new_rows, 2);
     }
 
     /// Paste into a read-only result is a no-op with a hint (no phantom rows).
