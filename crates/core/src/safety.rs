@@ -11,6 +11,7 @@ pub enum DangerKind {
     Drop,
     Truncate,
     Alter,
+    Merge,
 }
 
 impl DangerKind {
@@ -21,6 +22,7 @@ impl DangerKind {
             DangerKind::Drop => "DROP",
             DangerKind::Truncate => "TRUNCATE",
             DangerKind::Alter => "ALTER",
+            DangerKind::Merge => "MERGE",
         }
     }
 }
@@ -55,6 +57,17 @@ pub fn dangerous_statements(sql: &str) -> Vec<DangerousStatement> {
                 "drop" => DangerKind::Drop,
                 "truncate" => DangerKind::Truncate,
                 "alter" => DangerKind::Alter,
+                "merge" => DangerKind::Merge,
+                // A CTE can wrap data-modifying statements — both as the main statement
+                // (`WITH x AS (…) DELETE FROM t`) and inside a CTE body (Postgres allows
+                // `WITH x AS (DELETE … RETURNING *) SELECT …`). Flag the WITH if any
+                // modifying verb appears anywhere outside literals/comments. This can
+                // over-warn on an unquoted column literally named `update` etc., which is
+                // the safe direction for a confirmation gate.
+                "with" => match first_danger_verb(stmt) {
+                    Some(kind) => kind,
+                    None => return None,
+                },
                 _ => return None,
             };
             let missing_where = matches!(kind, DangerKind::Update | DangerKind::Delete)
@@ -66,6 +79,78 @@ pub fn dangerous_statements(sql: &str) -> Vec<DangerousStatement> {
             })
         })
         .collect()
+}
+
+/// The first destructive verb appearing anywhere in `stmt` (outside literals/comments),
+/// used to classify a `WITH` statement by what it wraps. "First" follows the order of
+/// the list below, not position in the text — UPDATE/DELETE outrank DDL for the label.
+fn first_danger_verb(stmt: &str) -> Option<DangerKind> {
+    [
+        ("update", DangerKind::Update),
+        ("delete", DangerKind::Delete),
+        ("merge", DangerKind::Merge),
+        ("truncate", DangerKind::Truncate),
+        ("drop", DangerKind::Drop),
+        ("alter", DangerKind::Alter),
+    ]
+    .into_iter()
+    .find(|(kw, _)| contains_keyword(stmt, kw))
+    .map(|(_, kind)| kind)
+}
+
+/// Verbs that modify data or schema when they appear inside an otherwise-read statement
+/// (a subquery, a CTE body, the target of an `EXPLAIN`, a `SELECT … INTO`).
+const EMBEDDED_WRITE_VERBS: &[&str] = &[
+    "insert", "update", "delete", "merge", "truncate", "drop", "alter", "create", "grant",
+    "revoke", "exec", "execute", "call", "into",
+];
+
+/// The statements in `sql` that are not provably read-only. Read-only mode refuses to run
+/// a batch unless this comes back empty.
+///
+/// Default-deny: a statement passes only when its leading keyword is a known read
+/// (`SELECT`, `SHOW`, `EXPLAIN`, …) — anything unrecognised (DML, DDL, `SET`, `GRANT`,
+/// `CALL`, `COPY`, vendor-specific verbs…) is rejected. Statements that can embed other
+/// statements are scanned for write verbs too, because `EXPLAIN ANALYZE UPDATE …` really
+/// runs the UPDATE, `WITH x AS (DELETE …) SELECT` really deletes, and `SELECT … INTO t`
+/// creates a table.
+///
+/// Lexical, so it can over-block exotic-but-legal SQL (e.g. MySQL's `INSERT()` string
+/// function in a SELECT); over-blocking is the safe direction here. It also cannot see
+/// side effects hidden in function calls (`SELECT setval(…)`), which is why the backends
+/// additionally enforce read-only at the session level where the engine supports it —
+/// this check exists to give a clear, local error before the server rejects the write.
+pub fn write_statements(sql: &str) -> Vec<String> {
+    split_statements(sql)
+        .into_iter()
+        .filter(|stmt| !statement_is_read_only(stmt))
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Is this single statement provably read-only? See [`write_statements`].
+fn statement_is_read_only(stmt: &str) -> bool {
+    let head = skip_leading_noise(stmt);
+    let first = head
+        .split(|c: char| c.is_whitespace() || c == '(' || c == ';')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match first.as_str() {
+        // Reads that can embed arbitrary expressions or whole statements.
+        "select" | "with" | "explain" | "table" | "values" => !EMBEDDED_WRITE_VERBS
+            .iter()
+            .any(|kw| contains_keyword(stmt, kw)),
+        // Metadata reads that take no subquery. (`SHOW CREATE TABLE` would trip the verb
+        // scan above, which is why these skip it.)
+        "show" | "describe" | "desc" | "use" => true,
+        // SQLite PRAGMA: reading (`PRAGMA table_info(t)`) is fine; assignment writes.
+        "pragma" => !stmt.contains('='),
+        // Transaction control around reads is fine, but `START TRANSACTION READ WRITE`
+        // would override the session's read-only default, so any WRITE token rejects.
+        "begin" | "start" | "commit" | "rollback" | "end" => !contains_keyword(stmt, "write"),
+        _ => false,
+    }
 }
 
 /// Does `stmt` contain `keyword` as a standalone word, outside string literals, quoted
@@ -213,5 +298,80 @@ mod tests {
         assert_eq!(kinds("/* x */ TRUNCATE t"), [DangerKind::Truncate]);
         // ...and a destructive keyword inside a comment is not a statement.
         assert!(dangerous_statements("-- DROP TABLE t\nSELECT 1").is_empty());
+    }
+
+    #[test]
+    fn cte_wrapped_dml_is_dangerous() {
+        // The main statement after the CTE list…
+        assert_eq!(
+            kinds("WITH old AS (SELECT id FROM t WHERE ts < now()) DELETE FROM t USING old WHERE t.id = old.id"),
+            [DangerKind::Delete]
+        );
+        // …and Postgres' data-modifying CTE bodies.
+        assert_eq!(
+            kinds("WITH gone AS (DELETE FROM t RETURNING *) SELECT count(*) FROM gone"),
+            [DangerKind::Delete]
+        );
+        assert_eq!(kinds("MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET a = 1"), [DangerKind::Merge]);
+        // A read-only WITH stays safe.
+        assert!(dangerous_statements("WITH c AS (SELECT 1 AS n) SELECT n FROM c").is_empty());
+    }
+
+    #[test]
+    fn read_only_allows_reads() {
+        for sql in [
+            "SELECT * FROM users WHERE id = 1",
+            "select id, updated_at from orders order by updated_at desc limit 10",
+            "WITH recent AS (SELECT * FROM orders) SELECT count(*) FROM recent",
+            "EXPLAIN SELECT * FROM t",
+            "SHOW CREATE TABLE t", // SHOW skips the embedded-verb scan on purpose
+            "DESCRIBE users",
+            "PRAGMA table_info(users)",
+            "USE analytics",
+            "SELECT 1; SELECT 2",
+            "BEGIN; SELECT 1; COMMIT",
+        ] {
+            assert!(write_statements(sql).is_empty(), "should pass: {sql}");
+        }
+    }
+
+    #[test]
+    fn read_only_blocks_writes_and_the_unknown() {
+        for sql in [
+            "INSERT INTO t VALUES (1)",
+            "UPDATE t SET a = 1 WHERE id = 1",
+            "DELETE FROM t",
+            "DROP TABLE t",
+            "CREATE TABLE t (id INT)",
+            "GRANT ALL ON t TO PUBLIC",
+            "SET default_transaction_read_only = off",
+            "CALL cleanup()",
+            "EXEC sp_who",
+            "COPY t FROM '/tmp/x.csv'",     // unknown verb → default deny
+            "VACUUM",                        // unknown verb → default deny
+            "WITH gone AS (DELETE FROM t RETURNING *) SELECT * FROM gone",
+            "WITH c AS (SELECT 1) UPDATE t SET a = 1",
+            "EXPLAIN ANALYZE UPDATE t SET a = 1", // EXPLAIN ANALYZE executes the DML
+            "SELECT * INTO backup FROM t",        // T-SQL/PG: creates a table
+            "PRAGMA journal_mode = DELETE",       // pragma assignment
+            "START TRANSACTION READ WRITE",       // would escape the read-only default
+            "SELECT 1; DELETE FROM t",            // one bad statement taints the batch
+        ] {
+            assert!(!write_statements(sql).is_empty(), "should block: {sql}");
+        }
+        // The offending statement (not the whole batch) is what's reported.
+        let found = write_statements("SELECT 1; DELETE FROM t");
+        assert_eq!(found, ["DELETE FROM t"]);
+    }
+
+    #[test]
+    fn read_only_ignores_verbs_in_literals_and_comments() {
+        for sql in [
+            "SELECT * FROM log WHERE action = 'delete'",
+            "SELECT * FROM t -- drop table t",
+            "SELECT \"insert\" FROM audit_events",
+        ] {
+            assert!(write_statements(sql).is_empty(), "should pass: {sql}");
+        }
     }
 }

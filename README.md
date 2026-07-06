@@ -56,8 +56,11 @@ export whole while the app stays responsive.
 ## More that's built in
 
 - **Safe on production.** Mark a connection *production* and destructive statements
-  (`UPDATE`, `DELETE`, `DROP`, `TRUNCATE`, `ALTER`) pause for confirmation — with a
-  clear warning when an `UPDATE` or `DELETE` has no `WHERE`.
+  (`UPDATE`, `DELETE`, `DROP`, `TRUNCATE`, `ALTER`, `MERGE`) pause for confirmation —
+  with a clear warning when an `UPDATE` or `DELETE` has no `WHERE`. Or go further and
+  mark it *read-only*: writes are blocked outright, enforced both in the app and at the
+  database session level. See [SECURITY.md](SECURITY.md) for the full security checklist
+  (keychain-only secrets, TLS everywhere, signed updates, audit log, no telemetry).
 - **Connect through anything.** Per-connection SSL (up to verify-full and mutual TLS)
   and optional SSH tunnels through a bastion host. Passwords and keys live in the OS
   keychain, never on disk in plaintext.

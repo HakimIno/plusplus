@@ -754,6 +754,11 @@ pub struct DbGuiApp {
     danger_pending: Option<Vec<dbcore::safety::DangerousStatement>>,
     /// Record executed statements to the on-disk query history (settings toggle).
     history_enabled: bool,
+    /// Record connections and statements to the append-only audit trail (settings toggle).
+    audit_enabled: bool,
+    /// Check GitHub for a newer release at launch (settings toggle) — the app's only
+    /// network call apart from the databases the user connects to.
+    update_check_enabled: bool,
     /// Whether the right-hand panel (History / Favorites) is open; the caches below hold its
     /// rows while it is.
     history_open: bool,
@@ -832,7 +837,7 @@ impl DbGuiApp {
         app.bookmarks = dbcore::bookmarks::load().unwrap_or_default();
 
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        if crate::update::automatic_updates_supported() {
+        if crate::update::automatic_updates_supported() && app.update_check_enabled {
             app.start_update_check();
         }
 
@@ -883,6 +888,8 @@ impl DbGuiApp {
             }
         }
         let history_enabled = settings.history_enabled.unwrap_or(true);
+        let audit_enabled = settings.audit_enabled.unwrap_or(true);
+        let update_check_enabled = settings.update_check_enabled.unwrap_or(true);
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -936,6 +943,8 @@ impl DbGuiApp {
             schema_pending: None,
             danger_pending: None,
             history_enabled,
+            audit_enabled,
+            update_check_enabled,
             history_open: false,
             history_cache: Vec::new(),
             // Loaded from disk in `new` (this builder stays config-dir-free for tests).
@@ -1079,6 +1088,8 @@ impl DbGuiApp {
         settings.beautify_indent = Some(self.beautify.indent);
         settings.welcomed = Some(!self.show_welcome);
         settings.history_enabled = Some(self.history_enabled);
+        settings.audit_enabled = Some(self.audit_enabled);
+        settings.update_check_enabled = Some(self.update_check_enabled);
         if let Err(e) = dbcore::config::save_settings(&settings) {
             self.error = Some(format!("Could not save settings: {e}"));
         }
@@ -1465,6 +1476,15 @@ impl DbGuiApp {
                             }
                             self.status_msg = format!("Connected to {name} — {n} tables");
                             self.error = None;
+                            self.record_audit(
+                                dbcore::audit::AuditAction::Connect,
+                                &arrived_id,
+                                "",
+                                true,
+                                None,
+                                None,
+                                0.0,
+                            );
                             // A fresh schema invalidates an open diagram of this connection
                             // (e.g. after a DDL migration re-introspects).
                             if self.erd.as_ref().is_some_and(|e| e.conn_id == arrived_id) {
@@ -1472,6 +1492,15 @@ impl DbGuiApp {
                             }
                         }
                         Err(e) => {
+                            self.record_audit(
+                                dbcore::audit::AuditAction::Connect,
+                                &conn_id,
+                                "",
+                                false,
+                                Some(e.clone()),
+                                None,
+                                0.0,
+                            );
                             self.error = Some(format!("Connection failed: {e}"));
                             self.status_msg = "Connection failed".to_string();
                         }
@@ -1528,6 +1557,7 @@ impl DbGuiApp {
                         Ok(res) => {
                             let rows = res.stats.rows_affected.unwrap_or(res.row_count() as u64);
                             self.record_history(
+                                dbcore::audit::AuditAction::Query,
                                 &conn_id,
                                 &sql,
                                 true,
@@ -1536,9 +1566,15 @@ impl DbGuiApp {
                                 res.stats.elapsed_ms,
                             );
                         }
-                        Err(e) => {
-                            self.record_history(&conn_id, &sql, false, Some(e.clone()), None, 0.0)
-                        }
+                        Err(e) => self.record_history(
+                            dbcore::audit::AuditAction::Query,
+                            &conn_id,
+                            &sql,
+                            false,
+                            Some(e.clone()),
+                            None,
+                            0.0,
+                        ),
                     }
                     let is_active = self
                         .tabs
@@ -1646,6 +1682,7 @@ impl DbGuiApp {
                 } => {
                     self.busy = Busy::Idle;
                     self.record_history(
+                        dbcore::audit::AuditAction::EditCommit,
                         &conn_id,
                         &sql,
                         result.is_ok(),
@@ -1731,6 +1768,7 @@ impl DbGuiApp {
                 } => {
                     self.busy = Busy::Idle;
                     self.record_history(
+                        dbcore::audit::AuditAction::SchemaApply,
                         &history_conn_id,
                         &sql,
                         result.is_ok(),
@@ -1828,10 +1866,12 @@ impl DbGuiApp {
         });
     }
 
-    /// Append one executed statement to the on-disk query history. Best effort: history
-    /// is never load-bearing, so failures are swallowed. No-op when disabled in settings.
-    fn record_history(
-        &mut self,
+    /// Append one event to the append-only audit trail (`dbcore::audit`). Separate from
+    /// history: audit also records connection events, rotates monthly instead of being
+    /// compacted, and has no in-app clear. Best effort — never load-bearing.
+    fn record_audit(
+        &self,
+        action: dbcore::audit::AuditAction,
         conn_id: &str,
         sql: &str,
         ok: bool,
@@ -1839,6 +1879,43 @@ impl DbGuiApp {
         rows: Option<u64>,
         elapsed_ms: f64,
     ) {
+        if !self.audit_enabled || cfg!(test) {
+            return;
+        }
+        let (conn_name, target) = self
+            .connections
+            .iter()
+            .find(|c| c.id == conn_id)
+            .map(|c| (c.name.clone(), c.target_summary()))
+            .unwrap_or_default();
+        let _ = dbcore::audit::append(&dbcore::audit::AuditEntry {
+            at: dbcore::history::now_rfc3339(),
+            action,
+            conn_id: conn_id.to_string(),
+            conn_name,
+            target,
+            sql: sql.to_string(),
+            ok,
+            error,
+            rows,
+            elapsed_ms,
+        });
+    }
+
+    /// Append one executed statement to the on-disk query history and the audit trail.
+    /// Best effort: history is never load-bearing, so failures are swallowed. History
+    /// and audit honour their own settings toggles independently.
+    fn record_history(
+        &mut self,
+        action: dbcore::audit::AuditAction,
+        conn_id: &str,
+        sql: &str,
+        ok: bool,
+        error: Option<String>,
+        rows: Option<u64>,
+        elapsed_ms: f64,
+    ) {
+        self.record_audit(action, conn_id, sql, ok, error.clone(), rows, elapsed_ms);
         // Feed the editor's ghost-text pool with statements that ran cleanly (independent
         // of the history-logging setting, which only governs the on-disk audit log). Skip
         // under test so the pool stays deterministic.
@@ -1954,6 +2031,25 @@ impl DbGuiApp {
                     .iter()
                     .any(|c| c.id == id && c.production)
             })
+    }
+
+    /// Is the tab at `idx` bound to a connection whose saved config is marked read-only?
+    fn tab_connection_is_read_only(&self, idx: usize) -> bool {
+        self.tabs
+            .get(idx)
+            .and_then(|tab| tab.conn_id.as_deref())
+            .is_some_and(|id| {
+                self.connections
+                    .iter()
+                    .any(|c| c.id == id && c.read_only)
+            })
+    }
+
+    /// Refuse an action on a read-only connection with a consistent error + status pair.
+    /// `what` completes the sentence "This connection is read-only — {what}".
+    fn refuse_read_only(&mut self, what: &str) {
+        self.error = Some(format!("This connection is read-only — {what}"));
+        self.status_msg = "Blocked by read-only mode".to_string();
     }
 
     /// Run the SQL of the tab at `idx` against its bound connection.
@@ -2213,12 +2309,18 @@ impl DbGuiApp {
         if matches.next().is_some() {
             return None;
         }
-        let pk_cols: Vec<String> = info
-            .columns
-            .iter()
-            .filter(|c| c.primary_key)
-            .map(|c| c.name.clone())
-            .collect();
+        // A read-only connection never gets editable rows: keep the table identity (the
+        // pager, Structure view, and row count key off it) but drop the PK columns, which
+        // is what `EditSource::editable()` checks. Staging, paste, and commit all follow.
+        let pk_cols: Vec<String> = if self.tab_connection_is_read_only(idx) {
+            Vec::new()
+        } else {
+            info.columns
+                .iter()
+                .filter(|c| c.primary_key)
+                .map(|c| c.name.clone())
+                .collect()
+        };
         // Keep the table identity even when the table has no primary key. The result isn't
         // *editable* (`EditSource::editable()` is false for empty `pk_cols`, so the grid stays
         // read-only and no PK-less UPDATE is ever generated), but it's still a genuine table
@@ -2260,6 +2362,10 @@ impl DbGuiApp {
     /// Validate staged edits and build the SQL statements, storing them in
     /// `commit_pending` to show the preview dialog. Nothing is executed yet.
     fn commit_edits(&mut self) {
+        if self.tab_connection_is_read_only(self.active_query_tab) {
+            self.refuse_read_only("staged edits can't be saved.");
+            return;
+        }
         if let Some(stmts) = self.build_commit_statements() {
             self.commit_pending = Some(stmts);
         }
@@ -2709,6 +2815,25 @@ impl DbGuiApp {
                 // single-table `SELECT *` — including a hand-tuned LIMIT/WHERE/ORDER BY —
                 // stays editable; anything else runs as a read-only ad-hoc query.
                 self.tabs[idx].edits.pending_source = self.derive_edit_source(idx);
+                // A read-only connection refuses anything that isn't provably a read —
+                // no confirmation dialog, it simply doesn't run. The backends enforce
+                // this at the session level too where the engine supports it; this check
+                // gives the clear, local error.
+                if self.tab_connection_is_read_only(idx) {
+                    let found = dbcore::safety::write_statements(&self.tabs[idx].sql);
+                    if let Some(first) = found.first() {
+                        let shown: String = first.chars().take(80).collect();
+                        self.refuse_read_only(&format!(
+                            "not running: {shown}{}",
+                            if found.len() > 1 {
+                                format!(" (+{} more)", found.len() - 1)
+                            } else {
+                                String::new()
+                            }
+                        ));
+                        return;
+                    }
+                }
                 // A production connection holds destructive SQL for confirmation first.
                 if self.tab_connection_is_production(idx) {
                     let found = dbcore::safety::dangerous_statements(&self.tabs[idx].sql);
@@ -2922,6 +3047,11 @@ impl DbGuiApp {
                 }
             }
             Action::ApplySchema => {
+                if self.tab_connection_is_read_only(self.active_query_tab) {
+                    self.schema_pending = None;
+                    self.refuse_read_only("schema changes can't be applied.");
+                    return;
+                }
                 let Some(stmts) = self.schema_pending.take() else {
                     return;
                 };
@@ -3564,6 +3694,68 @@ mod tests {
         app.connections[0].production = false;
         app.apply_action(Action::RunQuery);
         assert!(app.danger_pending.is_none());
+        assert_eq!(app.busy, Busy::Querying);
+    }
+
+    /// A read-only connection refuses writes outright (no confirmation dialog), refuses
+    /// staged-edit saves and DDL, and still runs reads.
+    #[test]
+    fn read_only_connection_blocks_writes() {
+        let mut app = DbGuiApp::construct();
+        app.connections.clear();
+        let mut cfg = dbcore::ConnectionConfig::new(dbcore::DbKind::Sqlite);
+        cfg.id = "c1".into();
+        cfg.read_only = true;
+        app.connections.push(cfg);
+        app.active_connections.push(ActiveConnection {
+            config_id: "c1".into(),
+            name: "replica".into(),
+            db: std::sync::Arc::new(DummyDb),
+            databases: Vec::new(),
+            schema: fake_schema(1, 1),
+        });
+        app.tab_mut().conn_id = Some("c1".into());
+
+        // Reads run normally.
+        app.tab_mut().sql = "SELECT * FROM table_0".into();
+        app.apply_action(Action::RunQuery);
+        assert!(app.error.is_none());
+        assert_eq!(app.busy, Busy::Querying);
+        app.busy = Busy::Idle;
+
+        // A write is refused outright — no danger dialog, no query.
+        app.tab_mut().sql = "DELETE FROM table_0".into();
+        app.apply_action(Action::RunQuery);
+        assert!(app.danger_pending.is_none());
+        assert_eq!(app.busy, Busy::Idle);
+        assert!(app.error.as_deref().unwrap_or("").contains("read-only"));
+
+        // So is a CTE-wrapped write the old lexical guard used to miss.
+        app.error = None;
+        app.tab_mut().sql = "WITH x AS (SELECT 1) UPDATE table_0 SET col0 = 1".into();
+        app.apply_action(Action::RunQuery);
+        assert_eq!(app.busy, Busy::Idle);
+        assert!(app.error.as_deref().unwrap_or("").contains("read-only"));
+
+        // Committing staged edits is refused before any SQL is built.
+        app.error = None;
+        app.apply_action(Action::PreviewEdits);
+        assert!(app.commit_pending.is_none());
+        assert!(app.error.as_deref().unwrap_or("").contains("read-only"));
+
+        // Applying a staged schema migration is refused and the preview is dropped.
+        app.error = None;
+        app.schema_pending = Some(vec!["ALTER TABLE table_0 ADD c INT".into()]);
+        app.apply_action(Action::ApplySchema);
+        assert!(app.schema_pending.is_none());
+        assert_eq!(app.busy, Busy::Idle);
+        assert!(app.error.as_deref().unwrap_or("").contains("read-only"));
+
+        // Turning the flag off lets the same write reach the danger-free run path.
+        app.error = None;
+        app.connections[0].read_only = false;
+        app.tab_mut().sql = "DELETE FROM table_0".into();
+        app.apply_action(Action::RunQuery);
         assert_eq!(app.busy, Busy::Querying);
     }
 

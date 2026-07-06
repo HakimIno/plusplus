@@ -1,9 +1,9 @@
 use super::{
-    ActiveConnection, Action, Busy, ConnField, ConnTestState, DbGuiApp, PageNav, QueryTab, TabView,
+    Action, ActiveConnection, Busy, ConnField, ConnTestState, DbGuiApp, PageNav, QueryTab, TabView,
 };
+use crate::components;
 use crate::filter::{self, FilterEvent};
 use crate::grid::results_grid;
-use crate::components;
 use crate::icons;
 use crate::style::{self, palette};
 use crate::title_bar;
@@ -83,7 +83,9 @@ fn status_text_input(
     width: f32,
     status: Option<bool>,
 ) -> egui::Response {
-    with_field_status(ui, status, |ui| components::text_input(ui, text, hint, width))
+    with_field_status(ui, status, |ui| {
+        components::text_input(ui, text, hint, width)
+    })
 }
 
 /// First non-empty line of a SQL string, for one-line list displays.
@@ -156,12 +158,8 @@ impl DbGuiApp {
                         {
                             actions.push(Action::NewConnection);
                         }
-                        if components::toolbar_icon_button(
-                            ui,
-                            icons::disconnect(),
-                            "Disconnect",
-                        )
-                        .clicked()
+                        if components::toolbar_icon_button(ui, icons::disconnect(), "Disconnect")
+                            .clicked()
                             && connected
                         {
                             actions.push(Action::Disconnect);
@@ -208,12 +206,8 @@ impl DbGuiApp {
                             actions.push(Action::ToggleHistory);
                         }
                         if ERD_ENABLED
-                            && components::toolbar_icon_button(
-                                ui,
-                                icons::diagram(),
-                                "ER diagram",
-                            )
-                            .clicked()
+                            && components::toolbar_icon_button(ui, icons::diagram(), "ER diagram")
+                                .clicked()
                         {
                             actions.push(Action::ToggleErd);
                         }
@@ -318,78 +312,84 @@ impl DbGuiApp {
                                         preview,
                                         drag_float_x,
                                     );
-                                let tab_count = self.tabs.len();
-                                let can_close_others = tab_count > 1;
-                                let can_close_right = idx + 1 < tab_count;
-                                resp.response.context_menu(|ui| {
-                                    ui.set_min_width(200.0);
-                                    if ui.button("Close Tab").clicked() {
-                                        actions.push(Action::CloseTab(idx));
-                                        ui.close();
-                                    }
-                                    if ui
-                                        .add_enabled(
-                                            can_close_others,
-                                            egui::Button::new("Close Other Tabs"),
-                                        )
-                                        .clicked()
-                                    {
-                                        actions.push(Action::CloseOtherTabs(idx));
-                                        ui.close();
-                                    }
-                                    if ui
-                                        .add_enabled(
-                                            can_close_right,
-                                            egui::Button::new("Close Tabs to the Right"),
-                                        )
-                                        .clicked()
-                                    {
-                                        actions.push(Action::CloseTabsToRight(idx));
-                                        ui.close();
-                                    }
-                                    if ui.button("Close All Tabs").clicked() {
-                                        actions.push(Action::CloseAllTabs);
-                                        ui.close();
-                                    }
-                                    if preview {
-                                        ui.separator();
-                                        if components::button(ui, icons::save(), "Pin Tab", true).clicked()
-                                        {
-                                            actions.push(Action::PinTab(idx));
+                                    let tab_count = self.tabs.len();
+                                    let can_close_others = tab_count > 1;
+                                    let can_close_right = idx + 1 < tab_count;
+                                    resp.response.context_menu(|ui| {
+                                        ui.set_min_width(200.0);
+                                        if ui.button("Close Tab").clicked() {
+                                            actions.push(Action::CloseTab(idx));
                                             ui.close();
                                         }
-                                    }
-                                });
-                                if resp.close {
-                                    actions.push(Action::CloseTab(idx));
-                                } else if resp.pinned {
-                                    actions.push(Action::PinTab(idx));
-                                } else if resp.clicked {
-                                    actions.push(Action::SelectTab(idx));
-                                } else if resp.drag_started {
-                                    // Grabbing a tab selects it (TablePlus-style) and
-                                    // starts the reorder, tracked by stable id so the
-                                    // grab survives the index changing mid-drag.
-                                    self.tab_drag = Some(super::TabDrag {
-                                        id: self.tabs[idx].id,
-                                        grab_x: pointer_x.unwrap_or(resp.rect.left())
-                                            - resp.rect.left(),
+                                        if ui
+                                            .add_enabled(
+                                                can_close_others,
+                                                egui::Button::new("Close Other Tabs"),
+                                            )
+                                            .clicked()
+                                        {
+                                            actions.push(Action::CloseOtherTabs(idx));
+                                            ui.close();
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                can_close_right,
+                                                egui::Button::new("Close Tabs to the Right"),
+                                            )
+                                            .clicked()
+                                        {
+                                            actions.push(Action::CloseTabsToRight(idx));
+                                            ui.close();
+                                        }
+                                        if ui.button("Close All Tabs").clicked() {
+                                            actions.push(Action::CloseAllTabs);
+                                            ui.close();
+                                        }
+                                        if preview {
+                                            ui.separator();
+                                            if components::button(
+                                                ui,
+                                                icons::save(),
+                                                "Pin Tab",
+                                                true,
+                                            )
+                                            .clicked()
+                                            {
+                                                actions.push(Action::PinTab(idx));
+                                                ui.close();
+                                            }
+                                        }
                                     });
-                                    actions.push(Action::SelectTab(idx));
+                                    if resp.close {
+                                        actions.push(Action::CloseTab(idx));
+                                    } else if resp.pinned {
+                                        actions.push(Action::PinTab(idx));
+                                    } else if resp.clicked {
+                                        actions.push(Action::SelectTab(idx));
+                                    } else if resp.drag_started {
+                                        // Grabbing a tab selects it (TablePlus-style) and
+                                        // starts the reorder, tracked by stable id so the
+                                        // grab survives the index changing mid-drag.
+                                        self.tab_drag = Some(super::TabDrag {
+                                            id: self.tabs[idx].id,
+                                            grab_x: pointer_x.unwrap_or(resp.rect.left())
+                                                - resp.rect.left(),
+                                        });
+                                        actions.push(Action::SelectTab(idx));
+                                    }
+                                    rects.push(resp.rect);
+                                    ui.add_space(2.0);
                                 }
-                                rects.push(resp.rect);
-                                ui.add_space(2.0);
-                            }
-                            self.handle_tab_drag(ui, &rects, actions);
-                            if components::toolbar_icon_button(
-                                ui,
-                                icons::plus(),
-                                "New query tab (Cmd/Ctrl+T)",
-                            )
-                            .clicked()
-                            {
-                                actions.push(Action::NewTab);
-                            }
+                                self.handle_tab_drag(ui, &rects, actions);
+                                if components::toolbar_icon_button(
+                                    ui,
+                                    icons::plus(),
+                                    "New query tab (Cmd/Ctrl+T)",
+                                )
+                                .clicked()
+                                {
+                                    actions.push(Action::NewTab);
+                                }
                             });
                         });
                 });
@@ -477,29 +477,29 @@ impl DbGuiApp {
             ui.horizontal(|ui| {
                 let version = format!("v{}", crate::update::CURRENT_VERSION);
                 ui.allocate_ui_with_layout(
-                    egui::vec2((ui.available_width() - 44.0).max(0.0), ui.available_height()),
+                    egui::vec2(
+                        (ui.available_width() - 44.0).max(0.0),
+                        ui.available_height(),
+                    ),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
                         ui.add_space(4.0);
                         if let Some(err) = &self.error {
                             icons::show_colored(ui, icons::warning(), 13.0, palette::DANGER());
-                            ui.label(
-                                egui::RichText::new(err).size(11.0).color(palette::DANGER()),
-                            );
+                            ui.label(egui::RichText::new(err).size(11.0).color(palette::DANGER()));
                         } else {
-
-
-
                             if self.busy == Busy::Querying {
                                 ui.add(components::spinner(11.0));
                                 ui.add_space(4.0);
                                 if ui
-                                    .add(egui::Label::new(
-                                        egui::RichText::new("Cancel")
-                                            .size(11.0)
-                                            .color(palette::DANGER()),
+                                    .add(
+                                        egui::Label::new(
+                                            egui::RichText::new("Cancel")
+                                                .size(11.0)
+                                                .color(palette::DANGER()),
+                                        )
+                                        .sense(egui::Sense::click()),
                                     )
-                                    .sense(egui::Sense::click()))
                                     .on_hover_text("Abort the running query")
                                     .clicked()
                                 {
@@ -515,14 +515,22 @@ impl DbGuiApp {
                             );
                             let tab = self.tab();
                             if let Some(res) = &tab.result {
-                                if tab.filter.is_active()
-                                    && tab.row_order.len() != res.row_count()
+                                if tab.filter.is_active() && tab.row_order.len() != res.row_count()
                                 {
                                     ui.colored_label(palette::TEXT_FAINT(), "·");
-                                    icons::show_colored(ui, icons::filter(), 13.0, palette::ACCENT());
+                                    icons::show_colored(
+                                        ui,
+                                        icons::filter(),
+                                        13.0,
+                                        palette::ACCENT(),
+                                    );
                                     ui.colored_label(
                                         palette::ACCENT(),
-                                        format!("{} of {} rows", tab.row_order.len(), res.row_count()),
+                                        format!(
+                                            "{} of {} rows",
+                                            tab.row_order.len(),
+                                            res.row_count()
+                                        ),
                                     );
                                 }
                             }
@@ -588,11 +596,7 @@ impl DbGuiApp {
                 .selected_text(egui::RichText::new(format!("{limit} / page")).size(11.0))
                 .show_ui(ui, |ui| {
                     for n in [100u64, 500, 1_000, 5_000, 10_000] {
-                        if ui
-                            .selectable_label(limit == n, group_digits(n))
-                            .clicked()
-                            && idle
-                        {
+                        if ui.selectable_label(limit == n, group_digits(n)).clicked() && idle {
                             actions.push(Action::SetPageSize(n));
                         }
                     }
@@ -675,8 +679,7 @@ impl DbGuiApp {
                         };
                         let (dot_rect, _) =
                             ui.allocate_exact_size(egui::vec2(8.0, row_h), egui::Sense::hover());
-                        ui.painter()
-                            .circle_filled(dot_rect.center(), 3.0, dot);
+                        ui.painter().circle_filled(dot_rect.center(), 3.0, dot);
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if self.busy == Busy::Querying {
@@ -763,7 +766,8 @@ impl DbGuiApp {
                         nav.dismiss |= i.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
                     });
                 }
-                let force = ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Space));
+                let force =
+                    ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Space));
 
                 // Ghost text (fish-shell autosuggestion): when the popup is closed and a
                 // suggestion was trailing the caret last frame, Tab accepts it. Stolen here,
@@ -784,74 +788,77 @@ impl DbGuiApp {
                             .id_salt("sql_scroll")
                             .auto_shrink(false)
                             .show(ui, |ui| {
-                        // Size the editor to fill the panel: a `TextEdit` only grows to its
-                        // `desired_rows` (or its content), so a fixed row count would leave the
-                        // dragged-open panel mostly empty. Derive the row count from the space the
-                        // scroll area gives us so the box tracks the resize; content longer than
-                        // that scrolls internally.
-                        let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
-                        // Leave room for the editor's own vertical margin so the widget doesn't
-                        // overflow the viewport by a few pixels and trigger a permanent scrollbar.
-                        let avail = ui.available_height() - 2.0 * ui.spacing().item_spacing.y;
-                        let rows = (avail / row_height).floor().max(5.0) as usize;
-                        // `.show()` (not `ui.add`) exposes the galley + cursor so the popup can
-                        // anchor under the caret and we can move the caret after an insertion.
-                        let output = egui::TextEdit::multiline(&mut self.tabs[self.active_query_tab].sql)
-                            .code_editor()
-                            .frame(egui::Frame::NONE)
-                            .desired_rows(rows)
-                            .desired_width(f32::INFINITY)
-                            .layouter(&mut layouter)
-                            .hint_text("SELECT ...")
-                            .show(ui);
+                                // Size the editor to fill the panel: a `TextEdit` only grows to its
+                                // `desired_rows` (or its content), so a fixed row count would leave the
+                                // dragged-open panel mostly empty. Derive the row count from the space the
+                                // scroll area gives us so the box tracks the resize; content longer than
+                                // that scrolls internally.
+                                let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
+                                // Leave room for the editor's own vertical margin so the widget doesn't
+                                // overflow the viewport by a few pixels and trigger a permanent scrollbar.
+                                let avail =
+                                    ui.available_height() - 2.0 * ui.spacing().item_spacing.y;
+                                let rows = (avail / row_height).floor().max(5.0) as usize;
+                                // `.show()` (not `ui.add`) exposes the galley + cursor so the popup can
+                                // anchor under the caret and we can move the caret after an insertion.
+                                let output = egui::TextEdit::multiline(
+                                    &mut self.tabs[self.active_query_tab].sql,
+                                )
+                                .code_editor()
+                                .frame(egui::Frame::NONE)
+                                .desired_rows(rows)
+                                .desired_width(f32::INFINITY)
+                                .layouter(&mut layouter)
+                                .hint_text("SELECT ...")
+                                .show(ui);
 
-                        let resp = &output.response.response;
-                        let editor_id = resp.id;
-                        let focused = resp.has_focus();
-                        let text_changed = resp.changed();
-                        if text_changed {
-                            // Editing the SQL means the rows currently on screen may no longer
-                            // map back to one table, so they turn read-only; the next Run
-                            // re-derives editability from the new SQL (`derive_edit_source`).
-                            // A previewed tab becomes permanent (just like other editors).
-                            let tab = self.tab_mut();
-                            tab.edits.source = None;
-                            tab.preview = false;
-                            self.workspace_dirty = true;
-                        }
+                                let resp = &output.response.response;
+                                let editor_id = resp.id;
+                                let focused = resp.has_focus();
+                                let text_changed = resp.changed();
+                                if text_changed {
+                                    // Editing the SQL means the rows currently on screen may no longer
+                                    // map back to one table, so they turn read-only; the next Run
+                                    // re-derives editability from the new SQL (`derive_edit_source`).
+                                    // A previewed tab becomes permanent (just like other editors).
+                                    let tab = self.tab_mut();
+                                    tab.edits.source = None;
+                                    tab.preview = false;
+                                    self.workspace_dirty = true;
+                                }
 
-                        // Caret position (char index + on-screen rect) drives the popup.
-                        let cursor = output.cursor_range.map(|r| r.primary);
-                        let cursor_char = cursor.map(|c| c.index);
-                        let cursor_rect = cursor.map(|c| {
-                            output
-                                .galley
-                                .pos_from_cursor(c)
-                                .translate(output.galley_pos.to_vec2())
-                        });
+                                // Caret position (char index + on-screen rect) drives the popup.
+                                let cursor = output.cursor_range.map(|r| r.primary);
+                                let cursor_char = cursor.map(|c| c.index);
+                                let cursor_rect = cursor.map(|c| {
+                                    output
+                                        .galley
+                                        .pos_from_cursor(c)
+                                        .translate(output.galley_pos.to_vec2())
+                                });
 
-                        let ctx = ui.ctx().clone();
-                        self.update_autocomplete(
-                            &ctx,
-                            editor_id,
-                            focused,
-                            text_changed,
-                            force,
-                            cursor_char,
-                            cursor_rect,
-                            nav,
-                        );
+                                let ctx = ui.ctx().clone();
+                                self.update_autocomplete(
+                                    &ctx,
+                                    editor_id,
+                                    focused,
+                                    text_changed,
+                                    force,
+                                    cursor_char,
+                                    cursor_rect,
+                                    nav,
+                                );
 
-                        self.update_ghost(
-                            ui,
-                            &ctx,
-                            editor_id,
-                            focused,
-                            cursor_char,
-                            cursor_rect,
-                            &font,
-                            accept_ghost,
-                        );
+                                self.update_ghost(
+                                    ui,
+                                    &ctx,
+                                    editor_id,
+                                    focused,
+                                    cursor_char,
+                                    cursor_rect,
+                                    &font,
+                                    accept_ghost,
+                                );
                             });
                     });
             });
@@ -887,7 +894,10 @@ impl DbGuiApp {
         // Recompute only when the text or caret moved since the cached suggestion. While the
         // focused editor merely repaints — e.g. the result grid is scrolling — reuse the cached
         // value instead of re-scanning history and the schema every frame.
-        let key = (self.tabs[self.active_query_tab].sql.chars().count(), cursor_char);
+        let key = (
+            self.tabs[self.active_query_tab].sql.chars().count(),
+            cursor_char,
+        );
         if self.ghost_key != Some(key) {
             self.ghost_suggestion = {
                 let (schema, kind) = match self.active() {
@@ -947,9 +957,11 @@ impl DbGuiApp {
 
         let new_cursor = self.tabs[self.active_query_tab].sql.chars().count();
         if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, editor_id) {
-            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
-                egui::text::CCursor::new(new_cursor),
-            )));
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(new_cursor),
+                )));
             state.store(ctx, editor_id);
         }
         ctx.memory_mut(|m| m.request_focus(editor_id));
@@ -1101,9 +1113,11 @@ impl DbGuiApp {
         // Move the editor's caret to just after the inserted text.
         let new_cursor = start + suggestion.chars().count();
         if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, editor_id) {
-            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
-                egui::text::CCursor::new(new_cursor),
-            )));
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(new_cursor),
+                )));
             state.store(ctx, editor_id);
         }
         ctx.memory_mut(|m| m.request_focus(editor_id));
@@ -1175,7 +1189,9 @@ impl DbGuiApp {
                                 );
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| components::type_badge(ui, &col.type_name, kind_color(kind)),
+                                    |ui| {
+                                        components::type_badge(ui, &col.type_name, kind_color(kind))
+                                    },
                                 );
                             });
                             let value = &res.rows[row_idx][c];
@@ -1264,8 +1280,13 @@ impl DbGuiApp {
                                         ui.set_min_width(180.0);
                                         let connect_label =
                                             if live { "Reconnect" } else { "Connect" };
-                                        if components::button(ui, icons::connect(), connect_label, true)
-                                            .clicked()
+                                        if components::button(
+                                            ui,
+                                            icons::connect(),
+                                            connect_label,
+                                            true,
+                                        )
+                                        .clicked()
                                         {
                                             actions.push(Action::Connect(idx));
                                             ui.close();
@@ -1273,35 +1294,53 @@ impl DbGuiApp {
                                         if live && !databases.is_empty() {
                                             ui.menu_button("Switch Database", |ui| {
                                                 ui.set_min_width(160.0);
-                                                    egui::ScrollArea::vertical()
-                                                        .max_height(220.0)
-                                                        .show(ui, |ui| {
-                                                            for db in &databases {
-                                                                let is_current = *db == current_db;
-                                                                let tint = ui.visuals().widgets.inactive.fg_stroke.color;
-                                                                let db_img = egui::Image::new(icons::database())
-                                                                    .fit_to_exact_size(egui::vec2(14.0, 14.0))
+                                                egui::ScrollArea::vertical()
+                                                    .max_height(220.0)
+                                                    .show(ui, |ui| {
+                                                        for db in &databases {
+                                                            let is_current = *db == current_db;
+                                                            let tint = ui
+                                                                .visuals()
+                                                                .widgets
+                                                                .inactive
+                                                                .fg_stroke
+                                                                .color;
+                                                            let db_img =
+                                                                egui::Image::new(icons::database())
+                                                                    .fit_to_exact_size(egui::vec2(
+                                                                        14.0, 14.0,
+                                                                    ))
                                                                     .tint(tint);
-                                                                let label = if is_current {
-                                                                    format!("✓  {db}")
-                                                                } else {
-                                                                    db.clone()
-                                                                };
-                                                                let btn = egui::Button::image_and_text(db_img, label)
-                                                                    .min_size(egui::vec2(ui.available_width(), 0.0));
-                                                                if ui.add_enabled(!is_current, btn).clicked() {
-                                                                    actions.push(Action::SwitchDatabase {
+                                                            let label = if is_current {
+                                                                format!("✓  {db}")
+                                                            } else {
+                                                                db.clone()
+                                                            };
+                                                            let btn = egui::Button::image_and_text(
+                                                                db_img, label,
+                                                            )
+                                                            .min_size(egui::vec2(
+                                                                ui.available_width(),
+                                                                0.0,
+                                                            ));
+                                                            if ui
+                                                                .add_enabled(!is_current, btn)
+                                                                .clicked()
+                                                            {
+                                                                actions.push(
+                                                                    Action::SwitchDatabase {
                                                                         conn_idx: idx,
                                                                         database: db.clone(),
-                                                                    });
-                                                                    ui.close();
-                                                                }
+                                                                    },
+                                                                );
+                                                                ui.close();
                                                             }
-                                                        });
-                                                },
-                                            );
+                                                        }
+                                                    });
+                                            });
                                         }
-                                        if components::button(ui, icons::edit(), "Edit…", true).clicked()
+                                        if components::button(ui, icons::edit(), "Edit…", true)
+                                            .clicked()
                                         {
                                             actions.push(Action::EditConnection(idx));
                                             ui.close();
@@ -1402,15 +1441,21 @@ impl DbGuiApp {
                                 .tint(ui.visuals().widgets.inactive.fg_stroke.color);
                             ui.menu_button(plus, |ui| {
                                 ui.set_min_width(150.0);
-                                if components::button(ui, icons::table(), "New Table…", true).clicked() {
+                                if components::button(ui, icons::table(), "New Table…", true)
+                                    .clicked()
+                                {
                                     actions.push(Action::OpenNewTable);
                                     ui.close();
                                 }
-                                if components::button(ui, icons::table(), "New View…", true).clicked() {
+                                if components::button(ui, icons::table(), "New View…", true)
+                                    .clicked()
+                                {
                                     actions.push(Action::OpenNewView);
                                     ui.close();
                                 }
-                                if components::button(ui, icons::play(), "New Trigger…", true).clicked() {
+                                if components::button(ui, icons::play(), "New Trigger…", true)
+                                    .clicked()
+                                {
                                     actions.push(Action::OpenNewTrigger);
                                     ui.close();
                                 }
@@ -1438,9 +1483,9 @@ impl DbGuiApp {
                             .on_hover_text("Create a new object");
                         });
                         if !connected {
-                            let _ = menu.response.on_disabled_hover_text(
-                                "Connect to a database first",
-                            );
+                            let _ = menu
+                                .response
+                                .on_disabled_hover_text("Connect to a database first");
                         }
                     });
                 });
@@ -1533,10 +1578,7 @@ impl DbGuiApp {
             show_pinned = ui.data(|d| d.get_temp::<bool>(tab_id).unwrap_or(false));
             let choice = components::segmented(
                 ui,
-                &[
-                    (icons::table(), "Tables"),
-                    (icons::star_filled(), "Pinned"),
-                ],
+                &[(icons::table(), "Tables"), (icons::star_filled(), "Pinned")],
                 usize::from(show_pinned),
             );
             show_pinned = choice == 1;
@@ -1604,7 +1646,8 @@ impl DbGuiApp {
             if selected {
                 ui.painter().rect_filled(row_rect, r, palette::SELECTION());
             } else if row_resp.hovered() {
-                ui.painter().rect_filled(row_rect, r, palette::SURFACE_HOVER());
+                ui.painter()
+                    .rect_filled(row_rect, r, palette::SURFACE_HOVER());
             }
         }
 
@@ -1632,7 +1675,11 @@ impl DbGuiApp {
                     }
 
                     // Accent table icon (neutral on the selected pill for contrast).
-                    let icon_color = if selected { palette::TEXT() } else { palette::ACCENT() };
+                    let icon_color = if selected {
+                        palette::TEXT()
+                    } else {
+                        palette::ACCENT()
+                    };
                     let (icon_rect, _) =
                         ui.allocate_exact_size(egui::vec2(16.0, ROW_H), egui::Sense::hover());
                     egui::Image::new(icons::table()).tint(icon_color).paint_at(
@@ -1727,7 +1774,10 @@ impl DbGuiApp {
                     .collect(),
             };
             actions.push(Action::OpenTable {
-                sql: active.db.kind().preview_query(&table.qualified(active.db.kind()), 100),
+                sql: active
+                    .db
+                    .kind()
+                    .preview_query(&table.qualified(active.db.kind()), 100),
                 source,
                 pin: open_pin,
             });
@@ -1796,7 +1846,13 @@ impl DbGuiApp {
                             } else {
                                 view.name.clone()
                             };
-                            components::truncated_label(ui, &label, None, false, egui::Sense::click())
+                            components::truncated_label(
+                                ui,
+                                &label,
+                                None,
+                                false,
+                                egui::Sense::click(),
+                            )
                         })
                         .body(|ui| {
                             for col in &view.columns {
@@ -1905,11 +1961,13 @@ impl DbGuiApp {
                     let row = object_leaf_row(ui, icons::play(), &t.name, &t.display());
                     row.context_menu(|ui| {
                         ui.set_min_width(170.0);
-                        if components::button(ui, icons::edit(), "Edit Trigger…", true).clicked() {
+                        if components::button(ui, icons::edit(), "Edit Trigger…", true).clicked()
+                        {
                             actions.push(Action::OpenEditTrigger(t.clone()));
                             ui.close();
                         }
-                        if components::button(ui, icons::trash(), "Drop Trigger…", true).clicked() {
+                        if components::button(ui, icons::trash(), "Drop Trigger…", true).clicked()
+                        {
                             actions.push(Action::DropTrigger(t.clone()));
                             ui.close();
                         }
@@ -2068,8 +2126,16 @@ impl DbGuiApp {
         egui::CentralPanel::default().show_inside(root, |ui| match result.as_ref() {
             Some(result) if result.column_count() > 0 => {
                 let resp = results_grid(
-                    ui, result, row_order, sort, selection, edits, editable, tab_id,
-                    pending_scroll.take(), emoji,
+                    ui,
+                    result,
+                    row_order,
+                    sort,
+                    selection,
+                    edits,
+                    editable,
+                    tab_id,
+                    pending_scroll.take(),
+                    emoji,
                 );
                 if let Some(cmd) = resp.sort {
                     actions.push(match cmd {
@@ -2105,11 +2171,9 @@ impl DbGuiApp {
                             if selection.move_cursor(dr, dc, len, result.column_count(), false) {
                                 if let Some((nd, nc)) = selection.cursor() {
                                     *pending_scroll = Some(nd);
-                                    if let Some(raw) = disp_to_raw(row_order, edits.new_rows, nd)
-                                    {
-                                        let bytes = original_value(result, raw, nc).is_some_and(
-                                            |v| matches!(v, dbcore::Value::Bytes(_)),
-                                        );
+                                    if let Some(raw) = disp_to_raw(row_order, edits.new_rows, nd) {
+                                        let bytes = original_value(result, raw, nc)
+                                            .is_some_and(|v| matches!(v, dbcore::Value::Bytes(_)));
                                         if edits.col_kind(nc) != crate::edit::EditorKind::Bool
                                             && !bytes
                                         {
@@ -2136,7 +2200,11 @@ impl DbGuiApp {
                 // bool), settle that first so its typed value isn't silently dropped.
                 if let Some((disp, c)) = resp.toggle {
                     if let Some(raw) = disp_to_raw(row_order, edits.new_rows, disp) {
-                        if edits.active.as_ref().is_some_and(|a| (a.row, a.col) != (raw, c)) {
+                        if edits
+                            .active
+                            .as_ref()
+                            .is_some_and(|a| (a.row, a.col) != (raw, c))
+                        {
                             settle_active(edits, result);
                         }
                         if let Some(orig) = original_value(result, raw, c) {
@@ -2155,7 +2223,12 @@ impl DbGuiApp {
                     let first_col = (0..result.column_count())
                         .find(|&c| edits.col_kind(c) != crate::edit::EditorKind::Bool);
                     if let Some(c) = first_col {
-                        edits.begin(new_id, c, &dbcore::Value::Null, crate::edit::EditOrigin::Grid);
+                        edits.begin(
+                            new_id,
+                            c,
+                            &dbcore::Value::Null,
+                            crate::edit::EditOrigin::Grid,
+                        );
                         selection.set_cursor(disp, c);
                     }
                 }
@@ -2200,11 +2273,11 @@ impl DbGuiApp {
                 // Floating dots orbiting at various angles & distances.
                 for &(angle_deg, dist, r, alpha) in &[
                     (20.0f32, 68.0f32, 5.0f32, 0.70f32),
-                    (100.0,   95.0,    3.5,     0.45),
-                    (190.0,   72.0,    4.5,     0.60),
-                    (270.0,  105.0,    5.5,     0.75),
-                    (55.0,   120.0,    3.0,     0.35),
-                    (155.0,  115.0,    4.0,     0.50),
+                    (100.0, 95.0, 3.5, 0.45),
+                    (190.0, 72.0, 4.5, 0.60),
+                    (270.0, 105.0, 5.5, 0.75),
+                    (55.0, 120.0, 3.0, 0.35),
+                    (155.0, 115.0, 4.0, 0.50),
                 ] {
                     let a = angle_deg.to_radians();
                     let pos = center + egui::vec2(a.cos() * dist, a.sin() * dist);
@@ -2224,22 +2297,41 @@ impl DbGuiApp {
                 // Large database icon at centre.
                 let sz = 52.0;
                 ui.scope_builder(
-                    egui::UiBuilder::new().max_rect(egui::Rect::from_center_size(center, egui::vec2(sz, sz))),
-                    |ui| { icons::show_colored(ui, icons::database(), sz, palette::ACCENT()); },
+                    egui::UiBuilder::new()
+                        .max_rect(egui::Rect::from_center_size(center, egui::vec2(sz, sz))),
+                    |ui| {
+                        icons::show_colored(ui, icons::database(), sz, palette::ACCENT());
+                    },
                 );
 
                 // Small table icon — upper-right orbit.
                 let tbl = center + egui::vec2(56.0, -54.0);
                 ui.scope_builder(
-                    egui::UiBuilder::new().max_rect(egui::Rect::from_center_size(tbl, egui::vec2(22.0, 22.0))),
-                    |ui| { icons::show_colored(ui, icons::table(), 22.0, palette::ACCENT().linear_multiply(0.7)); },
+                    egui::UiBuilder::new()
+                        .max_rect(egui::Rect::from_center_size(tbl, egui::vec2(22.0, 22.0))),
+                    |ui| {
+                        icons::show_colored(
+                            ui,
+                            icons::table(),
+                            22.0,
+                            palette::ACCENT().linear_multiply(0.7),
+                        );
+                    },
                 );
 
                 // Small key icon — lower-left orbit.
                 let key = center + egui::vec2(-56.0, 52.0);
                 ui.scope_builder(
-                    egui::UiBuilder::new().max_rect(egui::Rect::from_center_size(key, egui::vec2(20.0, 20.0))),
-                    |ui| { icons::show_colored(ui, icons::key(), 20.0, palette::ACCENT().linear_multiply(0.55)); },
+                    egui::UiBuilder::new()
+                        .max_rect(egui::Rect::from_center_size(key, egui::vec2(20.0, 20.0))),
+                    |ui| {
+                        icons::show_colored(
+                            ui,
+                            icons::key(),
+                            20.0,
+                            palette::ACCENT().linear_multiply(0.55),
+                        );
+                    },
                 );
             });
 
@@ -2419,13 +2511,8 @@ impl DbGuiApp {
                         if components::button(ui, icons::play(), "Retry download", true).clicked() {
                             download = true;
                         }
-                    } else if components::primary_button(
-                        ui,
-                        icons::play(),
-                        "Download update",
-                        true,
-                    )
-                    .clicked()
+                    } else if components::primary_button(ui, icons::play(), "Download update", true)
+                        .clicked()
                     {
                         download = true;
                     }
@@ -2567,6 +2654,31 @@ impl DbGuiApp {
                 {
                     self.persist_settings();
                 }
+                if ui
+                    .checkbox(&mut self.audit_enabled, "Record audit trail")
+                    .on_hover_text(
+                        "Append connections and executed statements to an append-only \
+                         monthly log the app never rewrites or clears — a local record \
+                         of what touched which database. SQL may contain data values.",
+                    )
+                    .changed()
+                {
+                    self.persist_settings();
+                }
+                if ui
+                    .checkbox(
+                        &mut self.update_check_enabled,
+                        "Check for updates at launch",
+                    )
+                    .on_hover_text(
+                        "Ask GitHub for the latest release when the app starts. This is \
+                         the app's only network request besides your own database \
+                         connections; it sends no telemetry. Takes effect next launch.",
+                    )
+                    .changed()
+                {
+                    self.persist_settings();
+                }
 
                 components::dialog_footer(ui, |ui| {
                     if components::button(ui, icons::close(), "Close", true).clicked() {
@@ -2592,8 +2704,9 @@ impl DbGuiApp {
         }
     }
 
-    /// Right-hand query-history panel (the audit log): every executed statement with its
-    /// connection, time, duration, and outcome, newest first. Toggled from the title bar.
+    /// Right-hand query-history panel: every executed statement with its connection,
+    /// time, duration, and outcome, newest first. Toggled from the title bar. (The
+    /// append-only compliance record is separate — see `dbcore::audit`.)
     /// (Favorites live in the query bar's ★ menu, next to where queries are written.)
     pub(super) fn history_panel(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
         egui::Panel::right("history_panel")
@@ -2732,10 +2845,13 @@ impl DbGuiApp {
                 ui.horizontal(|ui| {
                     components::section_header(ui, "Saved Queries");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if components::icon_button(ui, icons::close(), "Hide saved queries").clicked() {
+                        if components::icon_button(ui, icons::close(), "Hide saved queries")
+                            .clicked()
+                        {
                             actions.push(Action::ToggleFavoritesPanel);
                         }
-                        if components::icon_button(ui, icons::save(), "Save the current query").clicked()
+                        if components::icon_button(ui, icons::save(), "Save the current query")
+                            .clicked()
                             && has_sql
                         {
                             actions.push(Action::SaveCurrentAsFavorite);
@@ -2766,7 +2882,9 @@ impl DbGuiApp {
                             let sql = fav.sql.clone();
                             let preview = first_line(&sql).to_string();
 
-                            let is_renaming_this = self.favorite_pending.as_ref()
+                            let is_renaming_this = self
+                                .favorite_pending
+                                .as_ref()
                                 .and_then(|d| d.editing_id.as_ref())
                                 .is_some_and(|id| id == &fav.id);
 
@@ -2775,11 +2893,16 @@ impl DbGuiApp {
                                 icons::show_colored(ui, icons::star(), 12.0, palette::ACCENT());
                                 if is_renaming_this {
                                     if let Some(draft) = self.favorite_pending.as_mut() {
-                                        let resp = ui.add(egui::TextEdit::singleline(&mut draft.name));
+                                        let resp =
+                                            ui.add(egui::TextEdit::singleline(&mut draft.name));
                                         resp.request_focus();
-                                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                        if resp.lost_focus()
+                                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                        {
                                             actions.push(Action::ConfirmSaveFavorite);
-                                        } else if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                        } else if resp.lost_focus()
+                                            && ui.input(|i| i.key_pressed(egui::Key::Escape))
+                                        {
                                             actions.push(Action::CancelSaveFavorite);
                                         }
                                     }
@@ -2802,12 +2925,15 @@ impl DbGuiApp {
                             // Line 3: minimal text links for actions
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
-                                
+
                                 if is_renaming_this {
-                                    if ui.link(egui::RichText::new("Save").color(palette::SUCCESS())).clicked() {
+                                    if ui
+                                        .link(egui::RichText::new("Save").color(palette::SUCCESS()))
+                                        .clicked()
+                                    {
                                         actions.push(Action::ConfirmSaveFavorite);
                                     }
-                                    
+
                                     ui.label(egui::RichText::new("·").color(palette::TEXT_WEAK()));
                                     if ui.link("Cancel").clicked() {
                                         actions.push(Action::CancelSaveFavorite);
@@ -2820,17 +2946,17 @@ impl DbGuiApp {
                                     {
                                         actions.push(Action::UseFavorite(idx));
                                     }
-                                    
+
                                     ui.label(egui::RichText::new("·").color(palette::TEXT_WEAK()));
                                     if ui.link("Rename").clicked() {
                                         actions.push(Action::RenameFavorite(idx));
                                     }
-                                    
+
                                     ui.label(egui::RichText::new("·").color(palette::TEXT_WEAK()));
                                     if ui.link("Copy").clicked() {
                                         ui.ctx().copy_text(sql.clone());
                                     }
-                                    
+
                                     ui.label(egui::RichText::new("·").color(palette::TEXT_WEAK()));
                                     if ui.link("Delete").clicked() {
                                         actions.push(Action::DeleteFavorite(idx));
@@ -2846,11 +2972,7 @@ impl DbGuiApp {
 
     /// Modal showing the SQL that will be executed, with Commit and Cancel buttons.
     /// Opened by Cmd+S; the user reviews the statements before anything is sent to the DB.
-    pub(super) fn commit_preview_dialog(
-        &mut self,
-        ctx: &egui::Context,
-        actions: &mut Vec<Action>,
-    ) {
+    pub(super) fn commit_preview_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let Some(stmts) = self.commit_pending.clone() else {
             return;
         };
@@ -2950,7 +3072,9 @@ impl DbGuiApp {
                 let font = egui::TextStyle::Monospace.resolve(ui.style());
                 ui.add(
                     egui::Label::new(
-                        egui::RichText::new(preview).font(font).color(palette::TEXT_FAINT()),
+                        egui::RichText::new(preview)
+                            .font(font)
+                            .color(palette::TEXT_FAINT()),
                     )
                     .truncate(),
                 );
@@ -2974,11 +3098,7 @@ impl DbGuiApp {
     /// Modal listing the destructive statements about to hit a production connection,
     /// with Run and Cancel buttons. Opened by Run when the tab's connection is marked
     /// production and the batch contains UPDATE/DELETE/DROP/TRUNCATE/ALTER.
-    pub(super) fn danger_confirm_dialog(
-        &mut self,
-        ctx: &egui::Context,
-        actions: &mut Vec<Action>,
-    ) {
+    pub(super) fn danger_confirm_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let Some(stmts) = self.danger_pending.clone() else {
             return;
         };
@@ -3100,12 +3220,7 @@ impl DbGuiApp {
 
                         ui.label("Type");
                         let previous_kind = editor.config.kind;
-                        components::db_kind_combo(
-                            ui,
-                            &mut editor.config.kind,
-                            "kind",
-                            field_w,
-                        );
+                        components::db_kind_combo(ui, &mut editor.config.kind, "kind", field_w);
                         if editor.config.kind != previous_kind {
                             editor.config.port = editor.config.kind.default_port();
                             form_changed = true;
@@ -3143,13 +3258,24 @@ impl DbGuiApp {
 
                         ui.label("Production");
                         form_changed |= ui
-                            .checkbox(
-                                &mut editor.config.production,
-                                "Confirm destructive queries",
-                            )
+                            .checkbox(&mut editor.config.production, "Confirm destructive queries")
                             .on_hover_text(
-                                "UPDATE, DELETE, DROP, TRUNCATE, and ALTER must be \
-                                 confirmed in a dialog before they run",
+                                "UPDATE, DELETE, DROP, TRUNCATE, ALTER, and MERGE must \
+                                 be confirmed in a dialog before they run",
+                            )
+                            .changed();
+                        ui.end_row();
+
+                        ui.label("Read-only");
+                        form_changed |= ui
+                            .checkbox(&mut editor.config.read_only, "Block all writes")
+                            .on_hover_text(
+                                "Only reads (SELECT, SHOW, EXPLAIN, …) are allowed to \
+                                 run; in-grid editing and schema changes are refused. \
+                                 Where the database supports it the session itself is \
+                                 opened read-only, so even writes hidden inside \
+                                 functions are rejected by the server. Takes effect on \
+                                 the next connect.",
                             )
                             .changed();
                         ui.end_row();
@@ -3448,7 +3574,9 @@ impl DbGuiApp {
             Some(crate::schema::ObjectEditor::Table(editor)) => {
                 table_editor_view(ui, actions, editor)
             }
-            Some(crate::schema::ObjectEditor::View(editor)) => view_editor_view(ui, actions, editor),
+            Some(crate::schema::ObjectEditor::View(editor)) => {
+                view_editor_view(ui, actions, editor)
+            }
             Some(crate::schema::ObjectEditor::Trigger(editor)) => {
                 trigger_editor_view(ui, actions, editor)
             }
@@ -3461,11 +3589,7 @@ impl DbGuiApp {
 
     // ─── Schema DDL preview dialog ────────────────────────────────────────────
 
-    pub(super) fn schema_preview_dialog(
-        &mut self,
-        ctx: &egui::Context,
-        actions: &mut Vec<Action>,
-    ) {
+    pub(super) fn schema_preview_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let Some(stmts) = self.schema_pending.clone() else {
             return;
         };
@@ -3588,7 +3712,10 @@ fn table_editor_view(
             (SchemaTab::ForeignKeys, "Foreign Keys"),
         ] {
             if ui
-                .selectable_label(editor.active_tab == tab, egui::RichText::new(label).size(12.0))
+                .selectable_label(
+                    editor.active_tab == tab,
+                    egui::RichText::new(label).size(12.0),
+                )
                 .clicked()
             {
                 editor.active_tab = tab;
@@ -3676,7 +3803,9 @@ fn trigger_body_hint(kind: dbcore::DbKind) -> &'static str {
     match kind {
         dbcore::DbKind::Postgres => "BEGIN\n  -- NEW / OLD available\n  RETURN NEW;\nEND;",
         dbcore::DbKind::Sqlite => "INSERT INTO audit(msg) VALUES ('changed');",
-        dbcore::DbKind::SqlServer => "BEGIN\n  SET NOCOUNT ON;\n  -- inserted / deleted tables\nEND",
+        dbcore::DbKind::SqlServer => {
+            "BEGIN\n  SET NOCOUNT ON;\n  -- inserted / deleted tables\nEND"
+        }
         _ => "SET NEW.col = ...;  -- or a BEGIN ... END block",
     }
 }
@@ -3808,7 +3937,10 @@ fn trigger_editor_view(
 
             // Body — Postgres can execute an existing function instead of an inline body.
             if kind == DbKind::Postgres {
-                ui.checkbox(&mut editor.pg_existing_function, "Execute existing function");
+                ui.checkbox(
+                    &mut editor.pg_existing_function,
+                    "Execute existing function",
+                );
                 if editor.pg_existing_function {
                     ui.add_space(2.0);
                     ui.label(
@@ -4088,7 +4220,11 @@ fn table_actions_menu(
     actions: &mut Vec<Action>,
 ) {
     ui.set_min_width(180.0);
-    let pin_label = if pinned { "Unpin from Top" } else { "Pin to Top" };
+    let pin_label = if pinned {
+        "Unpin from Top"
+    } else {
+        "Pin to Top"
+    };
     if components::button(ui, icons::star(), pin_label, true).clicked() {
         actions.push(Action::ToggleBookmark {
             schema: table.schema.clone(),
@@ -4189,12 +4325,8 @@ fn structure_view(ui: &mut egui::Ui, info: &dbcore::TableInfo) {
     let header = |ui: &mut egui::Ui, title: &str| {
         components::paint_table_header_cell(ui);
         ui.add(
-            egui::Label::new(
-                egui::RichText::new(title)
-                    .strong()
-                    .color(palette::TEXT()),
-            )
-            .selectable(false),
+            egui::Label::new(egui::RichText::new(title).strong().color(palette::TEXT()))
+                .selectable(false),
         );
     };
 
@@ -4360,9 +4492,13 @@ fn structure_view(ui: &mut egui::Ui, info: &dbcore::TableInfo) {
                                     .monospace(),
                             );
                         });
-                        for title in
-                            ["constraint_name", "columns", "references", "on_delete", "on_update"]
-                        {
+                        for title in [
+                            "constraint_name",
+                            "columns",
+                            "references",
+                            "on_delete",
+                            "on_update",
+                        ] {
                             h.col(|ui| header(ui, title));
                         }
                     })
@@ -4402,10 +4538,7 @@ fn structure_view(ui: &mut egui::Ui, info: &dbcore::TableInfo) {
                                         }
                                         _ => fk.ref_table.clone(),
                                     };
-                                    ui.label(format!(
-                                        "{target} ({})",
-                                        fk.ref_columns.join(", ")
-                                    ));
+                                    ui.label(format!("{target} ({})", fk.ref_columns.join(", ")));
                                 });
                                 row.col(|ui| {
                                     ui.label(&fk.on_delete);
@@ -4511,10 +4644,10 @@ fn erd_canvas(ui: &mut egui::Ui, erd: &mut crate::erd::ErDiagram) {
         let mut width: f32 = painter
             .layout_no_wrap(node.title.clone(), title_font.clone(), palette::TEXT())
             .size()
-            .x + 24.0;
+            .x
+            + 24.0;
         for col in &node.columns {
-            let name =
-                painter.layout_no_wrap(col.name.clone(), body_font.clone(), palette::TEXT());
+            let name = painter.layout_no_wrap(col.name.clone(), body_font.clone(), palette::TEXT());
             let ty =
                 painter.layout_no_wrap(col.data_type.clone(), small_font.clone(), palette::TEXT());
             // marker + name + gap + type + padding
@@ -4528,9 +4661,7 @@ fn erd_canvas(ui: &mut egui::Ui, erd: &mut crate::erd::ErDiagram) {
 
     // Edges first, so the boxes draw over them.
     for edge in &erd.edges {
-        let highlighted = erd
-            .selected
-            .is_some_and(|s| s == edge.from || s == edge.to);
+        let highlighted = erd.selected.is_some_and(|s| s == edge.from || s == edge.to);
         let color = if highlighted {
             palette::ACCENT()
         } else {
@@ -4550,7 +4681,14 @@ fn erd_canvas(ui: &mut egui::Ui, erd: &mut crate::erd::ErDiagram) {
             // Self-reference: a small loop out of the right side.
             let r = from_rect.right();
             let p0 = egui::pos2(r, from_y);
-            let p1 = egui::pos2(r, to_y + if edge.to_row == Some(edge.from_row) { ROW_H * 0.6 } else { 0.0 });
+            let p1 = egui::pos2(
+                r,
+                to_y + if edge.to_row == Some(edge.from_row) {
+                    ROW_H * 0.6
+                } else {
+                    0.0
+                },
+            );
             let reach = 46.0;
             painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
                 [
@@ -4572,11 +4710,19 @@ fn erd_canvas(ui: &mut egui::Ui, erd: &mut crate::erd::ErDiagram) {
         // Exit/enter on the sides that face each other.
         let from_right = to_rect.center().x >= from_rect.center().x;
         let p0 = egui::pos2(
-            if from_right { from_rect.right() } else { from_rect.left() },
+            if from_right {
+                from_rect.right()
+            } else {
+                from_rect.left()
+            },
             from_y,
         );
         let p1 = egui::pos2(
-            if from_right { to_rect.left() } else { to_rect.right() },
+            if from_right {
+                to_rect.left()
+            } else {
+                to_rect.right()
+            },
             to_y,
         );
         let reach = ((p1.x - p0.x).abs() * 0.5).clamp(32.0, 140.0);
@@ -4623,8 +4769,7 @@ fn erd_canvas(ui: &mut egui::Ui, erd: &mut crate::erd::ErDiagram) {
             egui::StrokeKind::Inside,
         );
         // Header band + title.
-        let header_rect =
-            egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), HEADER_H));
+        let header_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), HEADER_H));
         painter.line_segment(
             [
                 egui::pos2(rect.left(), rect.top() + HEADER_H),
@@ -4632,8 +4777,7 @@ fn erd_canvas(ui: &mut egui::Ui, erd: &mut crate::erd::ErDiagram) {
             ],
             egui::Stroke::new(1.0, palette::BORDER()),
         );
-        let title =
-            painter.layout_no_wrap(node.title.clone(), title_font.clone(), palette::TEXT());
+        let title = painter.layout_no_wrap(node.title.clone(), title_font.clone(), palette::TEXT());
         painter.galley(
             egui::pos2(
                 header_rect.left() + 10.0,
@@ -4689,7 +4833,11 @@ fn erd_canvas(ui: &mut egui::Ui, erd: &mut crate::erd::ErDiagram) {
         }
     }
     if let Some(i) = clicked {
-        erd.selected = if erd.selected == Some(i) { None } else { Some(i) };
+        erd.selected = if erd.selected == Some(i) {
+            None
+        } else {
+            Some(i)
+        };
     }
 }
 
@@ -5007,23 +5155,58 @@ fn db_type_options(kind: dbcore::DbKind) -> &'static [&'static str] {
     use dbcore::DbKind;
     match kind {
         DbKind::Postgres => &[
-            "TEXT", "VARCHAR(255)", "INTEGER", "BIGINT", "SERIAL", "BIGSERIAL",
-            "NUMERIC", "REAL", "DOUBLE PRECISION", "BOOLEAN", "DATE", "TIME",
-            "TIMESTAMP", "TIMESTAMPTZ", "UUID", "JSONB", "BYTEA",
+            "TEXT",
+            "VARCHAR(255)",
+            "INTEGER",
+            "BIGINT",
+            "SERIAL",
+            "BIGSERIAL",
+            "NUMERIC",
+            "REAL",
+            "DOUBLE PRECISION",
+            "BOOLEAN",
+            "DATE",
+            "TIME",
+            "TIMESTAMP",
+            "TIMESTAMPTZ",
+            "UUID",
+            "JSONB",
+            "BYTEA",
         ],
         DbKind::MySql | DbKind::MariaDb => &[
-            "VARCHAR(255)", "TEXT", "INT", "BIGINT", "TINYINT", "DECIMAL(10,2)",
-            "FLOAT", "DOUBLE", "BOOLEAN", "DATE", "DATETIME", "TIMESTAMP", "TIME",
-            "JSON", "BLOB",
+            "VARCHAR(255)",
+            "TEXT",
+            "INT",
+            "BIGINT",
+            "TINYINT",
+            "DECIMAL(10,2)",
+            "FLOAT",
+            "DOUBLE",
+            "BOOLEAN",
+            "DATE",
+            "DATETIME",
+            "TIMESTAMP",
+            "TIME",
+            "JSON",
+            "BLOB",
         ],
         DbKind::SqlServer => &[
-            "NVARCHAR(255)", "NVARCHAR(MAX)", "INT", "BIGINT", "BIT",
-            "DECIMAL(18,2)", "FLOAT", "REAL", "DATE", "DATETIME2", "TIME",
-            "UNIQUEIDENTIFIER", "VARBINARY(MAX)",
+            "NVARCHAR(255)",
+            "NVARCHAR(MAX)",
+            "INT",
+            "BIGINT",
+            "BIT",
+            "DECIMAL(18,2)",
+            "FLOAT",
+            "REAL",
+            "DATE",
+            "DATETIME2",
+            "TIME",
+            "UNIQUEIDENTIFIER",
+            "VARBINARY(MAX)",
         ],
         DbKind::Sqlite => &[
-            "TEXT", "INTEGER", "REAL", "NUMERIC", "BLOB", "BOOLEAN", "DATE",
-            "DATETIME",
+            "TEXT", "INTEGER", "REAL", "NUMERIC", "BLOB", "BOOLEAN", "DATE", "DATETIME",
         ],
     }
 }
@@ -5036,87 +5219,140 @@ fn schema_columns_tab(
 ) {
     use crate::schema::SchemaEditorMode;
 
+    const NAME_W: f32 = 150.0;
+    const TYPE_W: f32 = 132.0;
+    const NULL_W: f32 = 34.0;
+    const PK_W: f32 = 30.0;
+    const DEFAULT_W: f32 = 108.0;
+    const ACTION_W: f32 = 24.0;
+
     let mut to_remove: Option<usize> = None;
-    // Rows sit flush against each other — the frames' own inner margin is enough.
-    ui.spacing_mut().item_spacing.y = 0.0;
+
+    ui.spacing_mut().item_spacing.x = 4.0;
+    ui.horizontal(|ui| {
+        ui.add_space(4.0);
+        schema_column_header(ui, "Name", NAME_W);
+        schema_column_header(ui, "Type", TYPE_W);
+        schema_column_header(ui, "Null", NULL_W);
+        schema_column_header(ui, "Key", PK_W);
+        schema_column_header(ui, "Default", DEFAULT_W);
+        ui.allocate_exact_size(egui::vec2(ACTION_W, 1.0), egui::Sense::hover());
+    });
+    ui.add_space(3.0);
 
     for (i, col) in columns.iter_mut().enumerate() {
         let row_color = if col.drop {
-            Some(palette::DANGER().linear_multiply(0.12))
+            palette::DANGER().linear_multiply(0.12)
         } else if col.is_existing {
-            None
+            palette::SURFACE().linear_multiply(0.70)
         } else {
-            Some(palette::ACCENT().linear_multiply(0.10))
+            palette::ACCENT().linear_multiply(0.10)
         };
 
         let frame = egui::Frame::new()
-            .fill(row_color.unwrap_or(egui::Color32::TRANSPARENT))
+            .fill(row_color)
+            .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+            .corner_radius(egui::CornerRadius::same(style::radius::SM))
             .inner_margin(egui::Margin::symmetric(4, 3));
 
         frame.show(ui, |ui| {
             ui.horizontal(|ui| {
-                // A singleline TextEdit's height is font height + its own vertical margin —
-                // this margin is the only reliable height knob, so pad vertically here.
-                let pad = egui::Margin::symmetric(10, 5);
-                // Name
-                ui.add_enabled(
-                    !col.drop,
-                    egui::TextEdit::singleline(&mut col.name)
-                        .hint_text("column_name")
-                        .desired_width(140.0)
-                        .vertical_align(egui::Align::Center)
-                        .margin(pad),
-                );
-                // Type — a dropdown of common types for this database. The combo is sized
-                // up to match the padded text inputs beside it.
                 ui.add_enabled_ui(!col.drop, |ui| {
-                    ui.spacing_mut().interact_size.y = 27.0;
+                    components::text_input(ui, &mut col.name, "column_name", NAME_W);
+                });
+                ui.add_enabled_ui(!col.drop, |ui| {
+                    ui.spacing_mut().interact_size.y = style::CONTROL_H;
                     egui::ComboBox::from_id_salt(("schema_col_type", i))
-                        .selected_text(if col.data_type.is_empty() { "TEXT" } else { &col.data_type })
-                        .width(130.0)
+                        .selected_text(if col.data_type.is_empty() {
+                            "TEXT"
+                        } else {
+                            &col.data_type
+                        })
+                        .width(TYPE_W)
                         .show_ui(ui, |ui| {
                             for ty in db_type_options(db_kind) {
                                 ui.selectable_value(&mut col.data_type, ty.to_string(), *ty);
                             }
                         });
                 });
-                ui.add_space(2.0);
-                // Nullable
-                components::accent_checkbox(ui, !col.drop, &mut col.nullable, Some("NULL"));
-                ui.add_space(2.0);
-                // PK
-                components::accent_checkbox(ui, !col.drop, &mut col.primary_key, Some("PK"));
-                ui.add_space(2.0);
-                // Default
-                ui.add_enabled(
-                    !col.drop,
-                    egui::TextEdit::singleline(&mut col.default)
-                        .hint_text("default…")
-                        .desired_width(90.0)
-                        .vertical_align(egui::Align::Center)
-                        .margin(pad),
+                ui.allocate_ui_with_layout(
+                    egui::vec2(NULL_W, style::CONTROL_H),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        components::accent_checkbox(ui, !col.drop, &mut col.nullable, None);
+                    },
                 );
+                ui.allocate_ui_with_layout(
+                    egui::vec2(PK_W, style::CONTROL_H),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        components::accent_checkbox(ui, !col.drop, &mut col.primary_key, None);
+                    },
+                );
+                ui.add_enabled_ui(!col.drop, |ui| {
+                    components::text_input(ui, &mut col.default, "default...", DEFAULT_W);
+                });
 
-                // Drop / restore button
-                if col.is_existing {
-                    let (label, hover) = if col.drop {
-                        ("Restore", "Keep this column")
-                    } else {
-                        ("Drop", "Mark column for deletion")
-                    };
-                    if ui.small_button(label).on_hover_text(hover).clicked() {
-                        col.drop = !col.drop;
-                    }
-                } else if mode == SchemaEditorMode::EditTable {
-                    if ui.small_button("✕").on_hover_text("Remove new column").clicked() {
-                        to_remove = Some(i);
-                    }
+                let removable =
+                    (col.is_existing || mode == SchemaEditorMode::EditTable || i > 0) && !col.drop;
+                let remove_hover = if col.is_existing {
+                    "Mark column for deletion"
                 } else {
-                    if i > 0 && ui.small_button("✕").on_hover_text("Remove column").clicked() {
-                        to_remove = Some(i);
-                    }
-                }
+                    "Remove column"
+                };
+                let keep_hover = "Keep this column";
+
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ACTION_W, style::CONTROL_H),
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        if col.drop {
+                            if components::Btn::new("Keep")
+                                .tooltip(keep_hover)
+                                .show(ui)
+                                .clicked()
+                            {
+                                col.drop = false;
+                            }
+                        } else {
+                            let img = egui::Image::new(icons::trash())
+                                .fit_to_exact_size(egui::vec2(13.0, 13.0))
+                                .tint(palette::DANGER());
+                            let resp = ui
+                                .add_enabled(
+                                    removable,
+                                    egui::Button::image(img)
+                                        .frame(false)
+                                        .min_size(egui::vec2(20.0, 20.0)),
+                                )
+                                .on_hover_text(remove_hover);
+                            if resp.clicked() {
+                                if col.is_existing {
+                                    col.drop = true;
+                                } else {
+                                    to_remove = Some(i);
+                                }
+                            }
+                        }
+                    },
+                );
             });
+        });
+        ui.add_space(4.0);
+    }
+
+    if columns.is_empty() {
+        let frame = egui::Frame::new()
+            .fill(palette::SURFACE().linear_multiply(0.45))
+            .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+            .corner_radius(egui::CornerRadius::same(style::radius::SM))
+            .inner_margin(egui::Margin::same(12));
+        frame.show(ui, |ui| {
+            ui.label(
+                egui::RichText::new("No columns yet")
+                    .color(palette::TEXT_FAINT())
+                    .size(12.0),
+            );
         });
     }
 
@@ -5124,10 +5360,25 @@ fn schema_columns_tab(
         columns.remove(i);
     }
 
-    ui.add_space(4.0);
-    if ui.small_button("+ Add Column").clicked() {
+    ui.add_space(6.0);
+    if components::button(ui, icons::plus(), "Add Column", true).clicked() {
         columns.push(crate::schema::ColumnDraft::new_empty());
     }
+}
+
+fn schema_column_header(ui: &mut egui::Ui, label: &str, width: f32) {
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, 17.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.label(
+                egui::RichText::new(label)
+                    .size(10.5)
+                    .strong()
+                    .color(palette::TEXT_FAINT()),
+            );
+        },
+    );
 }
 
 fn schema_indexes_tab(ui: &mut egui::Ui, indexes: &mut Vec<crate::schema::IndexDraft>) {
@@ -5210,7 +5461,9 @@ fn schema_fk_tab(ui: &mut egui::Ui, fks: &mut Vec<crate::schema::FkDraft>) {
         };
 
         let frame = if let Some(c) = row_color {
-            egui::Frame::new().fill(c).inner_margin(egui::Margin::symmetric(4, 2))
+            egui::Frame::new()
+                .fill(c)
+                .inner_margin(egui::Margin::symmetric(4, 2))
         } else {
             egui::Frame::new().inner_margin(egui::Margin::symmetric(4, 2))
         };

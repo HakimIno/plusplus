@@ -27,8 +27,11 @@ impl SqliteDb {
     pub async fn connect(cfg: &ConnectionConfig) -> Result<Self> {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .filename(&cfg.sqlite_path)
-            // Create the file if absent so users can spin up a scratch database.
-            .create_if_missing(true)
+            // Read-only connections open the file read-only at the engine level (and
+            // must not create it); otherwise create the file if absent so users can
+            // spin up a scratch database.
+            .read_only(cfg.read_only)
+            .create_if_missing(!cfg.read_only)
             .disable_statement_logging();
         let pool = SqlitePoolOptions::new()
             .max_connections(5)

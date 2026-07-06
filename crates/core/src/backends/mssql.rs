@@ -67,6 +67,12 @@ impl MsSqlDb {
             &cfg.user,
             password.as_deref().unwrap_or(""),
         ));
+        // Best effort only: ApplicationIntent=ReadOnly is enforced by readable secondaries
+        // in an availability group, but a primary ignores it. On SQL Server the UI's
+        // lexical guard is the effective read-only layer.
+        if cfg.read_only {
+            config.readonly(true);
+        }
         // TDS negotiates encryption up front, so "prefer" can't fall back to plaintext
         // the way Postgres/MySQL can; it behaves like "require" here. The verify modes
         // both check the hostname too (rustls always does), so VerifyCa == VerifyFull.

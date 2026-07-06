@@ -8,8 +8,6 @@ use crate::model::ConnectionConfig;
 
 /// Directory where plusplus stores its config, e.g. `~/.config/plusplus` on Linux/macOS or
 /// `%APPDATA%\plusplus` on Windows. We avoid an extra crate and derive it from env vars.
-
-
 pub fn config_dir() -> Result<PathBuf> {
     // Honour XDG on unix, APPDATA on Windows, else fall back to ~/.config/plusplus.
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
@@ -83,6 +81,14 @@ pub struct Settings {
     /// Record executed statements to the on-disk query history. `None` = the default (on).
     #[serde(default)]
     pub history_enabled: Option<bool>,
+    /// Record connections and statements to the append-only audit trail (see
+    /// `crate::audit`). `None` = the default (on).
+    #[serde(default)]
+    pub audit_enabled: Option<bool>,
+    /// Check GitHub for a newer release at launch — the app's only network call apart
+    /// from the databases the user connects to. `None` = the default (on).
+    #[serde(default)]
+    pub update_check_enabled: Option<bool>,
     /// The last version of the app the user has seen the "What's New" dialog for.
     #[serde(default)]
     pub last_seen_version: Option<String>,

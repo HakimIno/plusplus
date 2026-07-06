@@ -8,6 +8,7 @@
 //!
 //! Everything here is testable without a window (see the tests at the bottom of this file).
 
+pub mod audit;
 pub mod backends;
 pub mod bookmarks;
 pub mod clipboard;

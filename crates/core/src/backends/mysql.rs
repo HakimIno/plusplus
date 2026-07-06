@@ -51,10 +51,20 @@ impl MySqlDb {
             opts = opts.password(&pw);
         }
         opts = opts.disable_statement_logging();
-        let pool = MySqlPoolOptions::new()
-            .max_connections(5)
-            .connect_with(opts)
-            .await?;
+        let mut pool_opts = MySqlPoolOptions::new().max_connections(5);
+        // Read-only connections pin the session's default transaction access mode, so
+        // writes are rejected by the server itself — not just by the UI's lexical guard.
+        // Applied per pooled connection as it is created.
+        if cfg.read_only {
+            pool_opts = pool_opts.after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    use sqlx::Executor;
+                    conn.execute("SET SESSION TRANSACTION READ ONLY").await?;
+                    Ok(())
+                })
+            });
+        }
+        let pool = pool_opts.connect_with(opts).await?;
         Ok(Self {
             pool,
             kind: cfg.kind,

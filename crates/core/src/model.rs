@@ -780,6 +780,14 @@ pub struct ConnectionConfig {
     /// must be confirmed in a dialog before they run.
     #[serde(default)]
     pub production: bool,
+    /// Hard read-only mode: only provably read statements run (see
+    /// [`crate::safety::write_statements`]), in-grid editing and DDL are refused, and the
+    /// backends additionally pin the session read-only where the engine supports it
+    /// (Postgres `default_transaction_read_only`, MySQL/MariaDB `SET SESSION TRANSACTION
+    /// READ ONLY`, SQLite opened read-only; SQL Server has no session-level equivalent —
+    /// `ApplicationIntent=ReadOnly` is sent but only enforced by readable replicas).
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 impl ConnectionConfig {
@@ -810,6 +818,7 @@ impl ConnectionConfig {
             title_bar_color: None,
             icon: ConnectionIcon::default(),
             production: false,
+            read_only: false,
         }
     }
 
