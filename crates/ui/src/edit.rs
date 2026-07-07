@@ -292,6 +292,80 @@ pub enum RowState {
     New,
 }
 
+/// One reversible mutation of the staged-edit state, recorded as it happens so
+/// Cmd/Ctrl+Z can walk back through them. Each op carries both sides of the change
+/// (`before`/`after`, the cleared cells, the removed row's contents) so it can be
+/// applied in either direction.
+#[derive(Clone, Debug)]
+enum EditOp {
+    /// The staged value at `(row, col)` changed (`None` ⇒ no staged edit).
+    Cell {
+        row: usize,
+        col: usize,
+        before: Option<Value>,
+        after: Option<Value>,
+    },
+    /// `row` was marked for deletion, dropping its staged edits (`cleared`).
+    MarkDelete {
+        row: usize,
+        cleared: HashMap<usize, Value>,
+    },
+    /// `row`'s deletion mark was removed.
+    UnmarkDelete { row: usize },
+    /// A new (insert) row was appended (always at the top slot).
+    AddRow,
+    /// The new row at `slot` (0-based) was removed; `cells` were its entered values.
+    RemoveRow {
+        slot: usize,
+        cells: HashMap<usize, Value>,
+    },
+}
+
+/// Steps beyond this are forgotten, oldest first — one fill over a huge row range can
+/// hold a lot of `Cell` ops, and the history must not outgrow the edits themselves.
+const MAX_UNDO_STEPS: usize = 100;
+
+/// Undo/redo history over the staged-edit state. Each step holds the [`EditOp`]s one user
+/// action produced: usually a single op, but a multi-row action (Backspace over a
+/// selection, paste, fill, Esc-discard) groups all of its ops into one step.
+#[derive(Default)]
+struct History {
+    undo: Vec<Vec<EditOp>>,
+    redo: Vec<Vec<EditOp>>,
+    /// Ops of the step currently being built; flushed when `depth` returns to 0.
+    pending: Vec<EditOp>,
+    /// [`Edits::begin_undo_group`] nesting depth. At 0 every op flushes as its own step.
+    depth: usize,
+}
+
+impl History {
+    fn record(&mut self, op: EditOp) {
+        self.pending.push(op);
+        if self.depth == 0 {
+            self.flush();
+        }
+    }
+
+    fn flush(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        self.undo.push(std::mem::take(&mut self.pending));
+        // A fresh edit invalidates anything that was undone.
+        self.redo.clear();
+        if self.undo.len() > MAX_UNDO_STEPS {
+            self.undo.remove(0);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+        self.pending.clear();
+        self.depth = 0;
+    }
+}
+
 /// All editing state for the current result.
 #[derive(Default)]
 pub struct Edits {
@@ -311,6 +385,8 @@ pub struct Edits {
     pub new_rows: usize,
     /// The cell open in a text editor right now.
     pub active: Option<ActiveEdit>,
+    /// Undo/redo history over the staging state above (cleared on save/reload).
+    history: History,
 }
 
 impl Edits {
@@ -351,21 +427,22 @@ impl Edits {
         if is_new_row(row) {
             return;
         }
-        if !self.deleted.insert(row) {
-            self.deleted.remove(&row);
+        if self.deleted.remove(&row) {
+            self.history.record(EditOp::UnmarkDelete { row });
         } else {
-            self.cells.remove(&row);
+            self.deleted.insert(row);
+            let cleared = self.cells.remove(&row).unwrap_or_default();
             if self.active.as_ref().is_some_and(|a| a.row == row) {
                 self.active = None;
             }
+            self.history.record(EditOp::MarkDelete { row, cleared });
         }
     }
 
     /// Append a new (empty) insert row and return its id.
     pub fn add_new_row(&mut self) -> usize {
-        let id = NEW_ROW_BASE + self.new_rows;
-        self.new_rows += 1;
-        self.cells.entry(id).or_default();
+        let id = self.add_new_row_raw();
+        self.history.record(EditOp::AddRow);
         id
     }
 
@@ -375,11 +452,28 @@ impl Edits {
         if !is_new_row(id) {
             return;
         }
-        let j = id - NEW_ROW_BASE;
-        if j >= self.new_rows {
+        let slot = id - NEW_ROW_BASE;
+        if slot >= self.new_rows {
             return;
         }
-        self.cells.remove(&id);
+        let cells = self.remove_new_row_raw(id);
+        self.history.record(EditOp::RemoveRow { slot, cells });
+    }
+
+    /// Append a new (empty) insert row and return its id, without recording history.
+    fn add_new_row_raw(&mut self) -> usize {
+        let id = NEW_ROW_BASE + self.new_rows;
+        self.new_rows += 1;
+        self.cells.entry(id).or_default();
+        id
+    }
+
+    /// Remove new row `id` (renumbering the rows above it), without recording history.
+    /// Returns the removed row's staged cells so history can restore them on undo. Assumes
+    /// the caller has already checked `id` addresses a live new row.
+    fn remove_new_row_raw(&mut self, id: usize) -> HashMap<usize, Value> {
+        let j = id - NEW_ROW_BASE;
+        let removed = self.cells.remove(&id).unwrap_or_default();
         for k in (j + 1)..self.new_rows {
             if let Some(m) = self.cells.remove(&(NEW_ROW_BASE + k)) {
                 self.cells.insert(NEW_ROW_BASE + k - 1, m);
@@ -396,6 +490,25 @@ impl Edits {
             }
         }
         self.new_rows -= 1;
+        removed
+    }
+
+    /// Re-insert a new row at `slot`, sliding the rows at/above it up by one and restoring
+    /// its `cells`. The inverse of [`Self::remove_new_row_raw`]; never records history.
+    fn insert_new_row_at(&mut self, slot: usize, cells: HashMap<usize, Value>) {
+        let slot = slot.min(self.new_rows);
+        for k in (slot..self.new_rows).rev() {
+            if let Some(m) = self.cells.remove(&(NEW_ROW_BASE + k)) {
+                self.cells.insert(NEW_ROW_BASE + k + 1, m);
+            }
+        }
+        if let Some(a) = self.active.as_mut() {
+            if is_new_row(a.row) && (a.row - NEW_ROW_BASE) >= slot {
+                a.row += 1;
+            }
+        }
+        self.cells.insert(NEW_ROW_BASE + slot, cells);
+        self.new_rows += 1;
     }
 
     /// Recompute the per-column editor kinds for a freshly loaded result.
@@ -425,14 +538,35 @@ impl Edits {
     /// Public so type-aware widgets (the Details panel's date picker and checkboxes) can
     /// stage a value directly, without going through a text editor.
     pub fn stage(&mut self, row: usize, col: usize, new: Value, original: &Value) {
-        let entry = self.cells.entry(row).or_default();
-        if &new == original {
-            entry.remove(&col);
-            if entry.is_empty() {
-                self.cells.remove(&row);
+        let before = self.staged(row, col).cloned();
+        let after = if &new == original { None } else { Some(new) };
+        if after == before {
+            return;
+        }
+        self.set_staged(row, col, after.clone());
+        self.history.record(EditOp::Cell {
+            row,
+            col,
+            before,
+            after,
+        });
+    }
+
+    /// Write (or clear, when `value` is `None`) a cell's staged value directly, without
+    /// recording history. The primitive that [`Self::stage`] and undo/redo both build on.
+    fn set_staged(&mut self, row: usize, col: usize, value: Option<Value>) {
+        match value {
+            Some(v) => {
+                self.cells.entry(row).or_default().insert(col, v);
             }
-        } else {
-            entry.insert(col, new);
+            None => {
+                if let Some(entry) = self.cells.get_mut(&row) {
+                    entry.remove(&col);
+                    if entry.is_empty() {
+                        self.cells.remove(&row);
+                    }
+                }
+            }
         }
     }
 
@@ -500,11 +634,156 @@ impl Edits {
     }
 
     /// Drop all staged edits and any open editor (e.g. after a successful save or a reload).
+    /// The staged rows are gone for good, so the undo history is dropped too — undoing into a
+    /// state that referenced saved/reloaded rows would be meaningless.
     pub fn clear(&mut self) {
         self.cells.clear();
         self.deleted.clear();
         self.new_rows = 0;
         self.active = None;
+        self.history.clear();
+    }
+
+    /// Revert *all* pending edits (the Esc "discard" action) as one undoable step: staged
+    /// cell edits drop, deletion marks lift, and new rows are removed. Unlike [`Self::clear`]
+    /// this is recorded, so an accidental discard can be taken back with Cmd/Ctrl+Z.
+    pub fn discard_all(&mut self) {
+        if !self.has_pending() {
+            return;
+        }
+        self.active = None;
+        self.begin_undo_group();
+        // Clear staged cell edits on stored rows (new rows are handled by removal below).
+        let dirty: Vec<(usize, usize)> = self
+            .cells
+            .iter()
+            .filter(|(row, _)| !is_new_row(**row))
+            .flat_map(|(&row, m)| m.keys().map(move |&col| (row, col)))
+            .collect();
+        for (row, col) in dirty {
+            if let Some(before) = self.staged(row, col).cloned() {
+                self.set_staged(row, col, None);
+                self.history.record(EditOp::Cell {
+                    row,
+                    col,
+                    before: Some(before),
+                    after: None,
+                });
+            }
+        }
+        // Lift every deletion mark.
+        let deleted: Vec<usize> = self.deleted.iter().copied().collect();
+        for row in deleted {
+            self.deleted.remove(&row);
+            self.history.record(EditOp::UnmarkDelete { row });
+        }
+        // Remove new rows from the top down, so each removal leaves the lower ids intact.
+        while self.new_rows > 0 {
+            self.remove_new_row(NEW_ROW_BASE + self.new_rows - 1);
+        }
+        self.end_undo_group();
+    }
+
+    /// Whether there is a step to undo / redo (drives menu + shortcut enablement).
+    pub fn can_undo(&self) -> bool {
+        !self.history.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.history.redo.is_empty()
+    }
+
+    /// Open an undo group: every mutation until the matching [`Self::end_undo_group`] folds
+    /// into a single undo step. Used to make a multi-row action (paste, fill, delete over a
+    /// selection) undo in one keystroke rather than row by row. Groups may nest.
+    pub fn begin_undo_group(&mut self) {
+        self.history.depth += 1;
+    }
+
+    pub fn end_undo_group(&mut self) {
+        self.history.depth = self.history.depth.saturating_sub(1);
+        if self.history.depth == 0 {
+            self.history.flush();
+        }
+    }
+
+    /// Undo the most recent step (its ops reversed, newest first). Closes any open editor
+    /// first. Returns whether anything was undone, so the app can refresh its view.
+    pub fn undo(&mut self) -> bool {
+        // A partly-built group (shouldn't happen between frames) is flushed so it can undo.
+        self.history.flush();
+        let Some(step) = self.history.undo.pop() else {
+            return false;
+        };
+        self.active = None;
+        for op in step.iter().rev() {
+            self.apply_op(op, false);
+        }
+        self.history.redo.push(step);
+        true
+    }
+
+    /// Redo the step undone most recently (its ops replayed in original order).
+    pub fn redo(&mut self) -> bool {
+        let Some(step) = self.history.redo.pop() else {
+            return false;
+        };
+        self.active = None;
+        for op in &step {
+            self.apply_op(op, true);
+        }
+        self.history.undo.push(step);
+        true
+    }
+
+    /// Apply one recorded op. `forward` replays it (redo); `!forward` inverts it (undo).
+    /// Uses only the raw, non-recording mutators so undo/redo never feed back into history.
+    fn apply_op(&mut self, op: &EditOp, forward: bool) {
+        match op {
+            EditOp::Cell {
+                row,
+                col,
+                before,
+                after,
+            } => {
+                let target = if forward { after } else { before };
+                self.set_staged(*row, *col, target.clone());
+            }
+            EditOp::MarkDelete { row, cleared } => {
+                if forward {
+                    self.cells.remove(row);
+                    self.deleted.insert(*row);
+                } else {
+                    self.deleted.remove(row);
+                    if !cleared.is_empty() {
+                        self.cells.insert(*row, cleared.clone());
+                    }
+                }
+            }
+            EditOp::UnmarkDelete { row } => {
+                if forward {
+                    self.deleted.remove(row);
+                } else {
+                    self.deleted.insert(*row);
+                }
+            }
+            EditOp::AddRow => {
+                if forward {
+                    self.add_new_row_raw();
+                } else if self.new_rows > 0 {
+                    self.remove_new_row_raw(NEW_ROW_BASE + self.new_rows - 1);
+                }
+            }
+            EditOp::RemoveRow { slot, cells } => {
+                if forward {
+                    if *slot < self.new_rows {
+                        self.remove_new_row_raw(NEW_ROW_BASE + *slot);
+                    }
+                } else {
+                    self.insert_new_row_at(*slot, cells.clone());
+                }
+            }
+        }
     }
 }
 
@@ -818,5 +1097,169 @@ mod tests {
         e.remove_new_row(NEW_ROW_BASE);
         assert_eq!(e.new_rows, 0);
         assert!(!e.has_pending());
+    }
+
+    #[test]
+    fn undo_redo_cell_edit() {
+        let mut e = Edits::default();
+        assert!(!e.can_undo() && !e.can_redo());
+        assert!(!e.undo(), "nothing to undo");
+
+        e.stage(0, 0, Value::Int(5), &Value::Int(1));
+        assert_eq!(e.staged(0, 0), Some(&Value::Int(5)));
+        assert!(e.can_undo());
+
+        assert!(e.undo());
+        assert_eq!(e.staged(0, 0), None, "undo reverts to the stored value");
+        assert!(!e.has_pending());
+        assert!(e.can_redo());
+
+        assert!(e.redo());
+        assert_eq!(e.staged(0, 0), Some(&Value::Int(5)), "redo re-applies the edit");
+        assert!(!e.can_redo());
+    }
+
+    #[test]
+    fn undo_restores_previous_staged_value_not_just_original() {
+        let mut e = Edits::default();
+        // Two edits to the same cell: 1 → 5 → 9. Each undo peels back one step.
+        e.stage(0, 0, Value::Int(5), &Value::Int(1));
+        e.stage(0, 0, Value::Int(9), &Value::Int(1));
+        assert!(e.undo());
+        assert_eq!(e.staged(0, 0), Some(&Value::Int(5)), "back to the first edit");
+        assert!(e.undo());
+        assert_eq!(e.staged(0, 0), None, "back to the stored value");
+    }
+
+    #[test]
+    fn a_fresh_edit_clears_the_redo_stack() {
+        let mut e = Edits::default();
+        e.stage(0, 0, Value::Int(5), &Value::Int(1));
+        assert!(e.undo());
+        assert!(e.can_redo());
+        // A new edit invalidates the redo branch (standard editor behaviour).
+        e.stage(1, 0, Value::Int(7), &Value::Int(0));
+        assert!(!e.can_redo());
+    }
+
+    #[test]
+    fn undo_group_folds_many_ops_into_one_step() {
+        let mut e = Edits::default();
+        e.begin_undo_group();
+        e.stage(0, 0, Value::Int(1), &Value::Null);
+        e.stage(1, 0, Value::Int(2), &Value::Null);
+        e.stage(2, 0, Value::Int(3), &Value::Null);
+        e.end_undo_group();
+
+        // A single undo reverts all three edits made inside the group.
+        assert!(e.undo());
+        assert_eq!(e.staged(0, 0), None);
+        assert_eq!(e.staged(1, 0), None);
+        assert_eq!(e.staged(2, 0), None);
+        assert!(!e.can_undo());
+        // And a single redo restores them all.
+        assert!(e.redo());
+        assert_eq!(e.staged(0, 0), Some(&Value::Int(1)));
+        assert_eq!(e.staged(2, 0), Some(&Value::Int(3)));
+    }
+
+    #[test]
+    fn undo_delete_restores_cleared_cell_edits() {
+        let mut e = Edits::default();
+        e.stage(2, 0, Value::Int(9), &Value::Int(8)); // step 1: edit
+        e.toggle_delete(2); // step 2: mark deleted, dropping the edit
+        assert_eq!(e.row_state(2), RowState::Deleted);
+        assert_eq!(e.staged(2, 0), None);
+
+        assert!(e.undo()); // undo the delete → the edit comes back
+        assert_eq!(e.row_state(2), RowState::Edited);
+        assert_eq!(e.staged(2, 0), Some(&Value::Int(9)));
+
+        assert!(e.undo()); // undo the edit
+        assert_eq!(e.staged(2, 0), None);
+        assert!(!e.has_pending());
+
+        // Redo replays delete-clears-edit exactly.
+        assert!(e.redo());
+        assert!(e.redo());
+        assert_eq!(e.row_state(2), RowState::Deleted);
+        assert_eq!(e.staged(2, 0), None);
+    }
+
+    #[test]
+    fn undo_redo_add_new_row_and_its_edit() {
+        let mut e = Edits::default();
+        let a = e.add_new_row();
+        e.stage(a, 0, Value::Text("x".into()), &Value::Null);
+
+        assert!(e.undo()); // undo the cell edit
+        assert_eq!(e.staged(a, 0), None);
+        assert_eq!(e.new_rows, 1, "row still there");
+        assert!(e.undo()); // undo the row add
+        assert_eq!(e.new_rows, 0);
+        assert!(!e.has_pending());
+
+        assert!(e.redo()); // re-add the row
+        assert_eq!(e.new_rows, 1);
+        assert!(e.redo()); // re-apply the cell edit
+        assert_eq!(e.staged(NEW_ROW_BASE, 0), Some(&Value::Text("x".into())));
+    }
+
+    #[test]
+    fn undo_remove_new_row_reinserts_it_in_place_with_cells() {
+        let mut e = Edits::default();
+        let r0 = e.add_new_row();
+        let r1 = e.add_new_row();
+        let r2 = e.add_new_row();
+        e.stage(r0, 0, Value::Text("a".into()), &Value::Null);
+        e.stage(r1, 0, Value::Text("b".into()), &Value::Null);
+        e.stage(r2, 0, Value::Text("c".into()), &Value::Null);
+
+        // Remove the middle row; the one above slides down into its slot.
+        e.remove_new_row(r1);
+        assert_eq!(e.new_rows, 2);
+        assert_eq!(e.staged(NEW_ROW_BASE, 0), Some(&Value::Text("a".into())));
+        assert_eq!(e.staged(NEW_ROW_BASE + 1, 0), Some(&Value::Text("c".into())));
+
+        // Undo brings "b" back in the middle, sliding "c" back up.
+        assert!(e.undo());
+        assert_eq!(e.new_rows, 3);
+        assert_eq!(e.staged(NEW_ROW_BASE, 0), Some(&Value::Text("a".into())));
+        assert_eq!(e.staged(NEW_ROW_BASE + 1, 0), Some(&Value::Text("b".into())));
+        assert_eq!(e.staged(NEW_ROW_BASE + 2, 0), Some(&Value::Text("c".into())));
+    }
+
+    #[test]
+    fn discard_all_is_one_undoable_step() {
+        let mut e = Edits::default();
+        e.stage(0, 0, Value::Int(9), &Value::Int(8)); // stored-row edit
+        e.toggle_delete(1); // deletion mark
+        let n = e.add_new_row(); // new row…
+        e.stage(n, 0, Value::Text("new".into()), &Value::Null); // …with a value
+        assert!(e.has_pending());
+
+        e.discard_all();
+        assert!(!e.has_pending(), "discard clears every pending change");
+
+        // A single undo restores the whole prior edit state.
+        assert!(e.undo());
+        assert_eq!(e.staged(0, 0), Some(&Value::Int(9)));
+        assert_eq!(e.row_state(1), RowState::Deleted);
+        assert_eq!(e.new_rows, 1);
+        assert_eq!(e.staged(NEW_ROW_BASE, 0), Some(&Value::Text("new".into())));
+        // The discard was one step on top of the four individual edits, which remain
+        // undoable beneath it.
+        assert!(e.can_undo());
+    }
+
+    #[test]
+    fn clear_wipes_history() {
+        let mut e = Edits::default();
+        e.stage(0, 0, Value::Int(5), &Value::Int(1));
+        // A save/reload clears staged edits *and* the history — there's nothing left to undo.
+        e.clear();
+        assert!(!e.can_undo());
+        assert!(!e.can_redo());
+        assert!(!e.undo());
     }
 }

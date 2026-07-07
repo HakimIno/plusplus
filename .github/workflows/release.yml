@@ -112,8 +112,31 @@ jobs:
             target/dist/plusplus-*.AppImage.minisig
           if-no-files-found: error
 
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release -p plusplus-app
+
+      - name: Package portable zip
+        run: packaging/windows/make-zip.sh
+
+      - name: Stage Windows release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: target/dist/plusplus-*-windows.zip
+          if-no-files-found: error
+
   publish:
-    needs: [macos, linux]
+    needs: [macos, linux, windows]
     runs-on: ubuntu-latest
     steps:
       - name: Collect release assets
@@ -122,6 +145,30 @@ jobs:
           pattern: release-*
           path: release-assets
           merge-multiple: true
+
+      # The Windows zip is built on a runner where installing minisign is flaky, so it is
+      # signed here instead — same key, same verification path as the DMG/AppImage. Keeps
+      # the invariant that every published asset ships with a .minisig.
+      - name: Sign Windows zip (minisign)
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+            echo "::error::MINISIGN_SECRET_KEY secret is not set — releases must be signed. See docs/RELEASE_SIGNING.md"
+            exit 1
+          fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends minisign
+          KEYFILE="$(mktemp)"
+          trap 'rm -f "${KEYFILE}"' EXIT
+          printf '%s\n' "${MINISIGN_SECRET_KEY}" > "${KEYFILE}"
+          for zip in release-assets/plusplus-*-windows.zip; do
+            echo "→ signing ${zip}"
+            printf '%s' "${MINISIGN_PASSWORD:-}" | minisign -S -s "${KEYFILE}" -m "${zip}"
+          done
+          ls -l release-assets/plusplus-*-windows.zip.minisig
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2

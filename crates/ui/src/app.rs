@@ -8,7 +8,9 @@
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 
-use dbcore::{ConnectionColor, ConnectionConfig, Database, DbKind, QueryResult, SchemaTree, TableInfo};
+use dbcore::{
+    ConnectionColor, ConnectionConfig, Database, DbKind, QueryResult, SchemaTree, TableInfo,
+};
 
 use crate::schema::{ObjectEditor, RoutineEditor, SchemaEditor, TriggerEditor, ViewEditor};
 
@@ -87,10 +89,7 @@ enum AppMessage {
     },
     /// Update package download progress (bytes received, total if known).
     #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
-    UpdateProgress {
-        downloaded: u64,
-        total: Option<u64>,
-    },
+    UpdateProgress { downloaded: u64, total: Option<u64> },
     /// Update package download finished.
     #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     UpdateDownloaded {
@@ -236,8 +235,10 @@ impl QueryTab {
         self.row_order = order;
         // Rows that filtered out can't stay selected; new (insert) rows live past the stored
         // rows and are still addressable, so keep them in range.
-        self.selection
-            .clamp(self.row_order.len() + self.edits.new_rows, result.column_count());
+        self.selection.clamp(
+            self.row_order.len() + self.edits.new_rows,
+            result.column_count(),
+        );
     }
 
     fn apply_sort(&mut self, col: usize) {
@@ -501,7 +502,10 @@ enum Action {
     EditConnection(usize),
     DeleteConnection(usize),
     /// Switch the target database for a saved connection and reconnect.
-    SwitchDatabase { conn_idx: usize, database: String },
+    SwitchDatabase {
+        conn_idx: usize,
+        database: String,
+    },
     TestConnection,
     SaveConnection,
     CancelDialog,
@@ -557,9 +561,18 @@ enum Action {
         title: String,
         sql: String,
     },
+    /// Follow a foreign key from a grid cell: open a preview tab on the referenced table,
+    /// filtered to the key the cell points at. `row`/`col` index the active tab's result.
+    FollowForeignKey {
+        row: usize,
+        col: usize,
+    },
     SortBy(usize),
     /// Header menu: sort a column in an explicit direction (vs `SortBy`, which toggles).
-    SetSort { col: usize, asc: bool },
+    SetSort {
+        col: usize,
+        asc: bool,
+    },
     /// Header menu: drop the sort, back to natural row order.
     ClearSort,
     /// Pager: jump to another page of a paged table tab. Rewrites the tab's LIMIT/OFFSET
@@ -579,6 +592,9 @@ enum Action {
     },
     /// Build staged edits into SQL and open the preview dialog.
     PreviewEdits,
+    /// Undo / redo the last staged-edit change (cell edit, delete mark, new row, fill, paste).
+    Undo,
+    Redo,
     /// User confirmed the preview: execute the statements transactionally.
     ConfirmEdits,
     /// User cancelled the preview dialog without committing.
@@ -754,6 +770,11 @@ pub struct DbGuiApp {
     danger_pending: Option<Vec<dbcore::safety::DangerousStatement>>,
     /// Record executed statements to the on-disk query history (settings toggle).
     history_enabled: bool,
+    /// Record connections and statements to the append-only audit trail (settings toggle).
+    audit_enabled: bool,
+    /// Check GitHub for a newer release at launch (settings toggle) — the app's only
+    /// network call apart from the databases the user connects to.
+    update_check_enabled: bool,
     /// Whether the right-hand panel (History / Favorites) is open; the caches below hold its
     /// rows while it is.
     history_open: bool,
@@ -832,7 +853,7 @@ impl DbGuiApp {
         app.bookmarks = dbcore::bookmarks::load().unwrap_or_default();
 
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        if crate::update::automatic_updates_supported() {
+        if crate::update::automatic_updates_supported() && app.update_check_enabled {
             app.start_update_check();
         }
 
@@ -883,6 +904,8 @@ impl DbGuiApp {
             }
         }
         let history_enabled = settings.history_enabled.unwrap_or(true);
+        let audit_enabled = settings.audit_enabled.unwrap_or(true);
+        let update_check_enabled = settings.update_check_enabled.unwrap_or(true);
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -936,6 +959,8 @@ impl DbGuiApp {
             schema_pending: None,
             danger_pending: None,
             history_enabled,
+            audit_enabled,
+            update_check_enabled,
             history_open: false,
             history_cache: Vec::new(),
             // Loaded from disk in `new` (this builder stays config-dir-free for tests).
@@ -980,10 +1005,7 @@ impl DbGuiApp {
         let tx = self.tx.clone();
         self.rt.spawn(async move {
             let result = crate::update::download_update(&offer, |downloaded, total| {
-                let _ = tx.send(AppMessage::UpdateProgress {
-                    downloaded,
-                    total,
-                });
+                let _ = tx.send(AppMessage::UpdateProgress { downloaded, total });
             })
             .await
             .map(|path| (offer, path))
@@ -1079,6 +1101,8 @@ impl DbGuiApp {
         settings.beautify_indent = Some(self.beautify.indent);
         settings.welcomed = Some(!self.show_welcome);
         settings.history_enabled = Some(self.history_enabled);
+        settings.audit_enabled = Some(self.audit_enabled);
+        settings.update_check_enabled = Some(self.update_check_enabled);
         if let Err(e) = dbcore::config::save_settings(&settings) {
             self.error = Some(format!("Could not save settings: {e}"));
         }
@@ -1303,34 +1327,146 @@ impl DbGuiApp {
             // Result is cleared on disconnect; re-selecting the same table from the sidebar
             // must re-run the preview query instead of leaving an empty grid.
             if self.tabs[idx].result.is_none()
-                && self.tabs[idx].conn_id.as_deref().is_some_and(|cid| {
-                    self.active_connections
-                        .iter()
-                        .any(|c| c.config_id == cid)
-                })
+                && self.tabs[idx]
+                    .conn_id
+                    .as_deref()
+                    .is_some_and(|cid| self.active_connections.iter().any(|c| c.config_id == cid))
             {
                 self.start_query_for(idx);
             }
             return;
         }
 
-        // Pick the target tab: the existing preview slot, else a blank scratch active tab,
-        // else a brand-new tab.
-        let idx = self.preview_target_slot();
+        self.open_in_preview_slot(sql, source, !pin);
+    }
 
-        // Rebuild the tab from scratch (clearing any previous preview's result/filter/edits),
-        // keeping its stable id and connection binding.
+    /// Load `sql` into a table tab bound to `source` and run it. Picks the reusable preview
+    /// slot, else a blank scratch active tab, else a fresh tab (see [`Self::preview_target_slot`]),
+    /// then rebuilds that tab from scratch — clearing any previous preview's result/filter/edits —
+    /// while keeping its stable id and connection binding. Shared by [`Self::open_table`] and
+    /// foreign-key follow. `preview` marks the tab as the transient (italic, reusable) preview.
+    fn open_in_preview_slot(&mut self, sql: String, source: EditSource, preview: bool) {
+        let idx = self.preview_target_slot();
         let id = self.tabs[idx].id;
         let conn_id = self.tabs[idx].conn_id.clone();
         let mut tab = QueryTab::new(id, source.table.clone());
         tab.conn_id = conn_id;
         tab.sql = sql;
-        tab.preview = !pin;
+        tab.preview = preview;
         tab.edits.pending_source = Some(source);
         self.tabs[idx] = tab;
         self.active_query_tab = idx;
         self.workspace_dirty = true;
         self.start_query_for(idx);
+    }
+
+    /// Follow the foreign key that column `col` of the active table tab's row `row` participates
+    /// in: open a preview tab on the referenced table, filtered to the key the cell points at.
+    /// `row`/`col` index the *raw* result (not the display order). A no-op with a status hint
+    /// when the column isn't a foreign key or its value is NULL (nothing to navigate to).
+    fn follow_foreign_key(&mut self, row: usize, col: usize) {
+        let idx = self.active_query_tab;
+        match self.build_fk_follow(idx, row, col) {
+            Some((sql, source)) => self.open_in_preview_slot(sql, source, true),
+            None => {
+                self.status_msg =
+                    "No foreign key to follow here (or the value is empty).".to_string();
+            }
+        }
+    }
+
+    /// Resolve the foreign key column `col` (raw result column) belongs to on the tab at `idx`,
+    /// and build a `SELECT … WHERE <ref key = cell value>` on the referenced table plus its edit
+    /// source. `row` is the raw result-row index. Returns `None` when the column isn't a foreign
+    /// key, the referenced value is wholly NULL, or the connection/columns can't be resolved.
+    fn build_fk_follow(&self, idx: usize, row: usize, col: usize) -> Option<(String, EditSource)> {
+        let tab = self.tabs.get(idx)?;
+        let result = tab.result.as_ref()?;
+        let conn = tab
+            .conn_id
+            .as_deref()
+            .and_then(|id| self.active_connections.iter().find(|c| c.config_id == id))?;
+        let kind = conn.db.kind();
+        let info = self.structure_table(idx)?;
+        let col_name = &result.columns.get(col)?.name;
+        // The FK this column takes part in (first match; a column is rarely in more than one).
+        let fk = info
+            .foreign_keys
+            .iter()
+            .find(|fk| fk.columns.iter().any(|c| c.eq_ignore_ascii_case(col_name)))?;
+        // Pair each referenced column with the value from this row's matching referencing column.
+        let mut keys: Vec<(&str, &dbcore::Value)> = Vec::with_capacity(fk.ref_columns.len());
+        for (referencing, referenced) in fk.columns.iter().zip(fk.ref_columns.iter()) {
+            let ci = result
+                .columns
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(referencing))?;
+            keys.push((referenced.as_str(), result.rows.get(row)?.get(ci)?));
+        }
+        // A wholly-NULL foreign key references nothing — nothing to navigate to.
+        if keys.iter().all(|(_, v)| v.is_null()) {
+            return None;
+        }
+        let sql = dbcore::build_select_where_sql(
+            kind,
+            fk.ref_schema.as_deref(),
+            &fk.ref_table,
+            &keys,
+            100,
+        )?;
+        // Edit source for the referenced table: its PK columns make the opened rows editable —
+        // empty on a read-only connection, exactly like the sidebar and `derive_edit_source` paths.
+        let ref_info = conn.schema.tables.iter().find(|t| {
+            t.name.eq_ignore_ascii_case(&fk.ref_table)
+                && match (&fk.ref_schema, &t.schema) {
+                    (Some(s), Some(ts)) => s.eq_ignore_ascii_case(ts),
+                    (None, _) => true,
+                    (Some(_), None) => false,
+                }
+        });
+        let pk_cols = match ref_info {
+            Some(t) if !self.tab_connection_is_read_only(idx) => t
+                .columns
+                .iter()
+                .filter(|c| c.primary_key)
+                .map(|c| c.name.clone())
+                .collect(),
+            _ => Vec::new(),
+        };
+        Some((
+            sql,
+            EditSource {
+                schema: ref_info
+                    .and_then(|t| t.schema.clone())
+                    .or_else(|| fk.ref_schema.clone()),
+                table: ref_info
+                    .map(|t| t.name.clone())
+                    .unwrap_or_else(|| fk.ref_table.clone()),
+                pk_cols,
+            },
+        ))
+    }
+
+    /// Per-result-column foreign-key labels for the tab at `idx`: `Some(ref_table)` where the
+    /// column takes part in a foreign key on the current table, else `None`. Drives the grid's
+    /// FK link tint + "Follow →" affordance. Empty when there's no result or no structure yet.
+    fn fk_column_labels(&self, idx: usize) -> Vec<Option<String>> {
+        let Some(result) = self.tabs.get(idx).and_then(|t| t.result.as_ref()) else {
+            return Vec::new();
+        };
+        let Some(info) = self.structure_table(idx) else {
+            return vec![None; result.column_count()];
+        };
+        result
+            .columns
+            .iter()
+            .map(|col| {
+                info.foreign_keys
+                    .iter()
+                    .find(|fk| fk.columns.iter().any(|c| c.eq_ignore_ascii_case(&col.name)))
+                    .map(|fk| fk.ref_table.clone())
+            })
+            .collect()
     }
 
     /// The tab slot a preview should land in: the existing reusable preview slot, else the
@@ -1410,9 +1546,9 @@ impl DbGuiApp {
             }
         }
         if self.querying_tab_id.is_some_and(|qid| {
-            self.tabs.iter().any(|t| {
-                t.id == qid && t.conn_id.as_deref() == Some(id)
-            })
+            self.tabs
+                .iter()
+                .any(|t| t.id == qid && t.conn_id.as_deref() == Some(id))
         }) {
             // Abort the in-flight query on the connection we're dropping.
             if let Some(cancel) = self.query_cancel.take() {
@@ -1446,13 +1582,18 @@ impl DbGuiApp {
                                 .iter()
                                 .position(|conn| conn.config_id == conn_id)
                             {
-                                let prev_databases = std::mem::take(&mut self.active_connections[idx].databases);
+                                let prev_databases =
+                                    std::mem::take(&mut self.active_connections[idx].databases);
                                 self.active_connections[idx] = ActiveConnection {
                                     config_id: conn_id,
                                     name: name.clone(),
                                     db,
                                     schema,
-                                    databases: if databases.is_empty() { prev_databases } else { databases },
+                                    databases: if databases.is_empty() {
+                                        prev_databases
+                                    } else {
+                                        databases
+                                    },
                                 };
                             } else {
                                 self.active_connections.push(ActiveConnection {
@@ -1465,6 +1606,15 @@ impl DbGuiApp {
                             }
                             self.status_msg = format!("Connected to {name} — {n} tables");
                             self.error = None;
+                            self.record_audit(
+                                dbcore::audit::AuditAction::Connect,
+                                &arrived_id,
+                                "",
+                                true,
+                                None,
+                                None,
+                                0.0,
+                            );
                             // A fresh schema invalidates an open diagram of this connection
                             // (e.g. after a DDL migration re-introspects).
                             if self.erd.as_ref().is_some_and(|e| e.conn_id == arrived_id) {
@@ -1472,6 +1622,15 @@ impl DbGuiApp {
                             }
                         }
                         Err(e) => {
+                            self.record_audit(
+                                dbcore::audit::AuditAction::Connect,
+                                &conn_id,
+                                "",
+                                false,
+                                Some(e.clone()),
+                                None,
+                                0.0,
+                            );
                             self.error = Some(format!("Connection failed: {e}"));
                             self.status_msg = "Connection failed".to_string();
                         }
@@ -1528,6 +1687,7 @@ impl DbGuiApp {
                         Ok(res) => {
                             let rows = res.stats.rows_affected.unwrap_or(res.row_count() as u64);
                             self.record_history(
+                                dbcore::audit::AuditAction::Query,
                                 &conn_id,
                                 &sql,
                                 true,
@@ -1536,9 +1696,15 @@ impl DbGuiApp {
                                 res.stats.elapsed_ms,
                             );
                         }
-                        Err(e) => {
-                            self.record_history(&conn_id, &sql, false, Some(e.clone()), None, 0.0)
-                        }
+                        Err(e) => self.record_history(
+                            dbcore::audit::AuditAction::Query,
+                            &conn_id,
+                            &sql,
+                            false,
+                            Some(e.clone()),
+                            None,
+                            0.0,
+                        ),
                     }
                     let is_active = self
                         .tabs
@@ -1549,10 +1715,7 @@ impl DbGuiApp {
                     };
                     // A disconnect can race an in-flight query; ignore stale results.
                     if tab.conn_id.as_deref().is_some_and(|id| {
-                        !self
-                            .active_connections
-                            .iter()
-                            .any(|c| c.config_id == id)
+                        !self.active_connections.iter().any(|c| c.config_id == id)
                     }) {
                         continue;
                     }
@@ -1595,8 +1758,7 @@ impl DbGuiApp {
                                                 .await
                                                 .map_err(|e| e.to_string())
                                                 .and_then(|r| count_from_result(&r));
-                                            let _ = tx
-                                                .send(AppMessage::Counted { tab_id, result });
+                                            let _ = tx.send(AppMessage::Counted { tab_id, result });
                                         });
                                     }
                                 }
@@ -1646,6 +1808,7 @@ impl DbGuiApp {
                 } => {
                     self.busy = Busy::Idle;
                     self.record_history(
+                        dbcore::audit::AuditAction::EditCommit,
                         &conn_id,
                         &sql,
                         result.is_ok(),
@@ -1701,7 +1864,10 @@ impl DbGuiApp {
                 }
                 AppMessage::UpdateDownloaded { result } => match result {
                     Ok((offer, package_path)) => {
-                        self.update = crate::update::UpdatePhase::Ready { offer, package_path };
+                        self.update = crate::update::UpdatePhase::Ready {
+                            offer,
+                            package_path,
+                        };
                         self.status_msg = "Update downloaded — ready to install".to_string();
                         self.error = None;
                     }
@@ -1731,6 +1897,7 @@ impl DbGuiApp {
                 } => {
                     self.busy = Busy::Idle;
                     self.record_history(
+                        dbcore::audit::AuditAction::SchemaApply,
                         &history_conn_id,
                         &sql,
                         result.is_ok(),
@@ -1828,10 +1995,12 @@ impl DbGuiApp {
         });
     }
 
-    /// Append one executed statement to the on-disk query history. Best effort: history
-    /// is never load-bearing, so failures are swallowed. No-op when disabled in settings.
-    fn record_history(
-        &mut self,
+    /// Append one event to the append-only audit trail (`dbcore::audit`). Separate from
+    /// history: audit also records connection events, rotates monthly instead of being
+    /// compacted, and has no in-app clear. Best effort — never load-bearing.
+    fn record_audit(
+        &self,
+        action: dbcore::audit::AuditAction,
         conn_id: &str,
         sql: &str,
         ok: bool,
@@ -1839,6 +2008,43 @@ impl DbGuiApp {
         rows: Option<u64>,
         elapsed_ms: f64,
     ) {
+        if !self.audit_enabled || cfg!(test) {
+            return;
+        }
+        let (conn_name, target) = self
+            .connections
+            .iter()
+            .find(|c| c.id == conn_id)
+            .map(|c| (c.name.clone(), c.target_summary()))
+            .unwrap_or_default();
+        let _ = dbcore::audit::append(&dbcore::audit::AuditEntry {
+            at: dbcore::history::now_rfc3339(),
+            action,
+            conn_id: conn_id.to_string(),
+            conn_name,
+            target,
+            sql: sql.to_string(),
+            ok,
+            error,
+            rows,
+            elapsed_ms,
+        });
+    }
+
+    /// Append one executed statement to the on-disk query history and the audit trail.
+    /// Best effort: history is never load-bearing, so failures are swallowed. History
+    /// and audit honour their own settings toggles independently.
+    fn record_history(
+        &mut self,
+        action: dbcore::audit::AuditAction,
+        conn_id: &str,
+        sql: &str,
+        ok: bool,
+        error: Option<String>,
+        rows: Option<u64>,
+        elapsed_ms: f64,
+    ) {
+        self.record_audit(action, conn_id, sql, ok, error.clone(), rows, elapsed_ms);
         // Feed the editor's ghost-text pool with statements that ran cleanly (independent
         // of the history-logging setting, which only governs the on-disk audit log). Skip
         // under test so the pool stays deterministic.
@@ -1949,11 +2155,22 @@ impl DbGuiApp {
         self.tabs
             .get(idx)
             .and_then(|tab| tab.conn_id.as_deref())
-            .is_some_and(|id| {
-                self.connections
-                    .iter()
-                    .any(|c| c.id == id && c.production)
-            })
+            .is_some_and(|id| self.connections.iter().any(|c| c.id == id && c.production))
+    }
+
+    /// Is the tab at `idx` bound to a connection whose saved config is marked read-only?
+    fn tab_connection_is_read_only(&self, idx: usize) -> bool {
+        self.tabs
+            .get(idx)
+            .and_then(|tab| tab.conn_id.as_deref())
+            .is_some_and(|id| self.connections.iter().any(|c| c.id == id && c.read_only))
+    }
+
+    /// Refuse an action on a read-only connection with a consistent error + status pair.
+    /// `what` completes the sentence "This connection is read-only — {what}".
+    fn refuse_read_only(&mut self, what: &str) {
+        self.error = Some(format!("This connection is read-only — {what}"));
+        self.status_msg = "Blocked by read-only mode".to_string();
     }
 
     /// Run the SQL of the tab at `idx` against its bound connection.
@@ -1986,7 +2203,9 @@ impl DbGuiApp {
         self.error = None;
         self.status_msg = "Running query…".to_string();
         self.rt.spawn(async move {
-            let res = db.execute_capped_cancellable(&sql, MAX_FETCH_ROWS, cancel).await;
+            let res = db
+                .execute_capped_cancellable(&sql, MAX_FETCH_ROWS, cancel)
+                .await;
             // Distinguish a user cancel from a real failure before flattening to a string.
             let canceled = matches!(res, Err(dbcore::CoreError::Canceled));
             let result = res.map_err(|e| e.to_string());
@@ -2007,8 +2226,7 @@ impl DbGuiApp {
             return;
         };
         let idx = self.active_query_tab;
-        let Some(sql) = dbcore::with_page_window(kind, &self.tabs[idx].sql, limit, offset)
-        else {
+        let Some(sql) = dbcore::with_page_window(kind, &self.tabs[idx].sql, limit, offset) else {
             return;
         };
         self.tabs[idx].sql = sql;
@@ -2075,7 +2293,10 @@ impl DbGuiApp {
     fn copy_selection(&mut self, format: dbcore::CopyFormat) {
         let idx = self.active_query_tab;
         // Dialect + table identity for the SQL INSERT form (ignored by CSV/JSON).
-        let kind = self.active().map(|a| a.db.kind()).unwrap_or(dbcore::DbKind::Postgres);
+        let kind = self
+            .active()
+            .map(|a| a.db.kind())
+            .unwrap_or(dbcore::DbKind::Postgres);
         let tab = &self.tabs[idx];
         let Some(result) = tab.result.as_ref() else {
             return;
@@ -2092,7 +2313,12 @@ impl DbGuiApp {
             return;
         }
         let columns = result.columns.clone();
-        let (schema, table) = match tab.edits.source.as_ref().or(tab.edits.pending_source.as_ref()) {
+        let (schema, table) = match tab
+            .edits
+            .source
+            .as_ref()
+            .or(tab.edits.pending_source.as_ref())
+        {
             Some(s) => (s.schema.clone(), s.table.clone()),
             None => (None, "table".to_string()),
         };
@@ -2132,6 +2358,8 @@ impl DbGuiApp {
             return;
         }
         let added = parsed.len();
+        // One undo group so the whole paste takes a single Cmd/Ctrl+Z.
+        self.tabs[idx].edits.begin_undo_group();
         for fields in parsed {
             let id = self.tabs[idx].edits.add_new_row();
             for (c, field) in fields.into_iter().enumerate().take(ncols) {
@@ -2140,6 +2368,7 @@ impl DbGuiApp {
                 }
             }
         }
+        self.tabs[idx].edits.end_undo_group();
         // Select the freshly pasted rows (they sit just past the stored rows) so they're
         // highlighted and scrolled into view, ready to review before saving.
         let order_len = self.tabs[idx].row_order.len();
@@ -2213,12 +2442,18 @@ impl DbGuiApp {
         if matches.next().is_some() {
             return None;
         }
-        let pk_cols: Vec<String> = info
-            .columns
-            .iter()
-            .filter(|c| c.primary_key)
-            .map(|c| c.name.clone())
-            .collect();
+        // A read-only connection never gets editable rows: keep the table identity (the
+        // pager, Structure view, and row count key off it) but drop the PK columns, which
+        // is what `EditSource::editable()` checks. Staging, paste, and commit all follow.
+        let pk_cols: Vec<String> = if self.tab_connection_is_read_only(idx) {
+            Vec::new()
+        } else {
+            info.columns
+                .iter()
+                .filter(|c| c.primary_key)
+                .map(|c| c.name.clone())
+                .collect()
+        };
         // Keep the table identity even when the table has no primary key. The result isn't
         // *editable* (`EditSource::editable()` is false for empty `pk_cols`, so the grid stays
         // read-only and no PK-less UPDATE is ever generated), but it's still a genuine table
@@ -2260,6 +2495,10 @@ impl DbGuiApp {
     /// Validate staged edits and build the SQL statements, storing them in
     /// `commit_pending` to show the preview dialog. Nothing is executed yet.
     fn commit_edits(&mut self) {
+        if self.tab_connection_is_read_only(self.active_query_tab) {
+            self.refuse_read_only("staged edits can't be saved.");
+            return;
+        }
         if let Some(stmts) = self.build_commit_statements() {
             self.commit_pending = Some(stmts);
         }
@@ -2297,6 +2536,34 @@ impl DbGuiApp {
                 result,
             });
         });
+    }
+
+    /// Undo the last staged-edit change, refreshing the view and selection to match.
+    fn undo_edits(&mut self) {
+        // Commit or drop whatever's in the open editor first — undo acts on staged state,
+        // not on a half-typed buffer — then step back.
+        self.tab_mut().flush_active_edit();
+        if self.tab_mut().edits.undo() {
+            self.tab_mut().recompute_view();
+            self.status_msg = "Undo".to_string();
+            self.error = None;
+            self.workspace_dirty = true;
+        } else {
+            self.status_msg = "Nothing to undo".to_string();
+        }
+    }
+
+    /// Redo the change undone most recently.
+    fn redo_edits(&mut self) {
+        self.tab_mut().flush_active_edit();
+        if self.tab_mut().edits.redo() {
+            self.tab_mut().recompute_view();
+            self.status_msg = "Redo".to_string();
+            self.error = None;
+            self.workspace_dirty = true;
+        } else {
+            self.status_msg = "Nothing to redo".to_string();
+        }
     }
 
     /// Validate staged edits and build UPDATE/DELETE/INSERT statements. Returns `None`
@@ -2399,12 +2666,8 @@ impl DbGuiApp {
                 .collect();
             let key_refs: Vec<(&str, &dbcore::Value)> =
                 keys.iter().map(|(c, v)| (c.as_str(), v)).collect();
-            match dbcore::build_delete_sql(
-                kind,
-                source.schema.as_deref(),
-                &source.table,
-                &key_refs,
-            ) {
+            match dbcore::build_delete_sql(kind, source.schema.as_deref(), &source.table, &key_refs)
+            {
                 Some(sql) => deletes.push(sql),
                 None => {
                     self.error = Some(cant_write.into());
@@ -2418,7 +2681,12 @@ impl DbGuiApp {
         // new rows already accepted, so a new row can't duplicate a live primary key.
         let existing_pks: Vec<Vec<dbcore::Value>> = (0..result.rows.len())
             .filter(|r| !self.tabs[idx].edits.deleted.contains(r))
-            .map(|r| pk_idx.iter().map(|(_, i)| result.rows[r][*i].clone()).collect())
+            .map(|r| {
+                pk_idx
+                    .iter()
+                    .map(|(_, i)| result.rows[r][*i].clone())
+                    .collect()
+            })
             .collect();
         let mut new_pks: Vec<Vec<dbcore::Value>> = Vec::new();
         for j in 0..self.tabs[idx].edits.new_rows {
@@ -2439,8 +2707,9 @@ impl DbGuiApp {
                 match entered.iter().find(|(c, _)| c == i).map(|(_, v)| v) {
                     Some(v) if !v.is_null() => pk_tuple.push(v.clone()),
                     _ => {
-                        self.error =
-                            Some(format!("Cannot add row: primary key \"{name}\" is required."));
+                        self.error = Some(format!(
+                            "Cannot add row: primary key \"{name}\" is required."
+                        ));
                         self.status_msg = "Missing primary key — not saved".to_string();
                         return None;
                     }
@@ -2460,12 +2729,8 @@ impl DbGuiApp {
                 .collect();
             let col_refs: Vec<(&str, &dbcore::Value)> =
                 cols_owned.iter().map(|(c, v)| (c.as_str(), v)).collect();
-            match dbcore::build_insert_sql(
-                kind,
-                source.schema.as_deref(),
-                &source.table,
-                &col_refs,
-            ) {
+            match dbcore::build_insert_sql(kind, source.schema.as_deref(), &source.table, &col_refs)
+            {
                 Some(sql) => inserts.push(sql),
                 None => {
                     self.error = Some(cant_write.into());
@@ -2709,6 +2974,25 @@ impl DbGuiApp {
                 // single-table `SELECT *` — including a hand-tuned LIMIT/WHERE/ORDER BY —
                 // stays editable; anything else runs as a read-only ad-hoc query.
                 self.tabs[idx].edits.pending_source = self.derive_edit_source(idx);
+                // A read-only connection refuses anything that isn't provably a read —
+                // no confirmation dialog, it simply doesn't run. The backends enforce
+                // this at the session level too where the engine supports it; this check
+                // gives the clear, local error.
+                if self.tab_connection_is_read_only(idx) {
+                    let found = dbcore::safety::write_statements(&self.tabs[idx].sql);
+                    if let Some(first) = found.first() {
+                        let shown: String = first.chars().take(80).collect();
+                        self.refuse_read_only(&format!(
+                            "not running: {shown}{}",
+                            if found.len() > 1 {
+                                format!(" (+{} more)", found.len() - 1)
+                            } else {
+                                String::new()
+                            }
+                        ));
+                        return;
+                    }
+                }
                 // A production connection holds destructive SQL for confirmation first.
                 if self.tab_connection_is_production(idx) {
                     let found = dbcore::safety::dangerous_statements(&self.tabs[idx].sql);
@@ -2734,6 +3018,7 @@ impl DbGuiApp {
             Action::BeautifySql => self.beautify_sql(),
             Action::OpenTable { sql, source, pin } => self.open_table(sql, source, pin),
             Action::OpenDefinition { title, sql } => self.open_definition(title, sql),
+            Action::FollowForeignKey { row, col } => self.follow_foreign_key(row, col),
             Action::SortBy(col) => self.tab_mut().apply_sort(col),
             Action::SetSort { col, asc } => self.tab_mut().set_sort(col, asc),
             Action::ClearSort => self.tab_mut().clear_sort(),
@@ -2743,6 +3028,8 @@ impl DbGuiApp {
             Action::PasteRows(text) => self.paste_rows(&text),
             Action::ExportTable { table, format } => self.export_table(&table, format),
             Action::PreviewEdits => self.commit_edits(),
+            Action::Undo => self.undo_edits(),
+            Action::Redo => self.redo_edits(),
             Action::ConfirmEdits => self.confirm_edits(),
             Action::CancelEdits => {
                 self.commit_pending = None;
@@ -2753,8 +3040,10 @@ impl DbGuiApp {
                     .active()
                     .and_then(|a| a.schema.tables.first().and_then(|t| t.schema.as_deref()))
                     .map(|s| s.to_string());
-                self.tab_mut().schema_editor =
-                    Some(ObjectEditor::Table(SchemaEditor::new_table(kind, schema.as_deref())));
+                self.tab_mut().schema_editor = Some(ObjectEditor::Table(SchemaEditor::new_table(
+                    kind,
+                    schema.as_deref(),
+                )));
                 self.schema_pending = None;
             }
             Action::OpenEditTable(table) => {
@@ -2769,8 +3058,10 @@ impl DbGuiApp {
                     .active()
                     .and_then(|a| a.schema.tables.first().and_then(|t| t.schema.as_deref()))
                     .map(|s| s.to_string());
-                self.tab_mut().schema_editor =
-                    Some(ObjectEditor::View(ViewEditor::new_view(kind, schema.as_deref())));
+                self.tab_mut().schema_editor = Some(ObjectEditor::View(ViewEditor::new_view(
+                    kind,
+                    schema.as_deref(),
+                )));
                 self.schema_pending = None;
             }
             Action::OpenEditView(view) => {
@@ -2845,8 +3136,9 @@ impl DbGuiApp {
             }
             Action::OpenEditRoutine(routine) => {
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
-                self.tab_mut().schema_editor =
-                    Some(ObjectEditor::Routine(RoutineEditor::edit_routine(&routine, kind)));
+                self.tab_mut().schema_editor = Some(ObjectEditor::Routine(
+                    RoutineEditor::edit_routine(&routine, kind),
+                ));
                 self.schema_pending = None;
             }
             Action::DropRoutine(routine) => {
@@ -2922,12 +3214,16 @@ impl DbGuiApp {
                 }
             }
             Action::ApplySchema => {
+                if self.tab_connection_is_read_only(self.active_query_tab) {
+                    self.schema_pending = None;
+                    self.refuse_read_only("schema changes can't be applied.");
+                    return;
+                }
                 let Some(stmts) = self.schema_pending.take() else {
                     return;
                 };
-                let Some((db, conn_id)) = self
-                    .active()
-                    .map(|a| (a.db.clone(), a.config_id.clone()))
+                let Some((db, conn_id)) =
+                    self.active().map(|a| (a.db.clone(), a.config_id.clone()))
                 else {
                     return;
                 };
@@ -3168,14 +3464,37 @@ impl DbGuiApp {
         // Esc discards unsaved cell edits (revert to the stored values) when no cell editor
         // is open — the open-editor case is handled inside `render_editor` (cancel that
         // cell only). Skipped while the filter bar is up, which uses Esc to close itself.
+        // Recorded as one undo step so an accidental discard can be taken back with Cmd/Ctrl+Z.
         if ctx.input(|i| i.key_pressed(egui::Key::Escape))
             && self.tab().edits.active.is_none()
             && self.tab().edits.has_pending()
             && !self.tab().filter.visible
         {
-            self.tab_mut().edits.clear();
-            self.status_msg = "Discarded unsaved edits".to_string();
+            self.tab_mut().edits.discard_all();
+            self.tab_mut().recompute_view();
+            self.status_msg = "Discarded unsaved edits (⌘Z to undo)".to_string();
             self.error = None;
+            self.workspace_dirty = true;
+        }
+        // Cmd/Ctrl+Z undoes, Cmd/Ctrl+Shift+Z redoes, the last staged-edit change (cell edit,
+        // delete mark, new row, fill, paste, discard). Only when no text field is focused —
+        // an open cell editor / SQL console handles its own in-field undo. Shift+Z is matched
+        // first so a redo isn't also read as an undo.
+        let typing_now = ctx.memory(|m| m.focused().is_some());
+        if !typing_now && self.tab().edits.editable() {
+            let (undo, redo) = ctx.input_mut(|i| {
+                let redo = i.consume_key(
+                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                    egui::Key::Z,
+                );
+                let undo = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
+                (undo, redo)
+            });
+            if redo {
+                actions.push(Action::Redo);
+            } else if undo {
+                actions.push(Action::Undo);
+            }
         }
         // Backspace/Delete on the selected rows (when nothing is being typed) marks every
         // selected stored row for deletion (red) and drops any selected pending new rows.
@@ -3185,13 +3504,14 @@ impl DbGuiApp {
         if !typing
             && self.tab().edits.editable()
             && self.tab().edits.active.is_none()
-            && ctx.input(|i| {
-                i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)
-            })
+            && ctx
+                .input(|i| i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete))
             && !self.tab().selection.is_empty()
         {
             let order_len = self.tab().row_order.len();
             let selected: Vec<usize> = self.tab().selection.iter().collect();
+            // One undo group so the whole multi-row delete takes a single Cmd/Ctrl+Z.
+            self.tab_mut().edits.begin_undo_group();
             // Mark stored rows for deletion. New (insert) rows are removed instead, highest
             // display index first so the renumbering of the rows above each removal never
             // invalidates an index we still have to process.
@@ -3209,6 +3529,7 @@ impl DbGuiApp {
                     removed_new = true;
                 }
             }
+            self.tab_mut().edits.end_undo_group();
             // Removing new rows shifts the trailing display indices; clear the selection so it
             // can't point at the wrong (renumbered) rows. Stored-only deletes keep their
             // selection so the marked rows stay highlighted.
@@ -3271,15 +3592,12 @@ impl DbGuiApp {
                     if let Some(raw) =
                         crate::edit::disp_to_raw(&tab.row_order, tab.edits.new_rows, disp)
                     {
-                        let deleted =
-                            tab.edits.row_state(raw) == crate::edit::RowState::Deleted;
+                        let deleted = tab.edits.row_state(raw) == crate::edit::RowState::Deleted;
                         let bytes = crate::edit::original_value(result, raw, col)
                             .is_some_and(|v| matches!(v, dbcore::Value::Bytes(_)));
                         if !deleted && !bytes {
                             if tab.edits.col_kind(col) == crate::edit::EditorKind::Bool {
-                                if let Some(orig) =
-                                    crate::edit::original_value(result, raw, col)
-                                {
+                                if let Some(orig) = crate::edit::original_value(result, raw, col) {
                                     tab.edits.toggle_bool(raw, col, &orig);
                                 }
                             } else {
@@ -3398,6 +3716,7 @@ impl DbGuiApp {
                     | Action::BindConnection(_)
                     | Action::OpenTable { .. }
                     | Action::OpenDefinition { .. }
+                    | Action::FollowForeignKey { .. }
                     | Action::DeleteConnection(_)
             )
         });
@@ -3444,7 +3763,11 @@ mod tests {
         async fn introspect(&self) -> dbcore::Result<SchemaTree> {
             unreachable!()
         }
-        async fn execute_capped(&self, _sql: &str, _max_rows: usize) -> dbcore::Result<QueryResult> {
+        async fn execute_capped(
+            &self,
+            _sql: &str,
+            _max_rows: usize,
+        ) -> dbcore::Result<QueryResult> {
             // Background tasks (queries, pager counts) may legitimately land here in tests
             // that only assert on the UI-side state; an empty result keeps them quiet.
             Ok(QueryResult::default())
@@ -3567,6 +3890,68 @@ mod tests {
         assert_eq!(app.busy, Busy::Querying);
     }
 
+    /// A read-only connection refuses writes outright (no confirmation dialog), refuses
+    /// staged-edit saves and DDL, and still runs reads.
+    #[test]
+    fn read_only_connection_blocks_writes() {
+        let mut app = DbGuiApp::construct();
+        app.connections.clear();
+        let mut cfg = dbcore::ConnectionConfig::new(dbcore::DbKind::Sqlite);
+        cfg.id = "c1".into();
+        cfg.read_only = true;
+        app.connections.push(cfg);
+        app.active_connections.push(ActiveConnection {
+            config_id: "c1".into(),
+            name: "replica".into(),
+            db: std::sync::Arc::new(DummyDb),
+            databases: Vec::new(),
+            schema: fake_schema(1, 1),
+        });
+        app.tab_mut().conn_id = Some("c1".into());
+
+        // Reads run normally.
+        app.tab_mut().sql = "SELECT * FROM table_0".into();
+        app.apply_action(Action::RunQuery);
+        assert!(app.error.is_none());
+        assert_eq!(app.busy, Busy::Querying);
+        app.busy = Busy::Idle;
+
+        // A write is refused outright — no danger dialog, no query.
+        app.tab_mut().sql = "DELETE FROM table_0".into();
+        app.apply_action(Action::RunQuery);
+        assert!(app.danger_pending.is_none());
+        assert_eq!(app.busy, Busy::Idle);
+        assert!(app.error.as_deref().unwrap_or("").contains("read-only"));
+
+        // So is a CTE-wrapped write the old lexical guard used to miss.
+        app.error = None;
+        app.tab_mut().sql = "WITH x AS (SELECT 1) UPDATE table_0 SET col0 = 1".into();
+        app.apply_action(Action::RunQuery);
+        assert_eq!(app.busy, Busy::Idle);
+        assert!(app.error.as_deref().unwrap_or("").contains("read-only"));
+
+        // Committing staged edits is refused before any SQL is built.
+        app.error = None;
+        app.apply_action(Action::PreviewEdits);
+        assert!(app.commit_pending.is_none());
+        assert!(app.error.as_deref().unwrap_or("").contains("read-only"));
+
+        // Applying a staged schema migration is refused and the preview is dropped.
+        app.error = None;
+        app.schema_pending = Some(vec!["ALTER TABLE table_0 ADD c INT".into()]);
+        app.apply_action(Action::ApplySchema);
+        assert!(app.schema_pending.is_none());
+        assert_eq!(app.busy, Busy::Idle);
+        assert!(app.error.as_deref().unwrap_or("").contains("read-only"));
+
+        // Turning the flag off lets the same write reach the danger-free run path.
+        app.error = None;
+        app.connections[0].read_only = false;
+        app.tab_mut().sql = "DELETE FROM table_0".into();
+        app.apply_action(Action::RunQuery);
+        assert_eq!(app.busy, Busy::Querying);
+    }
+
     /// The pager rewrites the tab's LIMIT/OFFSET in place and never runs past a known end.
     #[test]
     fn pager_rewrites_sql_and_respects_total() {
@@ -3645,7 +4030,10 @@ mod tests {
             });
             tab.total_rows = Some(250);
         }
-        assert!(!app.tab().edits.editable(), "a PK-less table must not be editable");
+        assert!(
+            !app.tab().edits.editable(),
+            "a PK-less table must not be editable"
+        );
 
         app.busy = Busy::Idle;
         app.apply_action(Action::Page(PageNav::Next));
@@ -3668,8 +4056,14 @@ mod tests {
         let mut app = DbGuiApp::construct();
         let result = QueryResult {
             columns: vec![
-                ColumnMeta { name: "id".into(), type_name: "INTEGER".into() },
-                ColumnMeta { name: "name".into(), type_name: "TEXT".into() },
+                ColumnMeta {
+                    name: "id".into(),
+                    type_name: "INTEGER".into(),
+                },
+                ColumnMeta {
+                    name: "name".into(),
+                    type_name: "TEXT".into(),
+                },
             ],
             rows: vec![
                 vec![Value::Int(1), Value::Text("a".into())],
@@ -3703,8 +4097,14 @@ mod tests {
         let mut app = DbGuiApp::construct();
         let result = QueryResult {
             columns: vec![
-                ColumnMeta { name: "id".into(), type_name: "INTEGER".into() },
-                ColumnMeta { name: "name".into(), type_name: "TEXT".into() },
+                ColumnMeta {
+                    name: "id".into(),
+                    type_name: "INTEGER".into(),
+                },
+                ColumnMeta {
+                    name: "name".into(),
+                    type_name: "TEXT".into(),
+                },
             ],
             rows: vec![
                 vec![Value::Int(1), Value::Text("a".into())],
@@ -3739,8 +4139,14 @@ mod tests {
         let mut app = DbGuiApp::construct();
         let result = QueryResult {
             columns: vec![
-                ColumnMeta { name: "id".into(), type_name: "INTEGER".into() },
-                ColumnMeta { name: "name".into(), type_name: "TEXT".into() },
+                ColumnMeta {
+                    name: "id".into(),
+                    type_name: "INTEGER".into(),
+                },
+                ColumnMeta {
+                    name: "name".into(),
+                    type_name: "TEXT".into(),
+                },
             ],
             rows: vec![vec![Value::Int(1), Value::Text("a".into())]],
             stats: QueryStats::default(),
@@ -3761,9 +4167,70 @@ mod tests {
         // … with the id column parsed to an Int (not left as text) and the name as text.
         let first = crate::edit::NEW_ROW_BASE;
         assert_eq!(app.tab().edits.staged(first, 0), Some(&Value::Int(2)));
-        assert_eq!(app.tab().edits.staged(first, 1), Some(&Value::Text("b".into())));
+        assert_eq!(
+            app.tab().edits.staged(first, 1),
+            Some(&Value::Text("b".into()))
+        );
         // … and the pasted rows are selected for review.
         assert_eq!(app.tab().selection.len(), 2);
+    }
+
+    /// Undo/redo run through the app the same way the Cmd/Ctrl+Z shortcut does: a whole paste
+    /// is one undo step, and redo replays it. Exercises the `Action::Undo`/`Action::Redo` path
+    /// (flush editor → step history → recompute view) end to end.
+    #[test]
+    fn undo_redo_actions_step_staged_edits() {
+        let mut app = DbGuiApp::construct();
+        let result = QueryResult {
+            columns: vec![
+                ColumnMeta {
+                    name: "id".into(),
+                    type_name: "INTEGER".into(),
+                },
+                ColumnMeta {
+                    name: "name".into(),
+                    type_name: "TEXT".into(),
+                },
+            ],
+            rows: vec![vec![Value::Int(1), Value::Text("a".into())]],
+            stats: QueryStats::default(),
+            truncated: false,
+        };
+        app.tab_mut().set_result(result);
+        app.tab_mut().edits.source = Some(crate::edit::EditSource {
+            schema: None,
+            table: "t".into(),
+            pk_cols: vec!["id".into()],
+        });
+
+        // A stored-cell edit, then a two-row paste — two separate undo steps.
+        app.tab_mut()
+            .edits
+            .stage(0, 1, Value::Text("edited".into()), &Value::Text("a".into()));
+        app.apply_action(Action::PasteRows("2\tb\n3\tc".to_string()));
+        assert_eq!(app.tab().edits.new_rows, 2);
+
+        // Undo drops the whole paste in one step; the cell edit survives.
+        app.apply_action(Action::Undo);
+        assert_eq!(app.tab().edits.new_rows, 0, "paste undone in a single step");
+        assert_eq!(
+            app.tab().edits.staged(0, 1),
+            Some(&Value::Text("edited".into()))
+        );
+
+        // A second undo reverts the cell edit; nothing pending remains.
+        app.apply_action(Action::Undo);
+        assert_eq!(app.tab().edits.staged(0, 1), None);
+        assert!(!app.tab().edits.has_pending());
+
+        // Redo replays the cell edit, then the paste.
+        app.apply_action(Action::Redo);
+        assert_eq!(
+            app.tab().edits.staged(0, 1),
+            Some(&Value::Text("edited".into()))
+        );
+        app.apply_action(Action::Redo);
+        assert_eq!(app.tab().edits.new_rows, 2);
     }
 
     /// Paste into a read-only result is a no-op with a hint (no phantom rows).
@@ -3771,7 +4238,10 @@ mod tests {
     fn paste_rows_ignored_when_not_editable() {
         let mut app = DbGuiApp::construct();
         let result = QueryResult {
-            columns: vec![ColumnMeta { name: "x".into(), type_name: "TEXT".into() }],
+            columns: vec![ColumnMeta {
+                name: "x".into(),
+                type_name: "TEXT".into(),
+            }],
             rows: vec![vec![Value::Text("a".into())]],
             stats: QueryStats::default(),
             truncated: false,
@@ -4311,7 +4781,10 @@ mod tests {
                 let out = ctx.run_ui(raw, |ui| app.draw(ui, None));
                 clashes.extend(collect_clash_text(&out.shapes));
             }
-            assert!(app.tab().schema_editor.is_some(), "editor must survive drawing");
+            assert!(
+                app.tab().schema_editor.is_some(),
+                "editor must survive drawing"
+            );
         }
         clashes.sort();
         clashes.dedup();
@@ -4511,7 +4984,10 @@ mod tests {
             },
             pin: false,
         });
-        assert!(app.tab().schema_editor.is_none(), "editor must not follow to a new table");
+        assert!(
+            app.tab().schema_editor.is_none(),
+            "editor must not follow to a new table"
+        );
 
         // ...but the original tab still holds its in-progress editor.
         app.apply_action(Action::SelectTab(0));
@@ -4757,18 +5233,38 @@ mod tests {
         let (ctx, mut app) = grid_nav_app(5, 3);
         app.tab_mut().selection.select_one(0);
 
-        run_frame(&ctx, &mut app, vec![key(egui::Key::ArrowDown, egui::Modifiers::NONE)]);
+        run_frame(
+            &ctx,
+            &mut app,
+            vec![key(egui::Key::ArrowDown, egui::Modifiers::NONE)],
+        );
         assert_eq!(app.tab().selection.lead(), Some(1));
         assert_eq!(app.tab().selection.cursor(), Some((1, 0)));
 
-        run_frame(&ctx, &mut app, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
+        run_frame(
+            &ctx,
+            &mut app,
+            vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)],
+        );
         assert_eq!(app.tab().selection.cursor(), Some((1, 1)));
-        assert_eq!(app.tab().selection.lead(), Some(1), "column move keeps the row");
+        assert_eq!(
+            app.tab().selection.lead(),
+            Some(1),
+            "column move keeps the row"
+        );
 
-        run_frame(&ctx, &mut app, vec![key(egui::Key::ArrowDown, egui::Modifiers::SHIFT)]);
+        run_frame(
+            &ctx,
+            &mut app,
+            vec![key(egui::Key::ArrowDown, egui::Modifiers::SHIFT)],
+        );
         let rows: Vec<usize> = app.tab().selection.iter().collect();
         assert_eq!(rows, [1, 2], "Shift+Down extends from the anchor");
-        assert_eq!(app.tab().selection.cursor(), Some((2, 1)), "cursor keeps its column");
+        assert_eq!(
+            app.tab().selection.cursor(),
+            Some((2, 1)),
+            "cursor keeps its column"
+        );
     }
 
     /// Enter opens the editor on the cursor cell — and the very same Enter press must not
@@ -4779,9 +5275,18 @@ mod tests {
         app.tab_mut().selection.select_one(1);
         app.tab_mut().selection.set_cursor(1, 1);
 
-        run_frame(&ctx, &mut app, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+        run_frame(
+            &ctx,
+            &mut app,
+            vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
         {
-            let active = app.tab().edits.active.as_ref().expect("Enter opens the editor");
+            let active = app
+                .tab()
+                .edits
+                .active
+                .as_ref()
+                .expect("Enter opens the editor");
             assert_eq!((active.row, active.col), (1, 1));
             assert_eq!(active.origin, crate::edit::EditOrigin::Grid);
             assert_eq!(active.buf, "4"); // row 1 col 1 of fake_result(5, 3)
@@ -4800,14 +5305,25 @@ mod tests {
         let (ctx, mut app) = grid_nav_app(5, 3);
         app.tab_mut().selection.select_one(0); // cursor lands on (0, 0)
 
-        run_frame(&ctx, &mut app, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+        run_frame(
+            &ctx,
+            &mut app,
+            vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
         assert!(app.tab().edits.is_active(0, 0), "editor open at the cursor");
         run_frame(&ctx, &mut app, vec![]); // editor takes focus
         run_frame(&ctx, &mut app, vec![egui::Event::Text("7".into())]);
         let buf = app.tab().edits.active.as_ref().unwrap().buf.clone();
-        assert!(buf.contains('7'), "typed text reaches the editor, buf = {buf:?}");
+        assert!(
+            buf.contains('7'),
+            "typed text reaches the editor, buf = {buf:?}"
+        );
 
-        run_frame(&ctx, &mut app, vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
+        run_frame(
+            &ctx,
+            &mut app,
+            vec![key(egui::Key::Tab, egui::Modifiers::NONE)],
+        );
         assert!(
             app.tab().edits.staged(0, 0).is_some(),
             "Tab commits the edited cell"
@@ -4843,13 +5359,23 @@ mod tests {
         let (ctx, mut app) = grid_nav_app(200, 3);
         app.tab_mut().selection.select_one(150);
         let out = run_frame(&ctx, &mut app, vec![]);
-        assert!(!painted(&out.shapes, "453"), "row 151 must start out of view");
-        run_frame(&ctx, &mut app, vec![key(egui::Key::ArrowDown, egui::Modifiers::NONE)]);
+        assert!(
+            !painted(&out.shapes, "453"),
+            "row 151 must start out of view"
+        );
+        run_frame(
+            &ctx,
+            &mut app,
+            vec![key(egui::Key::ArrowDown, egui::Modifiers::NONE)],
+        );
         let seen = (0..30).any(|_| {
             let out = run_frame(&ctx, &mut app, vec![]);
             painted(&out.shapes, "453")
         });
-        assert!(seen, "ArrowDown past the viewport must scroll the row into view");
+        assert!(
+            seen,
+            "ArrowDown past the viewport must scroll the row into view"
+        );
 
         // Horizontal: 5 rows × 30 cols → wider than the panel → wrapped in the horizontal
         // ScrollArea. Off-screen columns skip their cell text, so cell (0, 25) ("25") is
@@ -4857,15 +5383,25 @@ mod tests {
         let (ctx, mut app) = grid_nav_app(5, 30);
         app.tab_mut().selection.select_one(0);
         let out = run_frame(&ctx, &mut app, vec![]);
-        assert!(!painted(&out.shapes, "25"), "column 25 must start out of view");
+        assert!(
+            !painted(&out.shapes, "25"),
+            "column 25 must start out of view"
+        );
         for _ in 0..25 {
-            run_frame(&ctx, &mut app, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
+            run_frame(
+                &ctx,
+                &mut app,
+                vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)],
+            );
         }
         let seen = (0..30).any(|_| {
             let out = run_frame(&ctx, &mut app, vec![]);
             painted(&out.shapes, "25")
         });
-        assert!(seen, "ArrowRight past the viewport must scroll the column into view");
+        assert!(
+            seen,
+            "ArrowRight past the viewport must scroll the column into view"
+        );
     }
 
     /// While a cell editor has focus, arrow keys belong to the text field — the grid cursor
@@ -4876,9 +5412,17 @@ mod tests {
         app.tab_mut().selection.select_one(1);
         app.tab_mut().selection.set_cursor(1, 1);
 
-        run_frame(&ctx, &mut app, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+        run_frame(
+            &ctx,
+            &mut app,
+            vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
         run_frame(&ctx, &mut app, vec![]); // editor takes focus
-        run_frame(&ctx, &mut app, vec![key(egui::Key::ArrowDown, egui::Modifiers::NONE)]);
+        run_frame(
+            &ctx,
+            &mut app,
+            vec![key(egui::Key::ArrowDown, egui::Modifiers::NONE)],
+        );
         assert_eq!(
             app.tab().selection.cursor(),
             Some((1, 1)),
@@ -4985,7 +5529,11 @@ mod tests {
         }
         clashes.sort();
         clashes.dedup();
-        assert!(clashes.is_empty(), "ID clashes detected:\n{}", clashes.join("\n"));
+        assert!(
+            clashes.is_empty(),
+            "ID clashes detected:\n{}",
+            clashes.join("\n")
+        );
     }
 
     /// A small schema with a real FK so ERD tests exercise edges, not just boxes.
@@ -5013,6 +5561,111 @@ mod tests {
             schema,
         });
         app.tab_mut().conn_id = Some("c1".into());
+    }
+
+    /// A result over `field_0..field_{n-1}` (matching [`fake_schema`]'s column names) with one row.
+    fn field_result(values: Vec<Value>) -> QueryResult {
+        QueryResult {
+            columns: (0..values.len())
+                .map(|c| ColumnMeta {
+                    name: format!("field_{c}"),
+                    type_name: "TEXT".into(),
+                })
+                .collect(),
+            rows: vec![values],
+            stats: QueryStats::default(),
+            truncated: false,
+        }
+    }
+
+    /// Set up a `table_1` tab (whose `field_1` is a FK → `table_0.field_0`) holding `row`.
+    fn fk_tab(row: Vec<Value>) -> DbGuiApp {
+        let mut app = DbGuiApp::construct();
+        connect_fake(&mut app, fake_schema_with_fk());
+        let tab = app.tab_mut();
+        tab.edits.source = Some(EditSource {
+            schema: None,
+            table: "table_1".into(),
+            pk_cols: vec!["field_0".into()],
+        });
+        tab.result = Some(field_result(row));
+        app
+    }
+
+    /// Following a FK cell builds a filtered `SELECT` of the referenced table (with its PK as
+    /// the edit source) and opens it in a reusable preview tab bound to the same connection.
+    #[test]
+    fn follow_foreign_key_opens_filtered_referenced_table() {
+        let mut app = fk_tab(vec![
+            Value::Text("row-pk".into()),
+            Value::Text("u7".into()),
+            Value::Null,
+            Value::Null,
+        ]);
+
+        // Per-column labels drive the grid's link affordance: only the FK column is tagged.
+        assert_eq!(
+            app.fk_column_labels(0),
+            vec![None, Some("table_0".to_string()), None, None]
+        );
+
+        // Resolve the FK at (row 0, col 1 = field_1) → filtered SELECT of table_0.
+        let (sql, source) = app
+            .build_fk_follow(0, 0, 1)
+            .expect("field_1 is a foreign key");
+        assert_eq!(
+            sql,
+            "SELECT * FROM \"table_0\" WHERE \"field_0\" = 'u7' LIMIT 100;"
+        );
+        assert_eq!(source.table, "table_0");
+        assert_eq!(source.schema, None);
+        assert_eq!(source.pk_cols, vec!["field_0".to_string()]);
+
+        // The action opens a *second* (preview) tab on the referenced table.
+        app.apply_action(Action::FollowForeignKey { row: 0, col: 1 });
+        assert_eq!(
+            app.tabs.len(),
+            2,
+            "follow opens a new tab, not clobbering the source"
+        );
+        let opened = app.tab();
+        assert!(
+            opened.preview,
+            "FK follow lands in the reusable preview tab"
+        );
+        assert_eq!(opened.conn_id.as_deref(), Some("c1"));
+        assert_eq!(
+            opened
+                .edits
+                .pending_source
+                .as_ref()
+                .map(|s| s.table.as_str()),
+            Some("table_0")
+        );
+        assert_eq!(opened.sql, sql);
+    }
+
+    /// A non-FK column, or a NULL foreign-key value, has nothing to follow → status hint, no tab.
+    #[test]
+    fn follow_foreign_key_noops_on_non_fk_and_null() {
+        let mut app = fk_tab(vec![
+            Value::Text("pk".into()),
+            Value::Null, // the FK column, but empty here
+            Value::Null,
+            Value::Null,
+        ]);
+        assert!(
+            app.build_fk_follow(0, 0, 0).is_none(),
+            "field_0 isn't a foreign key"
+        );
+        assert!(
+            app.build_fk_follow(0, 0, 1).is_none(),
+            "NULL FK references nothing"
+        );
+
+        app.apply_action(Action::FollowForeignKey { row: 0, col: 1 });
+        assert_eq!(app.tabs.len(), 1, "a NULL FK opens no tab");
+        assert!(app.status_msg.contains("No foreign key"));
     }
 
     /// ToggleErd needs a live connection; with one it snapshots the schema, and a second
@@ -5069,7 +5722,10 @@ mod tests {
         let erd = app.erd.as_ref().expect("refresh keeps the diagram open");
         assert_eq!(erd.nodes.len(), 4);
         let kept = erd.nodes.iter().find(|n| n.title == "table_0").unwrap();
-        assert_eq!(kept.pos, moved, "surviving nodes keep their dragged position");
+        assert_eq!(
+            kept.pos, moved,
+            "surviving nodes keep their dragged position"
+        );
 
         app.disconnect_conn("c1");
         assert!(app.erd.is_none(), "diagram closes with its connection");

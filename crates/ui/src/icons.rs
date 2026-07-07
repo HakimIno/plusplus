@@ -50,6 +50,8 @@ icon_fns! {
     warning    => "../assets/icons/warning.svg",
     close      => "../assets/icons/close.svg",
     save       => "../assets/icons/save.svg",
+    undo       => "../assets/icons/undo.svg",
+    redo       => "../assets/icons/redo.svg",
     star       => "../assets/icons/star.svg",
     star_filled => "../assets/icons/star-filled.svg",
     settings   => "../assets/icons/settings.svg",
@@ -183,4 +185,3 @@ pub fn show_colored(
 ) -> egui::Response {
     ui.add(image(ui, src, size, color))
 }
-

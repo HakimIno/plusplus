@@ -2,7 +2,7 @@
 //!
 //! Helpers for the compact toolbar drawn into the native macOS titlebar space.
 
-use egui::{self, Color32, CornerRadius, Rect, Stroke, Ui, UiBuilder};
+use egui::{self, Color32, CornerRadius, Rect, Ui, UiBuilder};
 
 use crate::style::palette;
 
