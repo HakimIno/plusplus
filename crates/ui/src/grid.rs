@@ -267,6 +267,10 @@ pub struct GridResponse {
     /// chosen format. The app copies the current selection (targeting this row if it wasn't
     /// already selected).
     pub copy: Option<(usize, dbcore::CopyFormat)>,
+    /// A foreign-key cell asked to be followed (Shift+click the underlined value, or the
+    /// right-click "Follow →" menu): the *raw* result-row index and the column. The app resolves
+    /// the FK target and opens a filtered tab on it.
+    pub follow_fk: Option<(usize, usize)>,
     /// A cell was double-clicked → start editing it (*display* row index, column index).
     pub begin_edit: Option<(usize, usize)>,
     /// A boolean cell was double-clicked → flip it (*display* row index, column index).
@@ -318,6 +322,7 @@ pub fn results_grid(
     grid_id: u64,
     scroll_to: Option<usize>,
     emoji: &EmojiAtlas,
+    fk_cols: &[Option<String>],
 ) -> GridResponse {
     let mut out = GridResponse::default();
     let ncols = result.columns.len();
@@ -362,7 +367,7 @@ pub fn results_grid(
         if desired_total <= ui.available_width() {
             build_grid(
                 ui, result, order, sort, selection, edits, editable, gutter_w, row_height,
-                &mut out, grid_id, scroll_to, emoji,
+                &mut out, grid_id, scroll_to, emoji, fk_cols,
             );
         } else {
             egui::ScrollArea::horizontal()
@@ -372,7 +377,7 @@ pub fn results_grid(
                     ui.set_width(desired_total);
                     build_grid(
                         ui, result, order, sort, selection, edits, editable, gutter_w, row_height,
-                        &mut out, grid_id, scroll_to, emoji,
+                        &mut out, grid_id, scroll_to, emoji, fk_cols,
                     );
                     // Horizontal keep-visible for keyboard cursor moves. This request must
                     // be issued *here* — inside this horizontal ScrollArea but outside the
@@ -465,6 +470,7 @@ fn build_grid(
     grid_id: u64,
     scroll_to: Option<usize>,
     emoji: &EmojiAtlas,
+    fk_cols: &[Option<String>],
 ) {
     let ncols = result.columns.len();
     let fill_id = egui::Id::new(("results_grid_fill_handle", grid_id));
@@ -572,6 +578,9 @@ fn build_grid(
 
                 let null = Value::Null;
                 let mut clicked_col = None;
+                // Set when a Shift+click on this row followed a foreign key, so the row's range
+                // selection is skipped for that click (the click navigated, it didn't select).
+                let mut follow_click = false;
                 let filling = fill_drag.is_some();
                 for c in 0..ncols {
                     // The original/stored value behind this cell (NULL for new rows).
@@ -579,6 +588,14 @@ fn build_grid(
                         RowKind::Stored(r) => &result.rows[r][c],
                         _ => &null,
                     };
+                    // A followable foreign-key cell: a stored, non-null value in an FK column.
+                    // Shift-hovering underlines it (link); a Shift+click follows the key. `fk_ref`
+                    // is the referenced table's name (for the right-click "Follow →" label).
+                    let fk_ref = fk_cols.get(c).and_then(|f| f.as_deref());
+                    let fk_raw = (fk_ref.is_some() && disp < order.len()
+                        && !result.rows[r][c].is_null())
+                    .then_some(r);
+                    let mut shift_hover = false;
                     let (_, col_resp) = row.col(|ui| {
                         tint_row(ui, state);
                         // Record the cell cursor's rect for the post-table outline paint and
@@ -618,6 +635,15 @@ fn build_grid(
                         // we avoid all the per-cell work for invisible columns.
                         if !ui.is_rect_visible(ui.max_rect()) {
                             return;
+                        }
+                        // Shift+hover over a followable FK cell: underline the value (it reads as a
+                        // link) and switch to a hand cursor. `ui` here is the cell's own Ui, so the
+                        // cursor can be set directly (unlike after the table, where it's borrowed).
+                        shift_hover = fk_raw.is_some()
+                            && modifiers.shift
+                            && pointer_pos.is_some_and(|p| ui.max_rect().contains(p));
+                        if shift_hover {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
                         let active_from_grid = active_cell.is_some_and(|(row, col, origin)| {
                             row == r && col == c && origin == crate::edit::EditOrigin::Grid
@@ -666,9 +692,13 @@ fn build_grid(
                                 }
                             }
                         } else {
-                            // Show the staged value if present, else the stored one.
+                            // Show the staged value if present, else the stored one. Foreign-key
+                            // cells with a real (non-null) value read as accent-coloured links,
+                            // underlined while Shift-hovered to signal the click will follow.
                             let staged = edits.staged(r, c);
-                            cell(ui, staged.unwrap_or(stored), staged.is_some(), emoji);
+                            let value = staged.unwrap_or(stored);
+                            let link = fk_ref.is_some() && !value.is_null();
+                            cell(ui, value, staged.is_some(), link, shift_hover, emoji);
                         }
                     });
 
@@ -724,10 +754,49 @@ fn build_grid(
                             out.begin_edit = Some((disp, c));
                         }
                     }
+
+                    // Shift+click a Shift-hovered (underlined) FK cell → follow the key, and skip
+                    // this click's row range-select (it navigated). Gated on no open editor so a
+                    // single click still moves an active editor as usual. The right-click "Follow →"
+                    // menu below is the discoverable, modifier-free path.
+                    if let Some(raw) = fk_raw {
+                        if shift_hover && col_resp.clicked() && edits.active.is_none() {
+                            out.follow_fk = Some((raw, c));
+                            follow_click = true;
+                        }
+                    }
+                    // Per-cell context menu: "Follow →" (FK cells) plus the row copy actions.
+                    // Copy targets this row; the app copies the whole selection, or just this
+                    // row when it was right-clicked while unselected (TablePlus-style).
+                    col_resp.context_menu(|ui| {
+                        if let (Some(raw), Some(ref_t)) = (fk_raw, fk_ref) {
+                            if ui.button(format!("↗  Follow → {ref_t}")).clicked() {
+                                out.follow_fk = Some((raw, c));
+                                ui.close();
+                            }
+                            ui.separator();
+                        }
+                        ui.label(
+                            egui::RichText::new("Copy selected rows")
+                                .small()
+                                .color(palette::TEXT_FAINT()),
+                        );
+                        for fmt in [
+                            dbcore::CopyFormat::Tsv,
+                            dbcore::CopyFormat::Csv,
+                            dbcore::CopyFormat::Json,
+                            dbcore::CopyFormat::Insert,
+                        ] {
+                            if ui.button(format!("Copy as {}", fmt.label())).clicked() {
+                                out.copy = Some((disp, fmt));
+                                ui.close(); // egui 0.34 replacement for the deprecated close_menu()
+                            }
+                        }
+                    });
                 }
 
                 let row_resp = row.response();
-                if !filling && row_resp.clicked() {
+                if !filling && !follow_click && row_resp.clicked() {
                     out.selected = Some(RowClick {
                         disp,
                         col: clicked_col,
@@ -735,26 +804,6 @@ fn build_grid(
                         cmd: modifiers.command,
                     });
                 }
-                // Right-click → "Copy as …". The app copies the whole selection, or just this
-                // row when it was right-clicked while unselected (TablePlus-style).
-                row_resp.context_menu(|ui| {
-                    ui.label(
-                        egui::RichText::new("Copy selected rows")
-                            .small()
-                            .color(palette::TEXT_FAINT()),
-                    );
-                    for fmt in [
-                        dbcore::CopyFormat::Tsv,
-                        dbcore::CopyFormat::Csv,
-                        dbcore::CopyFormat::Json,
-                        dbcore::CopyFormat::Insert,
-                    ] {
-                        if ui.button(format!("Copy as {}", fmt.label())).clicked() {
-                            out.copy = Some((disp, fmt));
-                            ui.close(); // egui 0.34 replacement for the deprecated close_menu()
-                        }
-                    }
-                });
             });
         });
 
@@ -1212,6 +1261,7 @@ mod tests {
                         0,
                         None,
                         &EmojiAtlas::default(),
+                        &[],
                     );
                 });
             });
@@ -1257,6 +1307,7 @@ mod tests {
                     0,
                     None,
                     &EmojiAtlas::default(),
+                    &[],
                 );
             });
         });
@@ -1343,6 +1394,7 @@ mod tests {
                         0,
                         None,
                         &EmojiAtlas::default(),
+                        &[],
                     );
                     if out.begin_edit.is_some() {
                         *begin = out.begin_edit;
@@ -1419,6 +1471,7 @@ mod tests {
                     0,
                     None,
                     &EmojiAtlas::default(),
+                    &[],
                 );
             });
         });
@@ -1464,6 +1517,7 @@ mod tests {
                         0,
                         None,
                         &EmojiAtlas::default(),
+                        &[],
                     );
                 });
             });
@@ -1491,11 +1545,21 @@ mod tests {
 /// Render a single cell, dimming NULLs and monospacing numbers. A `staged` value (an edit
 /// not yet saved) is drawn in the success colour so it stands out from stored data. Free-text
 /// values that contain emoji are drawn through [`emoji_cell`] so the emoji show in colour.
-fn cell(ui: &mut egui::Ui, value: &Value, staged: bool, emoji: &EmojiAtlas) -> egui::Response {
+fn cell(
+    ui: &mut egui::Ui,
+    value: &Value,
+    staged: bool,
+    link: bool,
+    underline: bool,
+    emoji: &EmojiAtlas,
+) -> egui::Response {
     let color = if staged {
         palette::SUCCESS()
     } else if value.is_null() {
         palette::TEXT_FAINT()
+    } else if link {
+        // Foreign-key value: accent-tinted so it reads as a followable link (TablePlus-style).
+        palette::ACCENT()
     } else {
         palette::TEXT()
     };
@@ -1504,10 +1568,13 @@ fn cell(ui: &mut egui::Ui, value: &Value, staged: bool, emoji: &EmojiAtlas) -> e
     // A click-sensing or selectable label here would be a second, text-width-only hit target
     // overlapping the cell, and double-clicks landing astride the text/empty boundary would
     // split across two widget ids and silently fail to register. One surface = reliable.
+    // `underline` marks a Shift-hovered FK value so it reads as a clickable link.
     let label = |ui: &mut egui::Ui, text: egui::RichText| {
-        ui.add(egui::Label::new(text.color(color)).selectable(false))
+        let text = text.color(color);
+        let text = if underline { text.underline() } else { text };
+        ui.add(egui::Label::new(text).selectable(false))
     };
-    match value {
+    let resp = match value {
         Value::Null => label(ui, egui::RichText::new("NULL").italics()),
         Value::Bool(v) => label(ui, egui::RichText::new(if *v { "true" } else { "false" })),
         Value::Int(_) | Value::Float(_) => {
@@ -1516,7 +1583,15 @@ fn cell(ui: &mut egui::Ui, value: &Value, staged: bool, emoji: &EmojiAtlas) -> e
         Value::Text(text) if emoji::contains_emoji(text) => emoji_cell(ui, text, color, emoji),
         Value::Text(text) => label(ui, egui::RichText::new(text)),
         Value::Bytes(bytes) => label(ui, egui::RichText::new(format!("[{} bytes]", bytes.len()))),
+    };
+    // A Shift-hovered, followable FK value: append a small ↗ after the text so the cell reads as
+    // a navigable link. Purely a marker — the whole cell is the click target (Shift+click follows).
+    if underline {
+        ui.add(
+            egui::Label::new(egui::RichText::new(" ↗").color(palette::ACCENT())).selectable(false),
+        );
     }
+    resp
 }
 
 /// Render a text value that contains emoji: plain runs as labels, each emoji grapheme as an

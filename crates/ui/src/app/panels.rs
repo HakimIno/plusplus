@@ -2091,19 +2091,17 @@ impl DbGuiApp {
                             ui.ctx()
                                 .format_shortcut(&egui::KeyboardShortcut::new(mods, egui::Key::Z))
                         };
-                        let btn = |glyph: &str| {
-                            egui::Button::new(egui::RichText::new(glyph).size(13.0))
-                                .frame(false)
-                        };
-                        if ui
-                            .add_enabled(can_undo, btn("↶"))
+                        if components::Btn::ghost_icon(icons::undo())
+                            .enabled(can_undo)
+                            .show(ui)
                             .on_hover_text(format!("Undo  ({})", hint(ui, false)))
                             .clicked()
                         {
                             actions.push(Action::Undo);
                         }
-                        if ui
-                            .add_enabled(can_redo, btn("↷"))
+                        if components::Btn::ghost_icon(icons::redo())
+                            .enabled(can_redo)
+                            .show(ui)
                             .on_hover_text(format!("Redo  ({})", hint(ui, true)))
                             .clicked()
                         {
@@ -2145,6 +2143,9 @@ impl DbGuiApp {
             }
         }
         let editable = self.tabs[idx].edits.editable();
+        // Per-column FK labels for the grid's link/"Follow →" affordance (owned, so it doesn't
+        // hold a borrow across the mutable tab access below).
+        let fk_cols = self.fk_column_labels(idx);
         let status_msg = &self.status_msg;
         let emoji = &self.emoji;
         let tab_id = self.tabs[idx].id;
@@ -2172,6 +2173,7 @@ impl DbGuiApp {
                     tab_id,
                     pending_scroll.take(),
                     emoji,
+                    &fk_cols,
                 );
                 if let Some(cmd) = resp.sort {
                     actions.push(match cmd {
@@ -2191,6 +2193,10 @@ impl DbGuiApp {
                         selection.select_one(disp);
                     }
                     actions.push(Action::CopyRows(fmt));
+                }
+                // "Follow →" on a foreign-key cell: open the referenced table, filtered.
+                if let Some((row, col)) = resp.follow_fk {
+                    actions.push(Action::FollowForeignKey { row, col });
                 }
                 use crate::edit::{begin_cell_edit, disp_to_raw, original_value, settle_active};
                 if let Some(fill) = resp.fill {

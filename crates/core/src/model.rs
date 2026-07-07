@@ -168,6 +168,43 @@ pub fn build_delete_sql(
     Some(format!("DELETE FROM {table_ref} WHERE {where_clause};"))
 }
 
+/// Build a `SELECT * … WHERE <keys>` capped to `limit` rows, selecting the row(s) a foreign
+/// key points at. `keys` pairs each referenced column with the value held in the referencing
+/// cell. SQL Server caps with `TOP` (it has no `LIMIT`); the rest append `LIMIT`. Identifiers
+/// and string values are escaped for `kind` via [`value_to_literal`] (the same path the
+/// UPDATE/DELETE builders use), so caller-supplied values can't break out of the literal.
+/// Returns `None` if `keys` is empty or any value can't be rendered as a literal (binary).
+pub fn build_select_where_sql(
+    kind: DbKind,
+    schema: Option<&str>,
+    table: &str,
+    keys: &[(&str, &Value)],
+    limit: u32,
+) -> Option<String> {
+    if keys.is_empty() {
+        return None;
+    }
+    let table_ref = match schema {
+        Some(s) => format!("{}.{}", kind.quote_ident(s), kind.quote_ident(table)),
+        None => kind.quote_ident(table),
+    };
+    let where_clause = keys
+        .iter()
+        .map(|(c, v)| {
+            Some(if v.is_null() {
+                format!("{} IS NULL", kind.quote_ident(c))
+            } else {
+                format!("{} = {}", kind.quote_ident(c), value_to_literal(v, kind)?)
+            })
+        })
+        .collect::<Option<Vec<_>>>()?
+        .join(" AND ");
+    Some(match kind {
+        DbKind::SqlServer => format!("SELECT TOP {limit} * FROM {table_ref} WHERE {where_clause};"),
+        _ => format!("SELECT * FROM {table_ref} WHERE {where_clause} LIMIT {limit};"),
+    })
+}
+
 /// Build a single-row `INSERT` statement from the given `cols` (column, value) pairs.
 /// Returns `None` if there are no columns or any value can't be rendered as a literal.
 pub fn build_insert_sql(
@@ -232,7 +269,9 @@ pub fn build_multi_insert_sql(
         })
         .collect::<Option<Vec<_>>>()?
         .join(",\n  ");
-    Some(format!("INSERT INTO {table_ref} ({col_list}) VALUES\n  {tuples};"))
+    Some(format!(
+        "INSERT INTO {table_ref} ({col_list}) VALUES\n  {tuples};"
+    ))
 }
 
 /// Strip `kw` (case-insensitively) off the front of `s`, requiring a non-identifier
@@ -445,9 +484,7 @@ fn keyword_positions(sql: &str, kw: &str) -> Vec<usize> {
 /// Parse the leading unsigned integer of `s` (after whitespace), if any.
 fn leading_u64(s: &str) -> Option<u64> {
     let s = s.trim_start();
-    let end = s
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(s.len());
+    let end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
     s[..end].parse().ok()
 }
 
@@ -994,8 +1031,12 @@ pub enum ParamMode {
 }
 
 impl ParamMode {
-    pub const ALL: &'static [ParamMode] =
-        &[ParamMode::In, ParamMode::Out, ParamMode::InOut, ParamMode::Variadic];
+    pub const ALL: &'static [ParamMode] = &[
+        ParamMode::In,
+        ParamMode::Out,
+        ParamMode::InOut,
+        ParamMode::Variadic,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -1056,7 +1097,9 @@ impl RoutineInfo {
                 } else {
                     format!("{} ", p.mode.label())
                 };
-                format!("{mode}{} {}", p.name, p.data_type).trim().to_string()
+                format!("{mode}{} {}", p.name, p.data_type)
+                    .trim()
+                    .to_string()
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -1085,8 +1128,11 @@ pub enum TriggerTiming {
 }
 
 impl TriggerTiming {
-    pub const ALL: &'static [TriggerTiming] =
-        &[TriggerTiming::Before, TriggerTiming::After, TriggerTiming::InsteadOf];
+    pub const ALL: &'static [TriggerTiming] = &[
+        TriggerTiming::Before,
+        TriggerTiming::After,
+        TriggerTiming::InsteadOf,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -1115,8 +1161,11 @@ pub enum TriggerEvent {
 }
 
 impl TriggerEvent {
-    pub const ALL: &'static [TriggerEvent] =
-        &[TriggerEvent::Insert, TriggerEvent::Update, TriggerEvent::Delete];
+    pub const ALL: &'static [TriggerEvent] = &[
+        TriggerEvent::Insert,
+        TriggerEvent::Update,
+        TriggerEvent::Delete,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -1204,7 +1253,12 @@ impl TriggerInfo {
 /// SQL Server = statement) may override the returned `level`.
 pub fn parse_trigger_header(
     def: &str,
-) -> (TriggerTiming, Vec<TriggerEvent>, TriggerLevel, Option<String>) {
+) -> (
+    TriggerTiming,
+    Vec<TriggerEvent>,
+    TriggerLevel,
+    Option<String>,
+) {
     let first = |kw: &str| keyword_positions(def, kw).first().copied();
     let when_at = first("WHEN");
     let action_at = ["EXECUTE", "BEGIN", "AS"]
@@ -1405,9 +1459,19 @@ fn col_def_sql(kind: DbKind, col: &ColumnDef, inline_pk: bool) -> String {
 }
 
 fn fk_clause_sql(kind: DbKind, fk: &ForeignKeyDef) -> String {
-    let cols = fk.columns.iter().map(|c| kind.quote_ident(c)).collect::<Vec<_>>().join(", ");
+    let cols = fk
+        .columns
+        .iter()
+        .map(|c| kind.quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
     let ref_t = kind.quote_ident(&fk.ref_table);
-    let ref_c = fk.ref_columns.iter().map(|c| kind.quote_ident(c)).collect::<Vec<_>>().join(", ");
+    let ref_c = fk
+        .ref_columns
+        .iter()
+        .map(|c| kind.quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
     let constraint = if fk.name.trim().is_empty() {
         String::new()
     } else {
@@ -1431,7 +1495,10 @@ pub fn build_create_table_sql(
 ) -> String {
     let pk_count = columns.iter().filter(|c| c.primary_key).count();
     let inline_pk = pk_count == 1;
-    let mut defs: Vec<String> = columns.iter().map(|c| col_def_sql(kind, c, inline_pk)).collect();
+    let mut defs: Vec<String> = columns
+        .iter()
+        .map(|c| col_def_sql(kind, c, inline_pk))
+        .collect();
     if pk_count > 1 {
         let pk_cols = columns
             .iter()
@@ -1590,18 +1657,26 @@ pub fn build_alter_column_sql(
                 format!("ALTER TABLE {tref} ALTER COLUMN {c} TYPE {ty};"),
                 format!(
                     "ALTER TABLE {tref} ALTER COLUMN {c} {};",
-                    if col.nullable { "DROP NOT NULL" } else { "SET NOT NULL" }
+                    if col.nullable {
+                        "DROP NOT NULL"
+                    } else {
+                        "SET NOT NULL"
+                    }
                 ),
             ];
             if let Some(d) = default {
-                out.push(format!("ALTER TABLE {tref} ALTER COLUMN {c} SET DEFAULT {d};"));
+                out.push(format!(
+                    "ALTER TABLE {tref} ALTER COLUMN {c} SET DEFAULT {d};"
+                ));
             }
             out
         }
         DbKind::MySql | DbKind::MariaDb => {
             let null = if col.nullable { "NULL" } else { "NOT NULL" };
             let def = default.map(|d| format!(" DEFAULT {d}")).unwrap_or_default();
-            vec![format!("ALTER TABLE {tref} MODIFY COLUMN {c} {ty} {null}{def};")]
+            vec![format!(
+                "ALTER TABLE {tref} MODIFY COLUMN {c} {ty} {null}{def};"
+            )]
         }
         DbKind::SqlServer => {
             let null = if col.nullable { "NULL" } else { "NOT NULL" };
@@ -1627,8 +1702,7 @@ pub fn build_rename_column_sql(
 ) -> String {
     match kind {
         DbKind::SqlServer => {
-            let qualified =
-                format!("{}.{}.{}", schema.unwrap_or("dbo"), table, old_name);
+            let qualified = format!("{}.{}.{}", schema.unwrap_or("dbo"), table, old_name);
             format!("EXEC sp_rename '{qualified}', '{new_name}', 'COLUMN';")
         }
         _ => format!(
@@ -1897,7 +1971,10 @@ pub fn build_drop_trigger_sql(
 ) -> String {
     let nm = kind.quote_ident(name);
     match kind {
-        DbKind::Postgres => format!("DROP TRIGGER {nm} ON {};", ddl_table_ref(kind, schema, table)),
+        DbKind::Postgres => format!(
+            "DROP TRIGGER {nm} ON {};",
+            ddl_table_ref(kind, schema, table)
+        ),
         // MySQL allows database-qualifying the trigger; SQL Server allows schema-qualifying it.
         DbKind::MySql | DbKind::MariaDb | DbKind::SqlServer => match schema {
             Some(s) => format!("DROP TRIGGER {}.{nm};", kind.quote_ident(s)),
@@ -2018,7 +2095,9 @@ pub fn build_create_routine_sql(
             };
             let returns = ret.map(|t| format!(" RETURNS {t}")).unwrap_or_default();
             let returns = if is_fn { returns } else { String::new() };
-            format!("CREATE {repl}{kw} {rref}({plist}){returns}\nLANGUAGE {lang} AS $$\n{body}\n$$;")
+            format!(
+                "CREATE {repl}{kw} {rref}({plist}){returns}\nLANGUAGE {lang} AS $$\n{body}\n$$;"
+            )
         }
         DbKind::MySql | DbKind::MariaDb => {
             let returns = if is_fn {
@@ -2093,7 +2172,14 @@ mod tests {
     fn create_view_per_dialect() {
         // Postgres / MySQL redefine in place with OR REPLACE.
         assert_eq!(
-            build_create_view_sql(DbKind::Postgres, Some("public"), "v", "SELECT 1", false, true),
+            build_create_view_sql(
+                DbKind::Postgres,
+                Some("public"),
+                "v",
+                "SELECT 1",
+                false,
+                true
+            ),
             "CREATE OR REPLACE VIEW \"public\".\"v\" AS\nSELECT 1;"
         );
         assert_eq!(
@@ -2127,9 +2213,15 @@ mod tests {
             build_drop_view_sql(DbKind::Postgres, None, "mv", true),
             "DROP MATERIALIZED VIEW \"mv\";"
         );
-        assert_eq!(build_drop_view_sql(DbKind::MySql, None, "v", false), "DROP VIEW `v`;");
+        assert_eq!(
+            build_drop_view_sql(DbKind::MySql, None, "v", false),
+            "DROP VIEW `v`;"
+        );
         // Only Postgres has materialized views; the keyword is dropped elsewhere.
-        assert_eq!(build_drop_view_sql(DbKind::MySql, None, "v", true), "DROP VIEW `v`;");
+        assert_eq!(
+            build_drop_view_sql(DbKind::MySql, None, "v", true),
+            "DROP VIEW `v`;"
+        );
     }
 
     #[test]
@@ -2156,7 +2248,9 @@ mod tests {
         let sql = build_create_trigger_sql(DbKind::Postgres, &t).unwrap();
         assert_eq!(sql.len(), 2);
         assert!(sql[0].starts_with("CREATE OR REPLACE FUNCTION \"public\".\"trg_trigfn\"()"));
-        assert!(sql[1].contains("CREATE TRIGGER \"trg\" BEFORE INSERT OR UPDATE ON \"public\".\"t\""));
+        assert!(
+            sql[1].contains("CREATE TRIGGER \"trg\" BEFORE INSERT OR UPDATE ON \"public\".\"t\"")
+        );
         assert!(sql[1].contains("FOR EACH ROW"));
         assert!(sql[1].contains("WHEN (NEW.n > 0)"));
         assert!(sql[1].ends_with("EXECUTE FUNCTION \"public\".\"trg_trigfn\"();"));
@@ -2196,7 +2290,9 @@ mod tests {
         };
         assert_eq!(
             build_create_trigger_sql(DbKind::MySql, &one).unwrap(),
-            vec!["CREATE TRIGGER `trg` BEFORE INSERT ON `t`\nFOR EACH ROW\nSET NEW.created = NOW();"]
+            vec![
+                "CREATE TRIGGER `trg` BEFORE INSERT ON `t`\nFOR EACH ROW\nSET NEW.created = NOW();"
+            ]
         );
         let multi = TriggerBuild {
             events: &[TriggerEvent::Insert, TriggerEvent::Update],
@@ -2386,7 +2482,13 @@ mod tests {
         ];
         // Postgres disambiguates by IN/INOUT arg types (OUT excluded).
         assert_eq!(
-            build_drop_routine_sql(DbKind::Postgres, Some("public"), "f", RoutineKind::Function, &params),
+            build_drop_routine_sql(
+                DbKind::Postgres,
+                Some("public"),
+                "f",
+                RoutineKind::Function,
+                &params
+            ),
             "DROP FUNCTION \"public\".\"f\"(integer);"
         );
         assert_eq!(
@@ -2394,7 +2496,13 @@ mod tests {
             "DROP PROCEDURE `p`;"
         );
         assert_eq!(
-            build_drop_routine_sql(DbKind::SqlServer, Some("dbo"), "f", RoutineKind::Function, &params),
+            build_drop_routine_sql(
+                DbKind::SqlServer,
+                Some("dbo"),
+                "f",
+                RoutineKind::Function,
+                &params
+            ),
             "DROP FUNCTION \"dbo\".\"f\";"
         );
         assert!(routine_supports_replace(DbKind::Postgres));
@@ -2407,7 +2515,10 @@ mod tests {
     /// deserializes to, and it must not change underneath existing connections.
     #[test]
     fn new_connection_defaults_to_require_but_default_stays_prefer() {
-        assert_eq!(ConnectionConfig::new(DbKind::Postgres).ssl_mode, SslMode::Require);
+        assert_eq!(
+            ConnectionConfig::new(DbKind::Postgres).ssl_mode,
+            SslMode::Require
+        );
         assert_eq!(SslMode::default(), SslMode::Prefer);
         // Only the non-verifying modes carry a warning; the verifying ones don't.
         assert!(SslMode::Prefer.security_warning().is_some());
@@ -2445,7 +2556,10 @@ mod tests {
             default: None,
         };
         let sql = build_alter_column_sql(DbKind::MySql, None, "users", &col);
-        assert_eq!(sql, vec!["ALTER TABLE `users` MODIFY COLUMN `name` varchar(255) NULL;"]);
+        assert_eq!(
+            sql,
+            vec!["ALTER TABLE `users` MODIFY COLUMN `name` varchar(255) NULL;"]
+        );
     }
 
     #[test]
@@ -2513,38 +2627,62 @@ mod tests {
         let win = |sql: &str| parse_page_window(sql).unwrap();
         assert_eq!(
             win("SELECT * FROM t"),
-            PageWindow { limit: None, offset: 0 }
+            PageWindow {
+                limit: None,
+                offset: 0
+            }
         );
         assert_eq!(
             win("SELECT * FROM t LIMIT 100;"),
-            PageWindow { limit: Some(100), offset: 0 }
+            PageWindow {
+                limit: Some(100),
+                offset: 0
+            }
         );
         assert_eq!(
             win("SELECT * FROM t LIMIT 100 OFFSET 300"),
-            PageWindow { limit: Some(100), offset: 300 }
+            PageWindow {
+                limit: Some(100),
+                offset: 300
+            }
         );
         // MySQL's comma form puts the offset first.
         assert_eq!(
             win("SELECT * FROM t LIMIT 300, 100"),
-            PageWindow { limit: Some(100), offset: 300 }
+            PageWindow {
+                limit: Some(100),
+                offset: 300
+            }
         );
         assert_eq!(
             win("SELECT TOP 50 * FROM [dbo].[t];"),
-            PageWindow { limit: Some(50), offset: 0 }
+            PageWindow {
+                limit: Some(50),
+                offset: 0
+            }
         );
         assert_eq!(
             win("SELECT * FROM t ORDER BY id OFFSET 200 ROWS FETCH NEXT 100 ROWS ONLY;"),
-            PageWindow { limit: Some(100), offset: 200 }
+            PageWindow {
+                limit: Some(100),
+                offset: 200
+            }
         );
         // WHERE/ORDER BY don't confuse the parser; quoted text containing keywords is inert.
         assert_eq!(
             win("SELECT * FROM t WHERE name = 'limit 5 offset 2' ORDER BY id LIMIT 10 OFFSET 20"),
-            PageWindow { limit: Some(10), offset: 20 }
+            PageWindow {
+                limit: Some(10),
+                offset: 20
+            }
         );
         // An unquoted column named `offset` in WHERE isn't a paging clause.
         assert_eq!(
             win("SELECT * FROM t WHERE offset > 5 LIMIT 10"),
-            PageWindow { limit: Some(10), offset: 0 }
+            PageWindow {
+                limit: Some(10),
+                offset: 0
+            }
         );
         // Not a simple single-table read → no window.
         assert!(parse_page_window("SELECT a, b FROM t LIMIT 5").is_none());
@@ -2553,11 +2691,21 @@ mod tests {
     #[test]
     fn with_page_window_rewrites_in_place() {
         let pg = |sql: &str, l, o| with_page_window(DbKind::Postgres, sql, l, o).unwrap();
-        assert_eq!(pg("SELECT * FROM t LIMIT 100;", 100, 200), "SELECT * FROM t LIMIT 100 OFFSET 200;");
-        assert_eq!(pg("SELECT * FROM t LIMIT 100 OFFSET 200;", 100, 0), "SELECT * FROM t LIMIT 100;");
+        assert_eq!(
+            pg("SELECT * FROM t LIMIT 100;", 100, 200),
+            "SELECT * FROM t LIMIT 100 OFFSET 200;"
+        );
+        assert_eq!(
+            pg("SELECT * FROM t LIMIT 100 OFFSET 200;", 100, 0),
+            "SELECT * FROM t LIMIT 100;"
+        );
         // WHERE and ORDER BY survive the rewrite.
         assert_eq!(
-            pg("SELECT * FROM t WHERE a > 1 ORDER BY a LIMIT 50 OFFSET 50", 50, 100),
+            pg(
+                "SELECT * FROM t WHERE a > 1 ORDER BY a LIMIT 50 OFFSET 50",
+                50,
+                100
+            ),
             "SELECT * FROM t WHERE a > 1 ORDER BY a LIMIT 50 OFFSET 100;"
         );
         // A query with no paging clause gains one.
@@ -2565,14 +2713,21 @@ mod tests {
 
         let ms = |sql: &str, l, o| with_page_window(DbKind::SqlServer, sql, l, o).unwrap();
         // Page one without ORDER BY keeps the TOP form.
-        assert_eq!(ms("SELECT TOP 100 * FROM t;", 100, 0), "SELECT TOP 100 * FROM t;");
+        assert_eq!(
+            ms("SELECT TOP 100 * FROM t;", 100, 0),
+            "SELECT TOP 100 * FROM t;"
+        );
         // Deeper pages need OFFSET…FETCH, which needs an ORDER BY.
         assert_eq!(
             ms("SELECT TOP 100 * FROM t;", 100, 200),
             "SELECT * FROM t ORDER BY (SELECT NULL) OFFSET 200 ROWS FETCH NEXT 100 ROWS ONLY;"
         );
         assert_eq!(
-            ms("SELECT * FROM t ORDER BY id OFFSET 200 ROWS FETCH NEXT 100 ROWS ONLY;", 100, 300),
+            ms(
+                "SELECT * FROM t ORDER BY id OFFSET 200 ROWS FETCH NEXT 100 ROWS ONLY;",
+                100,
+                300
+            ),
             "SELECT * FROM t ORDER BY id OFFSET 300 ROWS FETCH NEXT 100 ROWS ONLY;"
         );
         // Joins and projections are refused.
@@ -2644,6 +2799,53 @@ mod tests {
         );
         // No keys ⇒ refuse (never emit an unfiltered DELETE).
         assert_eq!(build_delete_sql(DbKind::Postgres, None, "t", &[]), None);
+    }
+
+    #[test]
+    fn build_select_where_follows_a_foreign_key() {
+        // Single-column FK: filter the referenced table to the pointed-at key.
+        let uid = Value::Int(7);
+        assert_eq!(
+            build_select_where_sql(
+                DbKind::Postgres,
+                Some("public"),
+                "users",
+                &[("id", &uid)],
+                100
+            ),
+            Some("SELECT * FROM \"public\".\"users\" WHERE \"id\" = 7 LIMIT 100;".to_string())
+        );
+        // SQL Server caps with TOP, not LIMIT.
+        assert_eq!(
+            build_select_where_sql(DbKind::SqlServer, None, "users", &[("id", &uid)], 100),
+            Some("SELECT TOP 100 * FROM \"users\" WHERE \"id\" = 7;".to_string())
+        );
+        // Composite FK ANDs the key columns; string values are escaped (no literal breakout).
+        let tenant = Value::Text("O'Brien".into());
+        let seq = Value::Int(3);
+        assert_eq!(
+            build_select_where_sql(
+                DbKind::MySql,
+                None,
+                "orders",
+                &[("tenant", &tenant), ("seq", &seq)],
+                100
+            ),
+            Some(
+                "SELECT * FROM `orders` WHERE `tenant` = 'O''Brien' AND `seq` = 3 LIMIT 100;"
+                    .to_string()
+            )
+        );
+        // No keys ⇒ refuse (never emit an unfiltered scan); binary keys have no literal form.
+        assert_eq!(
+            build_select_where_sql(DbKind::Postgres, None, "t", &[], 100),
+            None
+        );
+        let blob = Value::Bytes(vec![1, 2, 3]);
+        assert_eq!(
+            build_select_where_sql(DbKind::Postgres, None, "t", &[("k", &blob)], 100),
+            None
+        );
     }
 
     #[test]

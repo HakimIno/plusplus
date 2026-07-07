@@ -33,19 +33,17 @@ pub use error::{CoreError, Result};
 pub use export::{ExportFormat, RowSink};
 pub use favorites::Favorite;
 pub use model::{
-    build_add_column_sql, build_add_fk_sql, build_alter_column_sql, build_count_sql,
-    build_create_index_sql,
-    build_clone_table_sql, build_create_table_sql, build_delete_sql, build_drop_column_sql,
-    build_drop_fk_sql, build_drop_index_sql, build_drop_table_sql, build_insert_sql,
-    build_rename_column_sql, build_truncate_table_sql,
-    build_create_routine_sql, build_create_trigger_sql, build_create_view_sql,
-    build_drop_routine_sql, build_drop_trigger_sql, build_drop_view_sql, build_update_sql,
-    parse_page_window, parse_trigger_header, routine_supports_replace, select_body_after_as,
-    simple_select_target, view_supports_replace, with_page_window, ColumnDef, ColumnInfo,
-    ColumnMeta, ConnectionColor,
+    build_add_column_sql, build_add_fk_sql, build_alter_column_sql, build_clone_table_sql,
+    build_count_sql, build_create_index_sql, build_create_routine_sql, build_create_table_sql,
+    build_create_trigger_sql, build_create_view_sql, build_delete_sql, build_drop_column_sql,
+    build_drop_fk_sql, build_drop_index_sql, build_drop_routine_sql, build_drop_table_sql,
+    build_drop_trigger_sql, build_drop_view_sql, build_insert_sql, build_rename_column_sql,
+    build_select_where_sql, build_truncate_table_sql, build_update_sql, parse_page_window,
+    parse_trigger_header, routine_supports_replace, select_body_after_as, simple_select_target,
+    view_supports_replace, with_page_window, ColumnDef, ColumnInfo, ColumnMeta, ConnectionColor,
     ConnectionConfig, ConnectionIcon, DbKind, FkAction, ForeignKeyDef, ForeignKeyInfo, IndexDef,
-    IndexInfo, PageWindow, ParamMode, QueryResult, QueryStats, RoutineInfo, RoutineKind,
-    RoutineBuild, RoutineParam, SchemaTree, SslMode, TableInfo, TriggerBuild, TriggerEvent,
+    IndexInfo, PageWindow, ParamMode, QueryResult, QueryStats, RoutineBuild, RoutineInfo,
+    RoutineKind, RoutineParam, SchemaTree, SslMode, TableInfo, TriggerBuild, TriggerEvent,
     TriggerInfo, TriggerLevel, TriggerTiming, ViewInfo,
 };
 pub use value::Value;
@@ -123,7 +121,9 @@ impl Database for Tunneled {
         max_rows: usize,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<QueryResult> {
-        self.inner.execute_capped_cancellable(sql, max_rows, cancel).await
+        self.inner
+            .execute_capped_cancellable(sql, max_rows, cancel)
+            .await
     }
     async fn execute_transaction(&self, stmts: &[String]) -> Result<usize> {
         self.inner.execute_transaction(stmts).await
@@ -167,7 +167,9 @@ mod tests {
         let path = temp_db_path();
         let mut cfg = ConnectionConfig::new(DbKind::Sqlite);
         cfg.sqlite_path = path.to_string_lossy().into_owned();
-        let db = connect(&cfg, None, None).await.expect("connect temp sqlite");
+        let db = connect(&cfg, None, None)
+            .await
+            .expect("connect temp sqlite");
         (db, TempDbGuard(path))
     }
 
@@ -248,8 +250,13 @@ mod tests {
         .unwrap();
 
         // Jump to the middle of the table: only that page is materialized.
-        let sql = with_page_window(DbKind::Sqlite, "SELECT * FROM big LIMIT 1000;", 1000, 50_000)
-            .unwrap();
+        let sql = with_page_window(
+            DbKind::Sqlite,
+            "SELECT * FROM big LIMIT 1000;",
+            1000,
+            50_000,
+        )
+        .unwrap();
         assert_eq!(sql, "SELECT * FROM big LIMIT 1000 OFFSET 50000;");
         let page = db.execute_capped(&sql, 100_000).await.unwrap();
         assert_eq!(page.row_count(), 1000);
