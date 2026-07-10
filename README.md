@@ -18,9 +18,6 @@
 
 ---
 
-## See it in action
-
-<img src="crates/ui/tests/snapshots/object_browser.png" alt="plusplus showing a SQLite schema browser and SQL editor" width="100%">
 
 Connect to a database, explore its schema, run SQL, edit rows safely, and keep working
 while large results stream in. The bundled SQLite sample lets you try the full workflow
