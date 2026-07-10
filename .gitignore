@@ -33,3 +33,7 @@ examples/*.sqlite-shm
 
 *.key
 *.pub
+# egui_kittest writes these beside a snapshot when it differs; only the .png baseline
+# belongs in git.
+**/tests/snapshots/*.old.png
+**/tests/snapshots/*.diff.png

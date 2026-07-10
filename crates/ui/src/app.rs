@@ -82,6 +82,18 @@ enum AppMessage {
         table: String,
         result: Result<(std::path::PathBuf, u64), String>,
     },
+    /// Rows read and coerced so far by a running import. The total is unknown — the file is
+    /// streamed rather than counted first — so this drives a status line, not a percentage.
+    ImportProgress { rows: usize },
+    /// A file import finished. `Ok` carries the number of rows inserted. `sql` is the synthetic
+    /// summary line recorded to the audit trail (the real statements can be hundreds of MB).
+    Imported {
+        table: String,
+        conn_id: String,
+        sql: String,
+        elapsed_ms: f64,
+        result: Result<usize, String>,
+    },
     /// Background GitHub Releases check finished.
     #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     UpdateChecked {
@@ -103,6 +115,7 @@ enum Busy {
     Idle,
     Connecting,
     Querying,
+    Importing,
 }
 
 /// In-progress "save / rename favorite" dialog state: the editable name plus the snapshot of
@@ -114,6 +127,108 @@ struct FavoriteDraft {
     conn_name: Option<String>,
     /// `Some(id)` when renaming an existing favorite; `None` when creating a new one.
     editing_id: Option<String>,
+}
+
+/// How many records of the file the import dialog shows before the user commits. Kept small:
+/// the preview shares one vertical scroll with the column mapping, so a long preview buries it.
+const IMPORT_PREVIEW_ROWS: usize = 10;
+
+/// In-progress "import file into table" dialog state: the chosen file, the head of its contents,
+/// and how its columns map onto the target table's. `None` on the app = no import dialog open.
+struct ImportDraft {
+    /// The target table, as introspected. Its column names are the only identifiers that ever
+    /// reach the generated `INSERT` — never the file's header row.
+    table: TableInfo,
+    conn_id: String,
+    path: std::path::PathBuf,
+    format: dbcore::ImportFormat,
+    /// Whether the file's first record names the columns. Toggling re-reads the preview.
+    has_header: bool,
+    /// Source column names, from the header row or synthesized (`column_1`…).
+    headers: Vec<String>,
+    preview_rows: Vec<dbcore::Record>,
+    /// The file holds more records than `preview_rows` shows.
+    more: bool,
+    /// One entry per *target* column: the source field it reads, or `None` to leave it to the
+    /// database's default.
+    mapping: Vec<Option<usize>>,
+}
+
+impl ImportDraft {
+    /// The target table for display: `schema.table`, *unquoted*. `TableInfo::qualified` returns
+    /// dialect-quoted SQL (`"public"."users"`), which is right for statements and noise in a
+    /// dialog title.
+    fn table_label(&self) -> String {
+        match &self.table.schema {
+            Some(s) => format!("{s}.{}", self.table.name),
+            None => self.table.name.clone(),
+        }
+    }
+
+    /// The file's base name, for labels and the audit summary.
+    fn file_name(&self) -> String {
+        self.path
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.path.to_string_lossy().into_owned())
+    }
+
+    /// Point each target column at the source column of the same name, case-insensitively.
+    /// Columns with no match stay unmapped rather than being filled positionally — a silent
+    /// off-by-one mapping is far worse than making the user pick.
+    fn auto_map(&mut self) {
+        self.mapping = self
+            .table
+            .columns
+            .iter()
+            .map(|col| {
+                self.headers
+                    .iter()
+                    .position(|h| h.eq_ignore_ascii_case(&col.name))
+            })
+            .collect();
+    }
+
+    /// The mapped columns, in table order, ready for `coerce_row` / `build_insert_batches`.
+    fn targets(&self) -> Vec<dbcore::Target> {
+        self.table
+            .columns
+            .iter()
+            .zip(&self.mapping)
+            .filter_map(|(col, src)| {
+                src.map(|source| dbcore::Target {
+                    name: col.name.clone(),
+                    kind: dbcore::EditorKind::classify(&col.data_type),
+                    source,
+                })
+            })
+            .collect()
+    }
+
+    /// Mapped columns whose type has no SQL literal form. Importing one is impossible, so the
+    /// dialog blocks on it rather than letting the transaction fail halfway.
+    fn binary_conflicts(&self) -> Vec<&str> {
+        self.table
+            .columns
+            .iter()
+            .zip(&self.mapping)
+            .filter(|(col, src)| src.is_some() && dbcore::import::is_binary_type(&col.data_type))
+            .map(|(col, _)| col.name.as_str())
+            .collect()
+    }
+
+    /// Target columns that would be skipped even though the database will reject a missing
+    /// value for them: `NOT NULL` and no mapping. Reported as a warning, not a hard block —
+    /// the column may well have a default the introspection cannot see.
+    fn unmapped_required(&self) -> Vec<&str> {
+        self.table
+            .columns
+            .iter()
+            .zip(&self.mapping)
+            .filter(|(col, src)| src.is_none() && !col.nullable && !col.primary_key)
+            .map(|(col, _)| col.name.as_str())
+            .collect()
+    }
 }
 
 /// Which view of a table tab the central panel shows: the row data, or the introspected
@@ -321,6 +436,62 @@ async fn stream_export(
     let file = std::fs::File::create(path)?;
     let mut sink = format.sink(std::io::BufWriter::new(file));
     db.export_query(sql, &mut *sink).await
+}
+
+/// How often the import reports progress back to the UI thread.
+const IMPORT_PROGRESS_EVERY: usize = 2_000;
+
+/// Read `path`, coerce each record against `targets`, and insert the rows as one transaction.
+/// Returns the number of rows inserted. Runs on the background runtime.
+///
+/// Unlike [`stream_export`], this cannot stream straight through: the import is all-or-nothing,
+/// so every statement must exist before the transaction opens. That is what
+/// `import::MAX_IMPORT_ROWS` bounds, and the row cap is enforced *while reading* so an
+/// oversized file is refused before it can exhaust memory.
+#[allow(clippy::too_many_arguments)]
+async fn run_import(
+    db: &dyn Database,
+    kind: dbcore::DbKind,
+    path: &std::path::Path,
+    format: dbcore::ImportFormat,
+    has_header: bool,
+    schema: Option<&str>,
+    table: &str,
+    targets: &[dbcore::Target],
+    col_names: &[String],
+    tx: &Sender<AppMessage>,
+) -> Result<usize, String> {
+    let reader = dbcore::import::read_records(path, format, has_header).map_err(|e| e.to_string())?;
+
+    let mut rows: Vec<Vec<dbcore::Value>> = Vec::new();
+    for (i, record) in reader.enumerate() {
+        let record = record.map_err(|e| e.to_string())?;
+        if rows.len() == dbcore::import::MAX_IMPORT_ROWS {
+            return Err(format!(
+                "file holds more than {} rows — split it and import in parts",
+                dbcore::import::MAX_IMPORT_ROWS
+            ));
+        }
+        // `i + 1` is the record number the user sees, header row excluded.
+        rows.push(dbcore::import::coerce_row(&record, targets, format, i + 1).map_err(|e| e.to_string())?);
+        if rows.len() % IMPORT_PROGRESS_EVERY == 0 {
+            let _ = tx.send(AppMessage::ImportProgress { rows: rows.len() });
+        }
+    }
+    if rows.is_empty() {
+        return Err("the file has no data rows".to_string());
+    }
+
+    let names: Vec<&str> = col_names.iter().map(String::as_str).collect();
+    let stmts = dbcore::import::build_insert_batches(kind, schema, table, &names, &rows)
+        .map_err(|e| e.to_string())?;
+    let n = rows.len();
+    drop(rows);
+
+    db.execute_transaction(&stmts)
+        .await
+        .map(|_| n)
+        .map_err(|e| e.to_string())
 }
 
 /// Human-readable status line for a completed result.
@@ -590,6 +761,22 @@ enum Action {
         table: TableInfo,
         format: dbcore::ExportFormat,
     },
+    /// Pick a CSV/JSON file and open the import mapping dialog for this table. Sidebar action.
+    ImportIntoTable(TableInfo),
+    /// Point a target column at a source column of the open import (or `None` to skip it).
+    SetImportMapping {
+        target: usize,
+        source: Option<usize>,
+    },
+    /// Re-run the by-name auto-mapping, discarding manual choices.
+    AutoMapImport,
+    /// Unmap every target column.
+    ClearImportMapping,
+    /// Flip the open import's "first row is a header" switch and re-read the file's head.
+    SetImportHasHeader(bool),
+    /// User confirmed the import: read the file and insert every row in one transaction.
+    ConfirmImport,
+    CancelImport,
     /// Build staged edits into SQL and open the preview dialog.
     PreviewEdits,
     /// Undo / redo the last staged-edit change (cell edit, delete mark, new row, fill, paste).
@@ -768,6 +955,8 @@ pub struct DbGuiApp {
     /// Destructive statements found when running a query against a production
     /// connection, held for the confirmation dialog. `None` = dialog closed.
     danger_pending: Option<Vec<dbcore::safety::DangerousStatement>>,
+    /// Open "import file into table" dialog, with its column mapping. `None` = dialog closed.
+    import_pending: Option<ImportDraft>,
     /// Record executed statements to the on-disk query history (settings toggle).
     history_enabled: bool,
     /// Record connections and statements to the append-only audit trail (settings toggle).
@@ -958,6 +1147,7 @@ impl DbGuiApp {
             commit_pending: None,
             schema_pending: None,
             danger_pending: None,
+            import_pending: None,
             history_enabled,
             audit_enabled,
             update_check_enabled,
@@ -1799,6 +1989,57 @@ impl DbGuiApp {
                         self.status_msg = "Export failed".to_string();
                     }
                 },
+                AppMessage::ImportProgress { rows } => {
+                    self.status_msg = format!("Importing… {rows} rows read");
+                }
+                AppMessage::Imported {
+                    table,
+                    conn_id,
+                    sql,
+                    elapsed_ms,
+                    result,
+                } => {
+                    self.busy = Busy::Idle;
+                    // Audited, but not added to query history: the summary line isn't runnable
+                    // SQL, and the real statements are far too large to keep.
+                    self.record_audit(
+                        dbcore::audit::AuditAction::Import,
+                        &conn_id,
+                        &sql,
+                        result.is_ok(),
+                        result.as_ref().err().cloned(),
+                        result.as_ref().ok().map(|n| *n as u64),
+                        elapsed_ms,
+                    );
+                    match result {
+                        Ok(n) => {
+                            self.status_msg = format!(
+                                "Imported {n} row{} into {table}",
+                                if n == 1 { "" } else { "s" }
+                            );
+                            self.error = None;
+                            // Show the new rows if the active tab is reading the table we
+                            // just wrote to.
+                            let idx = self.active_query_tab;
+                            let shows_table = self.tabs.get(idx).is_some_and(|t| {
+                                t.edits
+                                    .source
+                                    .as_ref()
+                                    .is_some_and(|s| s.table.eq_ignore_ascii_case(&table))
+                            });
+                            if shows_table {
+                                self.tabs[idx].edits.pending_source =
+                                    self.tabs[idx].edits.source.clone();
+                                self.start_query_for(idx);
+                            }
+                        }
+                        Err(e) => {
+                            // The transaction rolled back: nothing was written.
+                            self.error = Some(format!("Import into {table} failed: {e}"));
+                            self.status_msg = "Import failed".to_string();
+                        }
+                    }
+                }
                 AppMessage::Committed {
                     tab_id,
                     conn_id,
@@ -2163,7 +2404,15 @@ impl DbGuiApp {
         self.tabs
             .get(idx)
             .and_then(|tab| tab.conn_id.as_deref())
-            .is_some_and(|id| self.connections.iter().any(|c| c.id == id && c.read_only))
+            .is_some_and(|id| self.connection_is_read_only(id))
+    }
+
+    /// Is the saved config for `conn_id` marked read-only? Sidebar actions (import, export)
+    /// act on a connection rather than a tab, so they check it directly.
+    fn connection_is_read_only(&self, conn_id: &str) -> bool {
+        self.connections
+            .iter()
+            .any(|c| c.id == conn_id && c.read_only)
     }
 
     /// Refuse an action on a read-only connection with a consistent error + status pair.
@@ -2414,6 +2663,174 @@ impl DbGuiApp {
                 .map_err(|e| e.to_string());
             let _ = tx.send(AppMessage::Exported {
                 table: table_name,
+                result,
+            });
+        });
+    }
+
+    /// Pick a CSV/JSON file and open the import dialog for `table`. Nothing is read into the
+    /// database here — the dialog previews the file and lets the user map its columns first.
+    /// A cancelled file dialog is a no-op.
+    fn open_import(&mut self, table: &TableInfo) {
+        let Some(active) = self.active() else {
+            self.error = Some("Connect to a database to import into a table.".into());
+            return;
+        };
+        let conn_id = active.config_id.clone();
+        if self.connection_is_read_only(&conn_id) {
+            self.refuse_read_only("data can't be imported.");
+            return;
+        }
+
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("CSV or JSON", &["csv", "json"])
+            .add_filter("CSV", &["csv"])
+            .add_filter("JSON", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+        let Some(format) = dbcore::ImportFormat::from_path(&path) else {
+            self.error = Some("Import supports .csv and .json files only.".into());
+            return;
+        };
+
+        // A header row is by far the common case (and what our own export writes), so start
+        // there; the dialog's checkbox re-reads the file if the user disagrees.
+        match dbcore::import::preview(&path, format, true, IMPORT_PREVIEW_ROWS) {
+            Ok(preview) => {
+                let mut draft = ImportDraft {
+                    table: table.clone(),
+                    conn_id,
+                    path,
+                    format,
+                    has_header: true,
+                    headers: preview.headers,
+                    preview_rows: preview.rows,
+                    more: preview.more,
+                    mapping: Vec::new(),
+                };
+                draft.auto_map();
+                self.error = None;
+                self.import_pending = Some(draft);
+            }
+            Err(e) => {
+                let name = path
+                    .file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.error = Some(format!("Could not read {name}: {e}"));
+            }
+        }
+    }
+
+    /// Re-read the open draft's file after the "first row is a header" checkbox changed, and
+    /// re-derive the column mapping from the new headers.
+    fn reload_import_preview(&mut self) {
+        let Some(draft) = self.import_pending.as_mut() else {
+            return;
+        };
+        match dbcore::import::preview(
+            &draft.path,
+            draft.format,
+            draft.has_header,
+            IMPORT_PREVIEW_ROWS,
+        ) {
+            Ok(preview) => {
+                draft.headers = preview.headers;
+                draft.preview_rows = preview.rows;
+                draft.more = preview.more;
+                draft.auto_map();
+                self.error = None;
+            }
+            Err(e) => self.error = Some(format!("Could not read the file: {e}")),
+        }
+    }
+
+    /// Read the whole file, coerce every field against its target column, and insert the rows
+    /// as a single transaction on the background runtime.
+    fn confirm_import(&mut self) {
+        // Snapshot what the spawned task needs, then drop the borrow so the validation below
+        // can touch `self`. A failed validation leaves the dialog open with its mapping intact.
+        let Some(draft) = self.import_pending.as_ref() else {
+            return;
+        };
+        let conn_id = draft.conn_id.clone();
+        let binary: Vec<String> = draft
+            .binary_conflicts()
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let targets = draft.targets();
+        let table = draft.table.clone();
+        let file_name = draft.file_name();
+        let (path, format, has_header) = (draft.path.clone(), draft.format, draft.has_header);
+
+        // Defence in depth: the sidebar already refused, but the connection could have been
+        // edited to read-only while the dialog was open.
+        if self.connection_is_read_only(&conn_id) {
+            self.import_pending = None;
+            self.refuse_read_only("data can't be imported.");
+            return;
+        }
+        // `EditorKind::classify` maps an unknown type (BLOB included) to Text, so a mapped
+        // binary column would quietly insert a *string literal* into it. Refuse here as well as
+        // in the dialog, which is only a visual gate.
+        if !binary.is_empty() {
+            self.error = Some(format!(
+                "Binary columns can't be imported: {}. Set them to “skip”.",
+                binary.join(", ")
+            ));
+            return;
+        }
+        if targets.is_empty() {
+            self.error = Some("Map at least one column before importing.".into());
+            return;
+        }
+        let Some(active) = self.active() else {
+            self.error = Some("Connect to a database to import into a table.".into());
+            return;
+        };
+        let db = active.db.clone();
+        let kind = db.kind();
+
+        let table_name = table.name.clone();
+        let schema = table.schema.clone();
+        let col_names: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
+        // The audit trail records this summary, not the statements: a 200k-row import would
+        // otherwise write hundreds of megabytes of SQL into the log.
+        let summary = format!(
+            "-- IMPORT INTO {} ({}) FROM {}",
+            table.qualified(kind),
+            col_names.join(", "),
+            file_name,
+        );
+        self.import_pending = None;
+
+        let tx = self.tx.clone();
+        self.busy = Busy::Importing;
+        self.error = None;
+        self.status_msg = format!("Importing into {table_name}…");
+        self.rt.spawn(async move {
+            let start = std::time::Instant::now();
+            let result = run_import(
+                db.as_ref(),
+                kind,
+                &path,
+                format,
+                has_header,
+                schema.as_deref(),
+                &table_name,
+                &targets,
+                &col_names,
+                &tx,
+            )
+            .await;
+            let _ = tx.send(AppMessage::Imported {
+                table: table_name,
+                conn_id,
+                sql: summary,
+                elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
                 result,
             });
         });
@@ -3027,6 +3444,32 @@ impl DbGuiApp {
             Action::CopyRows(format) => self.copy_selection(format),
             Action::PasteRows(text) => self.paste_rows(&text),
             Action::ExportTable { table, format } => self.export_table(&table, format),
+            Action::ImportIntoTable(table) => self.open_import(&table),
+            Action::SetImportMapping { target, source } => {
+                if let Some(draft) = self.import_pending.as_mut() {
+                    if let Some(slot) = draft.mapping.get_mut(target) {
+                        *slot = source;
+                    }
+                }
+            }
+            Action::AutoMapImport => {
+                if let Some(draft) = self.import_pending.as_mut() {
+                    draft.auto_map();
+                }
+            }
+            Action::ClearImportMapping => {
+                if let Some(draft) = self.import_pending.as_mut() {
+                    draft.mapping.iter_mut().for_each(|m| *m = None);
+                }
+            }
+            Action::SetImportHasHeader(on) => {
+                if let Some(draft) = self.import_pending.as_mut() {
+                    draft.has_header = on;
+                }
+                self.reload_import_preview();
+            }
+            Action::ConfirmImport => self.confirm_import(),
+            Action::CancelImport => self.import_pending = None,
             Action::PreviewEdits => self.commit_edits(),
             Action::Undo => self.undo_edits(),
             Action::Redo => self.redo_edits(),
@@ -3699,6 +4142,7 @@ impl DbGuiApp {
         self.commit_preview_dialog(&ctx, &mut actions);
         self.favorite_name_dialog(&ctx, &mut actions);
         self.danger_confirm_dialog(&ctx, &mut actions);
+        self.import_dialog(&ctx, &mut actions);
         self.schema_preview_dialog(&ctx, &mut actions);
         self.update_dialog(&ctx, &mut actions);
         self.whats_new_dialog(&ctx, &mut actions);
@@ -3950,6 +4394,351 @@ mod tests {
         app.tab_mut().sql = "DELETE FROM table_0".into();
         app.apply_action(Action::RunQuery);
         assert_eq!(app.busy, Busy::Querying);
+    }
+
+    // ─── import ──────────────────────────────────────────────────────────────
+
+    /// An app with one live SQLite connection (`c1`) whose schema holds `users`.
+    fn app_with_users_table(columns: Vec<ColumnInfo>) -> DbGuiApp {
+        let mut app = DbGuiApp::construct();
+        app.connections.clear();
+        let mut cfg = dbcore::ConnectionConfig::new(dbcore::DbKind::Sqlite);
+        cfg.id = "c1".into();
+        app.connections.push(cfg);
+
+        let mut schema = fake_schema(0, 0);
+        schema.tables.push(TableInfo {
+            schema: None,
+            name: "users".into(),
+            columns,
+            indexes: Vec::new(),
+            foreign_keys: Vec::new(),
+        });
+        app.active_connections.push(ActiveConnection {
+            config_id: "c1".into(),
+            name: "local".into(),
+            db: std::sync::Arc::new(DummyDb),
+            databases: Vec::new(),
+            schema,
+        });
+        app.tab_mut().conn_id = Some("c1".into());
+        app
+    }
+
+    fn col(name: &str, ty: &str, nullable: bool, pk: bool) -> ColumnInfo {
+        ColumnInfo {
+            name: name.into(),
+            data_type: ty.into(),
+            nullable,
+            primary_key: pk,
+        }
+    }
+
+    fn users_columns() -> Vec<ColumnInfo> {
+        vec![
+            col("id", "INTEGER", false, true),
+            col("email", "TEXT", false, false),
+            col("age", "INTEGER", true, false),
+        ]
+    }
+
+    /// Build a draft directly, as `open_import` would after the (untestable) file dialog.
+    fn draft_for(app: &DbGuiApp, headers: &[&str], path: &std::path::Path) -> ImportDraft {
+        let table = app.active_connections[0].schema.tables[0].clone();
+        let mut draft = ImportDraft {
+            table,
+            conn_id: "c1".into(),
+            path: path.to_path_buf(),
+            format: dbcore::ImportFormat::Csv,
+            has_header: true,
+            headers: headers.iter().map(|h| (*h).to_string()).collect(),
+            preview_rows: Vec::new(),
+            more: false,
+            mapping: Vec::new(),
+        };
+        draft.auto_map();
+        draft
+    }
+
+    fn temp_csv(name: &str, body: &str) -> std::path::PathBuf {
+        use std::io::Write;
+        let mut p = std::env::temp_dir();
+        p.push(format!("plusplus-ui-import-{}-{name}", std::process::id()));
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+        p
+    }
+
+    /// The read-only refusal happens before the file dialog opens, so the sidebar action is a
+    /// pure no-op on a replica — no dialog, no picker.
+    #[test]
+    fn import_refuses_on_a_read_only_connection() {
+        let mut app = app_with_users_table(users_columns());
+        app.connections[0].read_only = true;
+        let table = app.active_connections[0].schema.tables[0].clone();
+
+        app.apply_action(Action::ImportIntoTable(table));
+        assert!(app.import_pending.is_none(), "no dialog should open");
+        assert!(app.error.as_deref().unwrap_or("").contains("read-only"));
+
+        // And confirming an already-open dialog is refused too (defence in depth), which is the
+        // path that matters if the connection is flipped to read-only mid-dialog.
+        let path = temp_csv("ro.csv", "id,email\n1,a@b.c\n");
+        app.error = None;
+        app.import_pending = Some(draft_for(&app, &["id", "email"], &path));
+        app.apply_action(Action::ConfirmImport);
+        assert!(app.import_pending.is_none());
+        assert_eq!(app.busy, Busy::Idle, "nothing was spawned");
+        assert!(app.error.as_deref().unwrap_or("").contains("read-only"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Headers map onto target columns by name regardless of case, and an unmatched target
+    /// stays unmapped rather than being filled positionally.
+    #[test]
+    fn import_maps_headers_case_insensitively_and_never_positionally() {
+        let app = app_with_users_table(users_columns());
+        let path = temp_csv("map.csv", "EMAIL,Id\n");
+        let draft = draft_for(&app, &["EMAIL", "Id"], &path);
+
+        // id <- source 1, email <- source 0, age unmatched.
+        assert_eq!(draft.mapping, vec![Some(1), Some(0), None]);
+
+        let targets = draft.targets();
+        assert_eq!(targets.len(), 2, "only mapped columns are written");
+        assert_eq!(targets[0].name, "id");
+        assert_eq!(targets[0].source, 1);
+        assert_eq!(targets[0].kind, dbcore::EditorKind::Int);
+        assert_eq!(targets[1].name, "email");
+        assert_eq!(targets[1].source, 0);
+
+        // `age` is nullable, so skipping it raises no warning.
+        assert!(draft.unmapped_required().is_empty());
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A NOT NULL column with no mapping is surfaced as a warning (it may still have a default).
+    #[test]
+    fn import_warns_about_unmapped_not_null_columns() {
+        let app = app_with_users_table(users_columns());
+        let path = temp_csv("warn.csv", "id\n");
+        let draft = draft_for(&app, &["id"], &path);
+
+        // `email` is NOT NULL and unmapped; `id` is a PK so it is excused (autoincrement).
+        assert_eq!(draft.unmapped_required(), vec!["email"]);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A mapped binary column is refused. `EditorKind::classify("BLOB")` falls through to Text,
+    /// so without this guard the import would insert a string literal into a BLOB column.
+    #[test]
+    fn import_refuses_a_mapped_binary_column() {
+        let mut app = app_with_users_table(vec![
+            col("id", "INTEGER", false, true),
+            col("avatar", "BLOB", true, false),
+        ]);
+        let path = temp_csv("bin.csv", "id,avatar\n1,xx\n");
+        let draft = draft_for(&app, &["id", "avatar"], &path);
+        assert_eq!(draft.binary_conflicts(), vec!["avatar"]);
+
+        app.import_pending = Some(draft);
+        app.apply_action(Action::ConfirmImport);
+        assert_eq!(app.busy, Busy::Idle, "nothing was spawned");
+        assert!(app.error.as_deref().unwrap_or("").contains("Binary columns"));
+        assert!(
+            app.import_pending.is_some(),
+            "a rejected import keeps the dialog open so the mapping isn't lost"
+        );
+
+        // Skipping the binary column unblocks it.
+        app.error = None;
+        app.import_pending.as_mut().unwrap().mapping[1] = None;
+        app.apply_action(Action::ConfirmImport);
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert_eq!(app.busy, Busy::Importing);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Importing with nothing mapped is refused, and the dialog stays open.
+    #[test]
+    fn import_requires_at_least_one_mapped_column() {
+        let mut app = app_with_users_table(users_columns());
+        let path = temp_csv("nomap.csv", "x,y\n1,2\n");
+        let mut draft = draft_for(&app, &["x", "y"], &path);
+        assert_eq!(draft.mapping, vec![None, None, None], "no names match");
+        draft.mapping = vec![None, None, None];
+
+        app.import_pending = Some(draft);
+        app.apply_action(Action::ConfirmImport);
+        assert_eq!(app.busy, Busy::Idle);
+        assert!(app.error.as_deref().unwrap_or("").contains("at least one"));
+        assert!(app.import_pending.is_some());
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A valid confirm closes the dialog and hands the work to the background runtime.
+    #[test]
+    fn import_confirm_spawns_the_transaction() {
+        let mut app = app_with_users_table(users_columns());
+        let path = temp_csv("ok.csv", "id,email,age\n1,a@b.c,30\n2,d@e.f,\n");
+        app.import_pending = Some(draft_for(&app, &["id", "email", "age"], &path));
+
+        app.apply_action(Action::ConfirmImport);
+        assert!(app.import_pending.is_none(), "dialog closes");
+        assert_eq!(app.busy, Busy::Importing);
+        assert!(app.error.is_none());
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Render the import dialog headlessly: its mapping combo boxes and two grids all live in
+    /// one window, so a missing `id_salt` would collide. Also proves it doesn't panic.
+    /// Bind the `heading` family to the default proportional fonts. The real app installs Inter
+    /// for it (`install_fonts`); a dialog title is the first thing in the test suite to ask for
+    /// that family, and epaint panics on an unbound one.
+    fn bind_heading_font(ctx: &egui::Context) {
+        let mut fonts = egui::FontDefinitions::default();
+        let proportional = fonts.families[&egui::FontFamily::Proportional].clone();
+        fonts
+            .families
+            .insert(egui::FontFamily::Name(crate::HEADING_FAMILY.into()), proportional);
+        ctx.set_fonts(fonts);
+    }
+
+    #[test]
+    fn probe_import_dialog_renders_without_id_clash() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::style::apply(&ctx);
+        bind_heading_font(&ctx);
+
+        let mut app = app_with_users_table(users_columns());
+        let path = temp_csv("probe.csv", "id,email,age\n1,a@b.c,30\n2,d@e.f,\n");
+        let mut draft = draft_for(&app, &["id", "email", "age"], &path);
+        // Give the preview something to lay out, including a JSON-style NULL cell.
+        draft.preview_rows = vec![
+            vec![Some("1".into()), Some("a@b.c".into()), Some("30".into())],
+            vec![Some("2".into()), Some("d@e.f".into()), None],
+        ];
+        draft.more = true;
+        app.import_pending = Some(draft);
+
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+        let mut clashes: Vec<String> = Vec::new();
+        for _ in 0..3 {
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let out = ctx.run_ui(raw, |ui| app.draw(ui, None));
+            clashes.extend(collect_clash_text(&out.shapes));
+        }
+        clashes.sort();
+        clashes.dedup();
+        assert!(clashes.is_empty(), "ID clashes:\n{}", clashes.join("\n"));
+        assert!(app.import_pending.is_some(), "dialog stayed open");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// "Skip all" unmaps everything; "Match by name" restores the auto-mapping, discarding
+    /// whatever the user picked by hand.
+    #[test]
+    fn import_quick_actions_clear_and_restore_the_mapping() {
+        let mut app = app_with_users_table(users_columns());
+        let path = temp_csv("quick.csv", "id,email,age\n1,a@b.c,30\n");
+        app.import_pending = Some(draft_for(&app, &["id", "email", "age"], &path));
+
+        app.apply_action(Action::ClearImportMapping);
+        assert_eq!(
+            app.import_pending.as_ref().unwrap().mapping,
+            vec![None, None, None]
+        );
+
+        // A hand-picked, deliberately wrong mapping is discarded by Match by name.
+        app.apply_action(Action::SetImportMapping {
+            target: 0,
+            source: Some(2),
+        });
+        app.apply_action(Action::AutoMapImport);
+        assert_eq!(
+            app.import_pending.as_ref().unwrap().mapping,
+            vec![Some(0), Some(1), Some(2)]
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The dialog's other render branches: the blocking binary callout, the not-null warning,
+    /// and the empty-file state (which draws its own footer and returns early).
+    #[test]
+    fn probe_import_dialog_alternate_states_render() {
+        let render = |app: &mut DbGuiApp| {
+            let ctx = egui::Context::default();
+            egui_extras::install_image_loaders(&ctx);
+            crate::style::apply(&ctx);
+            bind_heading_font(&ctx);
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 700.0));
+            let mut clashes = Vec::new();
+            for _ in 0..2 {
+                let raw = egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                };
+                let out = ctx.run_ui(raw, |ui| app.draw(ui, None));
+                clashes.extend(collect_clash_text(&out.shapes));
+            }
+            clashes.sort();
+            clashes.dedup();
+            assert!(clashes.is_empty(), "ID clashes:\n{}", clashes.join("\n"));
+        };
+
+        // Blocking binary conflict + a not-null column left unmapped.
+        let mut app = app_with_users_table(vec![
+            col("id", "INTEGER", false, true),
+            col("email", "TEXT", false, false),
+            col("avatar", "BLOB", true, false),
+        ]);
+        let path = temp_csv("alt.csv", "id,avatar\n1,xx\n");
+        let mut draft = draft_for(&app, &["id", "avatar"], &path);
+        draft.preview_rows = vec![vec![Some("1".into()), Some("xx".into())]];
+        assert_eq!(draft.binary_conflicts(), vec!["avatar"]);
+        assert_eq!(draft.unmapped_required(), vec!["email"]);
+        app.import_pending = Some(draft);
+        render(&mut app);
+
+        // Empty file: no headers at all.
+        let empty = temp_csv("none.csv", "");
+        let mut draft = draft_for(&app, &[], &empty);
+        draft.preview_rows.clear();
+        app.import_pending = Some(draft);
+        render(&mut app);
+        assert!(app.import_pending.is_some());
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&empty).ok();
+    }
+
+    /// Toggling the header checkbox re-reads the file: the first row becomes data, the source
+    /// columns get synthetic names, and the name-based mapping falls away.
+    #[test]
+    fn import_toggling_header_rereads_the_file_and_remaps() {
+        let mut app = app_with_users_table(users_columns());
+        let path = temp_csv("hdr.csv", "id,email,age\n1,a@b.c,30\n");
+        app.import_pending = Some(draft_for(&app, &["id", "email", "age"], &path));
+        assert_eq!(
+            app.import_pending.as_ref().unwrap().mapping,
+            vec![Some(0), Some(1), Some(2)]
+        );
+
+        app.apply_action(Action::SetImportHasHeader(false));
+        let draft = app.import_pending.as_ref().unwrap();
+        assert!(!draft.has_header);
+        assert_eq!(draft.headers, ["column_1", "column_2", "column_3"]);
+        assert_eq!(draft.preview_rows.len(), 2, "the header row is now data");
+        assert_eq!(
+            draft.mapping,
+            vec![None, None, None],
+            "synthetic names match nothing, so the user must map explicitly"
+        );
+        std::fs::remove_file(&path).ok();
     }
 
     /// The pager rewrites the tab's LIMIT/OFFSET in place and never runs past a known end.
@@ -4923,6 +5712,169 @@ mod tests {
         }
         harness.run_steps(6);
         harness.snapshot(name);
+    }
+
+    /// Screenshot generator (ignored): the import dialog with a realistic mapping — one column
+    /// auto-matched, one renamed in the file, one skipped.
+    #[test]
+    #[ignore = "screenshot generator; run manually with --ignored"]
+    fn snapshot_import_dialog() {
+        let mut app = app_with_users_table(vec![
+            col("id", "INTEGER", false, true),
+            col("email", "VARCHAR(255)", false, false),
+            col("full_name", "TEXT", true, false),
+            col("age", "INTEGER", true, false),
+            col("created_at", "TIMESTAMP", true, false),
+            col("is_active", "BOOLEAN", true, false),
+        ]);
+        // A stable file name: `temp_csv` embeds the pid, which would make the committed PNG
+        // churn on every regeneration.
+        let path = std::env::temp_dir().join("plusplus-snapshot-users.csv");
+        std::fs::write(
+            &path,
+            "id,Email,age,created_at,is_active,legacy_note\n\
+             1,ada@lovelace.org,36,2026-07-10 09:15:00,true,imported from v1\n\
+             2,grace@hopper.mil,45,2026-07-10 09:16:30,true,\n\
+             3,alan@turing.uk,41,2026-07-10 09:18:02,false,archived\n",
+        )
+        .unwrap();
+        let mut draft = draft_for(
+            &app,
+            &["id", "Email", "age", "created_at", "is_active", "legacy_note"],
+            &path,
+        );
+        draft.preview_rows = vec![
+            vec![
+                Some("1".into()),
+                Some("ada@lovelace.org".into()),
+                Some("36".into()),
+                Some("2026-07-10 09:15:00".into()),
+                Some("true".into()),
+                Some("imported from v1".into()),
+            ],
+            vec![
+                Some("2".into()),
+                Some("grace@hopper.mil".into()),
+                Some("45".into()),
+                Some("2026-07-10 09:16:30".into()),
+                Some("true".into()),
+                None,
+            ],
+        ];
+        draft.more = true;
+        app.import_pending = Some(draft);
+
+        let mut setup = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(940.0, 700.0))
+            .build_ui(move |ui| {
+                if !setup {
+                    egui_extras::install_image_loaders(ui.ctx());
+                    crate::style::apply(ui.ctx());
+                    bind_heading_font(ui.ctx());
+                    setup = true;
+                    // `set_fonts` lands at the end of the frame, and the dialog title asks for
+                    // the `heading` family — draw nothing until it is bound.
+                    return;
+                }
+                app.draw(ui, None);
+            });
+        harness.run_steps(8);
+        harness.snapshot("import_dialog");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    #[ignore = "temporary repro"]
+    fn snapshot_import_scrolled() {
+        let columns: Vec<_> = (0..14)
+            .map(|i| col(&format!("column_{i:02}"), "INTEGER", false, false))
+            .collect();
+        let mut app = app_with_users_table(columns);
+        let path = std::env::temp_dir().join("plusplus-scroll-probe.csv");
+        std::fs::write(&path, "Task Name\nA\n").unwrap();
+        let mut draft = draft_for(&app, &["Task Name"], &path);
+        draft.preview_rows = (0..6).map(|i| vec![Some(format!("row-{i}"))]).collect();
+        draft.more = true;
+        app.import_pending = Some(draft);
+
+        let mut setup = false;
+        let mut scrolled = 0;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 760.0))
+            .build_ui(move |ui| {
+                if !setup {
+                    egui_extras::install_image_loaders(ui.ctx());
+                    crate::style::apply(ui.ctx());
+                    bind_heading_font(ui.ctx());
+                    setup = true;
+                    return;
+                }
+                if scrolled < 30 {
+                    scrolled += 1;
+                    ui.ctx().input_mut(|i| {
+                        i.events.push(egui::Event::PointerMoved(egui::pos2(300.0, 400.0)));
+                        i.events.push(egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(0.0, -30.0),
+                            phase: egui::TouchPhase::Move,
+                            modifiers: egui::Modifiers::default(),
+                        });
+                    });
+                }
+                app.draw(ui, None);
+            });
+        harness.run_steps(34);
+        harness.snapshot("import_scrolled");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Screenshot generator (ignored): a table with more columns than fit, to check that the
+    /// single body scroll engages and the footer stays put.
+    #[test]
+    #[ignore = "screenshot generator; run manually with --ignored"]
+    fn snapshot_import_dialog_many_columns() {
+        let types = [
+            "INTEGER",
+            "VARCHAR(255)",
+            "TEXT",
+            "TIMESTAMP",
+            "BOOLEAN",
+            "NUMERIC(10,2)",
+        ];
+        let columns: Vec<_> = (0..18)
+            .map(|i| col(&format!("column_{i:02}"), types[i % types.len()], true, i == 0))
+            .collect();
+        let mut app = app_with_users_table(columns);
+
+        let headers: Vec<String> = (0..18).map(|i| format!("column_{i:02}")).collect();
+        let refs: Vec<&str> = headers.iter().map(String::as_str).collect();
+        let path = std::env::temp_dir().join("plusplus-snapshot-wide.csv");
+        std::fs::write(&path, format!("{}\n", refs.join(","))).unwrap();
+
+        let mut draft = draft_for(&app, &refs, &path);
+        draft.preview_rows = (0..6)
+            .map(|r| (0..18).map(|c| Some(format!("v{r}_{c}"))).collect())
+            .collect();
+        draft.more = true;
+        app.import_pending = Some(draft);
+
+        let mut setup = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(940.0, 700.0))
+            .build_ui(move |ui| {
+                if !setup {
+                    egui_extras::install_image_loaders(ui.ctx());
+                    crate::style::apply(ui.ctx());
+                    bind_heading_font(ui.ctx());
+                    setup = true;
+                    return;
+                }
+                app.draw(ui, None);
+            });
+        harness.run_steps(8);
+        harness.snapshot("import_dialog_many_columns");
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Screenshot generator (ignored in normal runs): the schema sidebar with its Views and

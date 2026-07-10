@@ -29,6 +29,8 @@ pub enum AuditAction {
     EditCommit,
     /// A schema migration (DDL) applied from the structure editor.
     SchemaApply,
+    /// Rows loaded into a table from a CSV/JSON file, as one transaction.
+    Import,
 }
 
 /// One audited event.
@@ -191,5 +193,8 @@ mod tests {
         // to a SIEM — changing it silently would break their parsers.
         let line = serde_json::to_string(&entry(AuditAction::SchemaApply, "ALTER…", true)).unwrap();
         assert!(line.contains("\"action\":\"schema_apply\""));
+
+        let line = serde_json::to_string(&entry(AuditAction::Import, "-- IMPORT…", true)).unwrap();
+        assert!(line.contains("\"action\":\"import\""));
     }
 }
