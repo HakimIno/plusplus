@@ -27,11 +27,7 @@ fn sql_colors() -> SqlColors {
     }
 }
 
-fn mix(a: Color32, b: Color32, amount_b: f32) -> Color32 {
-    let amount_a = 1.0 - amount_b;
-    let ch = |x: u8, y: u8| (x as f32 * amount_a + y as f32 * amount_b).round() as u8;
-    Color32::from_rgb(ch(a.r(), b.r()), ch(a.g(), b.g()), ch(a.b(), b.b()))
-}
+use crate::style::mix;
 
 /// Build a coloured layout job for `text`, using `font` for every run.
 pub fn highlight_sql(text: &str, font: FontId) -> LayoutJob {

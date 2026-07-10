@@ -17,6 +17,7 @@ mod highlight;
 mod icons;
 mod pet;
 mod schema;
+mod sqlctx;
 mod style;
 mod theme;
 mod title_bar;

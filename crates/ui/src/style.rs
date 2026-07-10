@@ -7,6 +7,15 @@
 
 use egui::{Color32, CornerRadius, FontFamily, FontId, Margin, Stroke, TextStyle};
 
+/// Blend `a` toward `b` by `amount_b` (0.0 → all `a`, 1.0 → all `b`). Used to derive
+/// in-between tokens — a muted accent, a punctuation grey — from the theme's own colours
+/// rather than hard-coding a third value that no theme author ever chose.
+pub fn mix(a: Color32, b: Color32, amount_b: f32) -> Color32 {
+    let amount_a = 1.0 - amount_b;
+    let ch = |x: u8, y: u8| (x as f32 * amount_a + y as f32 * amount_b).round() as u8;
+    Color32::from_rgb(ch(a.r(), b.r()), ch(a.g(), b.g()), ch(a.b(), b.b()))
+}
+
 /// Named colour tokens, resolved against the currently-active theme. UI code reads colours
 /// through these accessors (e.g. `palette::ACCENT()`) so a theme switch flows everywhere
 /// without touching call sites. See [`crate::theme`] for the underlying palettes.
