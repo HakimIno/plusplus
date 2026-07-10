@@ -1,5 +1,5 @@
 <p align="center">
-  <img src=".github/readme-banner.jpg" alt="plusplus — fast, native database GUI" width="100%">
+  <img src=".github/readme-banner.svg" alt="plusplus — fast, native database GUI" width="100%">
 </p>
 
 <p align="center">

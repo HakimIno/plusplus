@@ -147,21 +147,44 @@ pub(crate) struct QueryTabResponse {
     pub response: egui::Response,
 }
 
-/// Whether a query-tab chip represents a plain SQL editor or a table opened from the schema.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Whether a query-tab chip represents a plain SQL editor or a relation opened from the schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QueryTabKind {
     Query,
     Table,
+    View,
+    Function,
+    Procedure,
+    Trigger,
+}
+
+impl QueryTabKind {
+    pub(crate) fn color(self) -> egui::Color32 {
+        match self {
+            Self::Query => palette::WARNING(),
+            Self::Table => palette::ACCENT(),
+            Self::View => palette::SUCCESS(),
+            Self::Function => crate::style::mix(palette::ACCENT(), palette::DANGER(), 0.45),
+            Self::Procedure => palette::WARNING(),
+            Self::Trigger => palette::DANGER(),
+        }
+    }
+
+    pub(crate) fn icon(self) -> egui::ImageSource<'static> {
+        match self {
+            Self::Table => icons::table(),
+            Self::View => icons::view(),
+            Self::Function | Self::Procedure | Self::Query => icons::code(),
+            Self::Trigger => icons::play(),
+        }
+    }
 }
 
 const TAB_ICON_SIZE: f32 = 13.0;
 const TAB_ICON_GAP: f32 = 6.0;
 
 fn tab_icon_color(kind: QueryTabKind, selected: bool) -> egui::Color32 {
-    let color = match kind {
-        QueryTabKind::Query => palette::WARNING(),
-        QueryTabKind::Table => palette::ACCENT(),
-    };
+    let color = kind.color();
     if selected {
         color
     } else {
@@ -223,11 +246,7 @@ fn paint_tab_chip(
         badge_rect.center(),
         egui::vec2(TAB_ICON_SIZE, TAB_ICON_SIZE),
     );
-    let icon_src = match kind {
-        QueryTabKind::Table => icons::table(),
-        QueryTabKind::Query => icons::code(),
-    };
-    egui::Image::new(icon_src)
+    egui::Image::new(kind.icon())
         .fit_to_exact_size(icon_rect.size())
         .tint(icon_color)
         .paint_at(ui, icon_rect);

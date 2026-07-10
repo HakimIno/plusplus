@@ -262,6 +262,9 @@ struct QueryTab {
     /// The table name when this tab was opened from the schema sidebar; empty for a plain
     /// query tab (which is then labelled by position — see `tab_label`).
     title: String,
+    /// Visual identity in the tab strip. Stored explicitly so a View is not mistaken for a Table
+    /// merely because both tabs carry a schema-object title.
+    kind: crate::components::QueryTabKind,
     /// A transient "preview" tab (single-click on a table): shown in italics and reused for
     /// the next previewed table. Becomes permanent when its SQL is edited or it's pinned.
     preview: bool,
@@ -297,6 +300,7 @@ impl QueryTab {
         Self {
             id,
             title,
+            kind: crate::components::QueryTabKind::Query,
             preview: false,
             conn_id: None,
             sql: String::new(),
@@ -726,11 +730,13 @@ enum Action {
         sql: String,
         source: EditSource,
         pin: bool,
+        kind: crate::components::QueryTabKind,
     },
     /// Show a routine/trigger's definition SQL in a preview tab (read-only; not executed).
     OpenDefinition {
         title: String,
         sql: String,
+        kind: crate::components::QueryTabKind,
     },
     /// Follow a foreign key from a grid cell: open a preview tab on the referenced table,
     /// filtered to the key the cell points at. `row`/`col` index the active tab's result.
@@ -1380,18 +1386,11 @@ impl DbGuiApp {
         }
     }
 
-    /// Icon kind for the tab strip: table tabs carry a sidebar table name; the rest are
-    /// plain query editors.
+    /// Icon kind for the tab strip, recorded when the tab is opened from the schema tree.
     fn tab_kind(&self, idx: usize) -> crate::components::QueryTabKind {
-        if self
-            .tabs
+        self.tabs
             .get(idx)
-            .is_some_and(|t| !t.title.trim().is_empty())
-        {
-            crate::components::QueryTabKind::Table
-        } else {
-            crate::components::QueryTabKind::Query
-        }
+            .map_or(crate::components::QueryTabKind::Query, |tab| tab.kind)
     }
 
     fn select_tab(&mut self, idx: usize) {
@@ -1500,7 +1499,13 @@ impl DbGuiApp {
     ///   slot is reused as you click through tables, so they don't pile up. A blank scratch
     ///   tab is upgraded into that preview slot rather than spawning a new tab.
     /// - `pin` (double-click) makes the tab permanent (non-italic) instead.
-    fn open_table(&mut self, sql: String, source: EditSource, pin: bool) {
+    fn open_table(
+        &mut self,
+        sql: String,
+        source: EditSource,
+        pin: bool,
+        kind: crate::components::QueryTabKind,
+    ) {
         let same = |s: &EditSource| s.table == source.table && s.schema == source.schema;
         // Already open (loaded or in-flight)? Activate it, pinning if asked.
         if let Some(idx) = self.tabs.iter().position(|t| {
@@ -1527,7 +1532,7 @@ impl DbGuiApp {
             return;
         }
 
-        self.open_in_preview_slot(sql, source, !pin);
+        self.open_in_preview_slot(sql, source, !pin, kind);
     }
 
     /// Load `sql` into a table tab bound to `source` and run it. Picks the reusable preview
@@ -1535,12 +1540,19 @@ impl DbGuiApp {
     /// then rebuilds that tab from scratch — clearing any previous preview's result/filter/edits —
     /// while keeping its stable id and connection binding. Shared by [`Self::open_table`] and
     /// foreign-key follow. `preview` marks the tab as the transient (italic, reusable) preview.
-    fn open_in_preview_slot(&mut self, sql: String, source: EditSource, preview: bool) {
+    fn open_in_preview_slot(
+        &mut self,
+        sql: String,
+        source: EditSource,
+        preview: bool,
+        kind: crate::components::QueryTabKind,
+    ) {
         let idx = self.preview_target_slot();
         let id = self.tabs[idx].id;
         let conn_id = self.tabs[idx].conn_id.clone();
         let mut tab = QueryTab::new(id, source.table.clone());
         tab.conn_id = conn_id;
+        tab.kind = kind;
         tab.sql = sql;
         tab.preview = preview;
         tab.edits.pending_source = Some(source);
@@ -1557,7 +1569,12 @@ impl DbGuiApp {
     fn follow_foreign_key(&mut self, row: usize, col: usize) {
         let idx = self.active_query_tab;
         match self.build_fk_follow(idx, row, col) {
-            Some((sql, source)) => self.open_in_preview_slot(sql, source, true),
+            Some((sql, source)) => self.open_in_preview_slot(
+                sql,
+                source,
+                true,
+                crate::components::QueryTabKind::Table,
+            ),
             None => {
                 self.status_msg =
                     "No foreign key to follow here (or the value is empty).".to_string();
@@ -1680,12 +1697,18 @@ impl DbGuiApp {
     /// in a preview tab for reading. Unlike [`Self::open_table`] the SQL is *not* executed —
     /// re-running a `CREATE` would recreate the object — it's just placed in the editor so the
     /// user can read, copy, or run it deliberately.
-    fn open_definition(&mut self, title: String, sql: String) {
+    fn open_definition(
+        &mut self,
+        title: String,
+        sql: String,
+        kind: crate::components::QueryTabKind,
+    ) {
         let idx = self.preview_target_slot();
         let id = self.tabs[idx].id;
         let conn_id = self.tabs[idx].conn_id.clone();
         let mut tab = QueryTab::new(id, title);
         tab.conn_id = conn_id;
+        tab.kind = kind;
         tab.sql = if sql.trim().is_empty() {
             "-- No definition available (the backend did not expose this object's source).".into()
         } else {
@@ -3433,8 +3456,13 @@ impl DbGuiApp {
             }
             Action::CancelDangerQuery => self.danger_pending = None,
             Action::BeautifySql => self.beautify_sql(),
-            Action::OpenTable { sql, source, pin } => self.open_table(sql, source, pin),
-            Action::OpenDefinition { title, sql } => self.open_definition(title, sql),
+            Action::OpenTable {
+                sql,
+                source,
+                pin,
+                kind,
+            } => self.open_table(sql, source, pin, kind),
+            Action::OpenDefinition { title, sql, kind } => self.open_definition(title, sql, kind),
             Action::FollowForeignKey { row, col } => self.follow_foreign_key(row, col),
             Action::SortBy(col) => self.tab_mut().apply_sort(col),
             Action::SetSort { col, asc } => self.tab_mut().set_sort(col, asc),
@@ -5203,7 +5231,12 @@ mod tests {
             schema: fake_schema(1, 1),
         });
 
-        app.open_table("SELECT * FROM users".into(), src, false);
+        app.open_table(
+            "SELECT * FROM users".into(),
+            src,
+            false,
+            crate::components::QueryTabKind::Table,
+        );
 
         assert_eq!(app.querying_tab_id, Some(app.tab().id));
         assert!(app.tab().result.is_none());
@@ -5389,31 +5422,91 @@ mod tests {
         let mut app = DbGuiApp::construct();
         app.tab_mut().sql.clear(); // make the single default tab a blank scratch tab
                                    // First table reuses the blank scratch tab as a preview.
-        app.open_table("q".into(), src("users"), false);
+        app.open_table(
+            "q".into(),
+            src("users"),
+            false,
+            crate::components::QueryTabKind::Table,
+        );
         assert_eq!(app.tabs.len(), 1);
         assert!(app.tab().preview);
         assert_eq!(app.tab().title, "users");
 
         // Re-opening the same table doesn't add a tab.
-        app.open_table("q".into(), src("users"), false);
+        app.open_table(
+            "q".into(),
+            src("users"),
+            false,
+            crate::components::QueryTabKind::Table,
+        );
         assert_eq!(app.tabs.len(), 1);
 
         // A different table reuses the same preview slot (no pile-up).
-        app.open_table("q".into(), src("orders"), false);
+        app.open_table(
+            "q".into(),
+            src("orders"),
+            false,
+            crate::components::QueryTabKind::Table,
+        );
         assert_eq!(app.tabs.len(), 1);
         assert_eq!(app.tab().title, "orders");
         assert!(app.tab().preview);
 
         // Pinning the open table (double-click) makes it permanent.
-        app.open_table("q".into(), src("orders"), true);
+        app.open_table(
+            "q".into(),
+            src("orders"),
+            true,
+            crate::components::QueryTabKind::Table,
+        );
         assert_eq!(app.tabs.len(), 1);
         assert!(!app.tab().preview);
 
         // With no preview slot and a non-scratch active tab, a new table opens a new tab.
-        app.open_table("q".into(), src("products"), false);
+        app.open_table(
+            "q".into(),
+            src("products"),
+            false,
+            crate::components::QueryTabKind::Table,
+        );
         assert_eq!(app.tabs.len(), 2);
         assert_eq!(app.tab().title, "products");
         assert!(app.tab().preview);
+    }
+
+    #[test]
+    fn view_tabs_keep_their_view_icon_kind() {
+        let mut app = DbGuiApp::construct();
+        let source = EditSource {
+            schema: Some("public".into()),
+            table: "active_users".into(),
+            pk_cols: Vec::new(),
+        };
+
+        app.open_table(
+            "SELECT * FROM public.active_users".into(),
+            source,
+            false,
+            crate::components::QueryTabKind::View,
+        );
+
+        assert_eq!(
+            app.tab_kind(app.active_query_tab),
+            crate::components::QueryTabKind::View
+        );
+    }
+
+    #[test]
+    fn definition_tabs_keep_their_schema_object_icon_kind() {
+        let mut app = DbGuiApp::construct();
+        for kind in [
+            crate::components::QueryTabKind::Function,
+            crate::components::QueryTabKind::Procedure,
+            crate::components::QueryTabKind::Trigger,
+        ] {
+            app.open_definition("object".into(), "CREATE ...".into(), kind);
+            assert_eq!(app.tab_kind(app.active_query_tab), kind);
+        }
     }
 
     /// Closing the only tab keeps one (blank) tab rather than leaving zero.
@@ -5935,6 +6028,7 @@ mod tests {
                 pk_cols: vec!["field_0".into()],
             },
             pin: false,
+            kind: crate::components::QueryTabKind::Table,
         });
         assert!(
             app.tab().schema_editor.is_none(),

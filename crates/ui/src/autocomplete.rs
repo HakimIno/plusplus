@@ -4,8 +4,27 @@
 //!
 //! Split in two: pure suggestion logic (`complete`, unit-testable, no egui) and the
 //! popup widget (`Popup::show`) drawn over the editor at the text cursor.
+//!
+//! Cursor context — word scanning, string/comment detection, and the table/alias scan —
+//! lives in [`crate::sqlctx`], shared with the inline ghost suggestion.
 
+use crate::sqlctx::{
+    ident_before, in_string_or_comment, is_ident_char, previous_word, referenced_tables,
+};
 use dbcore::{DbKind, SchemaTree};
+
+/// Whether `c` opens a *quoted identifier* in this dialect — deliberately not "any quote
+/// character". MySQL spells identifiers with backticks and uses `"` for string literals, so
+/// treating a typed `"` as an identifier there would let a table name overwrite the string
+/// the user was halfway through. Mirrors [`DbKind::quote_ident`]; SQL Server also accepts
+/// the `[…]` form it does not itself emit.
+fn opens_quoted_ident(kind: Option<DbKind>, c: char) -> bool {
+    match kind {
+        Some(DbKind::MySql | DbKind::MariaDb) => c == '`',
+        Some(DbKind::SqlServer) => c == '"' || c == '[',
+        _ => c == '"',
+    }
+}
 
 /// What a suggestion refers to, driving the badge and sort order in the popup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -25,7 +44,8 @@ pub struct Suggestion {
 }
 
 /// A computed completion: the suggestions plus the char range they would replace
-/// (`replace_start..cursor`, the identifier prefix being typed).
+/// (`replace_start..cursor`), which is the identifier prefix being typed together with any
+/// opening quote in front of it — suggestions arrive fully quoted and must overwrite it.
 #[derive(Debug)]
 pub struct Completion {
     pub replace_start: usize,
@@ -74,14 +94,6 @@ pub struct NavKeys {
 
 const MAX_ITEMS: usize = 100;
 
-fn is_ident_char(c: char) -> bool {
-    // `is_alphanumeric` already covers ASCII and base letters of other scripts, but it
-    // excludes combining marks — Thai sara/tone marks (and similar) — which would split a
-    // word like `ชื่อ` mid-identifier. Treat any non-ASCII, non-whitespace char as part of
-    // the identifier so multi-byte names stay whole for prefix matching and tokenizing.
-    c.is_alphanumeric() || c == '_' || (!c.is_ascii() && !c.is_whitespace() && !c.is_control())
-}
-
 /// Compute suggestions for the identifier being typed at `cursor` (a char index).
 ///
 /// Context rules, in order:
@@ -113,11 +125,23 @@ pub fn complete(
     if prefix.chars().next().is_some_and(|c| c.is_ascii_digit()) {
         return None;
     }
-    let after_dot = start > 0 && chars[start - 1] == '.';
+
+    // An opening quote the user already typed (`FROM "cus…`) belongs to the identifier, so
+    // it has to be part of the range the suggestion replaces — every suggestion carries its
+    // own quotes. Leaving it out doubles it. The prefix itself stays unquoted, because that
+    // is what schema names are matched against.
+    let replace_start = match start.checked_sub(1) {
+        Some(before) if opens_quoted_ident(kind, chars[before]) => before,
+        _ => start,
+    };
+
+    // Read context from where the identifier really begins, or a leading quote hides the
+    // `FROM` that precedes it and table suggestions never fire.
+    let after_dot = replace_start > 0 && chars[replace_start - 1] == '.';
     if prefix.is_empty() && !after_dot && !force {
         return None;
     }
-    if in_string_or_comment(&chars, start) {
+    if in_string_or_comment(&chars, replace_start) {
         return None;
     }
 
@@ -125,7 +149,7 @@ pub fn complete(
 
     if after_dot {
         // `qualifier.` → columns of that table/alias, or tables of that schema.
-        let qualifier = ident_before(&chars, start - 1)?;
+        let qualifier = ident_before(&chars, replace_start - 1)?;
         let schema = schema?;
         let aliases = referenced_tables(&chars);
         let table_name = aliases
@@ -156,7 +180,7 @@ pub fn complete(
             return None;
         }
     } else {
-        let prev = previous_word(&chars, start);
+        let prev = previous_word(&chars, replace_start);
         let table_context = matches!(
             prev.as_deref(),
             Some("FROM") | Some("JOIN") | Some("INTO") | Some("UPDATE") | Some("TABLE")
@@ -242,7 +266,7 @@ pub fn complete(
         None
     } else {
         Some(Completion {
-            replace_start: start,
+            replace_start,
             items,
         })
     }
@@ -320,227 +344,22 @@ fn maybe_quote(name: &str, kind: Option<DbKind>) -> String {
     }
 }
 
-/// The identifier ending right before `end` (exclusive), e.g. the qualifier before a dot.
-fn ident_before(chars: &[char], end: usize) -> Option<String> {
-    let mut s = end;
-    while s > 0 && is_ident_char(chars[s - 1]) {
-        s -= 1;
-    }
-    (s < end).then(|| chars[s..end].iter().collect())
-}
-
-/// The previous significant word before `pos`, uppercased — used for context detection.
-/// Skips trailing whitespace; stops at punctuation (returning `None` for things like `(`).
-fn previous_word(chars: &[char], pos: usize) -> Option<String> {
-    let mut i = pos;
-    while i > 0 && chars[i - 1].is_whitespace() {
-        i -= 1;
-    }
-    let end = i;
-    while i > 0 && is_ident_char(chars[i - 1]) {
-        i -= 1;
-    }
-    // A comma keeps the context of the word before the list, TablePlus-style:
-    // `SELECT a, b…` is still column context, `FROM t1, t2…` still table context.
-    if i == end {
-        if i > 0 && chars[i - 1] == ',' {
-            return previous_word_skipping_list(chars, i - 1);
-        }
-        return None;
-    }
-    Some(chars[i..end].iter().collect::<String>().to_ascii_uppercase())
-}
-
-/// Walk back over a comma-separated identifier list to the keyword that opened it.
-fn previous_word_skipping_list(chars: &[char], mut pos: usize) -> Option<String> {
-    // Bounded walk so pathological input can't loop forever.
-    for _ in 0..64 {
-        let word_start = {
-            let mut i = pos;
-            while i > 0 && chars[i - 1].is_whitespace() {
-                i -= 1;
-            }
-            let end = i;
-            while i > 0 && (is_ident_char(chars[i - 1]) || chars[i - 1] == '.') {
-                i -= 1;
-            }
-            if i == end {
-                return None;
-            }
-            i
-        };
-        // The element before this one: another comma continues the list, anything
-        // else means this word is preceded by the opening keyword.
-        let mut j = word_start;
-        while j > 0 && chars[j - 1].is_whitespace() {
-            j -= 1;
-        }
-        if j > 0 && chars[j - 1] == ',' {
-            pos = j - 1;
-            continue;
-        }
-        return previous_word(chars, word_start);
-    }
-    None
-}
-
-/// True when `pos` sits inside a string literal or comment (where no completion makes sense).
-fn in_string_or_comment(chars: &[char], pos: usize) -> bool {
-    let mut i = 0;
-    while i < pos {
-        match chars[i] {
-            '\'' => {
-                i += 1;
-                while i < pos {
-                    if chars[i] == '\'' {
-                        if i + 1 < chars.len() && chars[i + 1] == '\'' {
-                            i += 2;
-                            continue;
-                        }
-                        break;
-                    }
-                    i += 1;
-                }
-                if i >= pos {
-                    return true; // ran past the cursor while still inside the string
-                }
-                i += 1; // closing quote
-            }
-            '-' if i + 1 < chars.len() && chars[i + 1] == '-' => {
-                while i < chars.len() && chars[i] != '\n' {
-                    i += 1;
-                }
-                if i >= pos {
-                    return true;
-                }
-            }
-            '/' if i + 1 < chars.len() && chars[i + 1] == '*' => {
-                i += 2;
-                while i < chars.len() && !(chars[i] == '*' && i + 1 < chars.len() && chars[i + 1] == '/') {
-                    i += 1;
-                }
-                if i >= pos {
-                    return true;
-                }
-                i += 2;
-            }
-            _ => i += 1,
-        }
-    }
-    false
-}
-
-/// Scan the SQL for `FROM`/`JOIN`/`UPDATE`/`INTO` targets, returning `(alias, table)`
-/// pairs. A table without an alias maps to itself, so the result doubles as the set of
-/// referenced tables. Quoted and schema-qualified names keep their last bare segment.
-fn referenced_tables(chars: &[char]) -> Vec<(String, String)> {
-    let words = tokenize_words(chars);
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < words.len() {
-        let upper = words[i].to_ascii_uppercase();
-        if matches!(upper.as_str(), "FROM" | "JOIN" | "UPDATE" | "INTO") {
-            if let Some(table) = words.get(i + 1) {
-                let table = table.clone();
-                let mut alias = table.clone();
-                let mut j = i + 2;
-                if words.get(j).is_some_and(|w| w.eq_ignore_ascii_case("AS")) {
-                    j += 1;
-                }
-                if let Some(next) = words.get(j) {
-                    let next_upper = next.to_ascii_uppercase();
-                    if !crate::highlight::KEYWORDS.contains(&next_upper.as_str()) {
-                        alias = next.clone();
-                    }
-                }
-                out.push((alias, table));
-            }
-        }
-        i += 1;
-    }
-    out
-}
-
-/// Split the SQL into bare words for the table/alias scan: identifiers (dotted chains
-/// reduced to their last segment, quotes stripped), skipping strings and comments.
-fn tokenize_words(chars: &[char]) -> Vec<String> {
-    let mut words = Vec::new();
-    let n = chars.len();
-    let mut i = 0;
-    while i < n {
-        let c = chars[i];
-        if c == '\'' {
-            i += 1;
-            while i < n {
-                if chars[i] == '\'' {
-                    if i + 1 < n && chars[i + 1] == '\'' {
-                        i += 2;
-                        continue;
-                    }
-                    i += 1;
-                    break;
-                }
-                i += 1;
-            }
-        } else if c == '-' && i + 1 < n && chars[i + 1] == '-' {
-            while i < n && chars[i] != '\n' {
-                i += 1;
-            }
-        } else if c == '/' && i + 1 < n && chars[i + 1] == '*' {
-            i += 2;
-            while i < n && !(chars[i] == '*' && i + 1 < n && chars[i + 1] == '/') {
-                i += 1;
-            }
-            i = (i + 2).min(n);
-        } else if is_ident_char(c) || c == '"' || c == '`' || c == '[' {
-            // An identifier chain like `schema.table` or `"My Table"`; keep the last segment.
-            let mut last = String::new();
-            let mut segment = String::new();
-            while i < n {
-                match chars[i] {
-                    ch if is_ident_char(ch) => {
-                        segment.push(ch);
-                        i += 1;
-                    }
-                    '"' | '`' => {
-                        let quote = chars[i];
-                        i += 1;
-                        while i < n && chars[i] != quote {
-                            segment.push(chars[i]);
-                            i += 1;
-                        }
-                        i = (i + 1).min(n);
-                    }
-                    '[' => {
-                        i += 1;
-                        while i < n && chars[i] != ']' {
-                            segment.push(chars[i]);
-                            i += 1;
-                        }
-                        i = (i + 1).min(n);
-                    }
-                    '.' => {
-                        last = std::mem::take(&mut segment);
-                        let _ = last; // replaced below if another segment follows
-                        i += 1;
-                    }
-                    _ => break,
-                }
-            }
-            if !segment.is_empty() {
-                last = segment;
-            }
-            if !last.is_empty() {
-                words.push(last);
-            }
-        } else {
-            i += 1;
-        }
-    }
-    words
-}
-
 // --- popup widget -------------------------------------------------------------------
+
+/// The icon-rail colour for a suggestion kind: one hue, three weights.
+///
+/// The theme's accent carries the schema — a table at full strength, a column muted toward
+/// the body text because it is a detail *of* a table — while a keyword stays uncoloured, as
+/// it belongs to SQL rather than to this database. A second and third hue would turn the
+/// rail into a legend the reader has to learn; a weight ladder is read at a glance.
+fn kind_color(kind: SuggestionKind) -> egui::Color32 {
+    let t = crate::theme::current();
+    match kind {
+        SuggestionKind::Table => t.accent,
+        SuggestionKind::Column => crate::style::mix(t.accent, t.text_weak, 0.75),
+        SuggestionKind::Keyword => t.text_faint,
+    }
+}
 
 /// What the popup reported this frame.
 pub enum Event {
@@ -621,9 +440,9 @@ pub fn show_popup(
                                     resp.scroll_to_me(None);
                                 }
 
-                                // Kind icon: a single-colour line glyph (table grid, column,
-                                // `< >` for a keyword) so kinds scan as a quiet left rail
-                                // without adding colour to the list.
+                                // Kind icon, coloured so the three kinds separate at a glance:
+                                // a filled header band for a table, a filled vertical band for
+                                // a column, `< >` for a keyword.
                                 let icon = match item.kind {
                                     SuggestionKind::Table => crate::icons::table(),
                                     SuggestionKind::Column => crate::icons::column(),
@@ -636,7 +455,7 @@ pub fn show_popup(
                                 );
                                 egui::Image::new(icon)
                                     .fit_to_exact_size(egui::vec2(ICON, ICON))
-                                    .tint(palette::TEXT_FAINT())
+                                    .tint(kind_color(item.kind))
                                     .paint_at(ui, icon_rect);
 
                                 let label_pos =
@@ -801,6 +620,105 @@ mod tests {
         assert_eq!(c.items[0].insert, "SELECT");
     }
 
+    /// Apply the chosen suggestion the way `accept_suggestion` does: overwrite
+    /// `replace_start..cursor` with `insert`.
+    fn accept(sql: &str, s: &SchemaTree, kind: Option<DbKind>, pick: &str) -> String {
+        let cursor = sql.chars().count();
+        let c = complete(sql, cursor, Some(s), kind, false).unwrap();
+        let item = c
+            .items
+            .iter()
+            .find(|i| i.insert.contains(pick))
+            .unwrap_or_else(|| panic!("no item containing {pick:?} in {:?}", c.items));
+        let mut out: Vec<char> = sql.chars().collect();
+        out.splice(c.replace_start..cursor, item.insert.chars());
+        out.into_iter().collect()
+    }
+
+    #[test]
+    fn accepting_absorbs_an_opening_quote_the_user_typed() {
+        let s = thai_schema();
+        let pg = Some(DbKind::Postgres);
+        // Without a typed quote the suggestion simply brings its own.
+        assert_eq!(
+            accept("SELECT * FROM ลูก", &s, pg, "ลูกค้า"),
+            "SELECT * FROM \"ลูกค้า\""
+        );
+        // With one, it must be overwritten rather than left in front — this used to yield
+        // `FROM ""ลูกค้า"`.
+        assert_eq!(
+            accept("SELECT * FROM \"ลูก", &s, pg, "ลูกค้า"),
+            "SELECT * FROM \"ลูกค้า\""
+        );
+    }
+
+    #[test]
+    fn a_typed_quote_still_reads_as_table_context() {
+        let s = thai_schema();
+        // The `"` must not hide the `FROM` behind it, or columns and keywords crowd out the
+        // table the user is clearly reaching for.
+        let sql = "SELECT * FROM \"ลูก";
+        let c = complete(sql, sql.chars().count(), Some(&s), Some(DbKind::Postgres), false).unwrap();
+        assert_eq!(c.items[0].kind, SuggestionKind::Table);
+    }
+
+    #[test]
+    fn backtick_is_the_identifier_quote_on_mysql() {
+        let s = thai_schema();
+        let my = Some(DbKind::MySql);
+        assert_eq!(
+            accept("SELECT * FROM `ลูก", &s, my, "ลูกค้า"),
+            "SELECT * FROM `ลูกค้า`"
+        );
+        // …and `"` is a *string literal* there, so it is left alone. Suggestions may still
+        // appear, but they must never eat the quote that opened the string.
+        let sql = "SELECT * FROM t WHERE name = \"ลูก";
+        if let Some(c) = complete(sql, sql.chars().count(), Some(&s), my, false) {
+            let quote_at = sql.chars().count() - 4; // the `"` before `ลูก`
+            assert!(c.replace_start > quote_at, "must not absorb a string's quote");
+        }
+    }
+
+    #[test]
+    fn brackets_quote_identifiers_on_sql_server() {
+        let s = thai_schema();
+        assert_eq!(
+            accept("SELECT * FROM [ลูก", &s, Some(DbKind::SqlServer), "ลูกค้า"),
+            "SELECT * FROM \"ลูกค้า\""
+        );
+    }
+
+    #[test]
+    fn columns_complete_after_a_quoted_table_name() {
+        let s = thai_schema();
+        // `"ลูกค้า".` used to offer nothing at all: the qualifier scan stopped at the quote.
+        let sql = "SELECT * FROM \"ลูกค้า\" WHERE \"ลูกค้า\".";
+        let c = complete(sql, sql.chars().count(), Some(&s), None, false).unwrap();
+        assert_eq!(c.items[0].insert, "\"ชื่อ\"");
+        assert_eq!(c.items[0].kind, SuggestionKind::Column);
+    }
+
+    fn thai_schema() -> SchemaTree {
+        SchemaTree {
+            database_name: "db".to_string(),
+            views: Vec::new(),
+            routines: Vec::new(),
+            triggers: Vec::new(),
+            tables: vec![TableInfo {
+                schema: None,
+                name: "ลูกค้า".to_string(),
+                columns: vec![ColumnInfo {
+                    name: "ชื่อ".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    primary_key: false,
+                }],
+                indexes: vec![],
+                foreign_keys: vec![],
+            }],
+        }
+    }
+
     #[test]
     fn multibyte_prefix_does_not_panic() {
         // A Thai prefix (3 bytes/char) once sliced `candidate` on a byte boundary and
@@ -841,5 +759,67 @@ mod tests {
         let sql2 = "SELECT * FROM ลูก";
         let c2 = complete(sql2, sql2.chars().count(), Some(&s), None, false).unwrap();
         assert!(c2.items.iter().any(|i| i.insert == "\"ลูกค้า\""));
+    }
+
+    /// Render the popup with a mix of all three kinds under `theme_key`, so the icon rail's
+    /// colour and glyph legibility can be judged at the size it actually ships at.
+    fn render_popup_snapshot(theme_key: &str, name: &str) {
+        let item = |insert: &str, detail: &str, kind: SuggestionKind| Suggestion {
+            insert: insert.to_string(),
+            detail: detail.to_string(),
+            kind,
+        };
+        let state = State {
+            open: true,
+            selected: 1,
+            items: vec![
+                item("orders", "public", SuggestionKind::Table),
+                item("order_items", "public", SuggestionKind::Table),
+                item("user_id", "orders · integer", SuggestionKind::Column),
+                item("created_at", "orders · timestamptz", SuggestionKind::Column),
+                item("SELECT", "keyword", SuggestionKind::Keyword),
+                item("ORDER BY", "keyword", SuggestionKind::Keyword),
+            ],
+            replace_start: 0,
+            caret_char: 0,
+            anchor: egui::Rect::ZERO,
+        };
+        let theme = crate::theme::ThemeRegistry::load().theme_of(theme_key);
+        let mut setup = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(340.0, 190.0))
+            .with_pixels_per_point(2.0)
+            .build_ui(move |ui| {
+                if !setup {
+                    egui_extras::install_image_loaders(ui.ctx());
+                    crate::theme::set_current(theme);
+                    crate::style::apply(ui.ctx());
+                    setup = true;
+                }
+                ui.painter().rect_filled(
+                    ui.ctx().content_rect(),
+                    0.0,
+                    crate::style::palette::CODE_BG(),
+                );
+                let anchor = egui::Rect::from_min_size(egui::pos2(8.0, 4.0), egui::vec2(1.0, 14.0));
+                show_popup(ui.ctx(), &state, anchor, false);
+            });
+        harness.run_steps(8);
+        harness.snapshot(name);
+    }
+
+    /// Screenshot generator (ignored): the popup on the default dark theme.
+    #[test]
+    #[ignore = "screenshot generator; run manually with --ignored"]
+    fn snapshot_popup() {
+        render_popup_snapshot("midnight-conversational", "autocomplete_popup");
+    }
+
+    /// Screenshot generator (ignored): the same popup on the light theme, where the kind
+    /// hues have to hold up against a white panel.
+    #[test]
+    #[ignore = "screenshot generator; run manually with --ignored"]
+    fn snapshot_popup_light() {
+        render_popup_snapshot("daylight", "autocomplete_popup_light");
     }
 }

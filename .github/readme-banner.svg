@@ -1,0 +1,113 @@
+<svg width="2048" height="560" viewBox="0 0 2048 560" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">plusplus — a fast, native database client</title>
+  <desc id="desc">A playful green banner with the plusplus mark, database badges, and a hand-drawn SQL editor.</desc>
+  <defs>
+    <linearGradient id="logo-tile" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#292B35"/>
+      <stop offset="1" stop-color="#111217"/>
+    </linearGradient>
+    <linearGradient id="logo-ink" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#B6C4FF"/>
+      <stop offset="1" stop-color="#6E8EFF"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="9" stdDeviation="0" flood-color="#2D3436" flood-opacity="0.18"/>
+    </filter>
+    <style>
+      .ink { stroke: #2D3436; stroke-linecap: round; stroke-linejoin: round; }
+      .display { font-family: ui-rounded, "SF Pro Rounded", "Arial Rounded MT Bold", "Trebuchet MS", sans-serif; }
+      .utility { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; }
+    </style>
+  </defs>
+
+  <rect width="2048" height="560" fill="#FFF5E8"/>
+  <rect width="28" height="560" fill="#F5A8B8"/>
+  <circle cx="14" cy="88" r="6" fill="#FFD93D" class="ink" stroke-width="2"/>
+  <circle cx="14" cy="142" r="5" fill="#4D96FF" class="ink" stroke-width="2"/>
+  <circle cx="14" cy="474" r="4" fill="#FF9F43" class="ink" stroke-width="2"/>
+
+  <rect x="48" y="34" width="1958" height="482" rx="44" fill="#6BCB77" class="ink" stroke-width="5"/>
+  <circle cx="104" cy="90" r="22" fill="#FFD93D" class="ink" stroke-width="4"/>
+  <circle cx="1950" cy="96" r="15" fill="#FF9F43" class="ink" stroke-width="4"/>
+  <circle cx="1970" cy="458" r="12" fill="#F5A8B8" class="ink" stroke-width="3"/>
+
+  <!-- Brand mark -->
+  <g filter="url(#shadow)">
+    <rect x="118" y="126" width="154" height="154" rx="36" fill="url(#logo-tile)" class="ink" stroke-width="4"/>
+    <g fill="url(#logo-ink)">
+      <rect x="145" y="192" width="48" height="18" rx="9"/>
+      <rect x="160" y="177" width="18" height="48" rx="9"/>
+      <rect x="197" y="192" width="48" height="18" rx="9"/>
+      <rect x="212" y="177" width="18" height="48" rx="9"/>
+    </g>
+  </g>
+
+  <!-- Product statement -->
+  <text x="318" y="173" class="display" font-size="43" font-weight="800" fill="#2D3436" letter-spacing="-1">plusplus</text>
+  <path d="M318 190 C375 198 442 196 497 186" class="ink" stroke-width="4"/>
+  <text x="118" y="354" class="display" font-size="76" font-weight="800" fill="#2D3436" letter-spacing="-2.5">Query. Inspect. Edit.</text>
+  <text x="121" y="405" class="display" font-size="29" font-weight="600" fill="#34443B">One fast, native workspace for every database.</text>
+
+  <!-- Database badges -->
+  <g class="utility" font-size="18" font-weight="700" fill="#2D3436" text-anchor="middle">
+    <g><rect x="118" y="444" width="156" height="42" rx="21" fill="#FFF8F0" class="ink" stroke-width="3"/><text x="196" y="471">POSTGRES</text></g>
+    <g><rect x="286" y="444" width="126" height="42" rx="21" fill="#FFD93D" class="ink" stroke-width="3"/><text x="349" y="471">MYSQL</text></g>
+    <g><rect x="424" y="444" width="168" height="42" rx="21" fill="#F5A8B8" class="ink" stroke-width="3"/><text x="508" y="471">SQL SERVER</text></g>
+    <g><rect x="604" y="444" width="130" height="42" rx="21" fill="#AFCBFF" class="ink" stroke-width="3"/><text x="669" y="471">SQLITE</text></g>
+  </g>
+
+  <!-- A data path connecting the product statement to the editor -->
+  <path d="M780 397 C842 359 871 431 934 392 C997 353 1029 421 1088 374 C1142 331 1170 344 1217 320" class="ink" stroke-width="13"/>
+  <path d="M780 397 C842 359 871 431 934 392 C997 353 1029 421 1088 374 C1142 331 1170 344 1217 320" stroke="#FFF8F0" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="780" cy="397" r="11" fill="#4D96FF" class="ink" stroke-width="4"/>
+  <circle cx="1217" cy="320" r="9" fill="#FFD93D" class="ink" stroke-width="4"/>
+  <g transform="translate(1004 310) rotate(-9)">
+    <path d="M-14 0H14M0-14V14" stroke="#F5A8B8" stroke-width="8" stroke-linecap="round"/>
+    <path d="M-9 0H9M0-9V9" class="ink" stroke-width="4"/>
+  </g>
+
+  <!-- Hand-drawn SQL editor -->
+  <g filter="url(#shadow)">
+    <rect x="1212" y="100" width="654" height="348" rx="30" fill="#FFF8F0" class="ink" stroke-width="5"/>
+    <path d="M1212 164H1866" class="ink" stroke-width="4"/>
+    <circle cx="1252" cy="132" r="9" fill="#F5A8B8" class="ink" stroke-width="3"/>
+    <circle cx="1284" cy="132" r="9" fill="#FFD93D" class="ink" stroke-width="3"/>
+    <circle cx="1316" cy="132" r="9" fill="#6BCB77" class="ink" stroke-width="3"/>
+    <rect x="1644" y="116" width="176" height="34" rx="17" fill="#2D3436"/>
+    <path d="M1666 127L1677 133L1666 139V127Z" fill="#6BCB77"/>
+    <text x="1690" y="139" class="utility" font-size="16" font-weight="700" fill="#FFF8F0">RUN QUERY</text>
+
+    <g class="utility" font-size="25" font-weight="700">
+      <text x="1260" y="224" fill="#8A6BC7">SELECT</text>
+      <text x="1372" y="224" fill="#2D3436">customer, total</text>
+      <text x="1260" y="269" fill="#8A6BC7">FROM</text>
+      <text x="1344" y="269" fill="#D66B4C">orders</text>
+      <text x="1260" y="314" fill="#8A6BC7">WHERE</text>
+      <text x="1360" y="314" fill="#2D3436">status =</text>
+      <text x="1512" y="314" fill="#2E8C58">'ready'</text>
+      <text x="1260" y="359" fill="#8A6BC7">ORDER BY</text>
+      <text x="1403" y="359" fill="#2D3436">created_at</text>
+      <text x="1568" y="359" fill="#8A6BC7">DESC;</text>
+    </g>
+    <path d="M1260 397 C1385 403 1498 391 1608 398" stroke="#AFCBFF" stroke-width="7" stroke-linecap="round"/>
+    <circle cx="1788" cy="394" r="19" fill="#FFD93D" class="ink" stroke-width="3"/>
+    <path d="M1779 394H1797M1788 385V403" class="ink" stroke-width="3"/>
+  </g>
+
+  <!-- Small product-specific doodles -->
+  <g transform="translate(1884 74) rotate(8)">
+    <ellipse cx="0" cy="0" rx="17" ry="14" fill="#FFD93D" class="ink" stroke-width="3"/>
+    <path d="M-12-3H12M-11 5H11" class="ink" stroke-width="3"/>
+    <ellipse cx="-19" cy="-7" rx="10" ry="6" fill="#FFF8F0" class="ink" stroke-width="3" transform="rotate(-24)"/>
+    <ellipse cx="19" cy="-7" rx="10" ry="6" fill="#FFF8F0" class="ink" stroke-width="3" transform="rotate(24)"/>
+    <circle cx="7" cy="-4" r="2" fill="#2D3436"/>
+  </g>
+  <g transform="translate(1912 468)">
+    <path d="M0 0C5 16 3 28 8 41" stroke="#FFF8F0" stroke-width="8" stroke-linecap="round"/>
+    <path d="M0 0C5 16 3 28 8 41" class="ink" stroke-width="4"/>
+    <ellipse cy="-10" rx="10" ry="15" fill="#FF9F43" class="ink" stroke-width="3"/>
+    <ellipse cx="-13" cy="0" rx="10" ry="15" fill="#FF9F43" class="ink" stroke-width="3" transform="rotate(-55)"/>
+    <ellipse cx="13" cy="0" rx="10" ry="15" fill="#FF9F43" class="ink" stroke-width="3" transform="rotate(55)"/>
+    <circle r="8" fill="#FFD93D" class="ink" stroke-width="3"/>
+  </g>
+</svg>

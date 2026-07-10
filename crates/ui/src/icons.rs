@@ -35,6 +35,7 @@ icon_fns! {
     trash      => "../assets/icons/trash.svg",
     database   => "../assets/icons/database.svg",
     table      => "../assets/icons/table.svg",
+    view       => "../assets/icons/view.svg",
     conn_cloud => "../assets/icons/cloud.svg",
     conn_storage => "../assets/icons/disk.svg",
     conn_star  => "../assets/icons/star-emphasis.svg",

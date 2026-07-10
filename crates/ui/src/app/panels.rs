@@ -1447,7 +1447,7 @@ impl DbGuiApp {
                                     actions.push(Action::OpenNewTable);
                                     ui.close();
                                 }
-                                if components::button(ui, icons::table(), "New View…", true)
+                                if components::button(ui, icons::view(), "New View…", true)
                                     .clicked()
                                 {
                                     actions.push(Action::OpenNewView);
@@ -1631,12 +1631,22 @@ impl DbGuiApp {
             s.schema.as_deref() == table.schema.as_deref() && s.table == table.name
         });
 
-        let id = ui.make_persistent_id((id_salt, table.name.as_str()));
+        let id = ui.make_persistent_id((
+            id_salt,
+            table.schema.as_deref(),
+            table.name.as_str(),
+        ));
         let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, false);
 
         let full_w = ui.available_width();
         let (row_rect, row_resp) =
             ui.allocate_exact_size(egui::vec2(full_w, ROW_H), egui::Sense::click());
+        // Keep the row's height in the outer scroll area, but avoid building its icons,
+        // interactions, and menus when a collapsed table is outside the viewport. Large schemas
+        // commonly contain thousands of tables, so this removes most per-frame widget work.
+        if !ui.is_rect_visible(row_rect) && state.openness(ui.ctx()) <= 0.0 {
+            return;
+        }
         let row_resp = row_resp.on_hover_text("Click to preview · double-click to open");
 
         // Pill background: a soft accent-tinted selection fill when selected (no border), a
@@ -1719,7 +1729,12 @@ impl DbGuiApp {
                     // Pin (star) toggle: always shown when pinned, otherwise only on hover.
                     let star_resp = ui.interact(
                         star_rect,
-                        ui.make_persistent_id((id_salt, "star", table.name.as_str())),
+                        ui.make_persistent_id((
+                            id_salt,
+                            "star",
+                            table.schema.as_deref(),
+                            table.name.as_str(),
+                        )),
                         egui::Sense::click(),
                     );
                     if (pinned || selected || row_resp.hovered()) && ui.is_rect_visible(star_rect) {
@@ -1780,6 +1795,7 @@ impl DbGuiApp {
                     .preview_query(&table.qualified(active.db.kind()), 100),
                 source,
                 pin: open_pin,
+                kind: crate::components::QueryTabKind::Table,
             });
         }
 
@@ -1831,7 +1847,8 @@ impl DbGuiApp {
         if !views.is_empty() {
             object_group(ui, "views_group", "Views", views.len(), |ui| {
                 for view in views {
-                    let id = ui.make_persistent_id(("view", view.name.as_str()));
+                    let id =
+                        ui.make_persistent_id(("view", view.schema.as_deref(), view.name.as_str()));
                     let (_t, header, _b) =
                         egui::collapsing_header::CollapsingState::load_with_default_open(
                             ui.ctx(),
@@ -1839,7 +1856,8 @@ impl DbGuiApp {
                             false,
                         )
                         .show_header(ui, |ui| {
-                            icons::show_native(ui, icons::table(), 15.0);
+                            let kind = crate::components::QueryTabKind::View;
+                            icons::show_colored(ui, kind.icon(), 15.0, kind.color());
                             ui.add_space(2.0);
                             let label = if view.materialized {
                                 format!("{} · materialized", view.name)
@@ -1904,6 +1922,7 @@ impl DbGuiApp {
                             sql: kind.preview_query(&view.qualified(kind), 100),
                             source,
                             pin: resp.double_clicked(),
+                            kind: crate::components::QueryTabKind::View,
                         });
                     }
                 }
@@ -1925,26 +1944,55 @@ impl DbGuiApp {
                 continue;
             }
             object_group(ui, key, title, routines.len(), |ui| {
-                for r in routines {
-                    let row = object_leaf_row(ui, icons::code(), &r.name, &r.signature());
-                    row.context_menu(|ui| {
-                        ui.set_min_width(170.0);
-                        if components::button(ui, icons::edit(), "Edit…", true).clicked() {
-                            actions.push(Action::OpenEditRoutine(r.clone()));
-                            ui.close();
+                virtualized_object_rows(ui, &routines, |ui, index, r| {
+                    let signature = r.signature();
+                    let tab_kind = match r.kind {
+                        dbcore::RoutineKind::Function => {
+                            crate::components::QueryTabKind::Function
                         }
-                        if components::button(ui, icons::trash(), "Drop…", true).clicked() {
-                            actions.push(Action::DropRoutine(r.clone()));
-                            ui.close();
+                        dbcore::RoutineKind::Procedure => {
+                            crate::components::QueryTabKind::Procedure
                         }
-                    });
-                    if row.clicked() || row.double_clicked() {
-                        actions.push(Action::OpenDefinition {
-                            title: r.name.clone(),
-                            sql: r.body.clone(),
-                        });
-                    }
-                }
+                    };
+                    ui.push_id(
+                        (
+                            "routine",
+                            index,
+                            r.schema.as_deref(),
+                            r.name.as_str(),
+                            signature.as_str(),
+                        ),
+                        |ui| {
+                            let row = object_leaf_row(
+                                ui,
+                                tab_kind.icon(),
+                                tab_kind.color(),
+                                &r.name,
+                                &signature,
+                            );
+                            row.context_menu(|ui| {
+                                ui.set_min_width(170.0);
+                                if components::button(ui, icons::edit(), "Edit…", true).clicked()
+                                {
+                                    actions.push(Action::OpenEditRoutine((*r).clone()));
+                                    ui.close();
+                                }
+                                if components::button(ui, icons::trash(), "Drop…", true).clicked()
+                                {
+                                    actions.push(Action::DropRoutine((*r).clone()));
+                                    ui.close();
+                                }
+                            });
+                            if row.clicked() || row.double_clicked() {
+                                actions.push(Action::OpenDefinition {
+                                    title: r.name.clone(),
+                                    sql: r.body.clone(),
+                                    kind: tab_kind,
+                                });
+                            }
+                        },
+                    );
+                });
             });
         }
 
@@ -1957,28 +2005,49 @@ impl DbGuiApp {
             .collect();
         if !triggers.is_empty() {
             object_group(ui, "trig_group", "Triggers", triggers.len(), |ui| {
-                for t in triggers {
-                    let row = object_leaf_row(ui, icons::play(), &t.name, &t.display());
-                    row.context_menu(|ui| {
-                        ui.set_min_width(170.0);
-                        if components::button(ui, icons::edit(), "Edit Trigger…", true).clicked()
-                        {
-                            actions.push(Action::OpenEditTrigger(t.clone()));
-                            ui.close();
-                        }
-                        if components::button(ui, icons::trash(), "Drop Trigger…", true).clicked()
-                        {
-                            actions.push(Action::DropTrigger(t.clone()));
-                            ui.close();
-                        }
-                    });
-                    if row.clicked() || row.double_clicked() {
-                        actions.push(Action::OpenDefinition {
-                            title: t.name.clone(),
-                            sql: t.action.clone(),
-                        });
-                    }
-                }
+                virtualized_object_rows(ui, &triggers, |ui, index, t| {
+                    let tab_kind = crate::components::QueryTabKind::Trigger;
+                    ui.push_id(
+                        (
+                            "trigger",
+                            index,
+                            t.schema.as_deref(),
+                            t.table.as_str(),
+                            t.name.as_str(),
+                        ),
+                        |ui| {
+                            let row = object_leaf_row(
+                                ui,
+                                tab_kind.icon(),
+                                tab_kind.color(),
+                                &t.name,
+                                &t.display(),
+                            );
+                            row.context_menu(|ui| {
+                                ui.set_min_width(170.0);
+                                if components::button(ui, icons::edit(), "Edit Trigger…", true)
+                                    .clicked()
+                                {
+                                    actions.push(Action::OpenEditTrigger((*t).clone()));
+                                    ui.close();
+                                }
+                                if components::button(ui, icons::trash(), "Drop Trigger…", true)
+                                    .clicked()
+                                {
+                                    actions.push(Action::DropTrigger((*t).clone()));
+                                    ui.close();
+                                }
+                            });
+                            if row.clicked() || row.double_clicked() {
+                                actions.push(Action::OpenDefinition {
+                                    title: t.name.clone(),
+                                    sql: t.action.clone(),
+                                    kind: tab_kind,
+                                });
+                            }
+                        },
+                    );
+                });
             });
         }
     }
@@ -4732,21 +4801,115 @@ fn object_group(
     .show(ui, body);
 }
 
+const OBJECT_ROW_HEIGHT: f32 = 22.0;
+
+/// Reserve the full height of a large object list, but build widgets only for rows intersecting
+/// the outer schema scroll area's clip rectangle. This keeps expanding a group with thousands of
+/// routines cheap without introducing a nested scrollbar.
+fn virtualized_object_rows<T>(
+    ui: &mut egui::Ui,
+    items: &[T],
+    mut show_row: impl FnMut(&mut egui::Ui, usize, &T),
+) {
+    if items.is_empty() {
+        return;
+    }
+
+    let spacing = ui.spacing().item_spacing.y;
+    let stride = OBJECT_ROW_HEIGHT + spacing;
+    let full_height = stride * items.len() as f32 - spacing;
+    let (_, full_rect) = ui.allocate_space(egui::vec2(ui.available_width().max(0.0), full_height));
+    let visible = visible_object_row_range(full_rect, ui.clip_rect(), stride, items.len());
+    if visible.is_empty() {
+        return;
+    }
+
+    let rows_rect = egui::Rect::from_min_max(
+        egui::pos2(
+            full_rect.left(),
+            full_rect.top() + visible.start as f32 * stride,
+        ),
+        egui::pos2(
+            full_rect.right(),
+            full_rect.top() + visible.end as f32 * stride - spacing,
+        ),
+    );
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rows_rect), |ui| {
+        ui.skip_ahead_auto_ids(visible.start);
+        for index in visible {
+            show_row(ui, index, &items[index]);
+        }
+    });
+}
+
+fn visible_object_row_range(
+    full_rect: egui::Rect,
+    clip_rect: egui::Rect,
+    stride: f32,
+    total: usize,
+) -> std::ops::Range<usize> {
+    if total == 0 || stride <= 0.0 || !full_rect.intersects(clip_rect) {
+        return 0..0;
+    }
+    let first = ((clip_rect.top() - full_rect.top()) / stride)
+        .floor()
+        .max(0.0) as usize;
+    let end = (((clip_rect.bottom() - full_rect.top()) / stride).ceil() as usize + 1).min(total);
+    first.min(end)..end
+}
+
 /// A single clickable leaf row (a routine or trigger) in the sidebar tree: an icon, the object
-/// name, and `detail` shown as a hover tooltip. Returns the name label's response so the caller
-/// can react to clicks.
+/// name, and `detail` shown as a hover tooltip. The full row is interactive so a click beside a
+/// short name still opens the intended object.
 fn object_leaf_row(
     ui: &mut egui::Ui,
     icon: egui::ImageSource<'static>,
+    color: egui::Color32,
     name: &str,
     detail: &str,
 ) -> egui::Response {
-    ui.horizontal(|ui| {
-        icons::show_weak(ui, icon, 14.0);
-        ui.add_space(2.0);
-        components::truncated_label(ui, name, Some(detail), false, egui::Sense::click())
-    })
-    .inner
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().max(0.0), OBJECT_ROW_HEIGHT),
+        egui::Sense::click(),
+    );
+    if ui.is_rect_visible(rect) {
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
+                icons::show_colored(ui, icon, 14.0, color);
+                ui.add_space(2.0);
+                components::truncated_label(ui, name, None, false, egui::Sense::hover());
+            },
+        );
+    }
+    response.on_hover_text(detail)
+}
+
+#[cfg(test)]
+mod object_row_tests {
+    use super::visible_object_row_range;
+
+    #[test]
+    fn large_object_lists_only_build_visible_rows() {
+        let full = egui::Rect::from_min_size(egui::pos2(0.0, 100.0), egui::vec2(300.0, 30_000.0));
+        let top = egui::Rect::from_min_size(egui::pos2(0.0, 100.0), egui::vec2(300.0, 300.0));
+        let middle = egui::Rect::from_min_size(egui::pos2(0.0, 15_100.0), egui::vec2(300.0, 300.0));
+
+        assert_eq!(visible_object_row_range(full, top, 30.0, 1_024), 0..11);
+        assert_eq!(
+            visible_object_row_range(full, middle, 30.0, 1_024),
+            500..511
+        );
+    }
+
+    #[test]
+    fn offscreen_object_lists_build_no_rows() {
+        let full = egui::Rect::from_min_size(egui::pos2(0.0, 500.0), egui::vec2(300.0, 300.0));
+        let clip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 400.0));
+        assert_eq!(visible_object_row_range(full, clip, 30.0, 10), 0..0);
+    }
 }
 
 /// The Structure view of a table tab: its introspected columns, indexes, and foreign keys
