@@ -42,6 +42,11 @@ pub enum CoreError {
     #[error("ssh tunnel error: {0}")]
     Ssh(String),
 
+    /// A file being imported was malformed: a ragged CSV row, a nested JSON value, a top-level
+    /// document that is not an array of objects. Carries a message naming the offending row.
+    #[error("import error: {0}")]
+    Import(String),
+
     /// The query was cancelled by the user (Cancel button). Carried as a distinct variant —
     /// not a generic failure — so the UI can show "Query cancelled" instead of a red error
     /// and skip recording it as a failed statement.

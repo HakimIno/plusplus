@@ -12,12 +12,14 @@ pub mod audit;
 pub mod backends;
 pub mod bookmarks;
 pub mod clipboard;
+pub mod coerce;
 pub mod config;
 pub mod database;
 pub mod error;
 pub mod export;
 pub mod favorites;
 pub mod history;
+pub mod import;
 pub mod model;
 pub mod safety;
 pub mod secrets;
@@ -28,10 +30,12 @@ use std::sync::Arc;
 
 pub use bookmarks::Bookmark;
 pub use clipboard::{copy_rows, CopyFormat};
+pub use coerce::{CoerceError, EditorKind};
 pub use database::Database;
 pub use error::{CoreError, Result};
 pub use export::{ExportFormat, RowSink};
 pub use favorites::Favorite;
+pub use import::{ImportFormat, Preview, Record, Target};
 pub use model::{
     build_add_column_sql, build_add_fk_sql, build_alter_column_sql, build_clone_table_sql,
     build_count_sql, build_create_index_sql, build_create_routine_sql, build_create_table_sql,
@@ -476,6 +480,197 @@ mod tests {
             &[("k", &Value::Int(1))]
         )
         .is_none());
+    }
+
+    /// Coerce every record of `path` against `targets` and insert them in one transaction —
+    /// exactly what the UI's `run_import` does, minus the progress messages.
+    async fn import_file(
+        db: &dyn Database,
+        path: &std::path::Path,
+        fmt: import::ImportFormat,
+        table: &str,
+        targets: &[import::Target],
+    ) -> std::result::Result<usize, String> {
+        let reader = import::read_records(path, fmt, true).map_err(|e| e.to_string())?;
+        let mut rows = Vec::new();
+        for (i, rec) in reader.enumerate() {
+            let rec = rec.map_err(|e| e.to_string())?;
+            rows.push(import::coerce_row(&rec, targets, fmt, i + 1).map_err(|e| e.to_string())?);
+        }
+        let names: Vec<&str> = targets.iter().map(|t| t.name.as_str()).collect();
+        let stmts = import::build_insert_batches(DbKind::Sqlite, None, table, &names, &rows)
+            .map_err(|e| e.to_string())?;
+        db.execute_transaction(&stmts)
+            .await
+            .map(|_| rows.len())
+            .map_err(|e| e.to_string())
+    }
+
+    fn target(name: &str, ty: &str, source: usize) -> import::Target {
+        import::Target {
+            name: name.to_string(),
+            kind: coerce::EditorKind::classify(ty),
+            source,
+        }
+    }
+
+    /// The real round trip against a live database: export a table to CSV, wipe it, import the
+    /// file back, and confirm every value survived — including the ones CSV has to quote.
+    #[tokio::test]
+    async fn exported_csv_imports_back_into_an_identical_table() {
+        let (db, _guard) = temp_db().await;
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, score REAL, note TEXT)")
+            .await
+            .unwrap();
+        // Values that exercise CSV quoting, unicode, and NULL.
+        db.execute(
+            "INSERT INTO t (id, name, score, note) VALUES \
+             (1, 'plain', 1.5, 'ok'), \
+             (2, 'has,comma and \"quotes\"', 2.25, NULL), \
+             (3, 'line
+break', 3.0, 'สวัสดี')",
+        )
+        .await
+        .unwrap();
+
+        let mut path = temp_db_path();
+        path.set_extension("csv");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut sink = ExportFormat::Csv.sink(std::io::BufWriter::new(file));
+        let exported = db
+            .export_query("SELECT id, name, score, note FROM t ORDER BY id", &mut *sink)
+            .await
+            .unwrap();
+        drop(sink);
+        assert_eq!(exported, 3);
+
+        db.execute("DELETE FROM t").await.unwrap();
+        assert_eq!(
+            db.execute("SELECT COUNT(*) FROM t").await.unwrap().rows[0][0],
+            Value::Int(0)
+        );
+
+        let targets = [
+            target("id", "INTEGER", 0),
+            target("name", "TEXT", 1),
+            target("score", "REAL", 2),
+            target("note", "TEXT", 3),
+        ];
+        let n = import_file(db.as_ref(), &path, import::ImportFormat::Csv, "t", &targets)
+            .await
+            .expect("import should succeed");
+        assert_eq!(n, 3);
+
+        let res = db
+            .execute("SELECT id, name, score, note FROM t ORDER BY id")
+            .await
+            .unwrap();
+        assert_eq!(res.row_count(), 3);
+        assert_eq!(res.rows[0][1], Value::Text("plain".into()));
+        assert_eq!(res.rows[0][2], Value::Float(1.5));
+        assert_eq!(
+            res.rows[1][1],
+            Value::Text("has,comma and \"quotes\"".into()),
+            "CSV quoting round-tripped"
+        );
+        assert!(res.rows[1][3].is_null(), "an empty CSV field is NULL again");
+        assert_eq!(res.rows[2][1], Value::Text("line\nbreak".into()));
+        assert_eq!(res.rows[2][3], Value::Text("สวัสดี".into()));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A value the target column can't hold is caught before any SQL runs, and names the
+    /// offending row and column.
+    #[tokio::test]
+    async fn a_bad_value_aborts_the_import_before_touching_the_database() {
+        let (db, _guard) = temp_db().await;
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)")
+            .await
+            .unwrap();
+
+        let mut path = temp_db_path();
+        path.set_extension("csv");
+        std::fs::write(&path, "id,n\r\n1,10\r\n2,abc\r\n").unwrap();
+
+        let targets = [target("id", "INTEGER", 0), target("n", "INTEGER", 1)];
+        let err = import_file(db.as_ref(), &path, import::ImportFormat::Csv, "t", &targets)
+            .await
+            .expect_err("a non-integer in an INTEGER column must fail");
+        assert!(err.contains("row 2"), "{err}");
+        assert!(err.contains("column `n`"), "{err}");
+        assert!(err.contains("an integer"), "{err}");
+
+        let res = db.execute("SELECT COUNT(*) FROM t").await.unwrap();
+        assert_eq!(res.rows[0][0], Value::Int(0), "nothing was written");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A failure the database only discovers mid-transaction (a duplicate primary key) rolls
+    /// the whole import back: the pre-existing row survives, none of the file's rows land.
+    #[tokio::test]
+    async fn a_constraint_violation_rolls_the_whole_import_back() {
+        let (db, _guard) = temp_db().await;
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)")
+            .await
+            .unwrap();
+        db.execute("INSERT INTO t (id, n) VALUES (1, 100)")
+            .await
+            .unwrap();
+
+        let mut path = temp_db_path();
+        path.set_extension("csv");
+        // id=2 is fine; id=1 collides with the row already there.
+        std::fs::write(&path, "id,n\r\n2,200\r\n1,999\r\n").unwrap();
+
+        let targets = [target("id", "INTEGER", 0), target("n", "INTEGER", 1)];
+        let err = import_file(db.as_ref(), &path, import::ImportFormat::Csv, "t", &targets)
+            .await
+            .expect_err("duplicate primary key must fail");
+        assert!(err.to_lowercase().contains("unique"), "{err}");
+
+        let res = db.execute("SELECT id, n FROM t").await.unwrap();
+        assert_eq!(res.row_count(), 1, "the valid row must not have been kept");
+        assert_eq!(res.rows[0][0], Value::Int(1));
+        assert_eq!(res.rows[0][1], Value::Int(100), "the old row is untouched");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// JSON imports too, with `null` distinguished from `""`.
+    #[tokio::test]
+    async fn json_imports_with_null_distinct_from_empty_string() {
+        let (db, _guard) = temp_db().await;
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, note TEXT)")
+            .await
+            .unwrap();
+
+        let mut path = temp_db_path();
+        path.set_extension("json");
+        std::fs::write(
+            &path,
+            r#"[{"id":1,"note":null},{"id":2,"note":""},{"id":3,"note":"hi"}]"#,
+        )
+        .unwrap();
+
+        // serde_json sorts object keys: id, note.
+        let targets = [target("id", "INTEGER", 0), target("note", "TEXT", 1)];
+        let n = import_file(db.as_ref(), &path, import::ImportFormat::Json, "t", &targets)
+            .await
+            .expect("json import should succeed");
+        assert_eq!(n, 3);
+
+        let res = db.execute("SELECT id, note FROM t ORDER BY id").await.unwrap();
+        assert!(res.rows[0][1].is_null(), "JSON null is SQL NULL");
+        assert_eq!(
+            res.rows[1][1],
+            Value::Text(String::new()),
+            "JSON \"\" stays an empty string, not NULL"
+        );
+        assert_eq!(res.rows[2][1], Value::Text("hi".into()));
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

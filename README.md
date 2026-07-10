@@ -2,82 +2,91 @@
   <img src=".github/readme-banner.jpg" alt="plusplus — fast, native database GUI" width="100%">
 </p>
 
-<p align="center"><strong>plusplus</strong> is a fast, native database GUI in the spirit of TablePlus — written in Rust.
-<br />One window for everything: browse your schema, run SQL, and edit results — without ever waiting on the network.</p>
+<p align="center">
+  <strong>A fast, native database client for PostgreSQL, MySQL, SQL Server, and SQLite.</strong><br>
+  A lightweight, open-source TablePlus alternative built in Rust — with no Electron and no web view.
+</p>
 
-<p align="center"><sub>PostgreSQL · MySQL / MariaDB · SQL Server · SQLite</sub></p>
+<p align="center">
+  <a href="https://github.com/HakimIno/plusplus/releases/latest"><strong>Download latest release</strong></a>
+  · <a href="#quick-start">Quick start</a>
+  · <a href="#why-plusplus">Why plusplus</a>
+  · <a href="#contributing">Contribute</a>
+</p>
 
-<p align="center">Grab a build from <a href="https://github.com/HakimIno/plusplus/releases">GitHub Releases</a>, or build from source — see <a href="#try-it">Try it</a> below.</p>
-
----
-
-## Why it feels fast
-
-plusplus is a single native binary — no Electron, no web view, no runtime to boot.
-It opens instantly and stays smooth no matter how large the data gets.
-
-- **The UI never blocks.** Every query, count, and export runs off the main thread.
-  You can keep scrolling, typing, and switching tabs while a million rows stream in.
-- **Grids that don't choke.** Results render in a virtualized grid that stays smooth
-  past 100k rows — resize columns, sort, and filter without a hitch.
-- **Million-row tables, one page at a time.** Large tables are paged server-side, so
-  you browse `1–1,000 of 1,234,567` without dragging the whole table over the wire.
-- **Memory-safe by design.** Queries stream off the wire and stop at a safe cap, so an
-  accidental `SELECT * FROM huge` can't take the app down.
-- **One interface, four databases.** Postgres, MySQL/MariaDB, SQL Server, and SQLite
-  all behave identically — same grid, same editing, same shortcuts.
+<p align="center"><sub>PostgreSQL · MySQL / MariaDB · SQL Server · SQLite · macOS · Windows · Linux</sub></p>
 
 ---
 
-## What you can do
+## See it in action
 
-**Browse any database instantly.**
-Connect and the whole schema appears in a filterable sidebar — tables, columns,
-primary keys, indexes, and foreign keys. Single-click to preview rows, double-click
-to open a tab.
+<img src="crates/ui/tests/snapshots/object_browser.png" alt="plusplus showing a SQLite schema browser and SQL editor" width="100%">
 
-**See how everything connects.**
-One click opens your database as a live ER diagram: every table a box, every foreign
-key a curve, auto-arranged and fully pannable and zoomable. It tracks schema changes
-as they happen.
+Connect to a database, explore its schema, run SQL, edit rows safely, and keep working
+while large results stream in. The bundled SQLite sample lets you try the full workflow
+without setting up a server.
 
-**Edit data right in the grid.**
-When a result maps back to a single table, cells become editable in place. Add rows,
-delete rows, tweak values — everything is staged and shown in colour until you hit
-save, so nothing touches the database until you mean it.
+## Why plusplus
 
-**Export whole tables in seconds.**
-Right-click any table, then Export Table, then CSV or JSON. The export streams
-server-side, straight to disk, with no row cap — so even multi-million-row tables
-export whole while the app stays responsive.
+| If you need… | plusplus gives you… |
+| --- | --- |
+| A responsive client for large data | A virtualized, server-paged grid that stays smooth beyond 100k rows. |
+| Confidence around production databases | Confirmation for destructive SQL, no-`WHERE` warnings, and an optional read-only mode enforced at the database session. |
+| A focused native desktop app | One Rust binary: no Electron, browser runtime, or telemetry. |
+| One workflow across databases | The same schema browser, editor, grid, shortcuts, and staged edits for Postgres, MySQL/MariaDB, SQL Server, and SQLite. |
 
----
+### Built for everyday database work
 
-## More that's built in
+- **Explore a schema quickly.** Filter tables, columns, keys, indexes, views, and triggers; preview rows with one click.
+- **Run queries without freezing the UI.** Queries, counts, and exports run away from the main thread, so you can keep navigating while results stream in.
+- **Edit deliberately.** Cell edits, inserted rows, and deletions stay staged until you save; discard them any time.
+- **Understand relationships.** Open a pannable, zoomable ER diagram directly from the schema.
+- **Export without loading everything into memory.** Stream complete tables to CSV or JSON.
+- **Connect safely.** TLS (including verify-full and mutual TLS), SSH tunnels, OS-keychain secrets, query history, and a local audit log are included.
 
-- **Safe on production.** Mark a connection *production* and destructive statements
-  (`UPDATE`, `DELETE`, `DROP`, `TRUNCATE`, `ALTER`, `MERGE`) pause for confirmation —
-  with a clear warning when an `UPDATE` or `DELETE` has no `WHERE`. Or go further and
-  mark it *read-only*: writes are blocked outright, enforced both in the app and at the
-  database session level. See [SECURITY.md](SECURITY.md) for the full security checklist
-  (keychain-only secrets, TLS everywhere, signed updates, audit log, no telemetry).
-- **Connect through anything.** Per-connection SSL (up to verify-full and mutual TLS)
-  and optional SSH tunnels through a bastion host. Passwords and keys live in the OS
-  keychain, never on disk in plaintext.
-- **Query history.** Every statement is logged with its connection, time, duration,
-  and outcome — replay or copy any of it from a live side panel.
-- **Independent query tabs.** Each tab is its own editor with syntax highlighting, its
-  own connection, result, sort, and filter — and they all persist across restarts.
-- **Thai-friendly.** A Thai-capable font is embedded everywhere; everything is UTF-8
-  end to end.
-- **Themes.** Carbon, Midnight, and Daylight built in and remembered across runs —
-  plus custom themes: drop a `*.json` palette into the themes folder and pick it in
-  Settings. See [docs/THEMES.md](docs/THEMES.md).
+## Quick start
 
-### Keyboard-first
+### Download an app
+
+Get the latest signed build from [GitHub Releases](https://github.com/HakimIno/plusplus/releases/latest).
+
+| Platform | Download | Notes |
+| --- | --- | --- |
+| macOS | `.dmg` | Open the disk image and move plusplus to Applications. |
+| Windows | `.zip` | Extract it and run `plusplus.exe`. |
+| Linux | `.AppImage` | Make it executable, then run it. |
+
+Release packages are accompanied by a Minisign signature. See [release signing](docs/RELEASE_SIGNING.md) for verification details.
+
+### Try it from source
+
+SQLite support is bundled, so you can launch the app immediately:
+
+```bash
+cargo run --bin plusplus
+```
+
+Then add `examples/sample.sqlite` as a SQLite connection. It is a small Thai e-commerce
+database with linked tables and real-looking order history, ideal for trying the grid,
+staged editing, and ER diagram.
+
+### Build on your platform
+
+```bash
+# macOS — build, package, and install in /Applications
+scripts/release.sh --install
+
+# Linux — install dependencies, build, smoke-test, then run
+scripts/linux-build.sh --install-deps --install-rust --release --smoke
+scripts/linux-build.sh --release --run
+```
+
+Windows builds and portable ZIPs are produced by CI; use the release download above.
+
+## Keyboard-first
 
 | Shortcut | Action |
-|---|---|
+| --- | --- |
 | `Cmd/Ctrl + Enter` | Run query |
 | `Cmd/Ctrl + S` | Save staged edits |
 | `Cmd/Ctrl + R` | Reload result |
@@ -86,42 +95,28 @@ export whole while the app stays responsive.
 | `Cmd/Ctrl + T / W` | Open / close tab |
 | `Cmd/Ctrl + F` | Toggle filter bar |
 
----
+## Security and privacy
 
-## Try it
+Secrets stay in the operating system keychain rather than plaintext config files. You can
+mark a connection as production or read-only, use TLS and SSH tunnels, and review a local
+audit log. Read the [security checklist](SECURITY.md) before using a production database.
 
-SQLite is bundled, so there's nothing else to install.
+## Contributing
 
-```bash
-cargo run --bin plusplus
-```
+Feedback is especially useful for database-specific workflows, missing drivers, and UX
+rough edges. Please open an [issue](https://github.com/HakimIno/plusplus/issues) with the
+database/version you use, the expected workflow, and a screenshot or minimal reproduction
+when possible.
 
-A sample database ships at `examples/sample.sqlite` — add it as a SQLite connection to
-explore a small Thai e-commerce shop (linked tables, foreign keys in every flavour,
-real order history) and see the schema browser, grid, and ER diagram with real data.
+Themes are the first contribution point: add a JSON palette and share it using the
+[theme format](docs/THEMES.md). Pull requests are welcome too.
 
-## Install on macOS
+## Roadmap
 
-```bash
-scripts/release.sh --install     # build, package, and replace /Applications/plusplus.app
-```
-
-Installed copies check [GitHub Releases](https://github.com/HakimIno/plusplus/releases)
-on launch; when a newer build is published, an **Update** button appears in the app and
-updates in place — no manual reinstall.
-
-## Run on Linux
-
-Ubuntu, Debian, Fedora, Arch, and openSUSE can use the helper script (CI smoke-tests
-this path on Ubuntu, Debian, and Fedora):
-
-```bash
-scripts/linux-build.sh --install-deps --install-rust --release --smoke
-scripts/linux-build.sh --release --run
-```
+The current focus is making the everyday connection → query → inspect → edit loop feel
+fast and trustworthy across all four supported database families. Proposed work and bugs
+will be tracked in [GitHub Issues](https://github.com/HakimIno/plusplus/issues).
 
 ---
 
-<div align="center">
-<sub>Built with Rust · <a href="https://github.com/HakimIno/plusplus">github.com/HakimIno/plusplus</a></sub>
-</div>
+<p align="center"><sub>Built with Rust · <a href="https://github.com/HakimIno/plusplus">github.com/HakimIno/plusplus</a></sub></p>

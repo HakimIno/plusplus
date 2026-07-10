@@ -67,6 +67,16 @@ impl DbKind {
             _ => format!("\"{}\"", ident.replace('"', "\"\"")),
         }
     }
+
+    /// How many row tuples one `INSERT ... VALUES` may carry. SQL Server rejects more than
+    /// 1000 outright; the others have no fixed row limit, so the cap there is a conservative
+    /// batch size that keeps a statement well inside MySQL's `max_allowed_packet`.
+    pub fn max_insert_rows(self) -> usize {
+        match self {
+            DbKind::SqlServer => 1000,
+            _ => 500,
+        }
+    }
 }
 
 /// Render `value` as a SQL literal for `kind`, safely escaping strings. Returns `None` for
@@ -246,16 +256,35 @@ pub fn build_multi_insert_sql(
     columns: &[ColumnMeta],
     rows: &[&[Value]],
 ) -> Option<String> {
-    if columns.is_empty() || rows.is_empty() {
+    let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+    build_multi_insert_for(kind, schema, table, &names, rows)
+}
+
+/// Build one multi-row `INSERT` over an explicit subset of columns — the columns a file import
+/// actually maps, leaving the rest to their database defaults. Each row's length must match
+/// `col_names`.
+///
+/// Returns `None` if there are no columns/rows, or any value has no literal form (binary —
+/// [`Value::Bytes`]). `col_names` are quoted as identifiers for `kind` and values escaped as
+/// literals, so neither may originate from an untrusted file: import passes the *table's* own
+/// introspected column names here.
+pub fn build_multi_insert_for(
+    kind: DbKind,
+    schema: Option<&str>,
+    table: &str,
+    col_names: &[&str],
+    rows: &[&[Value]],
+) -> Option<String> {
+    if col_names.is_empty() || rows.is_empty() {
         return None;
     }
     let table_ref = match schema {
         Some(s) => format!("{}.{}", kind.quote_ident(s), kind.quote_ident(table)),
         None => kind.quote_ident(table),
     };
-    let col_list = columns
+    let col_list = col_names
         .iter()
-        .map(|c| kind.quote_ident(&c.name))
+        .map(|c| kind.quote_ident(c))
         .collect::<Vec<_>>()
         .join(", ");
     let tuples = rows
