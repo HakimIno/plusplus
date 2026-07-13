@@ -116,6 +116,9 @@ impl Database for Tunneled {
     async fn introspect(&self) -> Result<model::SchemaTree> {
         self.inner.introspect().await
     }
+    async fn introspect_overview(&self) -> Result<model::SchemaTree> {
+        self.inner.introspect_overview().await
+    }
     async fn execute_capped(&self, sql: &str, max_rows: usize) -> Result<QueryResult> {
         self.inner.execute_capped(sql, max_rows).await
     }
@@ -300,6 +303,15 @@ mod tests {
         db.execute("CREATE UNIQUE INDEX idx_users_email ON users (email)")
             .await
             .unwrap();
+
+        let overview = db.introspect_overview().await.unwrap();
+        let overview_users = overview
+            .tables
+            .iter()
+            .find(|t| t.name == "users")
+            .expect("users table present in overview");
+        assert!(overview_users.columns.is_empty());
+        assert!(overview_users.indexes.is_empty());
 
         let schema = db.introspect().await.unwrap();
         let users = schema
@@ -538,7 +550,10 @@ break', 3.0, 'สวัสดี')",
         let file = std::fs::File::create(&path).unwrap();
         let mut sink = ExportFormat::Csv.sink(std::io::BufWriter::new(file));
         let exported = db
-            .export_query("SELECT id, name, score, note FROM t ORDER BY id", &mut *sink)
+            .export_query(
+                "SELECT id, name, score, note FROM t ORDER BY id",
+                &mut *sink,
+            )
             .await
             .unwrap();
         drop(sink);
@@ -656,12 +671,21 @@ break', 3.0, 'สวัสดี')",
 
         // serde_json sorts object keys: id, note.
         let targets = [target("id", "INTEGER", 0), target("note", "TEXT", 1)];
-        let n = import_file(db.as_ref(), &path, import::ImportFormat::Json, "t", &targets)
-            .await
-            .expect("json import should succeed");
+        let n = import_file(
+            db.as_ref(),
+            &path,
+            import::ImportFormat::Json,
+            "t",
+            &targets,
+        )
+        .await
+        .expect("json import should succeed");
         assert_eq!(n, 3);
 
-        let res = db.execute("SELECT id, note FROM t ORDER BY id").await.unwrap();
+        let res = db
+            .execute("SELECT id, note FROM t ORDER BY id")
+            .await
+            .unwrap();
         assert!(res.rows[0][1].is_null(), "JSON null is SQL NULL");
         assert_eq!(
             res.rows[1][1],

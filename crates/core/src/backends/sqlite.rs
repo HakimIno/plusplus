@@ -4,6 +4,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use futures_util::future::try_join_all;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions, SqliteRow};
 use sqlx::{AssertSqlSafe, Column, ConnectOptions, Row, TypeInfo, ValueRef};
 use tokio_util::sync::CancellationToken;
@@ -51,6 +52,44 @@ impl Database for SqliteDb {
         DbKind::Sqlite
     }
 
+    async fn introspect_overview(&self) -> Result<SchemaTree> {
+        let objects: Vec<(String, String)> = sqlx::query_as(
+            "SELECT type, name FROM sqlite_master \
+             WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' \
+             ORDER BY name",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut tables = Vec::new();
+        let mut views = Vec::new();
+        for (ty, name) in objects {
+            if ty == "view" {
+                views.push(ViewInfo {
+                    schema: None,
+                    name,
+                    columns: Vec::new(),
+                    definition: String::new(),
+                    materialized: false,
+                });
+            } else {
+                tables.push(TableInfo {
+                    schema: None,
+                    name,
+                    columns: Vec::new(),
+                    indexes: Vec::new(),
+                    foreign_keys: Vec::new(),
+                });
+            }
+        }
+        Ok(SchemaTree {
+            database_name: self.name.clone(),
+            tables,
+            views,
+            routines: Vec::new(),
+            triggers: Vec::new(),
+        })
+    }
+
     async fn introspect(&self) -> Result<SchemaTree> {
         // Tables, views, and triggers in one sweep, excluding SQLite's internal bookkeeping
         // objects. `tbl_name` is the owning table (== name for tables/views); `sql` is the
@@ -63,33 +102,16 @@ impl Database for SqliteDb {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut tables = Vec::new();
-        let mut views = Vec::new();
+        let mut table_names = Vec::new();
+        let mut view_defs = Vec::new();
         let mut triggers = Vec::new();
         for (ty, name, tbl_name, sql) in objects {
             match ty.as_str() {
-                "table" => {
-                    let columns = self.introspect_columns(&name).await?;
-                    let indexes = self.introspect_indexes(&name).await?;
-                    let foreign_keys = self.introspect_foreign_keys(&name).await?;
-                    tables.push(TableInfo {
-                        schema: None,
-                        name,
-                        columns,
-                        indexes,
-                        foreign_keys,
-                    });
-                }
-                "view" => {
-                    let columns = self.introspect_columns(&name).await?;
-                    views.push(ViewInfo {
-                        schema: None,
-                        name,
-                        columns,
-                        definition: select_body_after_as(sql.as_deref().unwrap_or_default()),
-                        materialized: false,
-                    });
-                }
+                "table" => table_names.push(name),
+                "view" => view_defs.push((
+                    name,
+                    select_body_after_as(sql.as_deref().unwrap_or_default()),
+                )),
                 "trigger" => triggers.push(parse_sqlite_trigger(
                     &name,
                     tbl_name.as_deref().unwrap_or_default(),
@@ -98,6 +120,35 @@ impl Database for SqliteDb {
                 _ => {}
             }
         }
+
+        // Each table's PRAGMA calls are independent. Schedule them together and let the
+        // five-connection pool bound actual concurrency instead of paying 3N serial waits.
+        let tables = try_join_all(table_names.into_iter().map(|name| async move {
+            let (columns, indexes, foreign_keys) = tokio::try_join!(
+                self.introspect_columns(&name),
+                self.introspect_indexes(&name),
+                self.introspect_foreign_keys(&name),
+            )?;
+            Ok::<_, CoreError>(TableInfo {
+                schema: None,
+                name,
+                columns,
+                indexes,
+                foreign_keys,
+            })
+        }))
+        .await?;
+        let views = try_join_all(view_defs.into_iter().map(|(name, definition)| async move {
+            let columns = self.introspect_columns(&name).await?;
+            Ok::<_, CoreError>(ViewInfo {
+                schema: None,
+                name,
+                columns,
+                definition,
+                materialized: false,
+            })
+        }))
+        .await?;
 
         Ok(SchemaTree {
             database_name: self.name.clone(),
@@ -248,7 +299,9 @@ impl Database for SqliteDb {
         }
         let mut tx = self.pool.begin().await?;
         for stmt in stmts {
-            sqlx::query(AssertSqlSafe(stmt.as_str())).execute(&mut *tx).await?;
+            sqlx::query(AssertSqlSafe(stmt.as_str()))
+                .execute(&mut *tx)
+                .await?;
         }
         tx.commit().await?;
         Ok(stmts.len())
@@ -386,9 +439,18 @@ fn decode(row: &SqliteRow, idx: usize) -> Value {
     }
     let ti = raw.type_info();
     match ti.name() {
-        "INTEGER" => row.try_get::<i64, _>(idx).map(Value::Int).unwrap_or(Value::Null),
-        "REAL" => row.try_get::<f64, _>(idx).map(Value::Float).unwrap_or(Value::Null),
-        "TEXT" => row.try_get::<String, _>(idx).map(Value::Text).unwrap_or(Value::Null),
+        "INTEGER" => row
+            .try_get::<i64, _>(idx)
+            .map(Value::Int)
+            .unwrap_or(Value::Null),
+        "REAL" => row
+            .try_get::<f64, _>(idx)
+            .map(Value::Float)
+            .unwrap_or(Value::Null),
+        "TEXT" => row
+            .try_get::<String, _>(idx)
+            .map(Value::Text)
+            .unwrap_or(Value::Null),
         "BLOB" => row
             .try_get::<Vec<u8>, _>(idx)
             .map(Value::Bytes)

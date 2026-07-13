@@ -21,6 +21,13 @@ pub trait Database: Send + Sync {
     /// foreign keys).
     async fn introspect(&self) -> Result<SchemaTree>;
 
+    /// Return a lightweight schema containing object names but no columns, indexes, foreign
+    /// keys, or source definitions. Backends override this to make the schema browser useful
+    /// after one small metadata query; the default preserves compatibility for wrappers/tests.
+    async fn introspect_overview(&self) -> Result<SchemaTree> {
+        self.introspect().await
+    }
+
     /// Execute an arbitrary SQL statement and return the result set, materializing at most
     /// `max_rows` rows. Backends stream rows off the wire and stop accumulating at the cap,
     /// so a `SELECT` over a huge table can't exhaust memory; a capped result comes back with

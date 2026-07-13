@@ -86,6 +86,47 @@ impl Database for MySqlDb {
         self.kind
     }
 
+    async fn introspect_overview(&self) -> Result<SchemaTree> {
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT DATABASE(), TABLE_NAME, TABLE_TYPE \
+             FROM information_schema.TABLES \
+             WHERE TABLE_SCHEMA = DATABASE() \
+               AND TABLE_TYPE IN ('BASE TABLE', 'VIEW') \
+             ORDER BY TABLE_NAME",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let database_name = rows.first().map(|r| r.0.clone()).unwrap_or_default();
+        let mut tables = Vec::new();
+        let mut views = Vec::new();
+        for (_, name, ty) in rows {
+            if ty.eq_ignore_ascii_case("VIEW") {
+                views.push(ViewInfo {
+                    schema: None,
+                    name,
+                    columns: Vec::new(),
+                    definition: String::new(),
+                    materialized: false,
+                });
+            } else {
+                tables.push(TableInfo {
+                    schema: None,
+                    name,
+                    columns: Vec::new(),
+                    indexes: Vec::new(),
+                    foreign_keys: Vec::new(),
+                });
+            }
+        }
+        Ok(SchemaTree {
+            database_name,
+            tables,
+            views,
+            routines: Vec::new(),
+            triggers: Vec::new(),
+        })
+    }
+
     async fn introspect(&self) -> Result<SchemaTree> {
         let database_name: String = sqlx::query_scalar("SELECT DATABASE()")
             .fetch_one(&self.pool)
@@ -206,7 +247,11 @@ impl Database for MySqlDb {
         .await?;
         for (table, constraint, column, ref_table, ref_column, del, upd) in fk_rows {
             if let Some(info) = tables.get_mut(&table) {
-                match info.foreign_keys.iter_mut().find(|fk| fk.name == constraint) {
+                match info
+                    .foreign_keys
+                    .iter_mut()
+                    .find(|fk| fk.name == constraint)
+                {
                     Some(fk) => {
                         fk.columns.push(column);
                         fk.ref_columns.push(ref_column);
@@ -224,15 +269,65 @@ impl Database for MySqlDb {
             }
         }
 
+        // These optional metadata groups do not depend on one another. Fetch them together so
+        // a remote connection pays one latency window instead of four sequential round trips.
+        type RoutineRow = (String, String, Option<String>, Option<String>);
+        type ParamRow = (String, Option<String>, String, Option<String>, i64);
+        type TriggerRow = (String, String, String, String, String);
+        let (view_defs, routine_rows, param_rows, trig_rows): (
+            Vec<(String, String)>,
+            Vec<RoutineRow>,
+            Vec<ParamRow>,
+            Vec<TriggerRow>,
+        ) = tokio::join!(
+            async {
+                sqlx::query_as(
+                    "SELECT TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS \
+                     WHERE TABLE_SCHEMA = DATABASE()",
+                )
+                .fetch_all(&self.pool)
+                .await
+                .unwrap_or_default()
+            },
+            async {
+                sqlx::query_as(
+                    "SELECT ROUTINE_NAME, ROUTINE_TYPE, DTD_IDENTIFIER, ROUTINE_DEFINITION \
+                     FROM information_schema.ROUTINES \
+                     WHERE ROUTINE_SCHEMA = DATABASE() \
+                     ORDER BY ROUTINE_NAME",
+                )
+                .fetch_all(&self.pool)
+                .await
+                .unwrap_or_default()
+            },
+            async {
+                sqlx::query_as(
+                    "SELECT SPECIFIC_NAME, PARAMETER_NAME, DTD_IDENTIFIER, PARAMETER_MODE, \
+                            ORDINAL_POSITION \
+                     FROM information_schema.PARAMETERS \
+                     WHERE SPECIFIC_SCHEMA = DATABASE() \
+                     ORDER BY SPECIFIC_NAME, ORDINAL_POSITION",
+                )
+                .fetch_all(&self.pool)
+                .await
+                .unwrap_or_default()
+            },
+            async {
+                sqlx::query_as(
+                    "SELECT TRIGGER_NAME, ACTION_TIMING, EVENT_MANIPULATION, EVENT_OBJECT_TABLE, \
+                            ACTION_STATEMENT \
+                     FROM information_schema.TRIGGERS \
+                     WHERE TRIGGER_SCHEMA = DATABASE() \
+                     ORDER BY TRIGGER_NAME",
+                )
+                .fetch_all(&self.pool)
+                .await
+                .unwrap_or_default()
+            },
+        );
+
         // View definitions. Tolerate failure (a restricted role may be denied) — an empty
         // body just means the editor opens blank, never that introspection fails.
-        let view_defs: Vec<(String, String)> = sqlx::query_as(
-            "SELECT TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS \
-             WHERE TABLE_SCHEMA = DATABASE()",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .unwrap_or_default();
         for (name, def) in view_defs {
             if let Some(view) = views.get_mut(&name) {
                 view.definition = def;
@@ -241,15 +336,6 @@ impl Database for MySqlDb {
 
         // Routines (functions + procedures), keyed by name; parameters attached below.
         let mut routines: BTreeMap<String, RoutineInfo> = BTreeMap::new();
-        let routine_rows: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT ROUTINE_NAME, ROUTINE_TYPE, DTD_IDENTIFIER, ROUTINE_DEFINITION \
-             FROM information_schema.ROUTINES \
-             WHERE ROUTINE_SCHEMA = DATABASE() \
-             ORDER BY ROUTINE_NAME",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .unwrap_or_default();
         for (name, rtype, ret, body) in routine_rows {
             let kind = if rtype.eq_ignore_ascii_case("FUNCTION") {
                 RoutineKind::Function
@@ -270,17 +356,6 @@ impl Database for MySqlDb {
             );
         }
         // Parameters: ORDINAL_POSITION 0 is a function's RETURN slot (NULL name/mode) — skip it.
-        let param_rows: Vec<(String, Option<String>, String, Option<String>, i64)> =
-            sqlx::query_as(
-                "SELECT SPECIFIC_NAME, PARAMETER_NAME, DTD_IDENTIFIER, PARAMETER_MODE, \
-                        ORDINAL_POSITION \
-                 FROM information_schema.PARAMETERS \
-                 WHERE SPECIFIC_SCHEMA = DATABASE() \
-                 ORDER BY SPECIFIC_NAME, ORDINAL_POSITION",
-            )
-            .fetch_all(&self.pool)
-            .await
-            .unwrap_or_default();
         for (spec, pname, dtype, mode, ordinal) in param_rows {
             if ordinal == 0 {
                 continue;
@@ -297,16 +372,6 @@ impl Database for MySqlDb {
 
         // Triggers: MySQL fires one event per trigger, always row-level, with no WHEN guard.
         let mut triggers = Vec::new();
-        let trig_rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
-            "SELECT TRIGGER_NAME, ACTION_TIMING, EVENT_MANIPULATION, EVENT_OBJECT_TABLE, \
-                    ACTION_STATEMENT \
-             FROM information_schema.TRIGGERS \
-             WHERE TRIGGER_SCHEMA = DATABASE() \
-             ORDER BY TRIGGER_NAME",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .unwrap_or_default();
         for (name, timing, event, table, body) in trig_rows {
             triggers.push(TriggerInfo {
                 schema: None,
@@ -354,7 +419,11 @@ impl Database for MySqlDb {
                     truncated = true;
                     break;
                 }
-                data.push((0..columns.len()).map(|i| decode(&row, i, &types[i])).collect());
+                data.push(
+                    (0..columns.len())
+                        .map(|i| decode(&row, i, &types[i]))
+                        .collect(),
+                );
             }
             Ok(QueryResult {
                 columns,
@@ -483,8 +552,9 @@ impl Database for MySqlDb {
                 sink.begin(&columns)?;
                 began = true;
             }
-            let values: Vec<Value> =
-                (0..types.len()).map(|i| decode(&row, i, &types[i])).collect();
+            let values: Vec<Value> = (0..types.len())
+                .map(|i| decode(&row, i, &types[i]))
+                .collect();
             sink.write_row(&values)?;
             count += 1;
         }
@@ -498,7 +568,9 @@ impl Database for MySqlDb {
         }
         let mut tx = self.pool.begin().await?;
         for stmt in stmts {
-            sqlx::query(AssertSqlSafe(stmt.as_str())).execute(&mut *tx).await?;
+            sqlx::query(AssertSqlSafe(stmt.as_str()))
+                .execute(&mut *tx)
+                .await?;
         }
         tx.commit().await?;
         Ok(stmts.len())
