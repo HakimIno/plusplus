@@ -86,6 +86,48 @@ impl Database for PostgresDb {
         DbKind::Postgres
     }
 
+    async fn introspect_overview(&self) -> Result<SchemaTree> {
+        let rows: Vec<(String, String, String, String)> = sqlx::query_as(AssertSqlSafe(format!(
+            "SELECT current_database(), n.nspname, c.relname, c.relkind::text \
+             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.relkind IN ('r', 'p', 'v', 'm') \
+               AND n.nspname NOT IN {SYSTEM_SCHEMAS} \
+               AND n.nspname NOT LIKE 'pg_toast%' \
+             ORDER BY n.nspname, c.relname"
+        )))
+        .fetch_all(&self.pool)
+        .await?;
+        let database_name = rows.first().map(|r| r.0.clone()).unwrap_or_default();
+        let mut tables = Vec::new();
+        let mut views = Vec::new();
+        for (_, schema, name, kind) in rows {
+            if kind == "v" || kind == "m" {
+                views.push(ViewInfo {
+                    schema: Some(schema),
+                    name,
+                    columns: Vec::new(),
+                    definition: String::new(),
+                    materialized: kind == "m",
+                });
+            } else {
+                tables.push(TableInfo {
+                    schema: Some(schema),
+                    name,
+                    columns: Vec::new(),
+                    indexes: Vec::new(),
+                    foreign_keys: Vec::new(),
+                });
+            }
+        }
+        Ok(SchemaTree {
+            database_name,
+            tables,
+            views,
+            routines: Vec::new(),
+            triggers: Vec::new(),
+        })
+    }
+
     async fn introspect(&self) -> Result<SchemaTree> {
         let database_name: String = sqlx::query_scalar("SELECT current_database()")
             .fetch_one(&self.pool)
@@ -119,16 +161,29 @@ impl Database for PostgresDb {
         // column sweep below; both carry their defining SELECT. `unwrap_or_default` keeps a
         // privilege error from failing the whole introspection.
         let mut views: BTreeMap<(String, String), ViewInfo> = BTreeMap::new();
-        let view_rows: Vec<(String, String, Option<String>)> = sqlx::query_as(AssertSqlSafe(
-            format!(
-                "SELECT table_schema, table_name, view_definition FROM information_schema.views \
-                 WHERE table_schema NOT IN {SYSTEM_SCHEMAS} \
-                 ORDER BY table_schema, table_name"
-            ),
-        ))
-        .fetch_all(&self.pool)
-        .await
-        .unwrap_or_default();
+        type ViewRow = (String, String, Option<String>);
+        let (view_rows, matview_rows): (Vec<ViewRow>, Vec<ViewRow>) = tokio::join!(
+            async {
+                sqlx::query_as(AssertSqlSafe(format!(
+                    "SELECT table_schema, table_name, view_definition FROM information_schema.views \
+                     WHERE table_schema NOT IN {SYSTEM_SCHEMAS} \
+                     ORDER BY table_schema, table_name"
+                )))
+                .fetch_all(&self.pool)
+                .await
+                .unwrap_or_default()
+            },
+            async {
+                sqlx::query_as(AssertSqlSafe(format!(
+                    "SELECT schemaname, matviewname, definition FROM pg_matviews \
+                     WHERE schemaname NOT IN {SYSTEM_SCHEMAS} \
+                     ORDER BY schemaname, matviewname"
+                )))
+                .fetch_all(&self.pool)
+                .await
+                .unwrap_or_default()
+            },
+        );
         for (schema, name, def) in view_rows {
             views.insert(
                 (schema.clone(), name.clone()),
@@ -141,16 +196,6 @@ impl Database for PostgresDb {
                 },
             );
         }
-        let matview_rows: Vec<(String, String, Option<String>)> = sqlx::query_as(AssertSqlSafe(
-            format!(
-                "SELECT schemaname, matviewname, definition FROM pg_matviews \
-                 WHERE schemaname NOT IN {SYSTEM_SCHEMAS} \
-                 ORDER BY schemaname, matviewname"
-            ),
-        ))
-        .fetch_all(&self.pool)
-        .await
-        .unwrap_or_default();
         for (schema, name, def) in matview_rows {
             views.insert(
                 (schema.clone(), name.clone()),
@@ -165,25 +210,13 @@ impl Database for PostgresDb {
         }
 
         // Columns (ordered by ordinal position).
-        let col_rows: Vec<(String, String, String, String)> = sqlx::query_as(AssertSqlSafe(format!(
-            "SELECT table_schema, table_name, column_name, data_type FROM information_schema.columns \
+        let col_rows: Vec<(String, String, String, String, String)> = sqlx::query_as(AssertSqlSafe(format!(
+            "SELECT table_schema, table_name, column_name, data_type, is_nullable FROM information_schema.columns \
              WHERE table_schema NOT IN {SYSTEM_SCHEMAS} \
              ORDER BY table_schema, table_name, ordinal_position"
         )))
         .fetch_all(&self.pool)
         .await?;
-
-        // Nullability is kept separate to keep the tuple small; query both at once instead.
-        let null_rows: Vec<(String, String, String, String)> = sqlx::query_as(AssertSqlSafe(format!(
-            "SELECT table_schema, table_name, column_name, is_nullable FROM information_schema.columns \
-             WHERE table_schema NOT IN {SYSTEM_SCHEMAS}"
-        )))
-        .fetch_all(&self.pool)
-        .await?;
-        let mut nullable: BTreeMap<(String, String, String), bool> = BTreeMap::new();
-        for (s, t, c, n) in null_rows {
-            nullable.insert((s, t, c), n.eq_ignore_ascii_case("YES"));
-        }
 
         // Primary-key columns.
         let pk_rows: Vec<(String, String, String)> = sqlx::query_as(AssertSqlSafe(format!(
@@ -202,12 +235,12 @@ impl Database for PostgresDb {
             pk_set.insert((s, t, c), ());
         }
 
-        for (schema, table, column, data_type) in col_rows {
+        for (schema, table, column, data_type, is_nullable) in col_rows {
             let key = (schema.clone(), table.clone(), column.clone());
             let col = ColumnInfo {
                 name: column,
                 data_type,
-                nullable: nullable.get(&key).copied().unwrap_or(true),
+                nullable: is_nullable.eq_ignore_ascii_case("YES"),
                 primary_key: pk_set.contains_key(&key),
             };
             if let Some(info) = tables.get_mut(&(schema.clone(), table.clone())) {
@@ -244,7 +277,17 @@ impl Database for PostgresDb {
         // conkey/confkey together keeps composite-key column pairs aligned.
         const ACTION_CASE: &str = "WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' \
              WHEN 'd' THEN 'SET DEFAULT' WHEN 'r' THEN 'RESTRICT' ELSE 'NO ACTION'";
-        type FkRow = (String, String, String, String, String, String, String, String, String);
+        type FkRow = (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        );
         let fk_rows: Vec<FkRow> = sqlx::query_as(AssertSqlSafe(format!(
             "SELECT sch.nspname, tbl.relname, con.conname, \
                     fsch.nspname, ftbl.relname, \
@@ -271,7 +314,11 @@ impl Database for PostgresDb {
             fk_rows
         {
             if let Some(info) = tables.get_mut(&(schema, table)) {
-                match info.foreign_keys.iter_mut().find(|fk| fk.name == constraint) {
+                match info
+                    .foreign_keys
+                    .iter_mut()
+                    .find(|fk| fk.name == constraint)
+                {
                     Some(fk) => {
                         fk.columns.push(column);
                         fk.ref_columns.push(ref_column);
@@ -293,8 +340,15 @@ impl Database for PostgresDb {
         // `pg_get_functiondef` yields the full `CREATE` text for display; arguments and the
         // return clause come pre-rendered and are parsed into structured params.
         let mut routines = Vec::new();
-        type RoutineRow =
-            (String, String, String, Option<String>, Option<String>, String, Option<String>);
+        type RoutineRow = (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+        );
         let routine_rows: Vec<RoutineRow> = sqlx::query_as(AssertSqlSafe(format!(
             "SELECT n.nspname, p.proname, p.prokind::text, \
                     pg_get_function_arguments(p.oid), pg_get_function_result(p.oid), \
@@ -328,19 +382,18 @@ impl Database for PostgresDb {
         // Triggers: skip internal (FK-enforcement) triggers; parse the rendered def into
         // structured fields, keeping the full `CREATE TRIGGER … EXECUTE FUNCTION …` in `action`.
         let mut triggers = Vec::new();
-        let trig_rows: Vec<(String, String, String, String)> = sqlx::query_as(AssertSqlSafe(
-            format!(
+        let trig_rows: Vec<(String, String, String, String)> =
+            sqlx::query_as(AssertSqlSafe(format!(
                 "SELECT n.nspname, c.relname, t.tgname, pg_get_triggerdef(t.oid) \
                  FROM pg_trigger t \
                  JOIN pg_class c ON c.oid = t.tgrelid \
                  JOIN pg_namespace n ON n.oid = c.relnamespace \
                  WHERE NOT t.tgisinternal AND n.nspname NOT IN {SYSTEM_SCHEMAS} \
                  ORDER BY n.nspname, c.relname, t.tgname"
-            ),
-        ))
-        .fetch_all(&self.pool)
-        .await
-        .unwrap_or_default();
+            )))
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_default();
         for (schema, table, name, def) in trig_rows {
             let (timing, events, level, when_condition) = parse_trigger_header(&def);
             triggers.push(TriggerInfo {
@@ -389,7 +442,11 @@ impl Database for PostgresDb {
                     truncated = true;
                     break;
                 }
-                data.push((0..columns.len()).map(|i| decode(&row, i, &types[i])).collect());
+                data.push(
+                    (0..columns.len())
+                        .map(|i| decode(&row, i, &types[i]))
+                        .collect(),
+                );
             }
             Ok(QueryResult {
                 columns,
@@ -518,8 +575,9 @@ impl Database for PostgresDb {
                 sink.begin(&columns)?;
                 began = true;
             }
-            let values: Vec<Value> =
-                (0..types.len()).map(|i| decode(&row, i, &types[i])).collect();
+            let values: Vec<Value> = (0..types.len())
+                .map(|i| decode(&row, i, &types[i]))
+                .collect();
             sink.write_row(&values)?;
             count += 1;
         }
@@ -533,7 +591,9 @@ impl Database for PostgresDb {
         }
         let mut tx = self.pool.begin().await?;
         for stmt in stmts {
-            sqlx::query(AssertSqlSafe(stmt.as_str())).execute(&mut *tx).await?;
+            sqlx::query(AssertSqlSafe(stmt.as_str()))
+                .execute(&mut *tx)
+                .await?;
         }
         tx.commit().await?;
         Ok(stmts.len())

@@ -5,8 +5,10 @@
 //! `mpsc` channel that we drain each frame. While work is in flight the UI stays
 //! interactive and shows a spinner.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
+use std::time::Instant;
 
 use dbcore::{
     ConnectionColor, ConnectionConfig, Database, DbKind, QueryResult, SchemaTree, TableInfo,
@@ -28,13 +30,31 @@ const MAX_FETCH_ROWS: usize = 100_000;
 
 /// Messages sent from background tasks back to the UI thread.
 enum AppMessage {
-    /// A connect+introspect attempt finished.
+    /// The transport/authentication handshake finished. Schema metadata and the database list
+    /// arrive separately so a slow introspection never keeps the connection unusable.
     Connected {
         conn_id: String,
         name: String,
-        /// Populated on initial connect; empty on a re-introspect (schema change).
+        elapsed_ms: f64,
+        result: Result<Arc<dyn Database>, String>,
+    },
+    /// Lightweight table/view names arrived; full object details continue loading.
+    SchemaOverviewLoaded {
+        conn_id: String,
+        schema: SchemaTree,
+        elapsed_ms: f64,
+    },
+    /// Full schema metadata finished loading for an already-live connection.
+    SchemaLoaded {
+        conn_id: String,
+        elapsed_ms: f64,
+        result: Result<SchemaTree, String>,
+    },
+    /// Databases visible to an already-live connection finished loading.
+    DatabaseListLoaded {
+        conn_id: String,
         databases: Vec<String>,
-        result: Result<(Arc<dyn Database>, SchemaTree), String>,
+        elapsed_ms: f64,
     },
     /// A connection test from the add/edit dialog finished.
     ConnectionTested {
@@ -61,12 +81,6 @@ enum AppMessage {
         sql: String,
         elapsed_ms: f64,
         result: Result<usize, String>,
-    },
-    /// A background `SELECT COUNT(*)` for a paged table tab finished. Failures are
-    /// non-fatal — the pager just shows an unknown total.
-    Counted {
-        tab_id: u64,
-        result: Result<u64, String>,
     },
     /// A DDL schema migration finished. `Ok` means success; carry a status message.
     /// `tab_id` is the tab whose schema editor initiated it (to close that editor).
@@ -253,6 +267,22 @@ struct ActiveConnection {
     databases: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
+enum ConnectStage {
+    Connect,
+    Overview,
+    FullSchema,
+    DatabaseList,
+}
+
+#[derive(Default)]
+struct ConnectionTimings {
+    connect_ms: Option<f64>,
+    overview_ms: Option<f64>,
+    full_schema_ms: Option<f64>,
+    database_list_ms: Option<f64>,
+}
+
 /// One query tab: an independent SQL editor with its own result, view state, and the
 /// connection it runs against. Tabs are global (a single row above the editor) but each
 /// remembers its own `conn_id`, so switching tabs switches the active connection too.
@@ -418,16 +448,6 @@ impl QueryTab {
     }
 }
 
-/// Pull the single scalar out of a `SELECT COUNT(*)` result. Backends decode big counts
-/// as Int; NUMERIC-ish ones arrive as Text.
-fn count_from_result(res: &QueryResult) -> Result<u64, String> {
-    match res.rows.first().and_then(|row| row.first()) {
-        Some(dbcore::Value::Int(n)) => Ok((*n).max(0) as u64),
-        Some(dbcore::Value::Text(s)) => s.trim().parse::<u64>().map_err(|e| e.to_string()),
-        _ => Err("count query returned no scalar".to_string()),
-    }
-}
-
 /// Stream a whole table to `path` in `format`, returning the number of rows written. The file
 /// is wrapped in a `BufWriter` and the backend streams rows straight into the format sink, so
 /// the table never has to fit in memory. Runs on the background runtime.
@@ -440,6 +460,41 @@ async fn stream_export(
     let file = std::fs::File::create(path)?;
     let mut sink = format.sink(std::io::BufWriter::new(file));
     db.export_query(sql, &mut *sink).await
+}
+
+/// Load metadata after authentication. The name-only overview intentionally completes before
+/// full introspection for that branch, while the independent database list runs alongside it.
+async fn load_connection_metadata(db: Arc<dyn Database>, conn_id: String, tx: Sender<AppMessage>) {
+    let schema_tx = tx.clone();
+    let schema_id = conn_id.clone();
+    let schema_db = db.clone();
+    let schema = async move {
+        let overview_started = Instant::now();
+        if let Ok(schema) = schema_db.introspect_overview().await {
+            let _ = schema_tx.send(AppMessage::SchemaOverviewLoaded {
+                conn_id: schema_id.clone(),
+                schema,
+                elapsed_ms: overview_started.elapsed().as_secs_f64() * 1000.0,
+            });
+        }
+        let schema_started = Instant::now();
+        let result = schema_db.introspect().await.map_err(|e| e.to_string());
+        let _ = schema_tx.send(AppMessage::SchemaLoaded {
+            conn_id: schema_id,
+            elapsed_ms: schema_started.elapsed().as_secs_f64() * 1000.0,
+            result,
+        });
+    };
+    let databases = async move {
+        let started = Instant::now();
+        let databases = db.list_databases().await.unwrap_or_default();
+        let _ = tx.send(AppMessage::DatabaseListLoaded {
+            conn_id,
+            databases,
+            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+        });
+    };
+    tokio::join!(schema, databases);
 }
 
 /// How often the import reports progress back to the UI thread.
@@ -465,7 +520,8 @@ async fn run_import(
     col_names: &[String],
     tx: &Sender<AppMessage>,
 ) -> Result<usize, String> {
-    let reader = dbcore::import::read_records(path, format, has_header).map_err(|e| e.to_string())?;
+    let reader =
+        dbcore::import::read_records(path, format, has_header).map_err(|e| e.to_string())?;
 
     let mut rows: Vec<Vec<dbcore::Value>> = Vec::new();
     for (i, record) in reader.enumerate() {
@@ -477,7 +533,10 @@ async fn run_import(
             ));
         }
         // `i + 1` is the record number the user sees, header row excluded.
-        rows.push(dbcore::import::coerce_row(&record, targets, format, i + 1).map_err(|e| e.to_string())?);
+        rows.push(
+            dbcore::import::coerce_row(&record, targets, format, i + 1)
+                .map_err(|e| e.to_string())?,
+        );
         if rows.len() % IMPORT_PROGRESS_EVERY == 0 {
             let _ = tx.send(AppMessage::ImportProgress { rows: rows.len() });
         }
@@ -904,6 +963,14 @@ pub struct DbGuiApp {
     // --- connection state ---
     /// Pool of live connections (one per connected config), shared across tabs.
     active_connections: Vec<ActiveConnection>,
+    /// Connect + metadata pipelines currently in flight. One saved connection may own at most
+    /// one pipeline, preventing repeated clicks from creating overlapping five-connection pools.
+    connection_jobs: HashSet<String>,
+    /// Last complete schema per saved connection. Survives disconnects within this process so
+    /// reconnect can paint immediately; mutations and config changes invalidate it.
+    schema_cache: HashMap<String, SchemaTree>,
+    /// Latest startup timings per connection. Kept in memory for diagnostics only.
+    connection_timings: HashMap<String, ConnectionTimings>,
 
     // --- query tabs ---
     /// Open query tabs. Always non-empty.
@@ -1123,6 +1190,9 @@ impl DbGuiApp {
             querying_tab_id: None,
             query_cancel: None,
             active_connections: Vec::new(),
+            connection_jobs: HashSet::new(),
+            schema_cache: HashMap::new(),
+            connection_timings: HashMap::new(),
             tabs: vec![default_tab],
             active_query_tab: 0,
             next_tab_id: 1,
@@ -1506,14 +1576,16 @@ impl DbGuiApp {
         pin: bool,
         kind: crate::components::QueryTabKind,
     ) {
+        let conn_id = self.tab().conn_id.clone();
         let same = |s: &EditSource| s.table == source.table && s.schema == source.schema;
         // Already open (loaded or in-flight)? Activate it, pinning if asked.
         if let Some(idx) = self.tabs.iter().position(|t| {
-            t.edits
-                .source
-                .as_ref()
-                .or(t.edits.pending_source.as_ref())
-                .is_some_and(same)
+            t.conn_id == conn_id
+                && t.edits
+                    .source
+                    .as_ref()
+                    .or(t.edits.pending_source.as_ref())
+                    .is_some_and(same)
         }) {
             if pin {
                 self.tabs[idx].preview = false;
@@ -1547,9 +1619,11 @@ impl DbGuiApp {
         preview: bool,
         kind: crate::components::QueryTabKind,
     ) {
+        // Preview tabs are global and may be reused across connections. Always bind the rebuilt
+        // tab to the connection that initiated this open, never the preview slot's old owner.
+        let conn_id = self.tab().conn_id.clone();
         let idx = self.preview_target_slot();
         let id = self.tabs[idx].id;
-        let conn_id = self.tabs[idx].conn_id.clone();
         let mut tab = QueryTab::new(id, source.table.clone());
         tab.conn_id = conn_id;
         tab.kind = kind;
@@ -1569,12 +1643,9 @@ impl DbGuiApp {
     fn follow_foreign_key(&mut self, row: usize, col: usize) {
         let idx = self.active_query_tab;
         match self.build_fk_follow(idx, row, col) {
-            Some((sql, source)) => self.open_in_preview_slot(
-                sql,
-                source,
-                true,
-                crate::components::QueryTabKind::Table,
-            ),
+            Some((sql, source)) => {
+                self.open_in_preview_slot(sql, source, true, crate::components::QueryTabKind::Table)
+            }
             None => {
                 self.status_msg =
                     "No foreign key to follow here (or the value is empty).".to_string();
@@ -1742,6 +1813,7 @@ impl DbGuiApp {
     /// Drop a live connection from the pool (tabs bound to it become "not connected").
     fn disconnect_conn(&mut self, id: &str) {
         self.active_connections.retain(|c| c.config_id != id);
+        self.connection_timings.remove(id);
         // An ER diagram of the dropped connection is stale; close it.
         if self.erd.as_ref().is_some_and(|e| e.conn_id == id) {
             self.erd = None;
@@ -1774,6 +1846,33 @@ impl DbGuiApp {
         self.error = None;
     }
 
+    fn record_connection_timing(&mut self, conn_id: &str, stage: ConnectStage, elapsed_ms: f64) {
+        let timings = self
+            .connection_timings
+            .entry(conn_id.to_string())
+            .or_default();
+        let label = match stage {
+            ConnectStage::Connect => {
+                timings.connect_ms = Some(elapsed_ms);
+                "connect"
+            }
+            ConnectStage::Overview => {
+                timings.overview_ms = Some(elapsed_ms);
+                "overview"
+            }
+            ConnectStage::FullSchema => {
+                timings.full_schema_ms = Some(elapsed_ms);
+                "full_schema"
+            }
+            ConnectStage::DatabaseList => {
+                timings.database_list_ms = Some(elapsed_ms);
+                "database_list"
+            }
+        };
+        #[cfg(debug_assertions)]
+        eprintln!("plusplus perf: connection={conn_id} stage={label} elapsed_ms={elapsed_ms:.1}");
+    }
+
     // --- background work --------------------------------------------------
 
     fn poll_messages(&mut self, ctx: &egui::Context) {
@@ -1782,14 +1881,24 @@ impl DbGuiApp {
                 AppMessage::Connected {
                     conn_id,
                     name,
-                    databases,
+                    elapsed_ms,
                     result,
                 } => {
+                    self.record_connection_timing(&conn_id, ConnectStage::Connect, elapsed_ms);
+                    if !self.connections.iter().any(|cfg| cfg.id == conn_id) {
+                        self.connection_jobs.remove(&conn_id);
+                        continue;
+                    }
                     self.busy = Busy::Idle;
                     match result {
-                        Ok((db, schema)) => {
-                            let n = schema.tables.len();
+                        Ok(db) => {
                             let arrived_id = conn_id.clone();
+                            let cached_schema = self.schema_cache.get(&conn_id).cloned();
+                            let has_cached_schema = cached_schema.is_some();
+                            let initial_schema = cached_schema.unwrap_or_else(|| SchemaTree {
+                                database_name: name.clone(),
+                                ..SchemaTree::default()
+                            });
                             if let Some(idx) = self
                                 .active_connections
                                 .iter()
@@ -1801,23 +1910,23 @@ impl DbGuiApp {
                                     config_id: conn_id,
                                     name: name.clone(),
                                     db,
-                                    schema,
-                                    databases: if databases.is_empty() {
-                                        prev_databases
-                                    } else {
-                                        databases
-                                    },
+                                    schema: initial_schema,
+                                    databases: prev_databases,
                                 };
                             } else {
                                 self.active_connections.push(ActiveConnection {
                                     config_id: conn_id,
                                     name: name.clone(),
                                     db,
-                                    schema,
-                                    databases,
+                                    schema: initial_schema,
+                                    databases: Vec::new(),
                                 });
                             }
-                            self.status_msg = format!("Connected to {name} — {n} tables");
+                            self.status_msg = if has_cached_schema {
+                                format!("Connected to {name} — cached schema, refreshing…")
+                            } else {
+                                format!("Connected to {name} — loading schema…")
+                            };
                             self.error = None;
                             self.record_audit(
                                 dbcore::audit::AuditAction::Connect,
@@ -1828,13 +1937,9 @@ impl DbGuiApp {
                                 None,
                                 0.0,
                             );
-                            // A fresh schema invalidates an open diagram of this connection
-                            // (e.g. after a DDL migration re-introspects).
-                            if self.erd.as_ref().is_some_and(|e| e.conn_id == arrived_id) {
-                                self.refresh_erd();
-                            }
                         }
                         Err(e) => {
+                            self.connection_jobs.remove(&conn_id);
                             self.record_audit(
                                 dbcore::audit::AuditAction::Connect,
                                 &conn_id,
@@ -1847,6 +1952,82 @@ impl DbGuiApp {
                             self.error = Some(format!("Connection failed: {e}"));
                             self.status_msg = "Connection failed".to_string();
                         }
+                    }
+                }
+                AppMessage::SchemaOverviewLoaded {
+                    conn_id,
+                    mut schema,
+                    elapsed_ms,
+                } => {
+                    self.record_connection_timing(&conn_id, ConnectStage::Overview, elapsed_ms);
+                    // A complete cached schema is more useful than the name-only overview.
+                    // Keep showing it until the refreshed full schema arrives.
+                    if self.schema_cache.contains_key(&conn_id) {
+                        continue;
+                    }
+                    if let Some(active) = self
+                        .active_connections
+                        .iter_mut()
+                        .find(|conn| conn.config_id == conn_id)
+                    {
+                        let n = schema.tables.len();
+                        let name = active.name.clone();
+                        if schema.database_name.is_empty() {
+                            schema.database_name = name.clone();
+                        }
+                        active.schema = schema;
+                        self.status_msg =
+                            format!("Connected to {name} — {n} tables, loading details…");
+                    }
+                }
+                AppMessage::SchemaLoaded {
+                    conn_id,
+                    elapsed_ms,
+                    result,
+                } => {
+                    self.connection_jobs.remove(&conn_id);
+                    self.record_connection_timing(&conn_id, ConnectStage::FullSchema, elapsed_ms);
+                    let Some(idx) = self
+                        .active_connections
+                        .iter()
+                        .position(|conn| conn.config_id == conn_id)
+                    else {
+                        continue;
+                    };
+                    match result {
+                        Ok(schema) => {
+                            let n = schema.tables.len();
+                            let name = self.active_connections[idx].name.clone();
+                            self.schema_cache.insert(conn_id.clone(), schema.clone());
+                            self.active_connections[idx].schema = schema;
+                            self.status_msg = format!("Connected to {name} — {n} tables");
+                            self.error = None;
+                            if self.erd.as_ref().is_some_and(|e| e.conn_id == conn_id) {
+                                self.refresh_erd();
+                            }
+                        }
+                        Err(e) => {
+                            self.error = Some(format!("Schema load failed: {e}"));
+                            self.status_msg = if self.schema_cache.contains_key(&conn_id) {
+                                "Connected — cached schema; refresh failed".to_string()
+                            } else {
+                                "Connected — schema unavailable".to_string()
+                            };
+                        }
+                    }
+                }
+                AppMessage::DatabaseListLoaded {
+                    conn_id,
+                    databases,
+                    elapsed_ms,
+                } => {
+                    self.record_connection_timing(&conn_id, ConnectStage::DatabaseList, elapsed_ms);
+                    if let Some(active) = self
+                        .active_connections
+                        .iter_mut()
+                        .find(|conn| conn.config_id == conn_id)
+                    {
+                        active.databases = databases;
                     }
                 }
                 AppMessage::ConnectionTested {
@@ -1941,9 +2122,10 @@ impl DbGuiApp {
                             let fetched = res.row_count() as u64;
                             let truncated = res.truncated;
                             tab.set_result(res);
-                            // Refresh the pager total for paged table tabs: a short first
-                            // page already tells us the total; otherwise count server-side
-                            // in the background (the WHERE clause may have changed).
+                            // A short page proves the exact total. Do not issue an automatic
+                            // COUNT(*) for full pages: on large/remote tables that scan can be
+                            // far more expensive than fetching the page itself. Next/Prev work
+                            // with an unknown total; Last remains unavailable until known.
                             tab.total_rows = None;
                             if tab.edits.source.is_some() {
                                 let window = dbcore::parse_page_window(&tab.sql);
@@ -1951,28 +2133,8 @@ impl DbGuiApp {
                                     window.and_then(|w| w.limit.map(|l| (w.offset, l)))
                                 {
                                     let (offset, limit) = limit;
-                                    if offset == 0 && fetched < limit && !truncated {
-                                        tab.total_rows = Some(fetched);
-                                    } else if let Some((db, count_sql)) = tab
-                                        .conn_id
-                                        .as_deref()
-                                        .and_then(|id| {
-                                            self.active_connections
-                                                .iter()
-                                                .find(|c| c.config_id == id)
-                                        })
-                                        .map(|c| c.db.clone())
-                                        .zip(dbcore::build_count_sql(&tab.sql))
-                                    {
-                                        let tx = self.tx.clone();
-                                        self.rt.spawn(async move {
-                                            let result = db
-                                                .execute(&count_sql)
-                                                .await
-                                                .map_err(|e| e.to_string())
-                                                .and_then(|r| count_from_result(&r));
-                                            let _ = tx.send(AppMessage::Counted { tab_id, result });
-                                        });
+                                    if fetched < limit && !truncated {
+                                        tab.total_rows = Some(offset + fetched);
                                     }
                                 }
                             }
@@ -1986,13 +2148,6 @@ impl DbGuiApp {
                             self.status_msg = "Query failed".to_string();
                         }
                         Err(_) => {}
-                    }
-                }
-                AppMessage::Counted { tab_id, result } => {
-                    if let (Some(tab), Ok(n)) =
-                        (self.tabs.iter_mut().find(|t| t.id == tab_id), result)
-                    {
-                        tab.total_rows = Some(n);
                     }
                 }
                 AppMessage::Exported { table, result } => match result {
@@ -2171,6 +2326,7 @@ impl DbGuiApp {
                     );
                     match result {
                         Ok(msg) => {
+                            self.schema_cache.remove(&history_conn_id);
                             self.status_msg = msg;
                             self.error = None;
                             self.schema_pending = None;
@@ -2191,18 +2347,14 @@ impl DbGuiApp {
                                     .find(|c| c.config_id == conn_id)
                                 {
                                     let db = ac.db.clone();
-                                    let name = ac.name.clone();
                                     let tx = self.tx.clone();
                                     self.rt.spawn(async move {
-                                        let result = db
-                                            .introspect()
-                                            .await
-                                            .map(|schema| (db, schema))
-                                            .map_err(|e| e.to_string());
-                                        let _ = tx.send(AppMessage::Connected {
+                                        let started = Instant::now();
+                                        let result =
+                                            db.introspect().await.map_err(|e| e.to_string());
+                                        let _ = tx.send(AppMessage::SchemaLoaded {
                                             conn_id,
-                                            name,
-                                            databases: Vec::new(),
+                                            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
                                             result,
                                         });
                                     });
@@ -2224,6 +2376,10 @@ impl DbGuiApp {
         let Some(cfg) = self.connections.get(idx).cloned() else {
             return;
         };
+        if !self.connection_jobs.insert(cfg.id.clone()) {
+            self.status_msg = format!("{} is already connecting or loading schema", cfg.name);
+            return;
+        }
         let password = if cfg.kind.is_server() {
             dbcore::secrets::get_password(&cfg.id).ok().flatten()
         } else {
@@ -2241,21 +2397,26 @@ impl DbGuiApp {
         self.error = None;
         self.status_msg = format!("Connecting to {name}…");
         self.rt.spawn(async move {
-            let mut databases = Vec::new();
-            let result = async {
-                let db = dbcore::connect(&cfg, password, ssh_secret).await?;
-                let schema = db.introspect().await?;
-                databases = db.list_databases().await.unwrap_or_default();
-                Ok::<_, dbcore::CoreError>((db, schema))
+            let connect_started = Instant::now();
+            match dbcore::connect(&cfg, password, ssh_secret).await {
+                Ok(db) => {
+                    let _ = tx.send(AppMessage::Connected {
+                        conn_id: id.clone(),
+                        name,
+                        elapsed_ms: connect_started.elapsed().as_secs_f64() * 1000.0,
+                        result: Ok(db.clone()),
+                    });
+                    load_connection_metadata(db, id, tx).await;
+                }
+                Err(e) => {
+                    let _ = tx.send(AppMessage::Connected {
+                        conn_id: id,
+                        name,
+                        elapsed_ms: connect_started.elapsed().as_secs_f64() * 1000.0,
+                        result: Err(e.to_string()),
+                    });
+                }
             }
-            .await
-            .map_err(|e| e.to_string());
-            let _ = tx.send(AppMessage::Connected {
-                conn_id: id,
-                name,
-                databases,
-                result,
-            });
         });
     }
 
@@ -3249,6 +3410,9 @@ impl DbGuiApp {
             Action::DeleteConnection(i) => {
                 if i < self.connections.len() {
                     let cfg = self.connections.remove(i);
+                    self.connection_jobs.remove(&cfg.id);
+                    self.schema_cache.remove(&cfg.id);
+                    self.connection_timings.remove(&cfg.id);
                     let _ = dbcore::secrets::delete_password(&cfg.id);
                     let _ = dbcore::secrets::delete_ssh_secret(&cfg.id);
                     if let Err(e) = dbcore::config::save_connections(&self.connections) {
@@ -3266,6 +3430,19 @@ impl DbGuiApp {
                 }
             }
             Action::SwitchDatabase { conn_idx, database } => {
+                let switching_id = self.connections.get(conn_idx).map(|cfg| cfg.id.clone());
+                if switching_id
+                    .as_ref()
+                    .is_some_and(|id| self.connection_jobs.contains(id))
+                {
+                    self.status_msg =
+                        "Wait for the current connection load before switching databases"
+                            .to_string();
+                    return;
+                }
+                if let Some(id) = switching_id {
+                    self.schema_cache.remove(&id);
+                }
                 if let Some(cfg) = self.connections.get_mut(conn_idx) {
                     cfg.database = database;
                     if let Err(e) = dbcore::config::save_connections(&self.connections) {
@@ -3820,6 +3997,7 @@ impl DbGuiApp {
     fn save_connection(&mut self) {
         let Some(ed) = self.editor.take() else { return };
         let cfg = ed.config;
+        self.schema_cache.remove(&cfg.id);
         // Persist the password to the keychain (server backends only); never to JSON.
         if cfg.kind.is_server() && !ed.password.is_empty() {
             if let Err(e) = dbcore::secrets::set_password(&cfg.id, &ed.password) {
@@ -4257,6 +4435,50 @@ mod tests {
         }
     }
 
+    struct DelayedMetadataDb;
+
+    #[async_trait::async_trait]
+    impl dbcore::Database for DelayedMetadataDb {
+        fn kind(&self) -> dbcore::DbKind {
+            dbcore::DbKind::Sqlite
+        }
+
+        async fn introspect_overview(&self) -> dbcore::Result<SchemaTree> {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            Ok(fake_schema(2, 0))
+        }
+
+        async fn introspect(&self) -> dbcore::Result<SchemaTree> {
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            Ok(fake_schema(2, 1))
+        }
+
+        async fn list_databases(&self) -> dbcore::Result<Vec<String>> {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            Ok(vec!["testdb".into()])
+        }
+
+        async fn execute_capped(
+            &self,
+            _sql: &str,
+            _max_rows: usize,
+        ) -> dbcore::Result<QueryResult> {
+            unreachable!()
+        }
+
+        async fn execute_transaction(&self, _stmts: &[String]) -> dbcore::Result<usize> {
+            unreachable!()
+        }
+
+        async fn export_query(
+            &self,
+            _sql: &str,
+            _sink: &mut (dyn dbcore::RowSink + Send),
+        ) -> dbcore::Result<u64> {
+            unreachable!()
+        }
+    }
+
     fn fake_schema(tables: usize, cols: usize) -> SchemaTree {
         SchemaTree {
             database_name: "testdb".into(),
@@ -4306,6 +4528,206 @@ mod tests {
             stats: QueryStats::default(),
             truncated: false,
         }
+    }
+
+    #[test]
+    fn metadata_pipeline_exposes_fast_results_before_full_schema() {
+        let app = DbGuiApp::construct();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.rt.block_on(load_connection_metadata(
+            Arc::new(DelayedMetadataDb),
+            "slow-connection".into(),
+            tx,
+        ));
+
+        let messages: Vec<_> = rx.try_iter().collect();
+        assert_eq!(messages.len(), 3);
+        assert!(matches!(messages[0], AppMessage::DatabaseListLoaded { .. }));
+        assert!(matches!(
+            messages[1],
+            AppMessage::SchemaOverviewLoaded { .. }
+        ));
+        assert!(matches!(messages[2], AppMessage::SchemaLoaded { .. }));
+
+        let overview_ms = match &messages[1] {
+            AppMessage::SchemaOverviewLoaded { elapsed_ms, .. } => *elapsed_ms,
+            _ => unreachable!(),
+        };
+        let full_schema_ms = match &messages[2] {
+            AppMessage::SchemaLoaded { elapsed_ms, .. } => *elapsed_ms,
+            _ => unreachable!(),
+        };
+        assert!(
+            overview_ms >= 25.0,
+            "overview timing was {overview_ms:.1} ms"
+        );
+        assert!(
+            full_schema_ms >= 55.0,
+            "schema timing was {full_schema_ms:.1} ms"
+        );
+    }
+
+    #[test]
+    fn connection_becomes_live_before_schema_arrives() {
+        let mut app = DbGuiApp::construct();
+        let ctx = egui::Context::default();
+        let mut cfg = ConnectionConfig::new(DbKind::Sqlite);
+        cfg.id = "conn-1".into();
+        cfg.name = "Remote DB".into();
+        app.connections.push(cfg);
+        app.connection_jobs.insert("conn-1".into());
+        app.busy = Busy::Connecting;
+
+        app.tx
+            .send(AppMessage::Connected {
+                conn_id: "conn-1".into(),
+                name: "Remote DB".into(),
+                elapsed_ms: 12.5,
+                result: Ok(Arc::new(DummyDb)),
+            })
+            .unwrap();
+        app.poll_messages(&ctx);
+
+        assert_eq!(app.busy, Busy::Idle);
+        assert!(app.connection_jobs.contains("conn-1"));
+        assert_eq!(app.active_connections.len(), 1);
+        assert!(app.active_connections[0].schema.tables.is_empty());
+        assert!(app.status_msg.contains("loading schema"));
+        assert_eq!(app.connection_timings["conn-1"].connect_ms, Some(12.5));
+
+        let mut overview = fake_schema(2, 0);
+        overview.tables.iter_mut().for_each(|table| {
+            table.indexes.clear();
+            table.foreign_keys.clear();
+        });
+        app.tx
+            .send(AppMessage::SchemaOverviewLoaded {
+                conn_id: "conn-1".into(),
+                schema: overview,
+                elapsed_ms: 20.0,
+            })
+            .unwrap();
+        app.poll_messages(&ctx);
+
+        assert_eq!(app.active_connections[0].schema.tables.len(), 2);
+        assert!(app.connection_jobs.contains("conn-1"));
+        assert!(app.active_connections[0].schema.tables[0]
+            .columns
+            .is_empty());
+        assert!(app.status_msg.contains("loading details"));
+        assert_eq!(app.connection_timings["conn-1"].overview_ms, Some(20.0));
+
+        app.tx
+            .send(AppMessage::SchemaLoaded {
+                conn_id: "conn-1".into(),
+                elapsed_ms: 80.0,
+                result: Ok(fake_schema(2, 1)),
+            })
+            .unwrap();
+        app.poll_messages(&ctx);
+
+        assert_eq!(app.active_connections[0].schema.tables.len(), 2);
+        assert!(!app.connection_jobs.contains("conn-1"));
+        assert!(app.status_msg.contains("2 tables"));
+        assert_eq!(app.connection_timings["conn-1"].full_schema_ms, Some(80.0));
+
+        app.tx
+            .send(AppMessage::DatabaseListLoaded {
+                conn_id: "conn-1".into(),
+                databases: vec!["main".into(), "analytics".into()],
+                elapsed_ms: 15.0,
+            })
+            .unwrap();
+        app.poll_messages(&ctx);
+        assert_eq!(app.active_connections[0].databases.len(), 2);
+        assert_eq!(
+            app.connection_timings["conn-1"].database_list_ms,
+            Some(15.0)
+        );
+
+        app.disconnect_conn("conn-1");
+        assert!(app.active_connections.is_empty());
+        assert!(app.schema_cache.contains_key("conn-1"));
+        app.tx
+            .send(AppMessage::Connected {
+                conn_id: "conn-1".into(),
+                name: "Remote DB".into(),
+                elapsed_ms: 9.0,
+                result: Ok(Arc::new(DummyDb)),
+            })
+            .unwrap();
+        app.poll_messages(&ctx);
+        assert_eq!(app.active_connections[0].schema.tables[0].columns.len(), 1);
+        assert!(app.status_msg.contains("cached schema"));
+
+        app.tx
+            .send(AppMessage::SchemaOverviewLoaded {
+                conn_id: "conn-1".into(),
+                schema: fake_schema(2, 0),
+                elapsed_ms: 18.0,
+            })
+            .unwrap();
+        app.poll_messages(&ctx);
+        assert_eq!(
+            app.active_connections[0].schema.tables[0].columns.len(),
+            1,
+            "name-only overview must not replace a complete cached schema"
+        );
+    }
+
+    #[test]
+    fn schema_failure_keeps_connection_live() {
+        let mut app = DbGuiApp::construct();
+        let ctx = egui::Context::default();
+        let mut cfg = ConnectionConfig::new(DbKind::Sqlite);
+        cfg.id = "conn-1".into();
+        cfg.name = "Remote DB".into();
+        app.connections.push(cfg);
+        app.connection_jobs.insert("conn-1".into());
+        app.tx
+            .send(AppMessage::Connected {
+                conn_id: "conn-1".into(),
+                name: "Remote DB".into(),
+                elapsed_ms: 10.0,
+                result: Ok(Arc::new(DummyDb)),
+            })
+            .unwrap();
+        app.poll_messages(&ctx);
+
+        app.tx
+            .send(AppMessage::SchemaLoaded {
+                conn_id: "conn-1".into(),
+                elapsed_ms: 50.0,
+                result: Err("metadata permission denied".into()),
+            })
+            .unwrap();
+        app.poll_messages(&ctx);
+
+        assert_eq!(app.active_connections.len(), 1);
+        assert!(!app.connection_jobs.contains("conn-1"));
+        assert!(app
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("metadata permission denied"));
+        assert_eq!(app.status_msg, "Connected — schema unavailable");
+    }
+
+    #[test]
+    fn duplicate_connect_is_rejected_before_opening_another_pool() {
+        let mut app = DbGuiApp::construct();
+        let mut cfg = ConnectionConfig::new(DbKind::Sqlite);
+        cfg.id = "conn-1".into();
+        cfg.name = "Busy DB".into();
+        app.connections.push(cfg);
+        app.connection_jobs.insert("conn-1".into());
+        let jobs_before = app.connection_jobs.len();
+
+        app.start_connect(app.connections.len() - 1);
+
+        assert_eq!(app.connection_jobs.len(), jobs_before);
+        assert!(app.connection_jobs.contains("conn-1"));
+        assert!(app.status_msg.contains("already connecting"));
     }
 
     /// Destructive SQL on a production connection is held for confirmation; cancelling
@@ -4572,7 +4994,11 @@ mod tests {
         app.import_pending = Some(draft);
         app.apply_action(Action::ConfirmImport);
         assert_eq!(app.busy, Busy::Idle, "nothing was spawned");
-        assert!(app.error.as_deref().unwrap_or("").contains("Binary columns"));
+        assert!(app
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("Binary columns"));
         assert!(
             app.import_pending.is_some(),
             "a rejected import keeps the dialog open so the mapping isn't lost"
@@ -4626,9 +5052,10 @@ mod tests {
     fn bind_heading_font(ctx: &egui::Context) {
         let mut fonts = egui::FontDefinitions::default();
         let proportional = fonts.families[&egui::FontFamily::Proportional].clone();
-        fonts
-            .families
-            .insert(egui::FontFamily::Name(crate::HEADING_FAMILY.into()), proportional);
+        fonts.families.insert(
+            egui::FontFamily::Name(crate::HEADING_FAMILY.into()),
+            proportional,
+        );
         ctx.set_fonts(fonts);
     }
 
@@ -5475,6 +5902,39 @@ mod tests {
     }
 
     #[test]
+    fn preview_reuse_never_mixes_connection_dialects() {
+        let source = EditSource {
+            schema: Some("backend".into()),
+            table: "ValetParking".into(),
+            pk_cols: Vec::new(),
+        };
+        let mut app = DbGuiApp::construct();
+        app.tab_mut().sql.clear();
+        app.tab_mut().conn_id = Some("postgres".into());
+        app.open_table(
+            "SELECT * FROM \"backend\".\"ValetParking\" LIMIT 100;".into(),
+            source.clone(),
+            false,
+            crate::components::QueryTabKind::Table,
+        );
+
+        app.new_tab();
+        app.tab_mut().conn_id = Some("mysql".into());
+        app.open_table(
+            "SELECT * FROM `backend`.`ValetParking` LIMIT 100;".into(),
+            source,
+            false,
+            crate::components::QueryTabKind::Table,
+        );
+
+        assert_eq!(app.tab().conn_id.as_deref(), Some("mysql"));
+        assert_eq!(
+            app.tab().sql,
+            "SELECT * FROM `backend`.`ValetParking` LIMIT 100;"
+        );
+    }
+
+    #[test]
     fn view_tabs_keep_their_view_icon_kind() {
         let mut app = DbGuiApp::construct();
         let source = EditSource {
@@ -5833,7 +6293,14 @@ mod tests {
         .unwrap();
         let mut draft = draft_for(
             &app,
-            &["id", "Email", "age", "created_at", "is_active", "legacy_note"],
+            &[
+                "id",
+                "Email",
+                "age",
+                "created_at",
+                "is_active",
+                "legacy_note",
+            ],
             &path,
         );
         draft.preview_rows = vec![
@@ -5906,7 +6373,8 @@ mod tests {
                 if scrolled < 30 {
                     scrolled += 1;
                     ui.ctx().input_mut(|i| {
-                        i.events.push(egui::Event::PointerMoved(egui::pos2(300.0, 400.0)));
+                        i.events
+                            .push(egui::Event::PointerMoved(egui::pos2(300.0, 400.0)));
                         i.events.push(egui::Event::MouseWheel {
                             unit: egui::MouseWheelUnit::Point,
                             delta: egui::vec2(0.0, -30.0),
@@ -5936,7 +6404,14 @@ mod tests {
             "NUMERIC(10,2)",
         ];
         let columns: Vec<_> = (0..18)
-            .map(|i| col(&format!("column_{i:02}"), types[i % types.len()], true, i == 0))
+            .map(|i| {
+                col(
+                    &format!("column_{i:02}"),
+                    types[i % types.len()],
+                    true,
+                    i == 0,
+                )
+            })
             .collect();
         let mut app = app_with_users_table(columns);
 

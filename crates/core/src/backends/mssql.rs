@@ -16,7 +16,8 @@ use crate::error::{CoreError, Result};
 use crate::model::{
     parse_trigger_header, select_body_after_as, ColumnInfo, ColumnMeta, ConnectionConfig, DbKind,
     ForeignKeyInfo, IndexInfo, ParamMode, QueryResult, QueryStats, RoutineInfo, RoutineKind,
-    RoutineParam, SchemaTree, SslMode, TableInfo, TriggerInfo, TriggerLevel, TriggerTiming, ViewInfo,
+    RoutineParam, SchemaTree, SslMode, TableInfo, TriggerInfo, TriggerLevel, TriggerTiming,
+    ViewInfo,
 };
 use crate::value::Value;
 
@@ -108,7 +109,11 @@ impl MsSqlDb {
         match tokio::time::timeout(std::time::Duration::from_secs(15), mgr.connect()).await {
             Ok(Ok(_conn)) => {}
             Ok(Err(e)) => return Err(map_conn_err(e)),
-            Err(_) => return Err(CoreError::Pool("timed out during the login handshake".into())),
+            Err(_) => {
+                return Err(CoreError::Pool(
+                    "timed out during the login handshake".into(),
+                ))
+            }
         }
 
         let pool = bb8::Pool::builder()
@@ -145,10 +150,63 @@ impl Database for MsSqlDb {
         DbKind::SqlServer
     }
 
+    async fn introspect_overview(&self) -> Result<SchemaTree> {
+        let (database_rows, object_rows) = tokio::try_join!(
+            self.fetch("SELECT DB_NAME()"),
+            self.fetch(
+                "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE \
+                 FROM INFORMATION_SCHEMA.TABLES \
+                 WHERE TABLE_TYPE IN ('BASE TABLE', 'VIEW') \
+                 ORDER BY TABLE_SCHEMA, TABLE_NAME",
+            ),
+        )?;
+        let database_name = database_rows
+            .first()
+            .map(|r| get_str(r, 0))
+            .unwrap_or_default();
+        let mut tables = Vec::new();
+        let mut views = Vec::new();
+        for row in object_rows {
+            let schema = get_str(&row, 0);
+            let name = get_str(&row, 1);
+            if get_str(&row, 2).eq_ignore_ascii_case("VIEW") {
+                views.push(ViewInfo {
+                    schema: Some(schema),
+                    name,
+                    columns: Vec::new(),
+                    definition: String::new(),
+                    materialized: false,
+                });
+            } else {
+                tables.push(TableInfo {
+                    schema: Some(schema),
+                    name,
+                    columns: Vec::new(),
+                    indexes: Vec::new(),
+                    foreign_keys: Vec::new(),
+                });
+            }
+        }
+        Ok(SchemaTree {
+            database_name,
+            tables,
+            views,
+            routines: Vec::new(),
+            triggers: Vec::new(),
+        })
+    }
+
     async fn introspect(&self) -> Result<SchemaTree> {
-        let database_name = self
-            .fetch("SELECT DB_NAME()")
-            .await?
+        let (database_rows, object_rows) = tokio::try_join!(
+            self.fetch("SELECT DB_NAME()"),
+            self.fetch(
+                "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE \
+                 FROM INFORMATION_SCHEMA.TABLES \
+                 WHERE TABLE_TYPE IN ('BASE TABLE', 'VIEW') \
+                 ORDER BY TABLE_SCHEMA, TABLE_NAME",
+            ),
+        )?;
+        let database_name = database_rows
             .first()
             .map(|r| get_str(r, 0))
             .unwrap_or_default();
@@ -157,15 +215,7 @@ impl Database for MsSqlDb {
         // Columns below populate both buckets.
         let mut tables: BTreeMap<(String, String), TableInfo> = BTreeMap::new();
         let mut views: BTreeMap<(String, String), ViewInfo> = BTreeMap::new();
-        for row in self
-            .fetch(
-                "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE \
-                 FROM INFORMATION_SCHEMA.TABLES \
-                 WHERE TABLE_TYPE IN ('BASE TABLE', 'VIEW') \
-                 ORDER BY TABLE_SCHEMA, TABLE_NAME",
-            )
-            .await?
-        {
+        for row in object_rows {
             let schema = get_str(&row, 0);
             let name = get_str(&row, 1);
             if get_str(&row, 2).eq_ignore_ascii_case("VIEW") {
@@ -311,7 +361,11 @@ impl Database for MsSqlDb {
             let table = get_str(&row, 1);
             let constraint = get_str(&row, 2);
             if let Some(info) = tables.get_mut(&(schema, table)) {
-                match info.foreign_keys.iter_mut().find(|fk| fk.name == constraint) {
+                match info
+                    .foreign_keys
+                    .iter_mut()
+                    .find(|fk| fk.name == constraint)
+                {
                     Some(fk) => {
                         fk.columns.push(get_str(&row, 5));
                         fk.ref_columns.push(get_str(&row, 6));
@@ -406,7 +460,11 @@ impl Database for MsSqlDb {
                 routine.params.push(RoutineParam {
                     name: get_str(&row, 2),
                     data_type: get_str(&row, 3),
-                    mode: if is_output { ParamMode::Out } else { ParamMode::In },
+                    mode: if is_output {
+                        ParamMode::Out
+                    } else {
+                        ParamMode::In
+                    },
                     default: None,
                 });
             }
@@ -461,11 +519,7 @@ impl Database for MsSqlDb {
         let elapsed = |start: Instant| start.elapsed().as_secs_f64() * 1000.0;
 
         if mssql_returns_rows(sql) {
-            let mut conn = self
-                .pool
-                .get()
-                .await
-                .map_err(map_pool_err)?;
+            let mut conn = self.pool.get().await.map_err(map_pool_err)?;
             let mut stream = conn.simple_query(sql.to_string()).await?;
             // Stream row-by-row instead of `into_first_result` so at most `max_rows` rows
             // are materialized. The stream is still drained to its end — TDS gives no way
@@ -513,11 +567,7 @@ impl Database for MsSqlDb {
             })
         } else {
             // DML/DDL: `execute` reports rows affected (summed across statements).
-            let mut conn = self
-                .pool
-                .get()
-                .await
-                .map_err(map_pool_err)?;
+            let mut conn = self.pool.get().await.map_err(map_pool_err)?;
             let res = conn.execute(sql.to_string(), &[]).await?;
             Ok(QueryResult {
                 columns: Vec::new(),
@@ -683,11 +733,7 @@ impl Database for MsSqlDb {
             return Ok(0);
         }
         let n = stmts.len();
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(map_pool_err)?;
+        let mut conn = self.pool.get().await.map_err(map_pool_err)?;
         // SET XACT_ABORT ON: any runtime error automatically rolls back the transaction,
         // leaving the connection in a clean state when returned to the pool.
         conn.simple_query("SET XACT_ABORT ON; BEGIN TRANSACTION;")
@@ -715,7 +761,11 @@ impl Database for MsSqlDb {
                  ORDER BY name",
             )
             .await?;
-        Ok(rows.iter().map(|r| get_str(r, 0)).filter(|s| !s.is_empty()).collect())
+        Ok(rows
+            .iter()
+            .map(|r| get_str(r, 0))
+            .filter(|s| !s.is_empty())
+            .collect())
     }
 }
 
