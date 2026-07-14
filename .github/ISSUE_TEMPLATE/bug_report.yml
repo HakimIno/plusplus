@@ -1,0 +1,71 @@
+name: Bug report
+description: Report a reproducible problem in plusplus
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Remove passwords, connection strings, production data, and other secrets from every field and screenshot.
+  - type: input
+    id: version
+    attributes:
+      label: plusplus version
+      placeholder: v0.2.15
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Operating system
+      options: [macOS, Windows, Linux, Other]
+    validations:
+      required: true
+  - type: dropdown
+    id: database
+    attributes:
+      label: Database
+      options: [PostgreSQL, MySQL, MariaDB, SQL Server, SQLite, Not database-specific]
+    validations:
+      required: true
+  - type: input
+    id: database_version
+    attributes:
+      label: Database version
+      description: Leave blank when the problem is not database-specific.
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open…
+        2. Click…
+        3. Run…
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add sanitized logs or screenshots if useful. Never include credentials or private data.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Data safety
+      options:
+        - label: I removed credentials, connection strings, production data, and other secrets.
+          required: true
+        - label: This is not a security vulnerability. I will use private vulnerability reporting for security-sensitive reports.
+          required: true

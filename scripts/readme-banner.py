@@ -1,12 +1,12 @@
-"""Generate the plusplus README banner: black-purple gradient + film grain."""
+"""Generate the plusplus social-preview banner: black-purple gradient + film grain."""
 import math
 from PIL import Image, ImageChops, ImageDraw, ImageFont
 
-W, H = 2048, 560
+W, H = 1280, 640
 REPO = "/Users/weerachit/Documents/plusplus"
 
 # ---- base gradient (computed small, upscaled) ----
-gw, gh = 128, 35
+gw, gh = 80, 40
 base = Image.new("RGB", (gw, gh))
 px = base.load()
 
@@ -41,24 +41,24 @@ img = Image.blend(base, grained, 0.55)
 
 # ---- logo, top-left ----
 logo = Image.open(f"{REPO}/crates/app/assets/icon/png/icon-256.png").convert("RGBA")
-logo = logo.resize((96, 96), Image.LANCZOS)
-img.paste(logo, (88, 72), logo)
+logo = logo.resize((88, 88), Image.LANCZOS)
+img.paste(logo, (72, 64), logo)
 
 # ---- text, bottom-right (strix-style) ----
 draw = ImageDraw.Draw(img)
 TTC = "/System/Library/Fonts/HelveticaNeue.ttc"
-brand_font = ImageFont.truetype(TTC, 40, index=0)   # Regular
-head_font = ImageFont.truetype(TTC, 108, index=1)   # Bold
+brand_font = ImageFont.truetype(TTC, 32, index=0)   # Regular
+head_font = ImageFont.truetype(TTC, 68, index=1)    # Bold
 
-MARGIN = 96
+MARGIN = 72
 brand = "plusplus"
-headline = "Fast, native database GUI"
+headline = "Production-safe native SQL client"
 
 bw = draw.textlength(brand, font=brand_font)
-draw.text((W - MARGIN - bw, 268), brand, font=brand_font, fill=(232, 228, 244))
+draw.text((W - MARGIN - bw, 304), brand, font=brand_font, fill=(232, 228, 244))
 
 hw = draw.textlength(headline, font=head_font)
-draw.text((W - MARGIN - hw, 372), headline, font=head_font, fill=(250, 249, 253))
+draw.text((W - MARGIN - hw, 390), headline, font=head_font, fill=(250, 249, 253))
 
 img.save(f"{REPO}/.github/readme-banner.jpg", quality=90, optimize=True)
 print("saved", img.size)

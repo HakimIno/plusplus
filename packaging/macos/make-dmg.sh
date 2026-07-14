@@ -65,10 +65,19 @@ cat > "${APP}/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Ad-hoc sign so Gatekeeper treats it as a stable identity (no paid cert needed).
+# A Developer ID signature removes the unknown-developer warning after notarization. Local
+# builds fall back to an ad-hoc signature; that preserves bundle integrity but is not an
+# identity and must never be described as Apple platform signing.
 if command -v codesign >/dev/null 2>&1; then
-  echo "→ ad-hoc codesigning"
-  codesign --force --deep --sign - "$APP" 2>/dev/null || echo "  (codesign skipped)"
+  if [ -n "${MACOS_SIGN_IDENTITY:-}" ]; then
+    echo "→ Developer ID codesigning"
+    codesign --force --deep --strict --options runtime --timestamp \
+      --sign "$MACOS_SIGN_IDENTITY" "$APP"
+    codesign --verify --deep --strict --verbose=2 "$APP"
+  else
+    echo "→ ad-hoc codesigning (Developer ID not configured)"
+    codesign --force --deep --sign - "$APP" 2>/dev/null || echo "  (codesign skipped)"
+  fi
 fi
 
 # --- styled installer DMG ----------------------------------------------------

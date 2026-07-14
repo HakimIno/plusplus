@@ -1,6 +1,6 @@
 <svg width="2048" height="560" viewBox="0 0 2048 560" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
-  <title id="title">plusplus — a fast, native database client</title>
-  <desc id="desc">A playful green banner with the plusplus mark, database badges, and a hand-drawn SQL editor.</desc>
+  <title id="title">plusplus — a production-safe native database client</title>
+  <desc id="desc">A playful green banner for a production-safe native SQL client with database badges and a hand-drawn SQL editor.</desc>
   <defs>
     <linearGradient id="logo-tile" x1="0" y1="0" x2="1" y2="1">
       <stop stop-color="#292B35"/>
@@ -46,7 +46,7 @@
   <text x="318" y="173" class="display" font-size="43" font-weight="800" fill="#2D3436" letter-spacing="-1">plusplus</text>
   <path d="M318 190 C375 198 442 196 497 186" class="ink" stroke-width="4"/>
   <text x="118" y="354" class="display" font-size="76" font-weight="800" fill="#2D3436" letter-spacing="-2.5">Query. Inspect. Edit.</text>
-  <text x="121" y="405" class="display" font-size="29" font-weight="600" fill="#34443B">One fast, native workspace for every database.</text>
+  <text x="121" y="405" class="display" font-size="29" font-weight="600" fill="#34443B">Native speed. Production-safe guardrails.</text>
 
   <!-- Database badges -->
   <g class="utility" font-size="18" font-weight="700" fill="#2D3436" text-anchor="middle">

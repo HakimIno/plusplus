@@ -1,84 +1,97 @@
 <p align="center">
-  <img src=".github/readme-banner.svg" alt="plusplus — fast, native database GUI" width="100%">
+  <img src=".github/readme-banner.svg" alt="plusplus — a production-safe native database client" width="100%">
 </p>
 
 <p align="center">
-  <strong>A fast, native database client for PostgreSQL, MySQL, SQL Server, and SQLite.</strong><br>
-  A lightweight, open-source TablePlus alternative built in Rust — with no Electron and no web view.
+  <strong>A fast, native SQL client that makes production mistakes harder.</strong><br>
+  PostgreSQL · MySQL / MariaDB · SQL Server · SQLite · macOS · Windows · Linux
 </p>
 
 <p align="center">
-  <a href="https://github.com/HakimIno/plusplus/releases/latest"><strong>Download latest release</strong></a>
-  · <a href="#quick-start">Quick start</a>
+  <a href="https://github.com/HakimIno/plusplus/releases/latest"><strong>Download</strong></a>
+  · <a href="#try-it-in-two-minutes">Try it</a>
   · <a href="#why-plusplus">Why plusplus</a>
-  · <a href="#contributing">Contribute</a>
+  · <a href="ROADMAP.md">Roadmap</a>
+  · <a href="CONTRIBUTING.md">Contribute</a>
 </p>
 
-<p align="center"><sub>PostgreSQL · MySQL / MariaDB · SQL Server · SQLite · macOS · Windows · Linux</sub></p>
+<p align="center">
+  <a href="https://github.com/HakimIno/plusplus/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/HakimIno/plusplus"></a>
+  <a href="LICENSE-MIT"><img alt="MIT or Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue"></a>
+  <img alt="No Electron" src="https://img.shields.io/badge/Electron-none-6e8eff">
+  <img alt="No telemetry" src="https://img.shields.io/badge/telemetry-none-4acf8b">
+</p>
 
----
+<p align="center">
+  <img src="crates/ui/tests/snapshots/object_browser.png" alt="plusplus database client showing its schema browser and SQL editor" width="100%">
+</p>
 
-
-Connect to a database, explore its schema, run SQL, edit rows safely, and keep working
-while large results stream in. The bundled SQLite sample lets you try the full workflow
-without setting up a server.
+plusplus is an open-source desktop database client built in Rust. Browse schemas, run SQL,
+page through large tables, stage row edits, and export complete datasets without sending
+queries or results to a third party.
 
 ## Why plusplus
 
-| If you need… | plusplus gives you… |
+| What matters | What plusplus does |
 | --- | --- |
-| A responsive client for large data | A virtualized, server-paged grid that stays smooth beyond 100k rows. |
-| Confidence around production databases | Confirmation for destructive SQL, no-`WHERE` warnings, and an optional read-only mode enforced at the database session. |
-| A focused native desktop app | One Rust binary: no Electron, browser runtime, or telemetry. |
-| One workflow across databases | The same schema browser, editor, grid, shortcuts, and staged edits for Postgres, MySQL/MariaDB, SQL Server, and SQLite. |
+| Safer production access | Warns about destructive SQL and missing `WHERE` clauses; production connections require confirmation. |
+| Read-only that actually blocks writes | Enforces read-only mode in the application and, where supported, in the database session itself. |
+| Responsive work on large tables | Uses a virtualized, server-paged grid and caps materialized query results at 100,000 rows. |
+| A focused native app | Ships as a small Rust desktop app with no Electron, browser runtime, cloud account, or telemetry. |
+| One familiar workflow | Uses the same schema browser, SQL editor, result grid, shortcuts, and staged edits across four database families. |
 
 ### Built for everyday database work
 
-- **Explore a schema quickly.** Filter tables, columns, keys, indexes, views, and triggers; preview rows with one click.
-- **Run queries without freezing the UI.** Queries, counts, and exports run away from the main thread, so you can keep navigating while results stream in.
-- **Edit deliberately.** Cell edits, inserted rows, and deletions stay staged until you save; discard them any time.
-- **Understand relationships.** Open a pannable, zoomable ER diagram directly from the schema.
-- **Export without loading everything into memory.** Stream complete tables to CSV or JSON.
-- **Connect safely.** TLS (including verify-full and mutual TLS), SSH tunnels, OS-keychain secrets, query history, and a local audit log are included.
+- **Explore quickly.** Filter tables, columns, keys, indexes, views, routines, and triggers; preview rows with one click.
+- **Keep working during long operations.** Queries, counts, and exports run away from the UI thread.
+- **Edit deliberately.** Cell edits, inserted rows, and deletions remain staged until you save or discard them.
+- **Move complete datasets.** Stream table exports to CSV or JSON without loading the whole table into memory.
+- **Connect through real infrastructure.** Use TLS, mutual TLS where supported, and SSH tunnels with host-key verification.
+- **Keep secrets local.** Passwords stay in the OS keychain; query history and the optional audit trail stay on your machine.
 
-## Quick start
+See the [security model](SECURITY.md) for the exact guarantees and known platform-signing limitations.
 
-### Download an app
+## Try it in two minutes
 
-Get the latest signed build from [GitHub Releases](https://github.com/HakimIno/plusplus/releases/latest).
+### Download a release
 
-| Platform | Download | Notes |
+Download the latest package from [GitHub Releases](https://github.com/HakimIno/plusplus/releases/latest).
+
+| Platform | Package | Current signing status |
 | --- | --- | --- |
-| macOS | `.dmg` | Open the disk image and move plusplus to Applications. |
-| Windows | `.zip` | Extract it and run `plusplus.exe`. |
-| Linux | `.AppImage` | Make it executable, then run it. |
+| macOS | Universal `.dmg` | Minisign verified; Apple notarization is still pending. |
+| Windows | x86_64 `.zip` | Minisign verified; Authenticode signing is still pending. |
+| Linux | x86_64 `.AppImage` | Minisign verified. |
 
-Release packages are accompanied by a Minisign signature. See [release signing](docs/RELEASE_SIGNING.md) for verification details.
+Your operating system may warn about the macOS and Windows packages until native platform
+signing is available. Every release asset has a detached Minisign signature; verification
+instructions are in [Release signing](docs/RELEASE_SIGNING.md).
+Native certificate setup is documented separately in [Platform signing](docs/PLATFORM_SIGNING.md).
 
-### Try it from source
+### Run from source
 
-SQLite support is bundled, so you can launch the app immediately:
+SQLite support is bundled, so no database server is required:
 
 ```bash
 cargo run --bin plusplus
 ```
 
-Then add `examples/sample.sqlite` as a SQLite connection. It is a small Thai e-commerce
-database with linked tables and real-looking order history, ideal for trying the grid,
-staged editing, and ER diagram.
+Add `examples/sample.sqlite` as a SQLite connection. The sample contains a small Thai
+e-commerce schema and realistic linked data for trying schema navigation, queries, paging,
+filters, and staged editing.
 
 ### Build on your platform
 
 ```bash
-# macOS — build, package, and install in /Applications
+# macOS
 scripts/release.sh --install
 
-# Linux — install dependencies, build, smoke-test, then run
+# Linux
 scripts/linux-build.sh --install-deps --install-rust --release --smoke
-scripts/linux-build.sh --release --run
 ```
 
-Windows builds and portable ZIPs are produced by CI; use the release download above.
+Windows portable ZIPs are built by CI; use the release download unless you are developing
+the app itself.
 
 ## Keyboard-first
 
@@ -92,28 +105,25 @@ Windows builds and portable ZIPs are produced by CI; use the release download ab
 | `Cmd/Ctrl + T / W` | Open / close tab |
 | `Cmd/Ctrl + F` | Toggle filter bar |
 
-## Security and privacy
+## Project status
 
-Secrets stay in the operating system keychain rather than plaintext config files. You can
-mark a connection as production or read-only, use TLS and SSH tunnels, and review a local
-audit log. Read the [security checklist](SECURITY.md) before using a production database.
+plusplus is pre-1.0 and under active development. SQLite is the easiest evaluation path;
+before using any pre-1.0 database client against production, review the
+[security checklist](SECURITY.md), keep backups, and start with a read-only account.
+
+The current priorities and explicit non-goals are in [ROADMA
+P.md](ROADMAP.md). Releases are
+listed in the [changelog](CHANGELOG.md).
 
 ## Contributing
 
-Feedback is especially useful for database-specific workflows, missing drivers, and UX
-rough edges. Please open an [issue](https://github.com/HakimIno/plusplus/issues) with the
-database/version you use, the expected workflow, and a screenshot or minimal reproduction
-when possible.
+Bug reports, database-specific test cases, UX feedback, themes, documentation, and focused
+pull requests are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) and look for
+[`good first issue`](https://github.com/HakimIno/plusplus/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+or [`help wanted`](https://github.com/HakimIno/plusplus/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22).
 
-Themes are the first contribution point: add a JSON palette and share it using the
-[theme format](docs/THEMES.md). Pull requests are welcome too.
-
-## Roadmap
-
-The current focus is making the everyday connection → query → inspect → edit loop feel
-fast and trustworthy across all four supported database families. Proposed work and bugs
-will be tracked in [GitHub Issues](https://github.com/HakimIno/plusplus/issues).
+Please use private vulnerability reporting rather than a public issue for security-sensitive reports.
 
 ---
 
-<p align="center"><sub>Built with Rust · <a href="https://github.com/HakimIno/plusplus">github.com/HakimIno/plusplus</a></sub></p>
+<p align="center"><sub>Built with Rust · Dual-licensed under MIT or Apache-2.0</sub></p>

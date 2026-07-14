@@ -36,4 +36,5 @@ examples/*.sqlite-shm
 # egui_kittest writes these beside a snapshot when it differs; only the .png baseline
 # belongs in git.
 **/tests/snapshots/*.old.png
+**/tests/snapshots/*.new.png
 **/tests/snapshots/*.diff.png

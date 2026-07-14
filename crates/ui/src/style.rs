@@ -142,11 +142,15 @@ pub fn apply(ctx: &egui::Context) {
     let mut style = (*ctx.global_style()).clone();
 
     // Compact, minimal type scale — small but still readable.
+    // Headless tests do not install the app's embedded fonts; resolving an unbound named
+    // family panics in epaint before the behavioral assertion can run.
+    let heading_family = if cfg!(test) {
+        FontFamily::Proportional
+    } else {
+        FontFamily::Name(crate::HEADING_FAMILY.into())
+    };
     style.text_styles = [
-        (
-            TextStyle::Heading,
-            FontId::new(12.5, FontFamily::Name(crate::HEADING_FAMILY.into())),
-        ),
+        (TextStyle::Heading, FontId::new(12.5, heading_family)),
         (TextStyle::Body, FontId::new(12.5, FontFamily::Proportional)),
         (
             TextStyle::Button,
@@ -172,7 +176,7 @@ pub fn apply(ctx: &egui::Context) {
     // Buttons and combo boxes adopt the shared control height from here.
     s.interact_size.y = CONTROL_H;
     s.combo_width = 0.0; // let combos size to their content/width hint, not a min
-    // Tighter vertical padding keeps dialog title bars compact.
+                         // Tighter vertical padding keeps dialog title bars compact.
     s.window_margin = Margin::symmetric(12, 4);
     s.scroll.bar_width = 8.0;
     s.scroll.bar_inner_margin = 2.0;

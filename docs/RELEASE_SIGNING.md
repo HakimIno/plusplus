@@ -1,5 +1,8 @@
 # Release signing (required for in-app updates)
 
+This document covers Minisign update integrity. Apple notarization and Windows Authenticode
+are separate and documented in [Native platform signing](PLATFORM_SIGNING.md).
+
 plusplus verifies every downloaded update before installing it. The in-app updater
 downloads a release package (DMG on macOS, AppImage on Linux) **and** its detached
 [minisign](https://jedisct1.github.io/minisign/) signature (`<package>.minisig`), then

@@ -1,0 +1,36 @@
+name: Feature request
+description: Propose a focused workflow improvement
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the workflow and who experiences the problem, rather than only naming a feature.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: database
+    attributes:
+      label: Database scope
+      options: [All databases, PostgreSQL, MySQL or MariaDB, SQL Server, SQLite, Not database-specific]
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or prior art
+      description: Explain the current workaround or show how another tool handles the workflow.
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I may be able to help implement or test this change.

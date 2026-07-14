@@ -394,7 +394,10 @@ pub fn show_popup(
     if pos.y + height > screen.bottom() {
         pos.y = anchor.top() - height - 4.0;
     }
-    pos.x = pos.x.min(screen.right() - width - 8.0).max(screen.left() + 4.0);
+    pos.x = pos
+        .x
+        .min(screen.right() - width - 8.0)
+        .max(screen.left() + 4.0);
 
     let mut event = Event::None;
     let area = egui::Area::new(egui::Id::new("sql_autocomplete_popup"))
@@ -430,11 +433,8 @@ pub fn show_popup(
                                 if selected {
                                     ui.painter().rect_filled(rect, 3.0, palette::SELECTION());
                                 } else if resp.hovered() {
-                                    ui.painter().rect_filled(
-                                        rect,
-                                        3.0,
-                                        palette::SURFACE_HOVER(),
-                                    );
+                                    ui.painter()
+                                        .rect_filled(rect, 3.0, palette::SURFACE_HOVER());
                                 }
                                 if selected && nav_moved {
                                     resp.scroll_to_me(None);
@@ -458,8 +458,7 @@ pub fn show_popup(
                                     .tint(kind_color(item.kind))
                                     .paint_at(ui, icon_rect);
 
-                                let label_pos =
-                                    egui::pos2(rect.left() + 24.0, rect.center().y);
+                                let label_pos = egui::pos2(rect.left() + 24.0, rect.center().y);
                                 ui.painter().text(
                                     label_pos,
                                     egui::Align2::LEFT_CENTER,
@@ -468,8 +467,7 @@ pub fn show_popup(
                                     palette::TEXT(),
                                 );
                                 // Detail, right-aligned and clipped against the label.
-                                let detail_pos =
-                                    egui::pos2(rect.right() - 7.0, rect.center().y);
+                                let detail_pos = egui::pos2(rect.right() - 7.0, rect.center().y);
                                 ui.painter().text(
                                     detail_pos,
                                     egui::Align2::RIGHT_CENTER,
@@ -516,7 +514,11 @@ mod tests {
                 TableInfo {
                     schema: Some("public".to_string()),
                     name: "orders".to_string(),
-                    columns: vec![col("id", "int"), col("user_id", "int"), col("total", "numeric")],
+                    columns: vec![
+                        col("id", "int"),
+                        col("user_id", "int"),
+                        col("total", "numeric"),
+                    ],
                     indexes: vec![],
                     foreign_keys: vec![],
                 },
@@ -658,7 +660,14 @@ mod tests {
         // The `"` must not hide the `FROM` behind it, or columns and keywords crowd out the
         // table the user is clearly reaching for.
         let sql = "SELECT * FROM \"ลูก";
-        let c = complete(sql, sql.chars().count(), Some(&s), Some(DbKind::Postgres), false).unwrap();
+        let c = complete(
+            sql,
+            sql.chars().count(),
+            Some(&s),
+            Some(DbKind::Postgres),
+            false,
+        )
+        .unwrap();
         assert_eq!(c.items[0].kind, SuggestionKind::Table);
     }
 
@@ -675,7 +684,10 @@ mod tests {
         let sql = "SELECT * FROM t WHERE name = \"ลูก";
         if let Some(c) = complete(sql, sql.chars().count(), Some(&s), my, false) {
             let quote_at = sql.chars().count() - 4; // the `"` before `ลูก`
-            assert!(c.replace_start > quote_at, "must not absorb a string's quote");
+            assert!(
+                c.replace_start > quote_at,
+                "must not absorb a string's quote"
+            );
         }
     }
 

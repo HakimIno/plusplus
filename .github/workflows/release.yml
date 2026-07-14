@@ -20,8 +20,58 @@ jobs:
         run: |
           rustup target add x86_64-apple-darwin aarch64-apple-darwin
 
+      - name: Import Apple Developer ID certificate
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_CERTIFICATE_BASE64:-}" ]; then
+            echo "::notice::Apple Developer ID is not configured; the release will not be notarized"
+            exit 0
+          fi
+          CERTIFICATE_PATH="${RUNNER_TEMP}/plusplus-signing.p12"
+          KEYCHAIN_PATH="${RUNNER_TEMP}/plusplus-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
       - name: Build universal .app + .dmg
+        env:
+          MACOS_SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: scripts/release.sh --universal
+
+      - name: Notarize and staple DMG
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            echo "::notice::Skipping notarization because Apple signing is not configured"
+            exit 0
+          fi
+          if [ -z "${APPLE_ID:-}" ] || [ -z "${APPLE_TEAM_ID:-}" ] || [ -z "${APPLE_APP_PASSWORD:-}" ]; then
+            echo "::error::Apple signing identity exists but notarization secrets are incomplete"
+            exit 1
+          fi
+          for dmg in target/dist/plusplus-*.dmg; do
+            xcrun notarytool submit "$dmg" --wait \
+              --apple-id "$APPLE_ID" \
+              --team-id "$APPLE_TEAM_ID" \
+              --password "$APPLE_APP_PASSWORD"
+            xcrun stapler staple "$dmg"
+            xcrun stapler validate "$dmg"
+          done
 
       # Sign every DMG with the project's minisign key so the in-app updater (which verifies
       # the signature against the public key baked into the binary) will accept it. This is
@@ -124,6 +174,31 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release -p plusplus-app
+
+      - name: Authenticode sign executable
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE_BASE64) {
+            Write-Host "::notice::Windows signing certificate is not configured; skipping Authenticode"
+            exit 0
+          }
+          $certificatePath = Join-Path $env:RUNNER_TEMP "plusplus-signing.pfx"
+          [IO.File]::WriteAllBytes(
+            $certificatePath,
+            [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64)
+          )
+          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signTool) { throw "signtool.exe was not found" }
+          & $signTool.FullName sign /f $certificatePath /p $env:WINDOWS_CERTIFICATE_PASSWORD `
+            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 target/release/plusplus.exe
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE" }
+          & $signTool.FullName verify /pa /v target/release/plusplus.exe
+          if ($LASTEXITCODE -ne 0) { throw "signature verification failed" }
 
       - name: Package portable zip
         run: packaging/windows/make-zip.sh

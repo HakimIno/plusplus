@@ -179,6 +179,21 @@ fn icon_image(src: ImageSource<'static>, size: f32, tint: egui::Color32) -> egui
         .tint(tint)
 }
 
+/// A submenu row carrying the same icon + label as [`Btn`], so a menu that mixes plain items
+/// with a submenu still lines its labels up. `Ui::menu_button` takes atoms rather than a
+/// `Button`, so it cannot go through `Btn` — this keeps the two in step.
+pub(crate) fn menu_button<R>(
+    ui: &mut Ui,
+    src: ImageSource<'static>,
+    text: &str,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> Response {
+    let color = ui.visuals().widgets.inactive.fg_stroke.color;
+    let icon = icon_image(src, icons::SIZE, color);
+    ui.menu_button((icon, RichText::new(text).color(color)), add_contents)
+        .response
+}
+
 pub(crate) fn button(
     ui: &mut Ui,
     src: ImageSource<'static>,
@@ -224,16 +239,20 @@ pub(crate) fn icon_button(ui: &mut Ui, src: ImageSource<'static>, hover: &str) -
 }
 
 #[cfg(test)]
-mod tmp_snap {
+mod tests {
     use egui_kittest::kittest::Queryable as _;
 
+    /// Screenshot generator (ignored): a context menu mixing plain items with a submenu, the
+    /// shape of the connection menu. The submenu row must carry an icon like its siblings —
+    /// without one its label hangs left of the column and the row reads as a different kind
+    /// of thing.
     #[test]
     #[ignore = "screenshot generator; run manually with --ignored"]
-    fn snapshot_menu() {
+    fn snapshot_menu_with_submenu() {
         let theme = crate::theme::ThemeRegistry::load().theme_of("plusplus-dark");
         let mut setup = false;
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(200.0, 120.0))
+            .with_size(egui::vec2(240.0, 190.0))
             .with_pixels_per_point(2.0)
             .build_ui(move |ui| {
                 if !setup {
@@ -247,18 +266,22 @@ mod tmp_snap {
                     0.0,
                     crate::style::palette::BASE(),
                 );
-                egui::containers::menu::menu_style(ui.style_mut());
-                egui::Frame::menu(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(170.0);
-                    super::button(ui, crate::icons::connect(), "Connect", true);
+                ui.menu_button("open", |ui| {
+                    ui.set_min_width(180.0);
+                    super::button(ui, crate::icons::connect(), "Reconnect", true);
+                    super::menu_button(ui, crate::icons::database(), "Switch Database", |ui| {
+                        ui.label("demo");
+                    });
                     super::button(ui, crate::icons::edit(), "Edit\u{2026}", true);
+                    super::button(ui, crate::icons::disconnect(), "Disconnect", true);
                     super::button(ui, crate::icons::trash(), "Delete", true);
                 });
             });
-        harness.run_steps(8);
-        harness.snapshot("tmp_menu_rest");
-        harness.get_by_label("Delete").hover();
-        harness.run_steps(8);
-        harness.snapshot("tmp_menu_hover");
+        harness.run_steps(4);
+        harness.get_by_label("open").click();
+        harness.run();
+        let found = harness.query_by_label("Reconnect").is_some();
+        println!("MENU OPEN (Reconnect visible): {found}");
+        harness.snapshot("menu_with_submenu");
     }
 }

@@ -6,6 +6,9 @@ use egui::{Color32, CornerRadius, FontFamily, FontId, ImageSource, Margin, Pos2,
 use crate::icons;
 use crate::style::{palette, CONTROL_H};
 
+/// The one single-line field. Every form input goes through here (or its siblings below) so
+/// that heights line up across dialogs and editors: `add_sized` pins the height to
+/// [`CONTROL_H`], which a bare `TextEdit` would let drift with its margin.
 pub(crate) fn text_input(
     ui: &mut egui::Ui,
     text: &mut String,
@@ -16,6 +19,36 @@ pub(crate) fn text_input(
         egui::vec2(width, CONTROL_H),
         egui::TextEdit::singleline(text)
             .hint_text(hint)
+            .vertical_align(egui::Align::Center)
+            .margin(Margin::symmetric(6, 0)),
+    )
+}
+
+/// [`text_input`] that greys out when `enabled` is false, keeping identical metrics either
+/// way — a disabled field must not change the row's height.
+pub(crate) fn text_input_enabled(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    text: &mut String,
+    hint: &str,
+    width: f32,
+) -> egui::Response {
+    ui.add_enabled_ui(enabled, |ui| text_input(ui, text, hint, width))
+        .inner
+}
+
+/// [`text_input`] with the characters masked.
+pub(crate) fn password_input(
+    ui: &mut egui::Ui,
+    text: &mut String,
+    hint: &str,
+    width: f32,
+) -> egui::Response {
+    ui.add_sized(
+        egui::vec2(width, CONTROL_H),
+        egui::TextEdit::singleline(text)
+            .hint_text(hint)
+            .password(true)
             .vertical_align(egui::Align::Center)
             .margin(Margin::symmetric(6, 0)),
     )
@@ -60,15 +93,11 @@ pub(crate) fn accent_checkbox(
 
     let label_resp = label.map(|label| {
         ui.add(
-            egui::Label::new(
-                egui::RichText::new(label)
-                    .size(11.5)
-                    .color(if enabled {
-                        palette::TEXT_WEAK()
-                    } else {
-                        palette::TEXT_FAINT()
-                    }),
-            )
+            egui::Label::new(egui::RichText::new(label).size(11.5).color(if enabled {
+                palette::TEXT_WEAK()
+            } else {
+                palette::TEXT_FAINT()
+            }))
             .sense(sense),
         )
     });
@@ -138,8 +167,12 @@ pub(crate) fn accent_radio<T: PartialEq>(
     let (rect, mut resp) = ui.allocate_exact_size(egui::vec2(SIZE, SIZE), sense);
 
     let label_resp = ui.add(
-        egui::Label::new(egui::RichText::new(label).size(11.5).color(palette::TEXT_WEAK()))
-            .sense(sense),
+        egui::Label::new(
+            egui::RichText::new(label)
+                .size(11.5)
+                .color(palette::TEXT_WEAK()),
+        )
+        .sense(sense),
     );
 
     if (resp.clicked() || label_resp.clicked()) && !selected {
@@ -185,8 +218,10 @@ pub(crate) fn segmented(
 ) -> usize {
     let n = items.len().max(1);
     let height = 28.0;
-    let (rect, _) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), height), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), height),
+        egui::Sense::hover(),
+    );
     if ui.is_rect_visible(rect) {
         ui.painter()
             .rect_filled(rect, CornerRadius::same(8), palette::SURFACE());
@@ -206,8 +241,11 @@ pub(crate) fn segmented(
         let active = i == selected;
         if ui.is_rect_visible(seg) {
             if active {
-                ui.painter()
-                    .rect_filled(seg.shrink(3.0), CornerRadius::same(6), palette::SELECTION());
+                ui.painter().rect_filled(
+                    seg.shrink(3.0),
+                    CornerRadius::same(6),
+                    palette::SELECTION(),
+                );
             } else if resp.hovered() {
                 ui.painter().rect_filled(
                     seg.shrink(3.0),
@@ -233,9 +271,14 @@ pub(crate) fn segmented(
                 Pos2::new(start_x, seg.center().y - icon_sz / 2.0),
                 Vec2::splat(icon_sz),
             );
-            egui::Image::new(icon.clone()).tint(color).paint_at(ui, icon_rect);
+            egui::Image::new(icon.clone())
+                .tint(color)
+                .paint_at(ui, icon_rect);
             ui.painter().galley(
-                Pos2::new(icon_rect.max.x + gap, seg.center().y - galley.size().y / 2.0),
+                Pos2::new(
+                    icon_rect.max.x + gap,
+                    seg.center().y - galley.size().y / 2.0,
+                ),
                 galley,
                 color,
             );

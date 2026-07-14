@@ -1292,52 +1292,59 @@ impl DbGuiApp {
                                             ui.close();
                                         }
                                         if live && !databases.is_empty() {
-                                            ui.menu_button("Switch Database", |ui| {
-                                                ui.set_min_width(160.0);
-                                                egui::ScrollArea::vertical()
-                                                    .max_height(220.0)
-                                                    .show(ui, |ui| {
-                                                        for db in &databases {
-                                                            let is_current = *db == current_db;
-                                                            let tint = ui
-                                                                .visuals()
-                                                                .widgets
-                                                                .inactive
-                                                                .fg_stroke
-                                                                .color;
-                                                            let db_img =
-                                                                egui::Image::new(icons::database())
-                                                                    .fit_to_exact_size(egui::vec2(
-                                                                        14.0, 14.0,
-                                                                    ))
-                                                                    .tint(tint);
-                                                            let label = if is_current {
-                                                                format!("✓  {db}")
-                                                            } else {
-                                                                db.clone()
-                                                            };
-                                                            let btn = egui::Button::image_and_text(
-                                                                db_img, label,
-                                                            )
-                                                            .min_size(egui::vec2(
-                                                                ui.available_width(),
-                                                                0.0,
-                                                            ));
-                                                            if ui
-                                                                .add_enabled(!is_current, btn)
-                                                                .clicked()
-                                                            {
-                                                                actions.push(
-                                                                    Action::SwitchDatabase {
-                                                                        conn_idx: idx,
-                                                                        database: db.clone(),
-                                                                    },
-                                                                );
-                                                                ui.close();
+                                            components::menu_button(
+                                                ui,
+                                                icons::database(),
+                                                "Switch Database",
+                                                |ui| {
+                                                    ui.set_min_width(160.0);
+                                                    egui::ScrollArea::vertical()
+                                                        .max_height(220.0)
+                                                        .show(ui, |ui| {
+                                                            for db in &databases {
+                                                                let is_current = *db == current_db;
+                                                                let tint = ui
+                                                                    .visuals()
+                                                                    .widgets
+                                                                    .inactive
+                                                                    .fg_stroke
+                                                                    .color;
+                                                                let db_img = egui::Image::new(
+                                                                    icons::database(),
+                                                                )
+                                                                .fit_to_exact_size(egui::vec2(
+                                                                    14.0, 14.0,
+                                                                ))
+                                                                .tint(tint);
+                                                                let label = if is_current {
+                                                                    format!("✓  {db}")
+                                                                } else {
+                                                                    db.clone()
+                                                                };
+                                                                let btn =
+                                                                    egui::Button::image_and_text(
+                                                                        db_img, label,
+                                                                    )
+                                                                    .min_size(egui::vec2(
+                                                                        ui.available_width(),
+                                                                        0.0,
+                                                                    ));
+                                                                if ui
+                                                                    .add_enabled(!is_current, btn)
+                                                                    .clicked()
+                                                                {
+                                                                    actions.push(
+                                                                        Action::SwitchDatabase {
+                                                                            conn_idx: idx,
+                                                                            database: db.clone(),
+                                                                        },
+                                                                    );
+                                                                    ui.close();
+                                                                }
                                                             }
-                                                        }
-                                                    });
-                                            });
+                                                        });
+                                                },
+                                            );
                                         }
                                         if components::button(ui, icons::edit(), "Edit…", true)
                                             .clicked()
@@ -1631,11 +1638,7 @@ impl DbGuiApp {
             s.schema.as_deref() == table.schema.as_deref() && s.table == table.name
         });
 
-        let id = ui.make_persistent_id((
-            id_salt,
-            table.schema.as_deref(),
-            table.name.as_str(),
-        ));
+        let id = ui.make_persistent_id((id_salt, table.schema.as_deref(), table.name.as_str()));
         let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, false);
 
         let full_w = ui.available_width();
@@ -1947,9 +1950,7 @@ impl DbGuiApp {
                 virtualized_object_rows(ui, &routines, |ui, index, r| {
                     let signature = r.signature();
                     let tab_kind = match r.kind {
-                        dbcore::RoutineKind::Function => {
-                            crate::components::QueryTabKind::Function
-                        }
+                        dbcore::RoutineKind::Function => crate::components::QueryTabKind::Function,
                         dbcore::RoutineKind::Procedure => {
                             crate::components::QueryTabKind::Procedure
                         }
@@ -2771,8 +2772,8 @@ impl DbGuiApp {
 
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui
-                        .small_button("Reload themes")
+                    if components::Btn::new("Reload themes")
+                        .show(ui)
                         .on_hover_text(
                             themes_dir
                                 .as_deref()
@@ -2911,18 +2912,18 @@ impl DbGuiApp {
                         ui.label(egui::RichText::new(status).strong().color(color));
                         ui.label(egui::RichText::new(&entry.conn_name).strong());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui
-                                .small_button("Use")
+                            if components::Btn::new("Use")
+                                .show(ui)
                                 .on_hover_text("Put this SQL into the active tab")
                                 .clicked()
                             {
                                 actions.push(Action::UseHistorySql(idx));
                             }
-                            if ui.small_button("Copy").clicked() {
+                            if components::Btn::new("Copy").show(ui).clicked() {
                                 ui.ctx().copy_text(entry.sql.clone());
                             }
-                            if ui
-                                .small_button("Save")
+                            if components::Btn::new("Save")
+                                .show(ui)
                                 .on_hover_text("Save as a favorite")
                                 .clicked()
                             {
@@ -3037,8 +3038,9 @@ impl DbGuiApp {
                                 icons::show_colored(ui, icons::star(), 12.0, palette::ACCENT());
                                 if is_renaming_this {
                                     if let Some(draft) = self.favorite_pending.as_mut() {
+                                        let w = ui.available_width();
                                         let resp =
-                                            ui.add(egui::TextEdit::singleline(&mut draft.name));
+                                            components::text_input(ui, &mut draft.name, "", w);
                                         resp.request_focus();
                                         if resp.lost_focus()
                                             && ui.input(|i| i.key_pressed(egui::Key::Enter))
@@ -3202,11 +3204,8 @@ impl DbGuiApp {
             .show(ctx, |ui| {
                 ui.label(egui::RichText::new("Name").color(palette::TEXT_WEAK()));
                 if let Some(draft) = self.favorite_pending.as_mut() {
-                    let resp = ui.add(
-                        egui::TextEdit::singleline(&mut draft.name)
-                            .hint_text("My query")
-                            .desired_width(f32::INFINITY),
-                    );
+                    let w = ui.available_width();
+                    let resp = components::text_input(ui, &mut draft.name, "My query", w);
                     resp.request_focus();
                     if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         submit = true;
@@ -3449,9 +3448,14 @@ impl DbGuiApp {
                                     // edge; in a right-to-left layout the first thing added is
                                     // the rightmost, so this reserves the gutter.
                                     ui.add_space(SCROLLBAR_GUTTER);
-                                    if components::button(ui, icons::close(), "Skip all", mapped > 0)
-                                        .on_hover_text("Unmap every column")
-                                        .clicked()
+                                    if components::button(
+                                        ui,
+                                        icons::close(),
+                                        "Skip all",
+                                        mapped > 0,
+                                    )
+                                    .on_hover_text("Unmap every column")
+                                    .clicked()
                                     {
                                         actions.push(Action::ClearImportMapping);
                                     }
@@ -3557,7 +3561,11 @@ impl DbGuiApp {
                                         format!(
                                             "{} row{}",
                                             draft.preview_rows.len(),
-                                            if draft.preview_rows.len() == 1 { "" } else { "s" }
+                                            if draft.preview_rows.len() == 1 {
+                                                ""
+                                            } else {
+                                                "s"
+                                            }
                                         )
                                     };
                                     ui.label(
@@ -3817,12 +3825,11 @@ impl DbGuiApp {
                                 ui,
                                 field_test_status(&test_state, ConnField::Password),
                                 |ui| {
-                                    ui.add_sized(
-                                        egui::vec2(field_w, style::CONTROL_H),
-                                        egui::TextEdit::singleline(&mut editor.password)
-                                            .password(true)
-                                            .vertical_align(egui::Align::Center)
-                                            .margin(egui::Margin::symmetric(6, 0)),
+                                    components::password_input(
+                                        ui,
+                                        &mut editor.password,
+                                        "",
+                                        field_w,
                                     )
                                 },
                             )
@@ -3988,15 +3995,13 @@ impl DbGuiApp {
                                 } else {
                                     "Key passphrase"
                                 });
-                                form_changed |= ui
-                                    .add_sized(
-                                        egui::vec2(field_w, style::CONTROL_H),
-                                        egui::TextEdit::singleline(&mut editor.ssh_password)
-                                            .password(true)
-                                            .vertical_align(egui::Align::Center)
-                                            .margin(egui::Margin::symmetric(6, 0)),
-                                    )
-                                    .changed();
+                                form_changed |= components::password_input(
+                                    ui,
+                                    &mut editor.ssh_password,
+                                    "",
+                                    field_w,
+                                )
+                                .changed();
                                 ui.end_row();
                             }
                         } else {
@@ -4178,23 +4183,17 @@ fn table_editor_view(
 
     // Table name (only editable in NewTable mode; read-only in EditTable).
     ui.horizontal(|ui| {
-        let pad = egui::Margin::symmetric(10, 5);
         ui.label("Table name:");
-        let te = egui::TextEdit::singleline(&mut editor.table_name)
-            .hint_text("my_table")
-            .desired_width(200.0)
-            .vertical_align(egui::Align::Center)
-            .margin(pad);
-        ui.add_enabled(editor.mode == SchemaEditorMode::NewTable, te);
+        components::text_input_enabled(
+            ui,
+            editor.mode == SchemaEditorMode::NewTable,
+            &mut editor.table_name,
+            "my_table",
+            200.0,
+        );
         if !editor.schema_name.is_empty() || editor.mode == SchemaEditorMode::NewTable {
             ui.label("Schema:");
-            ui.add(
-                egui::TextEdit::singleline(&mut editor.schema_name)
-                    .hint_text("public")
-                    .desired_width(120.0)
-                    .vertical_align(egui::Align::Center)
-                    .margin(pad),
-            );
+            components::text_input(ui, &mut editor.schema_name, "public", 120.0);
         }
     });
     ui.add_space(6.0);
@@ -4247,24 +4246,11 @@ fn view_editor_view(
     object_editor_header(ui, actions, &title);
 
     ui.horizontal(|ui| {
-        let pad = egui::Margin::symmetric(10, 5);
         ui.label("View name:");
-        ui.add(
-            egui::TextEdit::singleline(&mut editor.name)
-                .hint_text("my_view")
-                .desired_width(200.0)
-                .vertical_align(egui::Align::Center)
-                .margin(pad),
-        );
+        components::text_input(ui, &mut editor.name, "my_view", 200.0);
         if !editor.schema_name.is_empty() || editor.mode == ObjectMode::Create {
             ui.label("Schema:");
-            ui.add(
-                egui::TextEdit::singleline(&mut editor.schema_name)
-                    .hint_text("public")
-                    .desired_width(120.0)
-                    .vertical_align(egui::Align::Center)
-                    .margin(pad),
-            );
+            components::text_input(ui, &mut editor.schema_name, "public", 120.0);
         }
         // Materialized views are Postgres-only.
         if editor.db_kind == dbcore::DbKind::Postgres {
@@ -4322,7 +4308,6 @@ fn trigger_editor_view(
     };
     object_editor_header(ui, actions, &title);
     let kind = editor.db_kind;
-    let pad = egui::Margin::symmetric(10, 5);
 
     egui::ScrollArea::vertical()
         .id_salt("trigger_editor_scroll")
@@ -4330,22 +4315,10 @@ fn trigger_editor_view(
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Name:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut editor.name)
-                        .hint_text("my_trigger")
-                        .desired_width(180.0)
-                        .vertical_align(egui::Align::Center)
-                        .margin(pad),
-                );
+                components::text_input(ui, &mut editor.name, "my_trigger", 180.0);
                 if !editor.schema_name.is_empty() || editor.mode == ObjectMode::Create {
                     ui.label("Schema:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut editor.schema_name)
-                            .hint_text("public")
-                            .desired_width(110.0)
-                            .vertical_align(egui::Align::Center)
-                            .margin(pad),
-                    );
+                    components::text_input(ui, &mut editor.schema_name, "public", 110.0);
                 }
             });
             ui.add_space(4.0);
@@ -4419,12 +4392,11 @@ fn trigger_editor_view(
             if matches!(kind, DbKind::Postgres | DbKind::Sqlite) {
                 ui.horizontal(|ui| {
                     ui.label("When:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut editor.when_condition)
-                            .hint_text("optional: NEW.col > 0")
-                            .desired_width(320.0)
-                            .vertical_align(egui::Align::Center)
-                            .margin(pad),
+                    components::text_input(
+                        ui,
+                        &mut editor.when_condition,
+                        "optional: NEW.col > 0",
+                        320.0,
                     );
                 });
                 ui.add_space(6.0);
@@ -4443,13 +4415,7 @@ fn trigger_editor_view(
                             .color(palette::TEXT_WEAK())
                             .size(12.0),
                     );
-                    ui.add(
-                        egui::TextEdit::singleline(&mut editor.body)
-                            .hint_text("my_trigger_fn")
-                            .desired_width(280.0)
-                            .vertical_align(egui::Align::Center)
-                            .margin(pad),
-                    );
+                    components::text_input(ui, &mut editor.body, "my_trigger_fn", 280.0);
                     return;
                 }
                 ui.label(
@@ -4507,7 +4473,6 @@ fn routine_editor_view(
     };
     object_editor_header(ui, actions, &title);
     let kind = editor.db_kind;
-    let pad = egui::Margin::symmetric(10, 5);
     let is_fn = editor.kind == RoutineKind::Function;
 
     egui::ScrollArea::vertical()
@@ -4526,22 +4491,10 @@ fn routine_editor_view(
 
             ui.horizontal(|ui| {
                 ui.label("Name:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut editor.name)
-                        .hint_text("my_routine")
-                        .desired_width(180.0)
-                        .vertical_align(egui::Align::Center)
-                        .margin(pad),
-                );
+                components::text_input(ui, &mut editor.name, "my_routine", 180.0);
                 if !editor.schema_name.is_empty() || editor.mode == ObjectMode::Create {
                     ui.label("Schema:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut editor.schema_name)
-                            .hint_text("public")
-                            .desired_width(110.0)
-                            .vertical_align(egui::Align::Center)
-                            .margin(pad),
-                    );
+                    components::text_input(ui, &mut editor.schema_name, "public", 110.0);
                 }
             });
             ui.add_space(4.0);
@@ -4551,13 +4504,7 @@ fn routine_editor_view(
                 ui.horizontal(|ui| {
                     if is_fn {
                         ui.label("Returns:");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut editor.return_type)
-                                .hint_text("integer")
-                                .desired_width(150.0)
-                                .vertical_align(egui::Align::Center)
-                                .margin(pad),
-                        );
+                        components::text_input(ui, &mut editor.return_type, "integer", 150.0);
                     }
                     if kind == DbKind::Postgres {
                         ui.label("Language:");
@@ -4585,18 +4532,8 @@ fn routine_editor_view(
             let mut remove: Option<usize> = None;
             for (i, p) in editor.params.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut p.name)
-                            .hint_text("name")
-                            .desired_width(110.0)
-                            .margin(pad),
-                    );
-                    ui.add(
-                        egui::TextEdit::singleline(&mut p.data_type)
-                            .hint_text("type")
-                            .desired_width(120.0)
-                            .margin(pad),
-                    );
+                    components::text_input(ui, &mut p.name, "name", 110.0);
+                    components::text_input(ui, &mut p.data_type, "type", 120.0);
                     if show_mode {
                         egui::ComboBox::from_id_salt(("pmode", i))
                             .selected_text(p.mode.label())
@@ -4607,12 +4544,7 @@ fn routine_editor_view(
                                 }
                             });
                     }
-                    ui.add(
-                        egui::TextEdit::singleline(&mut p.default)
-                            .hint_text("default")
-                            .desired_width(100.0)
-                            .margin(pad),
-                    );
+                    components::text_input(ui, &mut p.default, "default", 100.0);
                     if components::button(ui, icons::trash(), "", true).clicked() {
                         remove = Some(i);
                     }
@@ -5170,22 +5102,22 @@ impl DbGuiApp {
                 if components::icon_button(ui, icons::close(), "Close the diagram").clicked() {
                     actions.push(Action::ToggleErd);
                 }
-                if ui
-                    .small_button("Refresh")
+                if components::Btn::new("Refresh")
+                    .show(ui)
                     .on_hover_text("Rebuild from the current schema")
                     .clicked()
                 {
                     actions.push(Action::RefreshErd);
                 }
-                if ui
-                    .small_button("Re-layout")
+                if components::Btn::new("Re-layout")
+                    .show(ui)
                     .on_hover_text("Recompute the automatic arrangement")
                     .clicked()
                 {
                     erd.layout();
                 }
-                if ui
-                    .small_button("Fit")
+                if components::Btn::new("Fit")
+                    .show(ui)
                     .on_hover_text("Zoom to fit all tables")
                     .clicked()
                 {
@@ -6026,22 +5958,13 @@ fn schema_indexes_tab(ui: &mut egui::Ui, indexes: &mut Vec<crate::schema::IndexD
 
         frame.show(ui, |ui| {
             ui.horizontal(|ui| {
-                let pad = egui::Margin::symmetric(10, 5);
-                ui.add_enabled(
+                components::text_input_enabled(ui, !idx.drop, &mut idx.name, "index_name", 150.0);
+                components::text_input_enabled(
+                    ui,
                     !idx.drop,
-                    egui::TextEdit::singleline(&mut idx.name)
-                        .hint_text("index_name")
-                        .desired_width(150.0)
-                        .vertical_align(egui::Align::Center)
-                        .margin(pad),
-                );
-                ui.add_enabled(
-                    !idx.drop,
-                    egui::TextEdit::singleline(&mut idx.columns_raw)
-                        .hint_text("col1, col2")
-                        .desired_width(160.0)
-                        .vertical_align(egui::Align::Center)
-                        .margin(pad),
+                    &mut idx.columns_raw,
+                    "col1, col2",
+                    160.0,
                 );
                 ui.add_space(2.0);
                 components::accent_checkbox(ui, !idx.drop, &mut idx.unique, Some("Unique"));
@@ -6052,10 +5975,18 @@ fn schema_indexes_tab(ui: &mut egui::Ui, indexes: &mut Vec<crate::schema::IndexD
                     } else {
                         ("Drop", "Mark index for removal")
                     };
-                    if ui.small_button(label).on_hover_text(hover).clicked() {
+                    if components::Btn::new(label)
+                        .show(ui)
+                        .on_hover_text(hover)
+                        .clicked()
+                    {
                         idx.drop = !idx.drop;
                     }
-                } else if ui.small_button("✕").on_hover_text("Remove index").clicked() {
+                } else if components::Btn::new("✕")
+                    .show(ui)
+                    .on_hover_text("Remove index")
+                    .clicked()
+                {
                     to_remove = Some(i);
                 }
             });
@@ -6067,7 +5998,7 @@ fn schema_indexes_tab(ui: &mut egui::Ui, indexes: &mut Vec<crate::schema::IndexD
     }
 
     ui.add_space(4.0);
-    if ui.small_button("+ Add Index").clicked() {
+    if components::Btn::new("+ Add Index").show(ui).clicked() {
         indexes.push(crate::schema::IndexDraft::new_empty());
     }
 }
@@ -6099,34 +6030,38 @@ fn schema_fk_tab(ui: &mut egui::Ui, fks: &mut Vec<crate::schema::FkDraft>) {
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
                     ui.label("Constraint:");
-                    ui.add_enabled(
+                    components::text_input_enabled(
+                        ui,
                         !fk.drop,
-                        egui::TextEdit::singleline(&mut fk.constraint_name)
-                            .hint_text("fk_name (optional)")
-                            .desired_width(160.0),
+                        &mut fk.constraint_name,
+                        "fk_name (optional)",
+                        160.0,
                     );
                 });
                 ui.horizontal(|ui| {
                     ui.label("Columns:");
-                    ui.add_enabled(
+                    components::text_input_enabled(
+                        ui,
                         !fk.drop,
-                        egui::TextEdit::singleline(&mut fk.columns_raw)
-                            .hint_text("col1, col2")
-                            .desired_width(130.0),
+                        &mut fk.columns_raw,
+                        "col1, col2",
+                        130.0,
                     );
                     ui.label("→");
-                    ui.add_enabled(
+                    components::text_input_enabled(
+                        ui,
                         !fk.drop,
-                        egui::TextEdit::singleline(&mut fk.ref_table)
-                            .hint_text("ref_table")
-                            .desired_width(110.0),
+                        &mut fk.ref_table,
+                        "ref_table",
+                        110.0,
                     );
                     ui.label("(");
-                    ui.add_enabled(
+                    components::text_input_enabled(
+                        ui,
                         !fk.drop,
-                        egui::TextEdit::singleline(&mut fk.ref_columns_raw)
-                            .hint_text("ref_col")
-                            .desired_width(90.0),
+                        &mut fk.ref_columns_raw,
+                        "ref_col",
+                        90.0,
                     );
                     ui.label(")");
                 });
@@ -6147,10 +6082,18 @@ fn schema_fk_tab(ui: &mut egui::Ui, fks: &mut Vec<crate::schema::FkDraft>) {
                             } else {
                                 ("Drop", "Remove FK constraint")
                             };
-                            if ui.small_button(label).on_hover_text(hover).clicked() {
+                            if components::Btn::new(label)
+                                .show(ui)
+                                .on_hover_text(hover)
+                                .clicked()
+                            {
                                 fk.drop = !fk.drop;
                             }
-                        } else if ui.small_button("✕").on_hover_text("Remove FK").clicked() {
+                        } else if components::Btn::new("✕")
+                            .show(ui)
+                            .on_hover_text("Remove FK")
+                            .clicked()
+                        {
                             to_remove = Some(i);
                         }
                     });
@@ -6166,7 +6109,7 @@ fn schema_fk_tab(ui: &mut egui::Ui, fks: &mut Vec<crate::schema::FkDraft>) {
     }
 
     ui.add_space(4.0);
-    if ui.small_button("+ Add Foreign Key").clicked() {
+    if components::Btn::new("+ Add Foreign Key").show(ui).clicked() {
         fks.push(crate::schema::FkDraft::new_empty());
     }
 }

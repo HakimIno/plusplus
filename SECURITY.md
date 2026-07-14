@@ -131,5 +131,11 @@ where writes are still needed but should never be casual.
 
 ## Reporting a vulnerability
 
-Please open a GitHub issue with the `security` label, or email the maintainer directly
-for anything sensitive. Reports are welcome and taken seriously.
+**Do not open a public issue for a suspected vulnerability.** Use
+[GitHub private vulnerability reporting](https://github.com/HakimIno/plusplus/security/advisories/new)
+and include the affected version, impact, reproduction, and any suggested mitigation. Remove
+real credentials and production data; a minimal synthetic proof of concept is preferred.
+
+The maintainer will acknowledge a report as soon as practical, investigate it privately, and
+coordinate disclosure after a fix is available. If the report turns out to be an ordinary bug,
+it can then be moved to the public issue tracker without sensitive details.
