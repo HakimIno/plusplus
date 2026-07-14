@@ -23,7 +23,7 @@
 </p>
 
 <p align="center">
-  <img src="crates/ui/tests/snapshots/object_browser.png" alt="plusplus database client showing its schema browser and SQL editor" width="100%">
+  <img src="crates/ui/tests/snapshots/demo.png" alt="plusplus database client showing its schema browser and SQL editor" width="100%">
 </p>
 
 plusplus is an open-source desktop database client built in Rust. Browse schemas, run SQL,
