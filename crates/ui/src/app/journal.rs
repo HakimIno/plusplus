@@ -6,6 +6,7 @@ impl DbGuiApp {
     /// Append one event to the append-only audit trail (`dbcore::audit`). Separate from
     /// history: audit also records connection events, rotates monthly instead of being
     /// compacted, and has no in-app clear. Best effort — never load-bearing.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn record_audit(
         &self,
         action: dbcore::audit::AuditAction,
@@ -41,6 +42,7 @@ impl DbGuiApp {
     /// Append one executed statement to the on-disk query history and the audit trail.
     /// Best effort: history is never load-bearing, so failures are swallowed. History
     /// and audit honour their own settings toggles independently.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn record_history(
         &mut self,
         action: dbcore::audit::AuditAction,

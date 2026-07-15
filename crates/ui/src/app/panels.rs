@@ -3751,10 +3751,10 @@ impl DbGuiApp {
                             if editor.config.title_bar_color.is_none() {
                                 ui.label("Default");
                             }
-                            if ui.button("Clear").clicked() {
-                                if editor.config.title_bar_color.take().is_some() {
-                                    form_changed = true;
-                                }
+                            if ui.button("Clear").clicked()
+                                && editor.config.title_bar_color.take().is_some()
+                            {
+                                form_changed = true;
                             }
                         });
                         ui.end_row();
@@ -4820,6 +4820,7 @@ fn object_leaf_row(
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod object_row_tests {
     use super::visible_object_row_range;
 
@@ -5669,6 +5670,9 @@ fn details_value_box(
                         edits.stage(row_idx, c, dbcore::Value::Text(today), value);
                     }
                 }
+                // The click test stays inside the arm (not a match guard) to match the sibling
+                // Bool/Date arms, and because `ui.button` draws as a side effect.
+                #[allow(clippy::collapsible_match)]
                 K::DateTime => {
                     if ui.button("Now").clicked() {
                         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();

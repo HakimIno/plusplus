@@ -327,6 +327,9 @@ fn push_columns(
 /// Quote an identifier for the dialect only when the bare form wouldn't parse (or, for
 /// Postgres, wouldn't fold back to the introspected name).
 fn maybe_quote(name: &str, kind: Option<DbKind>) -> String {
+    // The positive, per-rule form reads clearer than clippy's De Morgan rewrite, and each
+    // clause is documented inline; keep it.
+    #[allow(clippy::nonminimal_bool)]
     let plain = !name.is_empty()
         && !name.chars().next().is_some_and(|c| c.is_ascii_digit())
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')

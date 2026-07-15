@@ -405,7 +405,7 @@ mod tests {
 
     #[test]
     fn no_suggestion_when_caret_not_at_end() {
-        let hist = vec!["SELECT * FROM users".to_string()];
+        let hist = ["SELECT * FROM users".to_string()];
         let refs: Vec<&str> = hist.iter().map(String::as_str).collect();
         assert!(suggest("SELECT * FROM us", 3, &refs, None, None).is_none());
     }

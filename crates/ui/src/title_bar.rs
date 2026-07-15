@@ -22,7 +22,7 @@ pub fn traffic_lights_inset(ctx: &egui::Context, frame: Option<&eframe::Frame>) 
     #[cfg(target_os = "macos")]
     {
         let _ = frame;
-        return MAC_TRAFFIC_LIGHTS_INSET / ctx.zoom_factor();
+        MAC_TRAFFIC_LIGHTS_INSET / ctx.zoom_factor()
     }
 
     #[cfg(not(target_os = "macos"))]

@@ -208,7 +208,7 @@ impl ThemeRegistry {
         if let Ok(dir) = dbcore::config::themes_dir() {
             let mut customs = load_custom_themes(&dir);
             // Stable, name-sorted order so the picker doesn't jump around between launches.
-            customs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            customs.sort_by_key(|a| a.name.to_lowercase());
             for entry in customs {
                 // Built-ins win on key collision — never let a file hide a default.
                 if !entries.iter().any(|e| e.key == entry.key) {

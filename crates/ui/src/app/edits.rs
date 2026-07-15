@@ -169,9 +169,7 @@ impl DbGuiApp {
                 }
             }
         }
-        let Some(source) = self.tabs[idx].edits.source.clone() else {
-            return None;
-        };
+        let source = self.tabs[idx].edits.source.clone()?;
         // Grab the dialect, then drop the `active()` borrow so we can freely touch `self`.
         let kind = match self.active() {
             Some(active) => active.db.kind(),

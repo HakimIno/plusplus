@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn value_sorting_handles_nulls_and_numbers() {
-        let mut v = vec![Value::Int(3), Value::Null, Value::Int(1), Value::Float(2.0)];
+        let mut v = [Value::Int(3), Value::Null, Value::Int(1), Value::Float(2.0)];
         v.sort_by(|a, b| a.sort_cmp(b));
         assert_eq!(v[0], Value::Int(1));
         assert_eq!(v[1], Value::Float(2.0));

@@ -257,7 +257,7 @@ mod tests {
             .build_ui(move |ui| {
                 if !setup {
                     egui_extras::install_image_loaders(ui.ctx());
-                    crate::theme::set_current(theme.clone());
+                    crate::theme::set_current(theme);
                     crate::style::apply(ui.ctx());
                     setup = true;
                 }

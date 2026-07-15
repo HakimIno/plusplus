@@ -25,6 +25,7 @@ pub(crate) fn connection_tab_item(
 ) -> egui::Response {
     const CONN_ICON_SIZE: f32 = 16.0;
 
+    #[allow(clippy::too_many_arguments)]
     fn paint_connection_chip(
         ui: &egui::Ui,
         painter: &egui::Painter,
@@ -345,10 +346,6 @@ pub(crate) fn query_tab_item(
     };
     let stroke = if dragging {
         egui::Stroke::new(1.0, palette::ACCENT())
-    } else if selected {
-        egui::Stroke::NONE
-    } else if resp.hovered() {
-        egui::Stroke::NONE
     } else {
         egui::Stroke::NONE
     };
