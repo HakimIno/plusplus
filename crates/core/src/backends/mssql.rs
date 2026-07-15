@@ -118,6 +118,14 @@ impl MsSqlDb {
 
         let pool = bb8::Pool::builder()
             .max_size(5)
+            // bb8 tests every connection on checkout by default (test_on_check_out = true),
+            // which runs a liveness round trip before each query. Skip it and keep one idle
+            // connection warm instead, so queries don't pay that round trip and the first one
+            // after connecting doesn't re-do the TLS + login handshake. A rarely-stale
+            // connection just fails once and the user retries — the same trade the sqlx
+            // backends make by disabling test_before_acquire.
+            .test_on_check_out(false)
+            .min_idle(Some(1))
             // Don't let a transient runtime failure spin for the default 30s; surface it.
             .retry_connection(false)
             .connection_timeout(std::time::Duration::from_secs(15))

@@ -1,11 +1,11 @@
 //! PostgreSQL backend implemented on top of `sqlx`.
 
 use std::collections::BTreeMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
-use sqlx::{AssertSqlSafe, Column, ConnectOptions, Row, TypeInfo, ValueRef};
+use sqlx::{AssertSqlSafe, Column, ConnectOptions, Executor, Row, TypeInfo, ValueRef};
 use tokio_util::sync::CancellationToken;
 
 use crate::database::{returns_rows, Database};
@@ -62,8 +62,14 @@ impl PostgresDb {
         }
         // Quieten sqlx's statement logging; the UI surfaces errors itself.
         opts = opts.disable_statement_logging();
+        // Pool tuning identical to the MySQL backend (see mysql.rs for the full rationale):
+        // skip the per-checkout liveness ping (a round trip on every query), keep one
+        // connection warm, and fail a bad host in 8s instead of sqlx's 30s default.
         let pool = PgPoolOptions::new()
             .max_connections(5)
+            .min_connections(1)
+            .test_before_acquire(false)
+            .acquire_timeout(Duration::from_secs(8))
             .connect_with(opts)
             .await?;
         Ok(Self { pool })
@@ -423,7 +429,11 @@ impl Database for PostgresDb {
         if returns_rows(sql) {
             // Stream rows instead of fetch_all: a SELECT over a huge table materializes at
             // most `max_rows` rows; dropping the stream early cancels the rest of the fetch.
-            let mut stream = sqlx::query(AssertSqlSafe(sql.to_string())).fetch(&self.pool);
+            // No bind arguments → `Executor::fetch` runs on Postgres's simple query protocol
+            // (one round trip, no Parse/Bind/Execute). Ad-hoc GUI queries are rarely repeated,
+            // so preparing them only adds a round trip; the simple protocol also lets a
+            // multi-statement batch run, which the extended protocol rejects.
+            let mut stream = self.pool.fetch(AssertSqlSafe(sql.to_string()));
             let mut columns: Vec<ColumnMeta> = Vec::new();
             // Upper-cased type names resolved once per result; `decode` dispatches on
             // these instead of re-uppercasing the type name for every cell.
@@ -458,8 +468,9 @@ impl Database for PostgresDb {
                 truncated,
             })
         } else {
-            let res = sqlx::query(AssertSqlSafe(sql.to_string()))
-                .execute(&self.pool)
+            let res = self
+                .pool
+                .execute(AssertSqlSafe(sql.to_string()))
                 .await?;
             Ok(QueryResult {
                 columns: Vec::new(),
@@ -489,7 +500,7 @@ impl Database for PostgresDb {
             .await?;
 
         if returns_rows(sql) {
-            let mut stream = sqlx::query(AssertSqlSafe(sql.to_string())).fetch(&mut *conn);
+            let mut stream = (&mut *conn).fetch(AssertSqlSafe(sql.to_string()));
             let mut columns: Vec<ColumnMeta> = Vec::new();
             let mut types: Vec<String> = Vec::new();
             let mut data: Vec<Vec<Value>> = Vec::new();
@@ -537,7 +548,7 @@ impl Database for PostgresDb {
                     self.cancel_backend(pid).await;
                     Err(CoreError::Canceled)
                 }
-                res = sqlx::query(AssertSqlSafe(sql.to_string())).execute(&mut *conn) => {
+                res = (&mut *conn).execute(AssertSqlSafe(sql.to_string())) => {
                     let res = res?;
                     Ok(QueryResult {
                         columns: Vec::new(),
@@ -560,8 +571,9 @@ impl Database for PostgresDb {
     ) -> Result<u64> {
         use futures_util::TryStreamExt;
         // Stream straight into the sink: rows are written to the file one at a time and never
-        // collected, so the whole (possibly huge) table never sits in memory.
-        let mut stream = sqlx::query(AssertSqlSafe(sql.to_string())).fetch(&self.pool);
+        // collected, so the whole (possibly huge) table never sits in memory. `Executor::fetch`
+        // (no bind arguments) runs it on the simple query protocol — no Parse/Bind round trip.
+        let mut stream = self.pool.fetch(AssertSqlSafe(sql.to_string()));
         let mut types: Vec<String> = Vec::new();
         let mut began = false;
         let mut count = 0u64;
@@ -591,9 +603,7 @@ impl Database for PostgresDb {
         }
         let mut tx = self.pool.begin().await?;
         for stmt in stmts {
-            sqlx::query(AssertSqlSafe(stmt.as_str()))
-                .execute(&mut *tx)
-                .await?;
+            (&mut *tx).execute(AssertSqlSafe(stmt.as_str())).await?;
         }
         tx.commit().await?;
         Ok(stmts.len())

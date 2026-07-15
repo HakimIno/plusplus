@@ -1,11 +1,11 @@
 //! MySQL/MariaDB backend implemented on top of `sqlx`.
 
 use std::collections::BTreeMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions, MySqlRow};
-use sqlx::{AssertSqlSafe, Column, ConnectOptions, Row, TypeInfo, ValueRef};
+use sqlx::{AssertSqlSafe, Column, ConnectOptions, Executor, Row, TypeInfo, ValueRef};
 use tokio_util::sync::CancellationToken;
 
 use crate::database::{returns_rows, Database};
@@ -51,14 +51,26 @@ impl MySqlDb {
             opts = opts.password(&pw);
         }
         opts = opts.disable_statement_logging();
-        let mut pool_opts = MySqlPoolOptions::new().max_connections(5);
+        // Pool tuning that makes every query snappier:
+        // - test_before_acquire(false): skip sqlx's default liveness PING before each
+        //   checkout (an extra round trip on every query). idle_timeout (sqlx's 10 min
+        //   default) reaps connections well before MySQL's wait_timeout closes them, so a
+        //   pooled connection won't have gone stale server-side by the time we hand it out.
+        // - min_connections(1): keep one connection warm so the first query after connecting
+        //   (or after an idle gap) doesn't pay a fresh TCP + TLS + auth handshake.
+        // - acquire_timeout(8s): fail a bad host/port fast instead of hanging on sqlx's 30s
+        //   default (there is no separate connect timeout in sqlx-mysql).
+        let mut pool_opts = MySqlPoolOptions::new()
+            .max_connections(5)
+            .min_connections(1)
+            .test_before_acquire(false)
+            .acquire_timeout(Duration::from_secs(8));
         // Read-only connections pin the session's default transaction access mode, so
         // writes are rejected by the server itself — not just by the UI's lexical guard.
         // Applied per pooled connection as it is created.
         if cfg.read_only {
             pool_opts = pool_opts.after_connect(|conn, _meta| {
                 Box::pin(async move {
-                    use sqlx::Executor;
                     conn.execute("SET SESSION TRANSACTION READ ONLY").await?;
                     Ok(())
                 })
@@ -400,7 +412,11 @@ impl Database for MySqlDb {
         if returns_rows(sql) {
             // Stream rows instead of fetch_all: a SELECT over a huge table materializes at
             // most `max_rows` rows; dropping the stream early cancels the rest of the fetch.
-            let mut stream = sqlx::query(AssertSqlSafe(sql.to_string())).fetch(&self.pool);
+            // `Executor::fetch` with an `AssertSqlSafe` string (no bind arguments) uses MySQL's
+            // simple/text protocol — one round trip — instead of prepare + execute. Ad-hoc GUI
+            // queries are almost never repeated, so preparing them just adds a round trip and
+            // churns the statement cache.
+            let mut stream = self.pool.fetch(AssertSqlSafe(sql.to_string()));
             let mut columns: Vec<ColumnMeta> = Vec::new();
             // Upper-cased type names resolved once per result; `decode` dispatches on
             // these instead of re-uppercasing the type name for every cell.
@@ -435,8 +451,9 @@ impl Database for MySqlDb {
                 truncated,
             })
         } else {
-            let res = sqlx::query(AssertSqlSafe(sql.to_string()))
-                .execute(&self.pool)
+            let res = self
+                .pool
+                .execute(AssertSqlSafe(sql.to_string()))
                 .await?;
             Ok(QueryResult {
                 columns: Vec::new(),
@@ -466,7 +483,7 @@ impl Database for MySqlDb {
             .await?;
 
         if returns_rows(sql) {
-            let mut stream = sqlx::query(AssertSqlSafe(sql.to_string())).fetch(&mut *conn);
+            let mut stream = (&mut *conn).fetch(AssertSqlSafe(sql.to_string()));
             let mut columns: Vec<ColumnMeta> = Vec::new();
             let mut types: Vec<String> = Vec::new();
             let mut data: Vec<Vec<Value>> = Vec::new();
@@ -514,7 +531,7 @@ impl Database for MySqlDb {
                     self.kill_query(conn_id).await;
                     Err(CoreError::Canceled)
                 }
-                res = sqlx::query(AssertSqlSafe(sql.to_string())).execute(&mut *conn) => {
+                res = (&mut *conn).execute(AssertSqlSafe(sql.to_string())) => {
                     let res = res?;
                     Ok(QueryResult {
                         columns: Vec::new(),
@@ -537,8 +554,9 @@ impl Database for MySqlDb {
     ) -> Result<u64> {
         use futures_util::TryStreamExt;
         // Stream straight into the sink: rows are written to the file one at a time and never
-        // collected, so the whole (possibly huge) table never sits in memory.
-        let mut stream = sqlx::query(AssertSqlSafe(sql.to_string())).fetch(&self.pool);
+        // collected, so the whole (possibly huge) table never sits in memory. `Executor::fetch`
+        // (no bind arguments) runs it on the simple/text protocol — no prepare round trip.
+        let mut stream = self.pool.fetch(AssertSqlSafe(sql.to_string()));
         let mut types: Vec<String> = Vec::new();
         let mut began = false;
         let mut count = 0u64;
@@ -568,9 +586,7 @@ impl Database for MySqlDb {
         }
         let mut tx = self.pool.begin().await?;
         for stmt in stmts {
-            sqlx::query(AssertSqlSafe(stmt.as_str()))
-                .execute(&mut *tx)
-                .await?;
+            (&mut *tx).execute(AssertSqlSafe(stmt.as_str())).await?;
         }
         tx.commit().await?;
         Ok(stmts.len())
