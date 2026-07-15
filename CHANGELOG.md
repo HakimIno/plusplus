@@ -5,6 +5,14 @@ while pre-1.0 releases may still change workflows and configuration formats.
 
 ## Unreleased
 
+## 0.2.16 — 2026-07-15
+
+- Sped up queries and reconnection across the MySQL, PostgreSQL, and SQL Server backends:
+  pooled connections no longer run a liveness ping before every query, keep one connection
+  warm, and fail an unreachable host in a few seconds instead of stalling.
+- Ad-hoc statements now run on the simple/text protocol, saving a network round trip per query
+  and letting multi-statement batches run on MySQL and PostgreSQL.
+
 ## 0.2.15 — 2026-07-14
 
 - Split the main application implementation into focused workflow modules without changing
