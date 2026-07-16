@@ -5,6 +5,13 @@ while pre-1.0 releases may still change workflows and configuration formats.
 
 ## Unreleased
 
+## 0.2.18 — 2026-07-16
+
+- Count paged table rows asynchronously so results render immediately and the pager updates
+  from `of ?` to the exact total in real time without blocking the data grid.
+- Consolidated deployment into one tag-only Release workflow containing macOS, Linux,
+  Windows, and publishing jobs; ordinary commits no longer start runners.
+
 ## 0.2.17 — 2026-07-16
 
 - Redesigned query and table workflows with adaptive editor placement, cleaner tabs, saved

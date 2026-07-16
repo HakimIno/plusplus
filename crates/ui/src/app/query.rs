@@ -15,6 +15,10 @@ impl DbGuiApp {
         let tab_id = tab.id;
         let tab_conn_id = tab.conn_id.clone();
         let conn_id = tab_conn_id.clone().unwrap_or_default();
+        let paged_table = (tab.edits.source.is_some() || tab.edits.pending_source.is_some())
+            && dbcore::parse_page_window(&sql)
+                .is_some_and(|window| window.limit.is_some_and(|limit| limit > 0));
+        let count_sql = paged_table.then(|| dbcore::build_count_sql(&sql)).flatten();
         // A new execution always returns to the primary result surface, so fresh data and
         // query errors cannot remain hidden behind Message or the Chart placeholder.
         self.tabs[idx].view = TabView::Data;
@@ -37,8 +41,35 @@ impl DbGuiApp {
         self.busy = Busy::Querying;
         self.querying_tab_id = Some(tab_id);
         self.tabs[idx].query_error = None;
+        self.tabs[idx].total_rows = None;
         self.error = None;
         self.status_msg = "Loading...".to_string();
+        if let Some(count_sql) = count_sql {
+            self.pending_page_counts.insert(tab_id);
+            let count_db = db.clone();
+            let count_tx = tx.clone();
+            let count_cancel = cancel.clone();
+            let count_query_sql = sql.clone();
+            self.rt.spawn(async move {
+                let total = count_db
+                    .execute_capped_cancellable(&count_sql, 1, count_cancel)
+                    .await
+                    .ok()
+                    .and_then(|result| match result.rows.first()?.first()? {
+                        dbcore::Value::Int(value) => u64::try_from(*value).ok(),
+                        dbcore::Value::Float(value) if *value >= 0.0 => Some(*value as u64),
+                        dbcore::Value::Text(value) => value.parse().ok(),
+                        _ => None,
+                    });
+                let _ = count_tx.send(AppMessage::PageCounted {
+                    tab_id,
+                    sql: count_query_sql,
+                    total,
+                });
+            });
+        } else {
+            self.pending_page_counts.remove(&tab_id);
+        }
         self.rt.spawn(async move {
             let res = db
                 .execute_capped_cancellable(&sql, MAX_FETCH_ROWS, cancel)
@@ -65,11 +96,15 @@ impl DbGuiApp {
         let Some(sql) = dbcore::with_page_window(kind, &self.tabs[idx].sql, limit, offset) else {
             return;
         };
+        let known_total = self.tabs[idx].total_rows;
         self.tabs[idx].sql = sql;
         // The rewrite preserves the simple-select shape, so the result stays editable.
         self.tabs[idx].edits.pending_source = self.derive_edit_source(idx);
         self.workspace_dirty = true;
         self.start_query_for(idx);
+        // Paging changes only LIMIT/OFFSET, so the previous total remains valid while the
+        // fresh background count runs. This keeps Last-page navigation and the label stable.
+        self.tabs[idx].total_rows = known_total;
     }
     /// Pager navigation for the active (paged) table tab.
     pub(super) fn page_nav(&mut self, nav: PageNav) {

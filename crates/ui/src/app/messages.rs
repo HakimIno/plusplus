@@ -251,11 +251,8 @@ impl DbGuiApp {
                             let fetched = res.row_count() as u64;
                             let truncated = res.truncated;
                             tab.set_result(res);
-                            // A short page proves the exact total. Do not issue an automatic
-                            // COUNT(*) for full pages: on large/remote tables that scan can be
-                            // far more expensive than fetching the page itself. Next/Prev work
-                            // with an unknown total; Last remains unavailable until known.
-                            tab.total_rows = None;
+                            // A short page proves the exact total immediately. Full pages keep
+                            // the independently computed background COUNT(*) when it arrives.
                             if tab.edits.source.is_some() {
                                 let window = dbcore::parse_page_window(&tab.sql);
                                 if let Some(limit) =
@@ -275,6 +272,7 @@ impl DbGuiApp {
                         Err(e) => {
                             tab.view = TabView::Data;
                             tab.query_error = Some(e.clone());
+                            tab.total_rows = None;
                             if is_active {
                                 // Query failures already own the result surface. Keep the global
                                 // status strip quiet so the same error is not shown twice.
@@ -349,6 +347,19 @@ impl DbGuiApp {
                             // The transaction rolled back: nothing was written.
                             self.error = Some(format!("Import into {table} failed: {e}"));
                             self.status_msg = "Import failed".to_string();
+                        }
+                    }
+                }
+                AppMessage::PageCounted { tab_id, sql, total } => {
+                    self.pending_page_counts.remove(&tab_id);
+                    let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+                        continue;
+                    };
+                    // Ignore a count belonging to SQL that the user has since edited or
+                    // re-paged, and never attach a successful count to a failed query.
+                    if tab.sql.trim() == sql && tab.query_error.is_none() {
+                        if let Some(total) = total {
+                            tab.total_rows = Some(total);
                         }
                     }
                 }

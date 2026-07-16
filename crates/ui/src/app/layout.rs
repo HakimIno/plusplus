@@ -73,7 +73,10 @@ impl DbGuiApp {
             if self.workspace_dirty {
                 ctx.request_repaint_after(std::time::Duration::from_millis(1600));
             }
-            if self.busy != Busy::Idle || self.update.is_busy() {
+            if self.busy != Busy::Idle
+                || self.update.is_busy()
+                || !self.pending_page_counts.is_empty()
+            {
                 ctx.request_repaint_after(std::time::Duration::from_millis(80));
             }
             return;
@@ -379,7 +382,7 @@ impl DbGuiApp {
         }
 
         // Keep animating the spinner while background work is in flight.
-        if self.busy != Busy::Idle || self.update.is_busy() {
+        if self.busy != Busy::Idle || self.update.is_busy() || !self.pending_page_counts.is_empty() {
             ctx.request_repaint_after(std::time::Duration::from_millis(80));
         }
     }

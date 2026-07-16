@@ -834,6 +834,40 @@ fn pager_rewrites_sql_and_respects_total() {
     assert!(app.tab().edits.pending_source.is_some());
 }
 
+#[test]
+fn background_page_count_updates_only_the_matching_query() {
+    let mut app = DbGuiApp::construct();
+    let tab_id = app.tab().id;
+    app.tab_mut().sql = "SELECT * FROM table_0 LIMIT 100;".into();
+    app.pending_page_counts.insert(tab_id);
+
+    app.tx
+        .send(AppMessage::PageCounted {
+            tab_id,
+            sql: "SELECT * FROM table_0 LIMIT 100;".into(),
+            total: Some(12_345),
+        })
+        .unwrap();
+    app.poll_messages(&egui::Context::default());
+    assert_eq!(app.tab().total_rows, Some(12_345));
+    assert!(!app.pending_page_counts.contains(&tab_id));
+
+    app.tab_mut().sql = "SELECT * FROM table_0 WHERE active = 1 LIMIT 100;".into();
+    app.tx
+        .send(AppMessage::PageCounted {
+            tab_id,
+            sql: "SELECT * FROM table_0 LIMIT 100;".into(),
+            total: Some(99_999),
+        })
+        .unwrap();
+    app.poll_messages(&egui::Context::default());
+    assert_eq!(
+        app.tab().total_rows,
+        Some(12_345),
+        "a late count from the previous SQL must be ignored"
+    );
+}
+
 /// A primary-key-less table (e.g. an imported dump) is browsable but read-only. Paging it
 /// must keep working: the source *identity* the pager keys off has to survive a page flip,
 /// even though the rows can't be edited. (Regression: `derive_edit_source` dropped the

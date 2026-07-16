@@ -97,6 +97,13 @@ enum AppMessage {
         /// so the UI shows "Query cancelled" instead of a red error and doesn't log a failure.
         canceled: bool,
     },
+    /// The background COUNT(*) for a paged table query finished. Kept separate from
+    /// [`Queried`](Self::Queried) so rows render immediately without waiting for the count.
+    PageCounted {
+        tab_id: u64,
+        sql: String,
+        total: Option<u64>,
+    },
     /// A batch of staged edits was saved (`Ok` carries the number of rows updated).
     Committed {
         tab_id: u64,
@@ -1016,6 +1023,8 @@ pub struct DbGuiApp {
     next_connection_test_id: u64,
     /// Tab id of the in-flight `SELECT` (cleared when [`AppMessage::Queried`] arrives).
     querying_tab_id: Option<u64>,
+    /// Tabs waiting for a background COUNT(*) so the pager can repaint as soon as totals arrive.
+    pending_page_counts: HashSet<u64>,
     /// Cancellation handle for the in-flight query; firing it asks the backend to abort and
     /// kill the server-side statement. `None` when no query is running.
     query_cancel: Option<tokio_util::sync::CancellationToken>,
@@ -1249,6 +1258,7 @@ impl DbGuiApp {
             busy: Busy::Idle,
             next_connection_test_id: 1,
             querying_tab_id: None,
+            pending_page_counts: HashSet::new(),
             query_cancel: None,
             active_connections: Vec::new(),
             connection_jobs: HashSet::new(),
