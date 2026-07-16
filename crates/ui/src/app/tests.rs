@@ -1160,6 +1160,18 @@ fn filter_recomputes_view() {
     assert_eq!(tab.row_order.len(), 10);
 }
 
+#[test]
+fn header_filter_action_targets_the_selected_column() {
+    let mut app = DbGuiApp::construct();
+    app.tab_mut().set_result(fake_result(3, 3));
+
+    app.apply_action(Action::FilterColumn(2));
+
+    assert!(app.tab().filter.visible);
+    assert_eq!(app.tab().filter.conditions.len(), 1);
+    assert_eq!(app.tab().filter.conditions[0].column, 2);
+}
+
 /// A new app always has exactly one tab, and `active()` resolves through the active tab's
 /// connection binding.
 #[test]
@@ -1413,6 +1425,32 @@ fn drag_reorders_tabs_headlessly() {
     assert!(app.tab_drag.is_none(), "drag state should clear on release");
 }
 
+#[test]
+fn query_tabs_use_their_database_provider_identity() {
+    let mut app = DbGuiApp::construct();
+    let mut pg = ConnectionConfig::new(DbKind::Postgres);
+    pg.id = "pg".into();
+    app.connections.push(pg);
+    app.tab_mut().conn_id = Some("pg".into());
+
+    assert_eq!(app.tab_db_kind(0), Some(DbKind::Postgres));
+    assert_eq!(app.tab_label(0), "PG Query 1");
+
+    app.new_tab();
+    let mut ms = ConnectionConfig::new(DbKind::SqlServer);
+    ms.id = "ms".into();
+    app.connections.push(ms);
+    app.tab_mut().conn_id = Some("ms".into());
+    assert_eq!(app.tab_label(1), "MS Query 2");
+
+    app.tab_mut().title = "orders".into();
+    assert_eq!(
+        app.tab_label(1),
+        "orders",
+        "named relation tabs must keep their object title"
+    );
+}
+
 /// Switching tabs swaps the active result; per-tab state stays independent.
 #[test]
 fn tabs_keep_independent_state() {
@@ -1423,6 +1461,257 @@ fn tabs_keep_independent_state() {
     app.select_tab(0);
     assert!(app.tab().result.is_some());
     assert_eq!(app.tab().row_order.len(), 5);
+}
+
+#[test]
+fn editor_placement_follows_tab_workflow() {
+    use crate::components::QueryTabKind as Kind;
+
+    for kind in [Kind::Query, Kind::Function, Kind::Procedure, Kind::Trigger] {
+        assert_eq!(
+            query_editor_placement(kind),
+            QueryEditorPlacement::Top,
+            "{kind:?} should be code-first"
+        );
+    }
+    for kind in [Kind::Table, Kind::View] {
+        assert_eq!(
+            query_editor_placement(kind),
+            QueryEditorPlacement::Bottom,
+            "{kind:?} should be data-first"
+        );
+    }
+}
+
+#[test]
+fn legacy_workspace_kind_falls_back_from_source() {
+    use crate::components::QueryTabKind as Kind;
+    use dbcore::config::WorkspaceTabKind as Saved;
+
+    assert_eq!(super::workspace::restored_tab_kind(None, true), Kind::Table);
+    assert_eq!(
+        super::workspace::restored_tab_kind(None, false),
+        Kind::Query
+    );
+    assert_eq!(
+        super::workspace::restored_tab_kind(Some(Saved::View), true),
+        Kind::View
+    );
+}
+
+#[test]
+fn workspace_snapshot_keeps_tab_kind_and_editor_size() {
+    let mut app = DbGuiApp::construct();
+    app.tab_mut().title = "active_users".into();
+    app.tab_mut().kind = crate::components::QueryTabKind::View;
+    app.tab_mut().editor_size = Some(212.0);
+
+    let saved = app.snapshot_workspace();
+    assert_eq!(saved.tabs.len(), 1);
+    assert_eq!(saved.tabs[0].title, "active_users");
+    assert_eq!(
+        saved.tabs[0].kind,
+        Some(dbcore::config::WorkspaceTabKind::View)
+    );
+    assert_eq!(saved.tabs[0].editor_size, Some(212.0));
+}
+
+#[test]
+fn adaptive_editor_renders_on_the_expected_side_of_results() {
+    use egui_kittest::kittest::Queryable;
+
+    let build = |kind, result: Option<QueryResult>, size| {
+        let mut app = DbGuiApp::construct();
+        app.show_welcome = false;
+        app.show_schema_panel = false;
+        app.show_details_panel = false;
+        app.show_connection_tabs = false;
+        app.tab_mut().kind = kind;
+        app.tab_mut().sql = "SELECT 1".into();
+        if let Some(result) = result {
+            app.tab_mut().set_result(result);
+        }
+        let mut setup = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(size)
+            .build_ui(move |ui| {
+                if !setup {
+                    egui_extras::install_image_loaders(ui.ctx());
+                    crate::style::apply(ui.ctx());
+                    setup = true;
+                }
+                app.draw(ui, None);
+            });
+        harness.run_steps(4);
+        harness
+    };
+
+    let query = build(
+        crate::components::QueryTabKind::Query,
+        None,
+        egui::vec2(1000.0, 700.0),
+    );
+    assert!(
+        query.get_by_label("Query").rect().center().y
+            < query.get_by_label("Empty state mascot").rect().center().y
+    );
+    assert!(
+        query.query_by_label("SQL line numbers").is_some(),
+        "the query editor must expose its line-number gutter"
+    );
+    assert!(
+        query.get_by_label("SQL line numbers").rect().left()
+            < query.get_by_label("Query").rect().left(),
+        "the query editor must reach the panel edge without an outer inset"
+    );
+    assert!(
+        (query.get_by_label("Save query").rect().center().y
+            - query.get_by_label("Query").rect().center().y)
+            .abs()
+            < 0.1,
+        "query tabs and actions must share one footer row"
+    );
+
+    let table = build(
+        crate::components::QueryTabKind::Table,
+        Some(fake_result(2, 2)),
+        egui::vec2(1000.0, 700.0),
+    );
+    assert!(
+        table.get_by_label("col0").rect().center().y
+            < table.get_by_label("Query").rect().center().y
+    );
+    assert!(
+        (table.get_by_label("Save query").rect().center().y
+            - table.get_by_label("Query").rect().center().y)
+            .abs()
+            < 0.1,
+        "table-query tabs and actions must share one footer row"
+    );
+
+    let compact = build(
+        crate::components::QueryTabKind::Query,
+        None,
+        egui::vec2(800.0, 500.0),
+    );
+    let editor_y = compact.get_by_label("Query").rect().center().y;
+    let result_y = compact.get_by_label("Empty state mascot").rect().center().y;
+    assert!(editor_y < result_y);
+    assert!(result_y - editor_y > 80.0, "compact result area collapsed");
+}
+
+#[test]
+fn query_result_controls_sit_between_query_toolbar_and_grid() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    connect_fake(&mut app, fake_schema(2, 3));
+    app.tab_mut().kind = crate::components::QueryTabKind::Query;
+    app.tab_mut().sql = "SELECT * FROM table_1 LIMIT 100".into();
+    app.tab_mut().edits.source = Some(EditSource {
+        schema: None,
+        table: "table_1".into(),
+        pk_cols: vec!["field_0".into()],
+    });
+    app.tab_mut().set_result(fake_result(2, 3));
+
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+        });
+    harness.run_steps(4);
+
+    let query_y = harness.get_by_label("Query").rect().center().y;
+    let data_y = harness.get_by_label("Data").rect().center().y;
+    let grid_y = harness.get_by_label("col0").rect().center().y;
+    assert!(harness.query_by_label("Message").is_some());
+    assert!(harness.query_by_label("Chart").is_some());
+    assert!(harness.query_by_label("Structure").is_none());
+    assert!(harness.query_by_label("Edit Table").is_none());
+    assert!(
+        harness.query_by_label("100 / page").is_none(),
+        "Query tabs must not show table-browser paging controls"
+    );
+    assert!(
+        query_y < data_y && data_y < grid_y,
+        "Query toolbar, result controls, and grid must form one continuous top-to-bottom stack"
+    );
+
+    harness.get_by_label("Message").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Query message").is_none());
+    assert!(harness
+        .query_by_label("2 row(s) × 3 col(s) in 0.0 ms")
+        .is_some());
+
+    harness.get_by_label("Chart").click();
+    harness.run_steps(2);
+    assert!(harness
+        .query_by_label("Chart visualization is coming soon")
+        .is_some());
+}
+
+#[test]
+fn query_failure_is_kept_on_its_tab_and_rendered_in_results() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    app.tab_mut().sql = "SELECT missing_column FROM customers".into();
+    app.tab_mut().view = TabView::Chart;
+    let tab_id = app.tab().id;
+    app.tx
+        .send(AppMessage::Queried {
+            tab_id,
+            conn_id: String::new(),
+            sql: app.tab().sql.clone(),
+            result: Err("no such column: missing_column".into()),
+            canceled: false,
+        })
+        .unwrap();
+    app.poll_messages(&egui::Context::default());
+
+    assert_eq!(
+        app.tab().query_error.as_deref(),
+        Some("no such column: missing_column")
+    );
+    assert!(app.tab().view == TabView::Data);
+    assert_eq!(app.status_msg, "Ready");
+    assert!(
+        app.error.is_none(),
+        "query errors must not be duplicated in the global status bar"
+    );
+
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+        });
+    harness.run_steps(4);
+    assert!(harness.query_by_label("Query failed").is_some());
+    assert!(harness
+        .query_by_label("no such column: missing_column")
+        .is_some());
 }
 
 /// Opening tables: the single italic preview tab is reused, an already-open table is
@@ -1560,15 +1849,15 @@ fn definition_tabs_keep_their_schema_object_icon_kind() {
     }
 }
 
-/// Closing the only tab keeps one (blank) tab rather than leaving zero.
+/// Closing the only tab keeps one clean query tab so the workspace is never empty.
 #[test]
-fn closing_last_tab_keeps_one() {
+fn closing_last_tab_keeps_one_clean_tab() {
     let mut app = DbGuiApp::construct();
     app.tab_mut().sql = "SELECT 99;".into();
     app.close_tab(0);
     assert_eq!(app.tabs.len(), 1);
     assert_eq!(app.active_query_tab, 0);
-    assert_eq!(app.tab().sql, ""); // reset to a blank scratch tab
+    assert_eq!(app.tab().sql, "");
 }
 
 /// `structure_table` resolves the tab's source table against its live connection's
@@ -1624,6 +1913,7 @@ fn probe_structure_view_id_clash() {
     {
         let tab = app.tab_mut();
         tab.conn_id = Some("c1".into());
+        tab.kind = crate::components::QueryTabKind::Table;
         tab.edits.source = Some(EditSource {
             schema: None,
             table: "table_1".into(),
@@ -1732,9 +2022,7 @@ fn probe_inline_schema_editor() {
     assert!(app.tab().schema_editor.is_none());
 }
 
-/// The schema explorer renders pinned + unpinned table rows without id clashes. A pinned
-/// table appears both in the "Pinned" group and the main list, so the two rows must key
-/// their collapsing state independently (different `id_salt`).
+/// The schema explorer renders its single pinned-first table list without id clashes.
 #[test]
 fn probe_schema_explorer_bookmarks() {
     let ctx = egui::Context::default();
@@ -1751,8 +2039,8 @@ fn probe_schema_explorer_bookmarks() {
         schema: fake_schema(3, 4),
     });
     app.tab_mut().conn_id = Some("c1".into());
-    // Pin one table so it shows in both the "Pinned" group and the main list, and make it
-    // the active tab's table so the selection pill draws too.
+    // Pin one table so it sorts to the top, and make it the active tab's table so the
+    // selection pill draws too.
     app.bookmarks = vec![dbcore::Bookmark {
         conn_id: "c1".into(),
         schema: None,
@@ -2058,6 +2346,82 @@ fn snapshot_object_browser() {
     let (app, dir) = demo_app_with_objects();
     render_and_snapshot(app, "object_browser", true);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Adaptive-layout references: code-first tabs place the editor above an inviting result
+/// state, while data-first tabs keep the grid dominant and the editable SQL below it.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_adaptive_query_layout() {
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    app.tab_mut().sql = "SELECT id, email\nFROM customers\nWHERE active = true;".into();
+    render_and_snapshot(app, "adaptive_query_layout", false);
+}
+
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_adaptive_table_layout() {
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    app.tab_mut().title = "customers".into();
+    app.tab_mut().kind = crate::components::QueryTabKind::Table;
+    app.tab_mut().sql = "SELECT * FROM customers LIMIT 100;".into();
+    app.tab_mut().set_result(fake_result(24, 6));
+    render_and_snapshot(app, "adaptive_table_layout", false);
+}
+
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_saved_queries_tab() {
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    app.tab_mut().sql = "SELECT * FROM customers WHERE active = true;".into();
+    app.show_saved_queries = true;
+    for (name, sql) in [
+        (
+            "Active customers",
+            "SELECT * FROM customers WHERE active = true",
+        ),
+        (
+            "Monthly revenue",
+            "SELECT month, SUM(total) FROM orders GROUP BY month",
+        ),
+    ] {
+        app.favorites_cache.push(dbcore::Favorite {
+            id: name.into(),
+            name: name.into(),
+            sql: sql.into(),
+            conn_id: None,
+            conn_name: None,
+            created_at: "2026-07-16T00:00:00Z".into(),
+        });
+    }
+    render_and_snapshot(app, "saved_queries_tab", false);
+}
+
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_query_error_state() {
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    app.tab_mut().sql = "SELECT customer_nam FROM customers;".into();
+    app.tab_mut().query_error =
+        Some("SQLite error: no such column: customer_nam\nat line 1, column 8".into());
+    app.status_msg = "Ready".into();
+    render_and_snapshot(app, "query_error_state", false);
 }
 
 /// Screenshot generator (ignored): the dialect-adaptive visual Trigger editor, opened on
@@ -2652,18 +3016,16 @@ fn probe_full_app_id_clash() {
     );
 }
 
-/// The Favorites panel carves a SidePanel inside the query console after the header row;
-/// render it open with entries to confirm that nested layout is clash-free and doesn't
-/// panic (the full-app probe keeps it closed).
+/// The Saved queries tab renders its full-width list without ID clashes or panics.
 #[test]
-fn probe_favorites_panel_open() {
+fn probe_saved_queries_tab() {
     let ctx = egui::Context::default();
     egui_extras::install_image_loaders(&ctx);
     crate::style::apply(&ctx);
 
     let mut app = DbGuiApp::construct();
     app.tab_mut().sql = "SELECT * FROM t".into();
-    app.favorites_open = true;
+    app.show_saved_queries = true;
     for i in 0..3 {
         app.favorites_cache.push(dbcore::Favorite {
             id: format!("id-{i}"),
@@ -2691,6 +3053,123 @@ fn probe_favorites_panel_open() {
         clashes.is_empty(),
         "ID clashes detected:\n{}",
         clashes.join("\n")
+    );
+}
+
+#[test]
+fn saved_queries_switches_as_a_tab_and_use_returns_to_editor() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.tab_mut().sql = "SELECT current_query".into();
+    app.favorites_cache.push(dbcore::Favorite {
+        id: "saved-1".into(),
+        name: "Customer report".into(),
+        sql: "SELECT * FROM customers".into(),
+        conn_id: None,
+        conn_name: None,
+        created_at: "2026-07-16T00:00:00Z".into(),
+    });
+
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+        });
+    harness.run_steps(4);
+    assert!(harness.query_by_label("Saved").is_none());
+    let editor_tab_rect = harness.get_by_label("Query").rect();
+    let editor_tab_width = editor_tab_rect.width();
+    let saved_tab_width = harness.get_by_label("Saved (1)").rect().width();
+    assert!(
+        (editor_tab_width - saved_tab_width).abs() < 0.1,
+        "workspace tabs must have equal widths"
+    );
+    assert!(harness.query_by_label("Save query").is_some());
+    harness.get_by_label("Save query").click();
+    harness.run_steps(4);
+    assert!(
+        harness.query_by_label("Save query to favorites").is_some(),
+        "saving must start directly from Query Console"
+    );
+    harness.get_by_label("Cancel").click();
+    harness.run_steps(4);
+    harness.get_by_label("Saved (1)").click();
+    harness.run_steps(4);
+    assert!(harness.query_by_label("Save query").is_none());
+    assert!(harness.query_by_label("Customer report").is_some());
+    let active_saved_width = harness.get_by_label("Saved (1)").rect().width();
+    assert!(
+        (saved_tab_width - active_saved_width).abs() < 0.1,
+        "activating a workspace tab must not resize it"
+    );
+    let active_saved_left = harness.get_by_label("Query").rect().left();
+    assert!(
+        (editor_tab_rect.left() - active_saved_left).abs() < 0.1,
+        "switching workspaces must not change the tab bar's horizontal inset: editor={}, saved={}",
+        editor_tab_rect.left(),
+        active_saved_left
+    );
+    assert!(
+        harness.query_by_label("Empty state mascot").is_none(),
+        "the result pet must be hidden while Saved queries owns the workspace"
+    );
+
+    harness.get_by_label("Query actions").click();
+    harness.run_steps(2);
+    harness.get_by_label("Use").click();
+    harness.run_steps(4);
+    assert!(harness.query_by_label("Query").is_some());
+    assert!(harness.query_by_label("Save query").is_some());
+}
+
+#[test]
+fn saved_queries_workspace_is_hidden_on_table_tabs() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.tab_mut().kind = crate::components::QueryTabKind::Table;
+    app.tab_mut().sql = "SELECT * FROM customers".into();
+    app.tab_mut().set_result(fake_result(4, 3));
+    app.favorites_cache.push(dbcore::Favorite {
+        id: "saved-1".into(),
+        name: "Customer report".into(),
+        sql: "SELECT * FROM customers".into(),
+        conn_id: None,
+        conn_name: None,
+        created_at: "2026-07-16T00:00:00Z".into(),
+    });
+    // This can remain true after switching away from a Query tab. Table tabs must ignore it.
+    app.show_saved_queries = true;
+
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+        });
+    harness.run_steps(4);
+
+    assert!(harness.query_by_label("Query").is_some());
+    assert!(harness.query_by_label("Saved").is_none());
+    assert!(harness.query_by_label("Saved (1)").is_none());
+    assert!(harness.query_by_label("Customer report").is_none());
+    assert!(
+        harness.query_by_label("Save query").is_some(),
+        "table query actions must remain available when Saved was open on another tab"
     );
 }
 
@@ -2750,8 +3229,8 @@ fn fk_tab(row: Vec<Value>) -> DbGuiApp {
     app
 }
 
-/// Following a FK cell builds a filtered `SELECT` of the referenced table (with its PK as
-/// the edit source) and opens it in a reusable preview tab bound to the same connection.
+/// Following a FK cell from a Query tab builds a filtered `SELECT` of the referenced table
+/// and keeps the code-first layout: editor above, referenced rows below.
 #[test]
 fn follow_foreign_key_opens_filtered_referenced_table() {
     let mut app = fk_tab(vec![
@@ -2801,6 +3280,34 @@ fn follow_foreign_key_opens_filtered_referenced_table() {
         Some("table_0")
     );
     assert_eq!(opened.sql, sql);
+    assert_eq!(
+        opened.kind,
+        crate::components::QueryTabKind::Query,
+        "FK navigation from a Query tab must keep the result table below the editor"
+    );
+    assert_eq!(
+        query_editor_placement(opened.kind),
+        QueryEditorPlacement::Top
+    );
+}
+
+#[test]
+fn follow_foreign_key_from_table_keeps_data_first_layout() {
+    let mut app = fk_tab(vec![
+        Value::Text("row-pk".into()),
+        Value::Text("u7".into()),
+        Value::Null,
+        Value::Null,
+    ]);
+    app.tab_mut().kind = crate::components::QueryTabKind::Table;
+
+    app.apply_action(Action::FollowForeignKey { row: 0, col: 1 });
+
+    assert_eq!(app.tab().kind, crate::components::QueryTabKind::Table);
+    assert_eq!(
+        query_editor_placement(app.tab().kind),
+        QueryEditorPlacement::Bottom
+    );
 }
 
 /// A non-FK column, or a NULL foreign-key value, has nothing to follow → status hint, no tab.
@@ -3002,4 +3509,85 @@ fn every_form_control_shares_one_height() {
         "controls must all be {}pt tall, but these are not: {ragged:?}",
         crate::style::CONTROL_H,
     );
+}
+
+// ─── Cmd/Ctrl+/ line-comment toggle ──────────────────────────────────────────
+
+/// Apply the pure comment toggle and return the resulting buffer. `sel` is a sorted char
+/// range; `None` (no edit) leaves the text untouched.
+fn toggle(text: &str, sel: std::ops::Range<usize>) -> String {
+    match super::panels::toggle_comment_edit(text, sel.clone()) {
+        Some((bytes, replacement)) => {
+            let mut out = text.to_string();
+            out.replace_range(bytes, &replacement);
+            out
+        }
+        None => text.to_string(),
+    }
+}
+
+#[test]
+fn comment_toggle_single_line_roundtrips() {
+    // A bare caret comments the whole line, then uncomments it back.
+    let commented = toggle("SELECT 1", 3..3);
+    assert_eq!(commented, "-- SELECT 1");
+    assert_eq!(toggle(&commented, 3..3), "SELECT 1");
+}
+
+#[test]
+fn comment_toggle_preserves_indent_and_aligns_markers() {
+    // Markers align at the shallowest indent (column 2 here); the deeper line keeps its extra
+    // indentation after the marker, so relative nesting survives — exactly like VS Code.
+    let src = "  a\n    b";
+    let out = toggle(src, 0..src.chars().count());
+    assert_eq!(out, "  -- a\n  --   b");
+    // Round-trips: uncommenting restores the original indentation exactly.
+    assert_eq!(toggle(&out, 0..out.chars().count()), src);
+}
+
+#[test]
+fn comment_toggle_uncomments_only_when_all_lines_commented() {
+    // One bare line among commented ones means the block is not fully commented, so the
+    // toggle comments everything (rather than stripping markers).
+    let src = "-- a\nb";
+    let out = toggle(src, 0..src.chars().count());
+    assert_eq!(out, "-- -- a\n-- b");
+    // Now every line carries a marker: the next toggle strips exactly one level back.
+    assert_eq!(toggle(&out, 0..out.chars().count()), src);
+}
+
+#[test]
+fn comment_toggle_skips_blank_lines_but_still_toggles() {
+    // A blank line inside the block is left untouched when commenting, and ignored when
+    // deciding whether the block is fully commented.
+    let src = "a\n\nb";
+    let out = toggle(src, 0..src.chars().count());
+    assert_eq!(out, "-- a\n\n-- b");
+    assert_eq!(toggle(&out, 0..out.chars().count()), src);
+    // An all-blank selection is a no-op.
+    assert_eq!(toggle("\n\n", 0..2), "\n\n");
+}
+
+#[test]
+fn comment_toggle_selection_ending_at_line_start_drops_trailing_line() {
+    // Selecting "a\n" (caret parked at the start of line two) must not comment line two.
+    let src = "a\nb";
+    let out = toggle(src, 0..2);
+    assert_eq!(out, "-- a\nb");
+}
+
+#[test]
+fn comment_toggle_uncomment_handles_marker_without_trailing_space() {
+    // `--x` (no space) uncomments to `x`; `-- x` uncomments to `x` as well.
+    assert_eq!(toggle("--x", 0..3), "x");
+    assert_eq!(toggle("-- x", 0..4), "x");
+}
+
+#[test]
+fn comment_toggle_is_multibyte_safe() {
+    // Char indices past a multi-byte glyph must map to byte boundaries, not split it.
+    let src = "café\nSELECT 1";
+    let out = toggle(src, 0..src.chars().count());
+    assert_eq!(out, "-- café\n-- SELECT 1");
+    assert_eq!(toggle(&out, 0..out.chars().count()), src);
 }

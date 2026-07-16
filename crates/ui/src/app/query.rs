@@ -13,15 +13,21 @@ impl DbGuiApp {
             return;
         }
         let tab_id = tab.id;
-        let conn_id = tab.conn_id.clone().unwrap_or_default();
-        let db = match tab
-            .conn_id
+        let tab_conn_id = tab.conn_id.clone();
+        let conn_id = tab_conn_id.clone().unwrap_or_default();
+        // A new execution always returns to the primary result surface, so fresh data and
+        // query errors cannot remain hidden behind Message or the Chart placeholder.
+        self.tabs[idx].view = TabView::Data;
+        let db = match tab_conn_id
             .as_deref()
             .and_then(|id| self.active_connections.iter().find(|c| c.config_id == id))
         {
             Some(active) => active.db.clone(),
             None => {
-                self.error = Some("Not connected.".to_string());
+                let message = "Not connected.".to_string();
+                self.tabs[idx].query_error = Some(message.clone());
+                self.error = None;
+                self.status_msg = "Ready".to_string();
                 return;
             }
         };
@@ -30,6 +36,7 @@ impl DbGuiApp {
         self.query_cancel = Some(cancel.clone());
         self.busy = Busy::Querying;
         self.querying_tab_id = Some(tab_id);
+        self.tabs[idx].query_error = None;
         self.error = None;
         self.status_msg = "Loading...".to_string();
         self.rt.spawn(async move {

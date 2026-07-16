@@ -12,7 +12,7 @@ use egui::{include_image, ImageSource};
 pub const SIZE: f32 = 16.0;
 
 /// Size for database-kind logos in pickers and labels.
-pub const DB_KIND_ICON_SIZE: f32 = 16.0;
+pub const DB_KIND_ICON_SIZE: f32 = 18.0;
 
 macro_rules! icon_fns {
     ($($name:ident => $path:literal),* $(,)?) => {
@@ -53,6 +53,8 @@ icon_fns! {
     save       => "../assets/icons/save.svg",
     undo       => "../assets/icons/undo.svg",
     redo       => "../assets/icons/redo.svg",
+    sort_ascending => "../assets/icons/sort-ascending.svg",
+    sort_descending => "../assets/icons/sort-descending.svg",
     star       => "../assets/icons/star.svg",
     star_filled => "../assets/icons/star-filled.svg",
     settings   => "../assets/icons/settings.svg",
@@ -60,7 +62,7 @@ icon_fns! {
     db_postgres_light => "../assets/icondb/skill-icons--postgresql-light.svg",
     db_mysql_dark => "../assets/icondb/skill-icons--mysql-dark.svg",
     db_mysql_light => "../assets/icondb/skill-icons--mysql-light.svg",
-    db_mariadb => "../assets/icondb/devicon--mariadb.svg",
+    db_mariadb => "../assets/icondb/simple-icons--mariadb.svg",
     db_sqlserver => "../assets/icondb/devicon-plain--microsoftsqlserver-wordmark.svg",
     db_sqlite => "../assets/icondb/skill-icons--sqlite.svg",
 }
@@ -87,6 +89,12 @@ pub fn db_kind_icon(kind: DbKind) -> ImageSource<'static> {
         DbKind::SqlServer => db_sqlserver(),
         DbKind::Sqlite => db_sqlite(),
     }
+}
+
+/// Provider assets carry their final colours. White tint preserves those embedded colours.
+pub fn db_kind_icon_tint(kind: DbKind) -> egui::Color32 {
+    let _ = kind;
+    egui::Color32::WHITE
 }
 
 /// Build a themed image widget for an icon at the given size.

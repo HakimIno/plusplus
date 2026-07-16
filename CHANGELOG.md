@@ -5,6 +5,15 @@ while pre-1.0 releases may still change workflows and configuration formats.
 
 ## Unreleased
 
+## 0.2.17 — 2026-07-16
+
+- Redesigned query and table workflows with adaptive editor placement, cleaner tabs, saved
+  queries, result Data/Message/Chart views, and clearer inline query errors.
+- Improved the data grid with full-width scrolling, resizable and content-fitted columns,
+  refined headers and column action menus, and more reliable row editing.
+- Refreshed database provider icons, the schema explorer, draggable table ordering, and the
+  empty-result sheep mascot.
+
 ## 0.2.16 — 2026-07-15
 
 - Sped up queries and reconnection across the MySQL, PostgreSQL, and SQL Server backends:

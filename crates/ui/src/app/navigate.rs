@@ -81,10 +81,12 @@ impl DbGuiApp {
     /// when the column isn't a foreign key or its value is NULL (nothing to navigate to).
     pub(super) fn follow_foreign_key(&mut self, row: usize, col: usize) {
         let idx = self.active_query_tab;
+        let target_kind = match self.tabs[idx].kind {
+            crate::components::QueryTabKind::Query => crate::components::QueryTabKind::Query,
+            _ => crate::components::QueryTabKind::Table,
+        };
         match self.build_fk_follow(idx, row, col) {
-            Some((sql, source)) => {
-                self.open_in_preview_slot(sql, source, true, crate::components::QueryTabKind::Table)
-            }
+            Some((sql, source)) => self.open_in_preview_slot(sql, source, true, target_kind),
             None => {
                 self.status_msg =
                     "No foreign key to follow here (or the value is empty).".to_string();

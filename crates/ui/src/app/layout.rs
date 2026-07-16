@@ -1,6 +1,7 @@
 //! The frame loop: `eframe::App::update` and the panel layout it drives.
 
 use super::*;
+use crate::style::palette;
 
 impl eframe::App for DbGuiApp {
     // eframe 0.34 hands us a root `Ui`; panels are added with `show_inside`.
@@ -33,6 +34,50 @@ impl DbGuiApp {
         }
 
         let mut actions: Vec<Action> = Vec::new();
+
+        // A workspace may intentionally have no tabs. Keep only the global chrome and the
+        // tab strip visible; the + button (or Cmd/Ctrl+T) is the explicit entry point into a
+        // query. This branch also protects the rest of the frame, which operates on an active
+        // tab by design.
+        if self.tabs.is_empty() {
+            if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::T)) {
+                actions.push(Action::NewTab);
+            }
+
+            self.top_bar(ui_root, frame, &mut actions);
+            self.query_tab_bar(ui_root, &mut actions);
+            self.status_bar(ui_root, &mut actions);
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(palette::BASE()))
+                .show_inside(ui_root, |_ui| {});
+
+            // Global dialogs remain available from the title bar even before a query tab exists.
+            self.connection_dialog(&ctx, &mut actions);
+            self.settings_dialog(&ctx, &mut actions);
+            self.update_dialog(&ctx, &mut actions);
+            self.whats_new_dialog(&ctx, &mut actions);
+
+            let structural = actions
+                .iter()
+                .any(|action| matches!(action, Action::NewTab | Action::DeleteConnection(_)));
+            for action in actions {
+                self.apply_action(action);
+            }
+            if let Some(text) = self.copy_buffer.take() {
+                ctx.copy_text(text);
+            }
+            if self.pending_quit {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            self.maybe_save_workspace(structural);
+            if self.workspace_dirty {
+                ctx.request_repaint_after(std::time::Duration::from_millis(1600));
+            }
+            if self.busy != Busy::Idle || self.update.is_busy() {
+                ctx.request_repaint_after(std::time::Duration::from_millis(80));
+            }
+            return;
+        }
 
         // Global shortcut: Cmd/Ctrl+Enter runs the query.
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter)) {
@@ -249,11 +294,11 @@ impl DbGuiApp {
             self.tab_mut().filter.visible = false;
         }
 
-        // Order matters: top/bottom/left/right carve space, central takes the rest. The
-        // status bar is carved first so it pins to the very bottom edge. The left/right side
-        // panels are carved BEFORE the query console so they run the full height (down to the
-        // status bar); the console is then confined to the central column under the grid,
-        // instead of spanning the whole width and clipping the details/schema panels.
+        // Order matters: top/bottom/left/right carve space, central takes the rest. The status
+        // bar is carved first so it pins to the very bottom edge. Side panels are carved before
+        // the SQL editor so they run the full height; the editor stays confined to the central
+        // column. Its edge is contextual: code-first tabs dock it above the result, data-first
+        // tabs keep it below the grid.
         self.top_bar(ui_root, frame, &mut actions);
         self.query_tab_bar(ui_root, &mut actions);
         self.status_bar(ui_root, &mut actions);
@@ -270,15 +315,20 @@ impl DbGuiApp {
         if self.show_details_panel {
             self.right_panel(ui_root);
         }
-        // Carved last among the edge panels: the console borders only the central grid, so its
-        // top resize handle drags cleanly with nothing but the grid above it.
-        if self.show_query_console {
-            self.query_console(ui_root, &mut actions);
+        let editor_placement = query_editor_placement(self.tab().kind);
+        let saved_queries_workspace = self.show_query_console
+            && self.show_saved_queries
+            && self.tab().kind == crate::components::QueryTabKind::Query;
+        if self.show_query_console && !saved_queries_workspace {
+            self.query_console(ui_root, editor_placement, &mut actions);
         }
-        // A top panel after left/right carves the strip directly above the grid.
-        self.filter_bar(ui_root);
-        // ...and a bottom panel here carves the Data/Structure switch directly below it.
-        self.view_mode_bar(ui_root, &mut actions);
+        if !saved_queries_workspace {
+            // A top panel after left/right carves the strip directly above the grid.
+            self.filter_bar(ui_root);
+            // Keep result controls next to the query toolbar: below it on code-first tabs,
+            // and between the grid and bottom editor on data-first tabs.
+            self.view_mode_bar(ui_root, editor_placement, &mut actions);
+        }
         self.central_panel(ui_root, &mut actions);
         self.connection_dialog(&ctx, &mut actions);
         self.settings_dialog(&ctx, &mut actions);

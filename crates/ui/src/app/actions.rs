@@ -120,10 +120,10 @@ impl DbGuiApp {
                     self.history_open = true;
                 }
             }
-            Action::ToggleFavoritesPanel => {
-                self.favorites_open = !self.favorites_open;
-                // Re-read on open so the list reflects any out-of-band change.
-                if self.favorites_open {
+            Action::ToggleFavoritesTab => {
+                self.show_saved_queries = !self.show_saved_queries;
+                // Re-read on reveal so the list reflects any out-of-band change.
+                if self.show_saved_queries && !cfg!(test) {
                     self.favorites_cache = dbcore::favorites::load().unwrap_or_default();
                 }
             }
@@ -169,6 +169,7 @@ impl DbGuiApp {
             Action::UseFavorite(i) => {
                 if let Some(fav) = self.favorites_cache.get(i) {
                     self.tab_mut().sql = fav.sql.clone();
+                    self.show_saved_queries = false;
                     self.workspace_dirty = true;
                 }
             }
@@ -295,9 +296,25 @@ impl DbGuiApp {
             } => self.open_table(sql, source, pin, kind),
             Action::OpenDefinition { title, sql, kind } => self.open_definition(title, sql, kind),
             Action::FollowForeignKey { row, col } => self.follow_foreign_key(row, col),
-            Action::SortBy(col) => self.tab_mut().apply_sort(col),
             Action::SetSort { col, asc } => self.tab_mut().set_sort(col, asc),
             Action::ClearSort => self.tab_mut().clear_sort(),
+            Action::FilterColumn(col) => {
+                let filter = &mut self.tab_mut().filter;
+                filter.visible = true;
+                if let Some(condition) = filter
+                    .conditions
+                    .iter_mut()
+                    .find(|condition| !condition.is_effective())
+                {
+                    condition.column = col;
+                } else {
+                    let condition = crate::filter::Condition {
+                        column: col,
+                        ..Default::default()
+                    };
+                    filter.conditions.push(condition);
+                }
+            }
             Action::Page(nav) => self.page_nav(nav),
             Action::SetPageSize(n) => self.set_page_size(n),
             Action::CopyRows(format) => self.copy_selection(format),
@@ -500,6 +517,50 @@ impl DbGuiApp {
                         self.error = Some(format!("Couldn't save bookmarks: {e}"));
                     }
                 }
+            }
+            Action::MoveSchemaTable {
+                conn_id,
+                source_schema,
+                source_table,
+                target_schema,
+                target_table,
+                after,
+            } => {
+                let Some(active) = self
+                    .active_connections
+                    .iter()
+                    .find(|connection| connection.config_id == conn_id)
+                else {
+                    return;
+                };
+                let saved_order = self.schema_table_order.get(&conn_id);
+                let mut keys: Vec<String> = active
+                    .schema
+                    .tables
+                    .iter()
+                    .map(|table| schema_table_key(table.schema.as_deref(), &table.name))
+                    .collect();
+                keys.sort_by_key(|key| {
+                    saved_order
+                        .and_then(|order| order.iter().position(|item| item == key))
+                        .unwrap_or(usize::MAX)
+                });
+
+                let source = schema_table_key(source_schema.as_deref(), &source_table);
+                let target = schema_table_key(target_schema.as_deref(), &target_table);
+                let Some(source_index) = keys.iter().position(|key| key == &source) else {
+                    return;
+                };
+                keys.remove(source_index);
+                let Some(mut target_index) = keys.iter().position(|key| key == &target) else {
+                    return;
+                };
+                if after {
+                    target_index += 1;
+                }
+                keys.insert(target_index, source);
+                self.schema_table_order.insert(conn_id, keys);
+                self.persist_settings();
             }
             Action::GenerateSchema => {
                 let Some(editor) = &self.tab().schema_editor else {

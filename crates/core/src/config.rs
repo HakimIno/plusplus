@@ -92,6 +92,10 @@ pub struct Settings {
     /// The last version of the app the user has seen the "What's New" dialog for.
     #[serde(default)]
     pub last_seen_version: Option<String>,
+    /// User-defined table order per saved connection. Entries are stable schema/name keys;
+    /// unknown or newly discovered tables fall back to schema order.
+    #[serde(default)]
+    pub schema_table_order: std::collections::HashMap<String, Vec<String>>,
 }
 
 /// Load app settings. A missing or unreadable file yields defaults — settings are a
@@ -125,6 +129,19 @@ pub struct WorkspaceSource {
     pub pk_cols: Vec<String>,
 }
 
+/// Visual/workflow kind of a workspace tab. Kept in core so the persisted workspace does not
+/// depend on UI types; the UI maps this to its own `QueryTabKind` when restoring a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceTabKind {
+    Query,
+    Table,
+    View,
+    Function,
+    Procedure,
+    Trigger,
+}
+
 /// One saved query tab. Only non-transient state is kept — never the result rows, which are
 /// re-fetched on demand when the user re-runs the query.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -136,6 +153,13 @@ pub struct WorkspaceTab {
     pub conn_id: Option<String>,
     #[serde(default)]
     pub sql: String,
+    /// Missing in workspaces written before tab kinds were persisted. Restore code treats a
+    /// legacy tab with a source as a table and every other legacy tab as a query.
+    #[serde(default)]
+    pub kind: Option<WorkspaceTabKind>,
+    /// Last user-selected SQL editor height, in egui points. `None` uses the contextual default.
+    #[serde(default)]
+    pub editor_size: Option<f32>,
     /// The table this tab represents, if it was opened from the schema sidebar.
     #[serde(default)]
     pub source: Option<WorkspaceSource>,
@@ -197,6 +221,8 @@ mod tests {
                     title: "Query 1".into(),
                     conn_id: Some("conn-abc".into()),
                     sql: "SELECT * FROM users;".into(),
+                    kind: Some(WorkspaceTabKind::Table),
+                    editor_size: Some(184.0),
                     source: Some(WorkspaceSource {
                         schema: Some("public".into()),
                         table: "users".into(),
@@ -207,6 +233,8 @@ mod tests {
                     title: "scratch".into(),
                     conn_id: None,
                     sql: "SELECT 1;".into(),
+                    kind: Some(WorkspaceTabKind::Query),
+                    editor_size: None,
                     source: None,
                 },
             ],
@@ -219,6 +247,8 @@ mod tests {
         assert_eq!(back.tabs.len(), 2);
         assert_eq!(back.tabs[0].conn_id.as_deref(), Some("conn-abc"));
         assert_eq!(back.tabs[0].sql, "SELECT * FROM users;");
+        assert_eq!(back.tabs[0].kind, Some(WorkspaceTabKind::Table));
+        assert_eq!(back.tabs[0].editor_size, Some(184.0));
         let src = back.tabs[0].source.as_ref().unwrap();
         assert_eq!(src.table, "users");
         assert_eq!(src.pk_cols, vec!["id".to_string()]);
@@ -258,5 +288,13 @@ mod tests {
         assert_eq!(ws.tabs[0].sql, "SELECT 1;");
         assert_eq!(ws.tabs[0].title, "");
         assert!(ws.tabs[0].conn_id.is_none());
+        assert!(ws.tabs[0].kind.is_none());
+        assert!(ws.tabs[0].editor_size.is_none());
+    }
+
+    #[test]
+    fn old_settings_default_to_no_custom_table_order() {
+        let settings: Settings = serde_json::from_slice(br#"{"theme":"dark"}"#).unwrap();
+        assert!(settings.schema_table_order.is_empty());
     }
 }

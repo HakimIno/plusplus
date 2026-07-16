@@ -14,13 +14,12 @@ pub(crate) enum ButtonVariant {
     Danger,
 }
 
-/// Fluent builder for text, icon, toggle, and toolbar buttons.
+/// Fluent builder for text, icon, and toolbar buttons.
 pub(crate) struct Btn<'a> {
     label: String,
     icon: Option<ImageSource<'static>>,
     variant: ButtonVariant,
     enabled: bool,
-    active: bool,
     tooltip: Option<&'a str>,
     icon_only: bool,
 }
@@ -32,7 +31,6 @@ impl<'a> Btn<'a> {
             icon: None,
             variant: ButtonVariant::Default,
             enabled: true,
-            active: false,
             tooltip: None,
             icon_only: false,
         }
@@ -68,11 +66,6 @@ impl<'a> Btn<'a> {
         self
     }
 
-    pub(crate) fn active(mut self, on: bool) -> Self {
-        self.active = on;
-        self
-    }
-
     pub(crate) fn tooltip(mut self, text: &'a str) -> Self {
         self.tooltip = Some(text);
         self
@@ -89,27 +82,17 @@ impl<'a> Btn<'a> {
             ButtonVariant::Primary => palette::ON_ACCENT(),
             ButtonVariant::Danger => palette::DANGER(),
             ButtonVariant::Default | ButtonVariant::Ghost => {
-                if self.active {
-                    palette::ACCENT()
-                } else {
-                    ui.visuals().widgets.inactive.fg_stroke.color
-                }
+                ui.visuals().widgets.inactive.fg_stroke.color
             }
         };
         let icon_tint = match self.variant {
             ButtonVariant::Primary => palette::ON_ACCENT(),
             ButtonVariant::Danger => palette::DANGER(),
-            ButtonVariant::Default | ButtonVariant::Ghost => {
-                if self.active {
-                    palette::ACCENT()
-                } else {
-                    text_color
-                }
-            }
+            ButtonVariant::Default | ButtonVariant::Ghost => text_color,
         };
 
         let mut label = RichText::new(self.label).color(text_color);
-        if matches!(self.variant, ButtonVariant::Primary) || self.active {
+        if matches!(self.variant, ButtonVariant::Primary) {
             label = label.strong();
         }
 
@@ -137,15 +120,10 @@ impl<'a> Btn<'a> {
             ButtonVariant::Danger => btn,
             ButtonVariant::Ghost => btn
                 .fill(egui::Color32::TRANSPARENT)
-                .frame(self.active)
+                .frame(false)
                 .frame_when_inactive(false),
             ButtonVariant::Default => btn,
         };
-        if self.active {
-            btn = btn
-                .fill(palette::SELECTION())
-                .stroke(egui::Stroke::new(1.0, palette::ACCENT()));
-        }
 
         let resp = if matches!(variant, ButtonVariant::Danger) {
             // Scoped so the danger hover/press tint applies to this button alone and not to the
@@ -218,20 +196,6 @@ pub(crate) fn primary_button(
     enabled: bool,
 ) -> Response {
     Btn::primary(text).icon(src).enabled(enabled).show(ui)
-}
-
-pub(crate) fn toggle_button(
-    ui: &mut Ui,
-    src: ImageSource<'static>,
-    text: &str,
-    enabled: bool,
-    active: bool,
-) -> Response {
-    Btn::new(text)
-        .icon(src)
-        .enabled(enabled)
-        .active(active)
-        .show(ui)
 }
 
 pub(crate) fn icon_button(ui: &mut Ui, src: ImageSource<'static>, hover: &str) -> Response {

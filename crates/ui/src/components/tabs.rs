@@ -1,4 +1,4 @@
-use dbcore::ConnectionIcon;
+use dbcore::{ConnectionIcon, DbKind};
 
 use crate::icons;
 use crate::style::palette;
@@ -205,6 +205,7 @@ fn paint_tab_chip(
     painter: &egui::Painter,
     rect: egui::Rect,
     kind: QueryTabKind,
+    db_kind: Option<DbKind>,
     galley: &std::sync::Arc<egui::Galley>,
     fill: egui::Color32,
     stroke: egui::Stroke,
@@ -238,19 +239,28 @@ fn paint_tab_chip(
         egui::pos2(rect.left() + pad + 7.0, rect.center().y),
         egui::vec2(16.0, 16.0),
     );
-    painter.rect_filled(
-        badge_rect,
-        egui::CornerRadius::same(4),
-        translucent(icon_color, if selected { 34 } else { 20 }),
-    );
+    if db_kind.is_none() {
+        painter.rect_filled(
+            badge_rect,
+            egui::CornerRadius::same(4),
+            translucent(icon_color, if selected { 34 } else { 20 }),
+        );
+    }
     let icon_rect = egui::Rect::from_center_size(
         badge_rect.center(),
         egui::vec2(TAB_ICON_SIZE, TAB_ICON_SIZE),
     );
-    egui::Image::new(kind.icon())
-        .fit_to_exact_size(icon_rect.size())
-        .tint(icon_color)
-        .paint_at(ui, icon_rect);
+    if let Some(db_kind) = db_kind {
+        egui::Image::new(icons::db_kind_icon(db_kind))
+            .fit_to_exact_size(icon_rect.size())
+            .tint(icons::db_kind_icon_tint(db_kind))
+            .paint_at(ui, icon_rect);
+    } else {
+        egui::Image::new(kind.icon())
+            .fit_to_exact_size(icon_rect.size())
+            .tint(icon_color)
+            .paint_at(ui, icon_rect);
+    }
     let text_x = badge_rect.right() + TAB_ICON_GAP;
     let pos = egui::pos2(text_x, rect.center().y - galley.size().y * 0.5);
     painter.galley(pos, galley.clone(), text_color);
@@ -276,6 +286,7 @@ pub(crate) fn query_tab_item(
     ui: &mut egui::Ui,
     title: &str,
     kind: QueryTabKind,
+    db_kind: Option<DbKind>,
     selected: bool,
     preview: bool,
     drag_float_x: Option<f32>,
@@ -384,6 +395,7 @@ pub(crate) fn query_tab_item(
                         ui.painter(),
                         float_rect,
                         kind,
+                        db_kind,
                         &galley,
                         fill,
                         stroke,
@@ -401,6 +413,7 @@ pub(crate) fn query_tab_item(
                 ui.painter(),
                 rect,
                 kind,
+                db_kind,
                 &galley,
                 fill,
                 stroke,

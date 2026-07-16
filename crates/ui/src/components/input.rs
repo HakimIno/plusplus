@@ -211,15 +211,18 @@ pub(crate) fn accent_radio<T: PartialEq>(
     resp
 }
 
-pub(crate) fn segmented(
+/// Compact segmented control for toolbars and workspace switches.
+pub(crate) fn segmented_sized(
     ui: &mut egui::Ui,
     items: &[(ImageSource<'_>, &str)],
     selected: usize,
+    width: f32,
+    show_icons: bool,
 ) -> usize {
     let n = items.len().max(1);
     let height = 28.0;
     let (rect, _) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), height),
+        Vec2::new(width.min(ui.available_width()), height),
         egui::Sense::hover(),
     );
     if ui.is_rect_visible(rect) {
@@ -239,6 +242,9 @@ pub(crate) fn segmented(
             egui::Sense::click(),
         );
         let active = i == selected;
+        resp.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, active, *label)
+        });
         if ui.is_rect_visible(seg) {
             if active {
                 ui.painter().rect_filled(
@@ -265,20 +271,26 @@ pub(crate) fn segmented(
                 FontId::new(12.0, FontFamily::Proportional),
                 color,
             );
-            let group_w = icon_sz + gap + galley.size().x;
+            let group_w = if show_icons {
+                icon_sz + gap + galley.size().x
+            } else {
+                galley.size().x
+            };
             let start_x = seg.center().x - group_w / 2.0;
-            let icon_rect = egui::Rect::from_min_size(
-                Pos2::new(start_x, seg.center().y - icon_sz / 2.0),
-                Vec2::splat(icon_sz),
-            );
-            egui::Image::new(icon.clone())
-                .tint(color)
-                .paint_at(ui, icon_rect);
+            let text_x = if show_icons {
+                let icon_rect = egui::Rect::from_min_size(
+                    Pos2::new(start_x, seg.center().y - icon_sz / 2.0),
+                    Vec2::splat(icon_sz),
+                );
+                egui::Image::new(icon.clone())
+                    .tint(color)
+                    .paint_at(ui, icon_rect);
+                icon_rect.max.x + gap
+            } else {
+                start_x
+            };
             ui.painter().galley(
-                Pos2::new(
-                    icon_rect.max.x + gap,
-                    seg.center().y - galley.size().y / 2.0,
-                ),
+                Pos2::new(text_x, seg.center().y - galley.size().y / 2.0),
                 galley,
                 color,
             );
@@ -291,10 +303,12 @@ pub(crate) fn segmented(
 }
 
 fn db_kind_button_image(kind: DbKind) -> egui::Image<'static> {
-    egui::Image::new(icons::db_kind_icon(kind)).fit_to_exact_size(egui::vec2(
-        icons::DB_KIND_ICON_SIZE,
-        icons::DB_KIND_ICON_SIZE,
-    ))
+    egui::Image::new(icons::db_kind_icon(kind))
+        .fit_to_exact_size(egui::vec2(
+            icons::DB_KIND_ICON_SIZE,
+            icons::DB_KIND_ICON_SIZE,
+        ))
+        .tint(icons::db_kind_icon_tint(kind))
 }
 
 pub(crate) fn db_kind_selectable(
@@ -324,9 +338,33 @@ pub(crate) fn db_kind_combo(
     width: f32,
 ) -> egui::Response {
     let btn = egui::Button::image_and_text(db_kind_button_image(*current), current.label())
-        .right_text(egui::RichText::new("▾").size(10.0))
+        // Reserve the trailing chevron zone without relying on a font glyph. Some bundled
+        // fonts do not contain U+25BE and render it as a missing-glyph square.
+        .right_text("   ")
         .min_size(egui::vec2(width, 0.0));
     let button_response = ui.add(btn);
+    if ui.is_rect_visible(button_response.rect) {
+        let center = egui::pos2(
+            button_response.rect.right() - 13.0,
+            button_response.rect.center().y,
+        );
+        let radius = 3.25;
+        let stroke = egui::Stroke::new(1.4, crate::style::palette::TEXT_WEAK());
+        ui.painter().line_segment(
+            [
+                center + egui::vec2(-radius, -radius * 0.45),
+                center + egui::vec2(0.0, radius * 0.55),
+            ],
+            stroke,
+        );
+        ui.painter().line_segment(
+            [
+                center + egui::vec2(0.0, radius * 0.55),
+                center + egui::vec2(radius, -radius * 0.45),
+            ],
+            stroke,
+        );
+    }
 
     egui::Popup::menu(&button_response)
         .id(egui::Id::new(id).with("popup"))

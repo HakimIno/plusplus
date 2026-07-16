@@ -2,9 +2,47 @@
 
 use super::*;
 
+fn restore_tab_kind(kind: dbcore::config::WorkspaceTabKind) -> crate::components::QueryTabKind {
+    use crate::components::QueryTabKind as Ui;
+    use dbcore::config::WorkspaceTabKind as Saved;
+    match kind {
+        Saved::Query => Ui::Query,
+        Saved::Table => Ui::Table,
+        Saved::View => Ui::View,
+        Saved::Function => Ui::Function,
+        Saved::Procedure => Ui::Procedure,
+        Saved::Trigger => Ui::Trigger,
+    }
+}
+
+fn save_tab_kind(kind: crate::components::QueryTabKind) -> dbcore::config::WorkspaceTabKind {
+    use crate::components::QueryTabKind as Ui;
+    use dbcore::config::WorkspaceTabKind as Saved;
+    match kind {
+        Ui::Query => Saved::Query,
+        Ui::Table => Saved::Table,
+        Ui::View => Saved::View,
+        Ui::Function => Saved::Function,
+        Ui::Procedure => Saved::Procedure,
+        Ui::Trigger => Saved::Trigger,
+    }
+}
+
+pub(super) fn restored_tab_kind(
+    kind: Option<dbcore::config::WorkspaceTabKind>,
+    has_source: bool,
+) -> crate::components::QueryTabKind {
+    kind.map(restore_tab_kind).unwrap_or(if has_source {
+        crate::components::QueryTabKind::Table
+    } else {
+        crate::components::QueryTabKind::Query
+    })
+}
+
 impl DbGuiApp {
-    /// Replace the tabs with the saved workspace, if one exists. We never auto-connect or
-    /// auto-run — tabs come back with their connection selected but idle.
+    /// Replace the default query tab with the saved workspace when tabs were persisted.
+    /// We never auto-connect or auto-run — restored tabs come back with their connection
+    /// selected but idle.
     pub(super) fn restore_workspace(&mut self) {
         let saved = dbcore::config::load_workspace();
         let mut next_tab_id = 0u64;
@@ -14,23 +52,28 @@ impl DbGuiApp {
             .map(|wt| {
                 let id = next_tab_id;
                 next_tab_id += 1;
+                let legacy_has_source = wt.source.is_some();
+                let kind = restored_tab_kind(wt.kind, legacy_has_source);
                 let source = wt.source.map(|s| EditSource {
                     schema: s.schema,
                     table: s.table,
                     pk_cols: s.pk_cols,
                 });
-                // The title is meaningful only for a table tab (the table name); untitled
-                // query tabs are labelled by position in the bar, so we don't bake a number in.
-                let title = source.as_ref().map(|s| s.table.clone()).unwrap_or_default();
+                // Data tabs use the source relation as their title. Definition tabs have no
+                // source but still need their persisted object name; plain queries stay empty
+                // and are labelled by position in the tab bar.
+                let title = source.as_ref().map(|s| s.table.clone()).unwrap_or(wt.title);
                 let mut tab = QueryTab::new(id, title);
+                tab.kind = kind;
                 tab.sql = wt.sql;
+                tab.editor_size = wt.editor_size;
                 tab.conn_id = wt.conn_id;
                 tab.edits.source = source;
                 tab
             })
             .collect();
         if tabs.is_empty() {
-            return; // no saved workspace → keep the default tab from `construct`
+            return; // no saved tabs → keep the default query tab from `construct`
         }
         self.active_query_tab = saved.active_tab.min(tabs.len() - 1);
         self.next_tab_id = next_tab_id;
@@ -48,6 +91,8 @@ impl DbGuiApp {
                     title: t.title.clone(),
                     conn_id: t.conn_id.clone(),
                     sql: t.sql.clone(),
+                    kind: Some(save_tab_kind(t.kind)),
+                    editor_size: t.editor_size,
                     source: t
                         .edits
                         .source
@@ -85,6 +130,7 @@ impl DbGuiApp {
         settings.history_enabled = Some(self.history_enabled);
         settings.audit_enabled = Some(self.audit_enabled);
         settings.update_check_enabled = Some(self.update_check_enabled);
+        settings.schema_table_order = self.schema_table_order.clone();
         if let Err(e) = dbcore::config::save_settings(&settings) {
             self.error = Some(format!("Could not save settings: {e}"));
         }
@@ -126,9 +172,9 @@ impl DbGuiApp {
                     conn_name: draft.conn_name,
                     created_at: dbcore::history::now_rfc3339(),
                 });
-                // Reveal the panel so the just-saved query is visible (e.g. when saving from
-                // a history entry while the panel was closed).
-                self.favorites_open = true;
+                // Reveal the tab so the just-saved query is visible (e.g. when saving from a
+                // history entry while the editor tab was active).
+                self.show_saved_queries = true;
                 self.status_msg = "Saved to favorites".to_string();
             }
         }

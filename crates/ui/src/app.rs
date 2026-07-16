@@ -39,6 +39,18 @@ use crate::theme::ThemeRegistry;
 /// hundreds of MB, far below where the grid stops being useful anyway.
 const MAX_FETCH_ROWS: usize = 100_000;
 
+fn schema_table_key(schema: Option<&str>, table: &str) -> String {
+    format!("{}\0{table}", schema.unwrap_or_default())
+}
+
+#[derive(Clone)]
+struct SchemaTableDrag {
+    conn_id: String,
+    schema: Option<String>,
+    table: String,
+    pinned: bool,
+}
+
 /// Messages sent from background tasks back to the UI thread.
 enum AppMessage {
     /// The transport/authentication handshake finished. Schema metadata and the database list
@@ -256,14 +268,46 @@ impl ImportDraft {
     }
 }
 
-/// Which view of a table tab the central panel shows: the row data, or the introspected
-/// structure (columns + indexes), TablePlus-style. Only meaningful for tabs opened on a
-/// table; plain query tabs always show data.
+/// Which result surface the central panel shows. Query tabs use Data / Message / Chart;
+/// table and view tabs use Data / Structure.
 #[derive(Clone, Copy, PartialEq, Default)]
 enum TabView {
     #[default]
     Data,
+    Message,
+    Chart,
     Structure,
+}
+
+/// Which side of the result area owns the SQL editor. Code-first tabs follow execution order
+/// (editor, then result); data-first tabs keep the browsable grid as the primary surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum QueryEditorPlacement {
+    Top,
+    Bottom,
+}
+
+fn query_editor_placement(kind: crate::components::QueryTabKind) -> QueryEditorPlacement {
+    match kind {
+        crate::components::QueryTabKind::Query
+        | crate::components::QueryTabKind::Function
+        | crate::components::QueryTabKind::Procedure
+        | crate::components::QueryTabKind::Trigger => QueryEditorPlacement::Top,
+        crate::components::QueryTabKind::Table | crate::components::QueryTabKind::View => {
+            QueryEditorPlacement::Bottom
+        }
+    }
+}
+
+fn query_editor_title(kind: crate::components::QueryTabKind) -> &'static str {
+    match kind {
+        crate::components::QueryTabKind::Query
+        | crate::components::QueryTabKind::Table
+        | crate::components::QueryTabKind::View => "Query",
+        crate::components::QueryTabKind::Function
+        | crate::components::QueryTabKind::Procedure
+        | crate::components::QueryTabKind::Trigger => "Definition",
+    }
 }
 
 /// A live connection plus its introspected schema.
@@ -312,6 +356,12 @@ struct QueryTab {
     /// Saved-connection id this tab runs against (`None` ⇒ unbound).
     conn_id: Option<String>,
     sql: String,
+    /// Last splitter-selected SQL editor height in egui points. `None` uses the contextual
+    /// default; once the user drags the splitter this is persisted with the workspace.
+    editor_size: Option<f32>,
+    /// Last execution failure for this tab. Kept beside the result so an error follows the
+    /// query tab that produced it instead of existing only in the global status bar.
+    query_error: Option<String>,
     result: Option<QueryResult>,
     /// Indices into `result.rows` giving the current display order (filter + sort).
     row_order: Vec<usize>,
@@ -345,6 +395,8 @@ impl QueryTab {
             preview: false,
             conn_id: None,
             sql: String::new(),
+            editor_size: None,
+            query_error: None,
             result: None,
             row_order: Vec::new(),
             sort: None,
@@ -360,6 +412,7 @@ impl QueryTab {
 
     /// Install a freshly returned result and rebuild the display order.
     fn set_result(&mut self, res: QueryResult) {
+        self.view = TabView::Data;
         self.sort = None;
         self.selection.clear();
         // A fresh result may have a different column count; keep filter conditions but stop
@@ -401,21 +454,7 @@ impl QueryTab {
         );
     }
 
-    fn apply_sort(&mut self, col: usize) {
-        let Some(result) = &self.result else { return };
-        if col >= result.column_count() {
-            return;
-        }
-        // Toggle ascending/descending on repeated clicks of the same column.
-        let ascending = match self.sort {
-            Some((c, asc)) if c == col => !asc,
-            _ => true,
-        };
-        self.sort = Some((col, ascending));
-        self.recompute_view();
-    }
-
-    /// Sort a column in an explicit direction (from the header menu, vs `apply_sort`'s toggle).
+    /// Sort a column in an explicit direction from the header menu.
     fn set_sort(&mut self, col: usize, ascending: bool) {
         let Some(result) = &self.result else { return };
         if col >= result.column_count() {
@@ -758,8 +797,8 @@ enum Action {
     CloseSettings,
     /// Show/hide the query-history side panel.
     ToggleHistory,
-    /// Show/hide the Favorites panel beside the SQL editor (the Saved button).
-    ToggleFavoritesPanel,
+    /// Switch between the SQL editor and Saved queries tabs.
+    ToggleFavoritesTab,
     /// Open the name dialog to save the active tab's SQL as a favorite.
     SaveCurrentAsFavorite,
     /// Open the name dialog to save a history entry (by cache index) as a favorite.
@@ -814,14 +853,15 @@ enum Action {
         row: usize,
         col: usize,
     },
-    SortBy(usize),
-    /// Header menu: sort a column in an explicit direction (vs `SortBy`, which toggles).
+    /// Header menu: sort a column in an explicit direction.
     SetSort {
         col: usize,
         asc: bool,
     },
     /// Header menu: drop the sort, back to natural row order.
     ClearSort,
+    /// Header menu: reveal the filter bar and target a condition at this result column.
+    FilterColumn(usize),
     /// Pager: jump to another page of a paged table tab. Rewrites the tab's LIMIT/OFFSET
     /// in place (the SQL editor always shows what runs) and re-runs the query.
     Page(PageNav),
@@ -881,6 +921,15 @@ enum Action {
     ToggleBookmark {
         schema: Option<String>,
         table: String,
+    },
+    /// Reorder one table relative to another table in the same pinned/unpinned group.
+    MoveSchemaTable {
+        conn_id: String,
+        source_schema: Option<String>,
+        source_table: String,
+        target_schema: Option<String>,
+        target_table: String,
+        after: bool,
     },
     /// Open the object editor to create a brand-new view.
     OpenNewView,
@@ -1053,13 +1102,15 @@ pub struct DbGuiApp {
     history_open: bool,
     history_cache: Vec<dbcore::history::HistoryEntry>,
     /// All saved queries, kept in memory and mirrored to `favorites.json` on every change.
-    /// Loaded once at startup so the Saved button's count is correct even before it opens.
+    /// Loaded once at startup so the Saved queries tab count is immediately correct.
     favorites_cache: Vec<dbcore::Favorite>,
     /// Pinned tables, kept in memory and mirrored to `bookmarks.json` on every change. Loaded
-    /// once at startup so the schema explorer's "Pinned" group is populated from launch.
+    /// once at startup so pinned entries sort to the top of the schema explorer from launch.
     bookmarks: Vec<dbcore::Bookmark>,
-    /// Whether the Favorites panel (beside the SQL editor, toggled by the Saved button) is open.
-    favorites_open: bool,
+    /// User-arranged table order for each connection, persisted in settings.json.
+    schema_table_order: HashMap<String, Vec<String>>,
+    /// Whether the Saved queries tab is active inside the SQL editor panel.
+    show_saved_queries: bool,
     /// Open name-this-favorite dialog. `None` = closed.
     favorite_pending: Option<FavoriteDraft>,
     /// Open ER diagram (takes over the central panel, like the schema editor).
@@ -1121,7 +1172,7 @@ impl DbGuiApp {
         // out of `construct` so tests don't read the user's favorites file.
         app.favorites_cache = dbcore::favorites::load().unwrap_or_default();
 
-        // Load pinned tables so the explorer's "Pinned" group is right from launch. Kept out
+        // Load pinned tables so they sort to the top of the explorer from launch. Kept out
         // of `construct` so tests don't read the user's bookmarks file.
         app.bookmarks = dbcore::bookmarks::load().unwrap_or_default();
 
@@ -1179,17 +1230,16 @@ impl DbGuiApp {
         let history_enabled = settings.history_enabled.unwrap_or(true);
         let audit_enabled = settings.audit_enabled.unwrap_or(true);
         let update_check_enabled = settings.update_check_enabled.unwrap_or(true);
+        let schema_table_order = settings.schema_table_order.clone();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()
             .expect("failed to build tokio runtime");
 
-        // Start with a single default query tab. The saved workspace (if any) is layered on
-        // top later by `restore_workspace`, called from `new` (not here, so tests are
-        // deterministic and don't read the user's config dir).
-        let mut default_tab = QueryTab::new(0, String::new());
-        default_tab.sql = "SELECT 1;".to_string();
+        // Start with one clean query tab so the workspace never opens as an empty shell.
+        // A saved workspace replaces it later through `restore_workspace`.
+        let default_tab = QueryTab::new(0, String::new());
 
         Self {
             connections,
@@ -1243,7 +1293,8 @@ impl DbGuiApp {
             // Loaded from disk in `new` (this builder stays config-dir-free for tests).
             favorites_cache: Vec::new(),
             bookmarks: Vec::new(),
-            favorites_open: false,
+            schema_table_order,
+            show_saved_queries: false,
             favorite_pending: None,
             erd: None,
             show_welcome,
@@ -1302,7 +1353,11 @@ impl DbGuiApp {
     /// Path string for the unified title-bar breadcrumb.
     fn breadcrumb_text(&self) -> String {
         let Some(active) = self.active() else {
-            if let Some(id) = self.tab().conn_id.as_deref() {
+            if let Some(id) = self
+                .tabs
+                .get(self.active_query_tab)
+                .and_then(|tab| tab.conn_id.as_deref())
+            {
                 if let Some(cfg) = self.connections.iter().find(|c| c.id == id) {
                     return format!("{} | {} — not connected", cfg.name, cfg.kind.label());
                 }
@@ -1349,13 +1404,13 @@ impl DbGuiApp {
 
     /// The live connection the active tab is bound to, if it's currently connected.
     fn active(&self) -> Option<&ActiveConnection> {
-        let id = self.tab().conn_id.as_deref()?;
+        let id = self.tabs.get(self.active_query_tab)?.conn_id.as_deref()?;
         self.active_connections.iter().find(|c| c.config_id == id)
     }
 
     /// Saved config the active tab is bound to, regardless of live connection state.
     fn active_connection_config(&self) -> Option<&ConnectionConfig> {
-        let id = self.tab().conn_id.as_deref()?;
+        let id = self.tabs.get(self.active_query_tab)?.conn_id.as_deref()?;
         self.connections.iter().find(|c| c.id == id)
     }
 

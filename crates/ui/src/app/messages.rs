@@ -244,6 +244,7 @@ impl DbGuiApp {
                     match result {
                         Ok(res) => {
                             // Promote the in-flight source and start from a clean edit slate.
+                            tab.query_error = None;
                             tab.edits.source = tab.edits.pending_source.take();
                             tab.edits.clear();
                             let status = result_status(&res);
@@ -271,11 +272,16 @@ impl DbGuiApp {
                                 self.error = None;
                             }
                         }
-                        Err(e) if is_active => {
-                            self.error = Some(format!("Query error: {e}"));
-                            self.status_msg = "Query failed".to_string();
+                        Err(e) => {
+                            tab.view = TabView::Data;
+                            tab.query_error = Some(e.clone());
+                            if is_active {
+                                // Query failures already own the result surface. Keep the global
+                                // status strip quiet so the same error is not shown twice.
+                                self.error = None;
+                                self.status_msg = "Ready".to_string();
+                            }
                         }
-                        Err(_) => {}
                     }
                 }
                 AppMessage::Exported { table, result } => match result {

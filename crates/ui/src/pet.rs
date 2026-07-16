@@ -1,31 +1,31 @@
-//! A small empty-state mascot drawn with `egui::Painter`.
+//! A small sheep mascot for empty states, drawn with `egui::Painter`.
 //!
 //! It intentionally stays calm: no physics, no dragging, no cursor tracking. The only motion is
-//! a quick blink on its `+ +` eyes so the empty state has a little life without bouncing around.
+//! a quick blink so the empty state has a little life without bouncing around.
 
 use egui::{Color32, Pos2, Rect, Sense, Stroke};
 
 /// One row of the 16x16 body sprite.
 ///
-/// Characters map to palette slots in [`pixel_color`]: `.` transparent, `o` outline, `b` body,
-/// `h` highlight, `s` shadow, `c` cheek. The eyes are painted on top so they can blink.
+/// Characters map to palette slots in [`pixel_color`]: `.` transparent, `o` outline, `w` wool,
+/// `h` highlight, `s` wool shadow, `f` face, `e` ear, `l` leg. Eyes and mouth are painted on top.
 const SPRITE: [&str; 16] = [
-    "................",
-    ".....o....o.....",
-    "....obo..obo....",
-    ".....obbo.......",
-    "...oobbbbbboo...",
-    "..obbbbbbbbbbo..",
-    ".obbhbbbbbbbbbo.",
-    ".obbbbbbbbbbbbo.",
-    "obbbbbbbbbbbbbbo",
-    "obbbbbbbbbbbbbbo",
-    "obbbbbbbbbbbbbbo",
-    ".obbcbbbbbcbbbo.",
-    ".obbbbbbbbbbbbo.",
-    "..obbbbbbbbbbo..",
-    "...obbssssbbo...",
-    "....oossssoo....",
+    ".....oooooo.....",
+    "...owwwwwwwwo...",
+    "..owwwhwwhwwwo..",
+    ".owwwwwwwwwwwwo.",
+    "oeeooffffffooeeo",
+    "oeeoffffffffoeeo",
+    "..offffffffffo..",
+    "..offffffffffo..",
+    "..offffffffffo..",
+    "...offfffffo....",
+    "..oowwwwwwwwoo..",
+    ".owwwwwwwwwwwwo.",
+    ".owhwwwwwwwwhwo.",
+    "..owwwsssswwwo..",
+    "...oll....llo...",
+    "....oo....oo....",
 ];
 
 const GRID: f32 = 16.0;
@@ -75,13 +75,15 @@ fn fade(color: Color32) -> Color32 {
 }
 
 fn pixel_color(ch: char, accent: Color32) -> Option<Color32> {
-    let dark = Color32::from_rgb(40, 32, 54);
+    let dark = Color32::from_rgb(53, 38, 48);
     Some(fade(match ch {
-        'b' => blend(accent, Color32::WHITE, 0.72),
-        'o' => blend(accent, dark, 0.56),
-        'h' => blend(accent, Color32::WHITE, 0.9),
-        's' => blend(accent, dark, 0.18),
-        'c' => blend(accent, Color32::from_rgb(255, 142, 170), 0.62),
+        'w' => blend(accent, Color32::from_rgb(246, 246, 226), 0.86),
+        'h' => Color32::from_rgb(255, 251, 231),
+        's' => blend(accent, Color32::from_rgb(194, 220, 211), 0.58),
+        'f' => Color32::from_rgb(244, 190, 155),
+        'e' => Color32::from_rgb(224, 145, 135),
+        'l' => Color32::from_rgb(78, 48, 50),
+        'o' => blend(accent, dark, 0.7),
         _ => return None,
     }))
 }
@@ -93,14 +95,16 @@ pub fn show(ui: &mut egui::Ui) {
 
     ui.scope(|ui| {
         let rect = ui.available_rect_before_wrap();
-        ui.allocate_rect(rect, Sense::hover());
+        ui.allocate_rect(rect, Sense::hover()).widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Image, true, "Empty state mascot")
+        });
         if !ui.is_rect_visible(rect) {
             return;
         }
 
-        let px = (rect.width().min(rect.height()) * 0.22 / GRID)
+        let px = (rect.width().min(rect.height()) * 0.30 / GRID)
             .floor()
-            .clamp(3.0, 8.0);
+            .clamp(3.0, 10.0);
         let half = GRID * px / 2.0;
         let pos = Pos2::new(rect.center().x, rect.center().y + px * 0.8);
         let id = ui.id().with("empty_pet");
@@ -202,4 +206,32 @@ fn paint_face(painter: &egui::Painter, pos: Pos2, px: f32, dark: Color32, lid: f
             );
         }
     }
+
+    // A tiny nose and mouth give the sheep the friendly expression from the reference without
+    // adding another animation or losing the crisp pixel silhouette.
+    let nose = Pos2::new(left + GRID * px * 0.5, top + 9.0 * px);
+    painter.rect_filled(
+        Rect::from_center_size(nose, egui::vec2(px * 1.8, px * 1.15)),
+        egui::CornerRadius::same((px * 0.35) as u8),
+        fade(dark),
+    );
+    let mouth_y = nose.y + px * 1.15;
+    painter.line_segment(
+        [nose, Pos2::new(nose.x, mouth_y)],
+        Stroke::new((px * 0.34).max(1.0), fade(dark)),
+    );
+    painter.line_segment(
+        [
+            Pos2::new(nose.x - px * 0.75, mouth_y),
+            Pos2::new(nose.x, mouth_y + px * 0.45),
+        ],
+        Stroke::new((px * 0.28).max(1.0), fade(dark)),
+    );
+    painter.line_segment(
+        [
+            Pos2::new(nose.x, mouth_y + px * 0.45),
+            Pos2::new(nose.x + px * 0.75, mouth_y),
+        ],
+        Stroke::new((px * 0.28).max(1.0), fade(dark)),
+    );
 }
