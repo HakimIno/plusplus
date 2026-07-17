@@ -157,13 +157,16 @@ pub(crate) enum QueryTabKind {
     Function,
     Procedure,
     Trigger,
+    /// An ER diagram (whole schema or one table's FK neighborhood). No editor,
+    /// no result grid — the tab is the canvas.
+    Diagram,
 }
 
 impl QueryTabKind {
     pub(crate) fn color(self) -> egui::Color32 {
         match self {
             Self::Query => palette::WARNING(),
-            Self::Table => palette::ACCENT(),
+            Self::Table | Self::Diagram => palette::ACCENT(),
             Self::View => palette::SUCCESS(),
             Self::Function => crate::style::mix(palette::ACCENT(), palette::DANGER(), 0.45),
             Self::Procedure => palette::WARNING(),
@@ -177,6 +180,7 @@ impl QueryTabKind {
             Self::View => icons::view(),
             Self::Function | Self::Procedure | Self::Query => icons::code(),
             Self::Trigger => icons::play(),
+            Self::Diagram => icons::diagram(),
         }
     }
 }

@@ -180,19 +180,24 @@ impl DbGuiApp {
                     self.status_msg = "Favorite deleted".to_string();
                 }
             }
-            Action::ToggleErd => {
-                if self.erd.is_some() {
-                    self.erd = None;
-                } else if let Some(active) = self.active() {
-                    self.erd = Some(crate::erd::ErDiagram::build(
+            Action::RefreshErd => self.refresh_diagram_tab(self.active_query_tab),
+            Action::ShowTableDiagram { schema, table } => {
+                if let Some(active) = self.active() {
+                    let erd = crate::erd::ErDiagram::build_focused(
                         &active.config_id,
                         &active.schema,
-                    ));
+                        crate::erd::ErdFocus {
+                            schema,
+                            table: table.clone(),
+                            depth: 1,
+                        },
+                    );
+                    self.open_diagram_tab(table, erd);
                 } else {
-                    self.error = Some("Connect to a database to view its ER diagram.".into());
+                    self.error = Some("Connect to a database to view its diagram.".into());
                 }
             }
-            Action::RefreshErd => self.refresh_erd(),
+            Action::SetErdDepth(depth) => self.set_erd_depth(depth),
             Action::ClearHistory => {
                 if let Err(e) = dbcore::history::clear() {
                     self.error = Some(format!("Could not clear history: {e}"));

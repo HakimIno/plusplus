@@ -25,10 +25,7 @@ impl DbGuiApp {
     pub(super) fn disconnect_conn(&mut self, id: &str) {
         self.active_connections.retain(|c| c.config_id != id);
         self.connection_timings.remove(id);
-        // An ER diagram of the dropped connection is stale; close it.
-        if self.erd.as_ref().is_some_and(|e| e.conn_id == id) {
-            self.erd = None;
-        }
+        // Diagram tabs keep their schema snapshot — still viewable, just not refreshable.
         for tab in &mut self.tabs {
             if tab.conn_id.as_deref() == Some(id) {
                 tab.result = None;

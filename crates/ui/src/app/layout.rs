@@ -319,18 +319,25 @@ impl DbGuiApp {
             self.right_panel(ui_root);
         }
         let editor_placement = query_editor_placement(self.tab().kind);
+        // A Diagram tab is just the canvas: no SQL editor, no filter or result-mode bars.
+        let diagram_tab = self.tab().kind == crate::components::QueryTabKind::Diagram;
         let saved_queries_workspace = self.show_query_console
             && self.show_saved_queries
             && self.tab().kind == crate::components::QueryTabKind::Query;
-        if self.show_query_console && !saved_queries_workspace {
+        if self.show_query_console && !saved_queries_workspace && !diagram_tab {
             self.query_console(ui_root, editor_placement, &mut actions);
         }
-        if !saved_queries_workspace {
+        if !saved_queries_workspace && !diagram_tab {
             // A top panel after left/right carves the strip directly above the grid.
             self.filter_bar(ui_root);
             // Keep result controls next to the query toolbar: below it on code-first tabs,
             // and between the grid and bottom editor on data-first tabs.
-            self.view_mode_bar(ui_root, editor_placement, &mut actions);
+            // Table/View tabs include this bar in their resizable bottom stack so the drag
+            // edge sits above Data / Structure / Edit Table. Query tabs keep it below the
+            // top-docked editor as before; when the console is hidden it remains standalone.
+            if editor_placement == QueryEditorPlacement::Top || !self.show_query_console {
+                self.view_mode_bar(ui_root, editor_placement, &mut actions);
+            }
         }
         self.central_panel(ui_root, &mut actions);
         self.connection_dialog(&ctx, &mut actions);

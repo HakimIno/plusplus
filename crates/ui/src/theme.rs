@@ -406,18 +406,21 @@ fn midnight() -> Theme {
 }
 
 /// A clean light theme: white wells, soft grey panels, a stronger accent for contrast.
+/// Its surface/border steps mirror the dark themes' spacing (surface clearly darker
+/// than panel, borders clearly darker than surface) — with near-white steps, tabs,
+/// buttons, and box borders all washed into the background.
 fn daylight() -> Theme {
     Theme {
         is_dark: false,
         base: rgb(0xff, 0xff, 0xff),
         panel: rgb(0xf4, 0xf5, 0xf7),
-        surface: rgb(0xf7, 0xf8, 0xfa),
-        surface_hover: rgb(0xec, 0xee, 0xf1),
+        surface: rgb(0xea, 0xec, 0xf1),
+        surface_hover: rgb(0xdf, 0xe3, 0xe9),
         code_bg: rgb(0xff, 0xff, 0xff),
         stripe: rgb(0xee, 0xf0, 0xf4),
         selection: rgb(0xd6, 0xe2, 0xff),
-        border: rgb(0xf0, 0xf1, 0xf4),
-        border_strong: rgb(0xde, 0xe1, 0xe8),
+        border: rgb(0xe2, 0xe5, 0xeb),
+        border_strong: rgb(0xc8, 0xce, 0xd8),
         text: rgb(0x1c, 0x1f, 0x26),
         text_weak: rgb(0x4a, 0x52, 0x60),
         text_faint: rgb(0x6b, 0x74, 0x82),

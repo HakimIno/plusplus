@@ -299,7 +299,9 @@ fn query_editor_placement(kind: crate::components::QueryTabKind) -> QueryEditorP
         crate::components::QueryTabKind::Query
         | crate::components::QueryTabKind::Function
         | crate::components::QueryTabKind::Procedure
-        | crate::components::QueryTabKind::Trigger => QueryEditorPlacement::Top,
+        | crate::components::QueryTabKind::Trigger
+        // Diagram tabs never draw an editor; the placement is inert.
+        | crate::components::QueryTabKind::Diagram => QueryEditorPlacement::Top,
         crate::components::QueryTabKind::Table | crate::components::QueryTabKind::View => {
             QueryEditorPlacement::Bottom
         }
@@ -310,7 +312,8 @@ fn query_editor_title(kind: crate::components::QueryTabKind) -> &'static str {
     match kind {
         crate::components::QueryTabKind::Query
         | crate::components::QueryTabKind::Table
-        | crate::components::QueryTabKind::View => "Query",
+        | crate::components::QueryTabKind::View
+        | crate::components::QueryTabKind::Diagram => "Query",
         crate::components::QueryTabKind::Function
         | crate::components::QueryTabKind::Procedure
         | crate::components::QueryTabKind::Trigger => "Definition",
@@ -391,6 +394,9 @@ struct QueryTab {
     /// One-shot request to scroll this display row into view next frame (keyboard cursor
     /// moves). Consumed by `central_panel` when it renders the grid.
     pending_scroll: Option<usize>,
+    /// The ER diagram shown by a `QueryTabKind::Diagram` tab. A schema snapshot, so it
+    /// stays viewable after a disconnect; not persisted with the workspace.
+    diagram: Option<crate::erd::ErDiagram>,
 }
 
 impl QueryTab {
@@ -414,6 +420,7 @@ impl QueryTab {
             total_rows: None,
             schema_editor: None,
             pending_scroll: None,
+            diagram: None,
         }
     }
 
@@ -820,10 +827,15 @@ enum Action {
     UseFavorite(usize),
     /// Delete a favorite (by cache index).
     DeleteFavorite(usize),
-    /// Open/close the ER diagram of the active connection (takes over the central panel).
-    ToggleErd,
     /// Rebuild the open ER diagram from the current schema (after DDL / re-introspection).
     RefreshErd,
+    /// Open the diagram scoped to one table and its FK neighborhood (depth 1).
+    ShowTableDiagram {
+        schema: Option<String>,
+        table: String,
+    },
+    /// Change the focused diagram's hop depth (`erd::DEPTH_ALL` = the whole schema).
+    SetErdDepth(usize),
     /// Wipe the on-disk query history.
     ClearHistory,
     /// Put a history entry's SQL into the active tab's editor.
@@ -1124,7 +1136,6 @@ pub struct DbGuiApp {
     favorite_pending: Option<FavoriteDraft>,
     /// Open ER diagram (takes over the central panel, like the schema editor).
     /// A snapshot of the schema it was built from; not persisted.
-    erd: Option<crate::erd::ErDiagram>,
 
     // --- layout ---
     show_connection_tabs: bool,
@@ -1306,7 +1317,6 @@ impl DbGuiApp {
             schema_table_order,
             show_saved_queries: false,
             favorite_pending: None,
-            erd: None,
             show_welcome,
             update: crate::update::UpdatePhase::Idle,
             update_dialog_open: false,
@@ -1424,26 +1434,85 @@ impl DbGuiApp {
         self.connections.iter().find(|c| c.id == id)
     }
 
-    /// Rebuild the open ER diagram from its connection's current schema, keeping the
-    /// user's pan/zoom and the position of every node whose table survived.
-    fn refresh_erd(&mut self) {
-        let Some(old) = self.erd.take() else { return };
+    /// Open `diagram` in a new Diagram tab and select it. Reuses an existing Diagram
+    /// tab showing the same connection and scope instead of stacking duplicates.
+    fn open_diagram_tab(&mut self, title: String, diagram: crate::erd::ErDiagram) {
+        // Scope = the root table (or the whole schema), regardless of hop depth: a
+        // re-opened table should land in its existing tab even after widening it.
+        let root = |d: &crate::erd::ErDiagram| {
+            d.focus.as_ref().map(|f| (f.schema.clone(), f.table.clone()))
+        };
+        let same_scope = |t: &QueryTab| {
+            t.kind == crate::components::QueryTabKind::Diagram
+                && t.diagram.as_ref().is_some_and(|d| {
+                    d.conn_id == diagram.conn_id && root(d) == root(&diagram)
+                })
+        };
+        if let Some(i) = self.tabs.iter().position(same_scope) {
+            self.select_tab(i);
+            return;
+        }
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let mut tab = QueryTab::new(id, title);
+        tab.kind = crate::components::QueryTabKind::Diagram;
+        tab.conn_id = Some(diagram.conn_id.clone());
+        tab.diagram = Some(diagram);
+        self.tabs.push(tab);
+        self.select_tab(self.tabs.len() - 1);
+    }
+
+    /// Rebuild the diagram in `tab_idx` from its connection's current schema, keeping
+    /// the user's pan/zoom, the focus scope, and the position of every node whose
+    /// table survived. Keeps the stale snapshot when the connection is gone.
+    fn refresh_diagram_tab(&mut self, tab_idx: usize) {
+        let Some(old) = self.tabs.get_mut(tab_idx).and_then(|t| t.diagram.take()) else {
+            return;
+        };
         let Some(conn) = self
             .active_connections
             .iter()
             .find(|c| c.config_id == old.conn_id)
         else {
-            // Connection dropped while the diagram was open: nothing to rebuild from.
+            // Connection dropped: the snapshot stays viewable, just not refreshable.
+            self.tabs[tab_idx].diagram = Some(old);
             return;
         };
-        let mut fresh = crate::erd::ErDiagram::build(&old.conn_id, &conn.schema);
+        let mut fresh = match &old.focus {
+            Some(f) => crate::erd::ErDiagram::build_focused(&old.conn_id, &conn.schema, f.clone()),
+            None => crate::erd::ErDiagram::build(&old.conn_id, &conn.schema),
+        };
         for node in &mut fresh.nodes {
             if let Some(prev) = old.nodes.iter().find(|n| n.title == node.title) {
                 node.pos = prev.pos;
             }
         }
         fresh.scene_rect = old.scene_rect;
-        self.erd = Some(fresh);
+        self.tabs[tab_idx].diagram = Some(fresh);
+    }
+
+    /// Change the FK-hop depth of the active tab's focused diagram ([`crate::erd::DEPTH_ALL`]
+    /// = whole schema, root still highlighted), re-laying it out from scratch. No-op when
+    /// the active tab isn't a focused diagram or its connection is gone.
+    fn set_erd_depth(&mut self, depth: usize) {
+        let idx = self.active_query_tab;
+        let Some(old) = self.tabs.get_mut(idx).and_then(|t| t.diagram.take()) else {
+            return;
+        };
+        let (Some(focus), Some(conn)) = (
+            old.focus.clone(),
+            self.active_connections
+                .iter()
+                .find(|c| c.config_id == old.conn_id),
+        ) else {
+            self.tabs[idx].diagram = Some(old);
+            return;
+        };
+        self.tabs[idx].diagram = Some(crate::erd::ErDiagram::build_focused(
+            &old.conn_id,
+            &conn.schema,
+            crate::erd::ErdFocus { depth, ..focus },
+        ));
     }
 
     fn active_title_bar_color(&self) -> Option<ConnectionColor> {

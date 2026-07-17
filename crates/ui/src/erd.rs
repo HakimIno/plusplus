@@ -2,7 +2,7 @@
 //!
 //! The diagram is a snapshot built from an introspected [`SchemaTree`]: one node per
 //! table (its columns, with PK/FK markers) and one edge per foreign key. Node positions
-//! come from a small force-directed layout run once at build time; the user can then
+//! come from a layered left-to-right layout run once at build time; the user can then
 //! drag nodes freely. Nothing here persists — closing the diagram discards the layout.
 
 use std::collections::BTreeMap;
@@ -82,6 +82,19 @@ pub struct ErdEdge {
     pub detail: String,
 }
 
+/// Depth meaning "no hop limit": the focused diagram shows the whole schema while
+/// keeping its root table highlighted (so the depth control stays available).
+pub const DEPTH_ALL: usize = usize::MAX;
+
+/// Scope of a table-focused diagram: the root table and how many foreign-key
+/// hops around it (in either direction) to include ([`DEPTH_ALL`] = everything).
+#[derive(Clone, PartialEq, Eq)]
+pub struct ErdFocus {
+    pub schema: Option<String>,
+    pub table: String,
+    pub depth: usize,
+}
+
 pub struct ErDiagram {
     /// Saved-connection id the snapshot was built from (shown alongside the database).
     pub conn_id: String,
@@ -93,6 +106,9 @@ pub struct ErDiagram {
     pub scene_rect: Rect,
     /// Node whose edges are highlighted (clicked). `None` = no highlight.
     pub selected: Option<usize>,
+    /// `Some` when the diagram shows one table's FK neighborhood instead of the
+    /// whole schema (kept so refresh and depth changes rebuild the same scope).
+    pub focus: Option<ErdFocus>,
 }
 
 impl ErDiagram {
@@ -233,8 +249,92 @@ impl ErDiagram {
             edges,
             scene_rect: Rect::NOTHING,
             selected: None,
+            focus: None,
         };
         diagram.layout();
+        diagram
+    }
+
+    /// Build a diagram of just `focus.table` and every table within `focus.depth`
+    /// foreign-key hops of it, following FKs both ways (parents it references and
+    /// children referencing it). The root comes out selected so its relations are
+    /// highlighted. Falls back to the full diagram when the root isn't in `schema`.
+    pub fn build_focused(conn_id: &str, schema: &SchemaTree, focus: ErdFocus) -> Self {
+        let root = schema.tables.iter().position(|t| {
+            t.name == focus.table && (focus.schema.is_none() || t.schema == focus.schema)
+        });
+        let Some(root) = root else {
+            return Self::build(conn_id, schema);
+        };
+
+        // "All": the whole schema (including tables unreachable from the root),
+        // with the root still selected and the focus kept for the depth control.
+        if focus.depth == DEPTH_ALL {
+            let mut diagram = Self::build(conn_id, schema);
+            diagram.selected = Some(root);
+            diagram.focus = Some(focus);
+            return diagram;
+        }
+
+        // Undirected FK adjacency over the full schema, resolving targets with the
+        // same rules as `build` (schema-qualified first, then bare table name).
+        let mut by_key: BTreeMap<(String, String), usize> = BTreeMap::new();
+        let mut by_name: BTreeMap<String, usize> = BTreeMap::new();
+        for (i, t) in schema.tables.iter().enumerate() {
+            by_key.insert(
+                (t.schema.clone().unwrap_or_default(), t.name.clone()),
+                i,
+            );
+            by_name.entry(t.name.clone()).or_insert(i);
+        }
+        let mut adjacent: Vec<Vec<usize>> = vec![Vec::new(); schema.tables.len()];
+        for (i, t) in schema.tables.iter().enumerate() {
+            for fk in &t.foreign_keys {
+                let target_schema = fk
+                    .ref_schema
+                    .clone()
+                    .or_else(|| t.schema.clone())
+                    .unwrap_or_default();
+                let Some(&to) = by_key
+                    .get(&(target_schema, fk.ref_table.clone()))
+                    .or_else(|| by_name.get(&fk.ref_table))
+                else {
+                    continue;
+                };
+                adjacent[i].push(to);
+                adjacent[to].push(i);
+            }
+        }
+
+        // BFS out to `depth` hops; `keep` stays in schema order for determinism.
+        let mut dist = vec![usize::MAX; schema.tables.len()];
+        dist[root] = 0;
+        let mut queue = std::collections::VecDeque::from([root]);
+        while let Some(i) = queue.pop_front() {
+            if dist[i] == focus.depth {
+                continue;
+            }
+            for &j in &adjacent[i] {
+                if dist[j] == usize::MAX {
+                    dist[j] = dist[i] + 1;
+                    queue.push_back(j);
+                }
+            }
+        }
+        let keep: Vec<usize> = (0..schema.tables.len())
+            .filter(|&i| dist[i] != usize::MAX)
+            .collect();
+
+        let filtered = SchemaTree {
+            database_name: schema.database_name.clone(),
+            tables: keep.iter().map(|&i| schema.tables[i].clone()).collect(),
+            views: Vec::new(),
+            routines: Vec::new(),
+            triggers: Vec::new(),
+        };
+        let mut diagram = Self::build(conn_id, &filtered);
+        diagram.selected = keep.iter().position(|&i| i == root);
+        diagram.focus = Some(focus);
         diagram
     }
 
@@ -243,9 +343,12 @@ impl ErDiagram {
         self.scene_rect = Rect::NOTHING;
     }
 
-    /// (Re)compute node positions: a deterministic grid seed refined by a few hundred
-    /// Fruchterman–Reingold iterations — repulsion between all boxes, attraction along
-    /// edges — then normalized so the content starts at the origin.
+    /// (Re)compute node positions with a layered ("Sugiyama-lite") arrangement:
+    /// referenced tables sit in columns to the left of the tables pointing at them,
+    /// so FK curves read left → right; a barycenter pass orders each column to keep
+    /// related boxes near each other; disconnected components stack below one
+    /// another and tables with no relations pack into a grid at the bottom.
+    /// Deterministic (no RNG) and O(V + E) up to the bounded ordering sweeps.
     pub fn layout(&mut self) {
         let n = self.nodes.len();
         if n == 0 {
@@ -254,75 +357,162 @@ impl ErDiagram {
 
         let sizes: Vec<Vec2> = self.nodes.iter().map(|nd| nd.estimated_size()).collect();
 
-        // Seed: row-major grid, deterministic (no RNG anywhere in the layout).
-        let cols = (n as f32).sqrt().ceil() as usize;
-        let cell = sizes
-            .iter()
-            .fold(Vec2::ZERO, |acc, s| acc.max(*s))
-            + vec2(120.0, 100.0);
-        let mut centers: Vec<Pos2> = (0..n)
-            .map(|i| {
-                pos2(
-                    (i % cols) as f32 * cell.x,
-                    (i / cols) as f32 * cell.y,
-                )
-            })
-            .collect();
+        const MARGIN: f32 = 40.0; // canvas origin offset
+        const H_GAP: f32 = 130.0; // between columns — room for the FK curves
+        const V_GAP: f32 = 36.0; // between boxes in a column
+        const COMP_GAP: f32 = 110.0; // between connected components
 
-        // Ideal edge length scales with box size so big tables get breathing room.
-        let k = (cell.x.max(cell.y)) * 0.9;
-        let mut temperature = cell.x * (cols as f32) * 0.25;
-        const ITERATIONS: usize = 250;
-
-        for _ in 0..ITERATIONS {
-            let mut disp = vec![Vec2::ZERO; n];
-
-            for i in 0..n {
-                for j in (i + 1)..n {
-                    let mut delta = centers[i] - centers[j];
-                    if delta == Vec2::ZERO {
-                        // Coincident centers (same grid cell can't happen, but identical
-                        // drag positions can): nudge apart deterministically.
-                        delta = vec2(0.01 * (i as f32 + 1.0), 0.01);
-                    }
-                    let dist = delta.length().max(1.0);
-                    let repulse = (k * k) / dist;
-                    let push = delta / dist * repulse;
-                    disp[i] += push;
-                    disp[j] -= push;
-                }
+        // Undirected adjacency; self-references don't influence placement.
+        let mut adjacent: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for e in &self.edges {
+            if e.from != e.to {
+                adjacent[e.from].push(e.to);
+                adjacent[e.to].push(e.from);
             }
+        }
 
+        // Longest-path layering: every table lands one column right of the tables it
+        // references. Bounded relaxation so FK cycles can't spin forever — nodes on a
+        // cycle just stop moving apart once the passes run out.
+        let mut layer = vec![0usize; n];
+        for _ in 0..n.min(32) {
+            let mut changed = false;
             for e in &self.edges {
-                if e.from == e.to {
-                    continue; // self-references don't pull
-                }
-                let delta = centers[e.from] - centers[e.to];
-                let dist = delta.length().max(1.0);
-                let attract = (dist * dist) / k;
-                let pull = delta / dist * attract;
-                disp[e.from] -= pull;
-                disp[e.to] += pull;
-            }
-
-            for i in 0..n {
-                let d = disp[i];
-                let len = d.length();
-                if len > 0.0 {
-                    centers[i] += d / len * len.min(temperature);
+                if e.from != e.to && layer[e.from] <= layer[e.to] {
+                    layer[e.from] = layer[e.to] + 1;
+                    changed = true;
                 }
             }
-            temperature *= 0.96;
+            if !changed {
+                break;
+            }
         }
 
-        // Convert centers to top-left positions and shift everything to start at the
-        // origin (the scene auto-fits, but keeping coordinates small avoids drift).
-        let mut min = pos2(f32::INFINITY, f32::INFINITY);
-        for (c, s) in centers.iter().zip(&sizes) {
-            min = min.min(*c - *s / 2.0);
+        // Connected components, discovered in schema order for determinism.
+        let mut component = vec![usize::MAX; n];
+        let mut components: Vec<Vec<usize>> = Vec::new();
+        for start in 0..n {
+            if component[start] != usize::MAX {
+                continue;
+            }
+            let id = components.len();
+            component[start] = id;
+            let mut members = vec![start];
+            let mut queue = std::collections::VecDeque::from([start]);
+            while let Some(i) = queue.pop_front() {
+                for &j in adjacent[i].iter() {
+                    if component[j] == usize::MAX {
+                        component[j] = id;
+                        members.push(j);
+                        queue.push_back(j);
+                    }
+                }
+            }
+            components.push(members);
         }
-        for ((node, c), s) in self.nodes.iter_mut().zip(&centers).zip(&sizes) {
-            node.pos = (*c - *s / 2.0 - min.to_vec2() + vec2(40.0, 40.0)).round();
+
+        // Row index of every node within its column, shared across components (indices
+        // are globally unique, so one flat vec works for all of them).
+        let mut row_of = vec![0usize; n];
+        let mut y_cursor = MARGIN;
+
+        for members in components.iter().filter(|m| m.len() > 1) {
+            // Bucket the component's nodes into columns, compacted to its own range.
+            let first = members.iter().map(|&i| layer[i]).min().unwrap_or(0);
+            let last = members.iter().map(|&i| layer[i]).max().unwrap_or(0);
+            let mut columns: Vec<Vec<usize>> = vec![Vec::new(); last - first + 1];
+            for &i in members {
+                columns[layer[i] - first].push(i);
+            }
+            for col in &columns {
+                for (r, &i) in col.iter().enumerate() {
+                    row_of[i] = r;
+                }
+            }
+
+            // Crossing reduction: reorder each column by the mean row of its neighbors
+            // in the column the sweep just left; nodes with no neighbors there keep
+            // their spot. Forward, backward, forward — enough to settle small schemas
+            // and cheap enough for big ones.
+            for sweep in 0..3 {
+                let order: Vec<usize> = if sweep % 2 == 0 {
+                    (1..columns.len()).collect()
+                } else {
+                    (0..columns.len().saturating_sub(1)).rev().collect()
+                };
+                let neighbor_col = |c: usize| if sweep % 2 == 0 { c - 1 } else { c + 1 };
+                for c in order {
+                    let against = first + neighbor_col(c);
+                    let mut keyed: Vec<(f32, usize, usize)> = columns[c]
+                        .iter()
+                        .map(|&i| {
+                            let rows: Vec<f32> = adjacent[i]
+                                .iter()
+                                .filter(|&&j| layer[j] == against)
+                                .map(|&j| row_of[j] as f32)
+                                .collect();
+                            let key = if rows.is_empty() {
+                                row_of[i] as f32
+                            } else {
+                                rows.iter().sum::<f32>() / rows.len() as f32
+                            };
+                            (key, row_of[i], i)
+                        })
+                        .collect();
+                    keyed.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+                    columns[c] = keyed.iter().map(|&(_, _, i)| i).collect();
+                    for (r, &i) in columns[c].iter().enumerate() {
+                        row_of[i] = r;
+                    }
+                }
+            }
+
+            // Place the component: columns advance rightward by their widest box, and
+            // each column centers vertically on the component's tallest column.
+            let col_width = |col: &[usize]| {
+                col.iter().map(|&i| sizes[i].x).fold(0.0_f32, f32::max)
+            };
+            let col_height = |col: &[usize]| {
+                col.iter().map(|&i| sizes[i].y).sum::<f32>()
+                    + V_GAP * col.len().saturating_sub(1) as f32
+            };
+            let comp_height = columns.iter().map(|c| col_height(c)).fold(0.0_f32, f32::max);
+            let mut x = MARGIN;
+            for col in &columns {
+                if col.is_empty() {
+                    continue; // layer skipped by cycle-bounded layering: no gap for it
+                }
+                let width = col_width(col);
+                let mut y = y_cursor + (comp_height - col_height(col)) * 0.5;
+                for &i in col {
+                    // Center each box within its column so the lane reads as one axis.
+                    self.nodes[i].pos = pos2(x + (width - sizes[i].x) * 0.5, y).round();
+                    y += sizes[i].y + V_GAP;
+                }
+                x += width + H_GAP;
+            }
+            y_cursor += comp_height + COMP_GAP;
+        }
+
+        // Tables with no relations: a compact grid block under the connected parts.
+        let singles: Vec<usize> = components
+            .iter()
+            .filter(|m| m.len() == 1)
+            .map(|m| m[0])
+            .collect();
+        if !singles.is_empty() {
+            let cell = singles
+                .iter()
+                .fold(Vec2::ZERO, |acc, &i| acc.max(sizes[i]))
+                + vec2(H_GAP * 0.5, V_GAP);
+            let per_row = (singles.len() as f32).sqrt().ceil() as usize;
+            for (slot, &i) in singles.iter().enumerate() {
+                self.nodes[i].pos = pos2(
+                    MARGIN + (slot % per_row) as f32 * cell.x,
+                    y_cursor + (slot / per_row) as f32 * cell.y,
+                )
+                .round();
+            }
         }
 
         self.request_fit();
@@ -452,6 +642,97 @@ mod tests {
         schema.tables[1].foreign_keys[0].ref_table = "missing".into();
         let d = ErDiagram::build("c1", &schema);
         assert_eq!(d.edges.len(), 1); // only the employees self-reference survives
+    }
+
+    #[test]
+    fn focused_build_keeps_only_the_fk_neighborhood() {
+        let mut schema = sample_schema();
+        schema.tables.push(table(
+            "order_items",
+            vec![col("id", true), col("order_id", false)],
+            vec![fk(&["order_id"], "orders", &["id"])],
+        ));
+        let focus = |depth| ErdFocus {
+            schema: None,
+            table: "users".into(),
+            depth,
+        };
+
+        let d1 = ErDiagram::build_focused("c1", &schema, focus(1));
+        let titles: Vec<&str> = d1.nodes.iter().map(|n| n.title.as_str()).collect();
+        assert_eq!(titles, vec!["users", "orders"]);
+        assert_eq!(d1.edges.len(), 1);
+        assert_eq!(d1.selected, Some(0), "the root comes out highlighted");
+        assert_eq!(d1.focus.as_ref().map(|f| f.depth), Some(1));
+
+        // Depth 2 reaches the child's children; unconnected employees never appears.
+        let d2 = ErDiagram::build_focused("c1", &schema, focus(2));
+        let titles: Vec<&str> = d2.nodes.iter().map(|n| n.title.as_str()).collect();
+        assert_eq!(titles, vec!["users", "orders", "order_items"]);
+    }
+
+    #[test]
+    fn focused_build_follows_fks_in_both_directions() {
+        // Focusing the child must pull in the parent it references…
+        let d = ErDiagram::build_focused(
+            "c1",
+            &sample_schema(),
+            ErdFocus {
+                schema: None,
+                table: "orders".into(),
+                depth: 1,
+            },
+        );
+        let titles: Vec<&str> = d.nodes.iter().map(|n| n.title.as_str()).collect();
+        assert_eq!(titles, vec!["users", "orders"]);
+        assert_eq!(d.selected, Some(1));
+        // …and focusing the parent must pull in the children referencing it.
+        let d = ErDiagram::build_focused(
+            "c1",
+            &sample_schema(),
+            ErdFocus {
+                schema: None,
+                table: "users".into(),
+                depth: 1,
+            },
+        );
+        assert_eq!(d.nodes.len(), 2);
+        assert_eq!(d.selected, Some(0));
+    }
+
+    #[test]
+    fn layout_layers_parents_left_of_children() {
+        let mut schema = sample_schema();
+        schema.tables.push(table(
+            "order_items",
+            vec![col("id", true), col("order_id", false)],
+            vec![fk(&["order_id"], "orders", &["id"])],
+        ));
+        let d = ErDiagram::build("c1", &schema);
+        let x = |name: &str| d.nodes.iter().find(|n| n.title == name).unwrap().pos.x;
+        // The FK chain order_items → orders → users lays out as three columns,
+        // referenced tables leftmost.
+        assert!(x("users") < x("orders"), "referenced table sits left");
+        assert!(x("orders") < x("order_items"), "chains keep flowing right");
+        // employees is unrelated (only a self-reference): parked below, not inline.
+        let users_y = d.nodes.iter().find(|n| n.title == "users").unwrap().pos.y;
+        let employees = d.nodes.iter().find(|n| n.title == "employees").unwrap();
+        assert!(employees.pos.y > users_y, "isolated tables go under the graph");
+    }
+
+    #[test]
+    fn focused_build_falls_back_to_full_when_root_missing() {
+        let d = ErDiagram::build_focused(
+            "c1",
+            &sample_schema(),
+            ErdFocus {
+                schema: None,
+                table: "missing".into(),
+                depth: 1,
+            },
+        );
+        assert_eq!(d.nodes.len(), 3);
+        assert!(d.focus.is_none(), "fallback is the plain full diagram");
     }
 
     #[test]

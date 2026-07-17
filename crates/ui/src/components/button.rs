@@ -198,6 +198,31 @@ pub(crate) fn primary_button(
     Btn::primary(text).icon(src).enabled(enabled).show(ui)
 }
 
+/// A 28×28 icon button drawn as a pill, matching `segmented_sized`'s surface
+/// background, rounding, and inset hover — so icons sit flush beside a segmented
+/// control in one toolbar row.
+pub(crate) fn pill_icon_button(ui: &mut Ui, src: ImageSource<'static>, hover: &str) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::Vec2::splat(28.0), egui::Sense::click());
+    resp.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, hover)
+    });
+    if ui.is_rect_visible(rect) {
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(8), palette::SURFACE());
+        if resp.hovered() || resp.is_pointer_button_down_on() {
+            ui.painter().rect_filled(
+                rect.shrink(3.0),
+                egui::CornerRadius::same(6),
+                palette::SURFACE_HOVER(),
+            );
+        }
+        let color = ui.visuals().widgets.inactive.fg_stroke.color;
+        let icon_rect = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(icons::SIZE));
+        egui::Image::new(src).tint(color).paint_at(ui, icon_rect);
+    }
+    resp.on_hover_text(hover)
+}
+
 pub(crate) fn icon_button(ui: &mut Ui, src: ImageSource<'static>, hover: &str) -> Response {
     Btn::ghost_icon(src).tooltip(hover).show(ui)
 }

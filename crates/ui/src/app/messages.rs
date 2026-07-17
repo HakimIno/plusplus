@@ -130,8 +130,15 @@ impl DbGuiApp {
                             self.active_connections[idx].schema = schema;
                             self.status_msg = format!("Connected to {name} — {n} tables");
                             self.error = None;
-                            if self.erd.as_ref().is_some_and(|e| e.conn_id == conn_id) {
-                                self.refresh_erd();
+                            // Diagram tabs of this connection track the fresh schema.
+                            for i in 0..self.tabs.len() {
+                                if self.tabs[i]
+                                    .diagram
+                                    .as_ref()
+                                    .is_some_and(|d| d.conn_id == conn_id)
+                                {
+                                    self.refresh_diagram_tab(i);
+                                }
                             }
                         }
                         Err(e) => {

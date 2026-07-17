@@ -5,6 +5,14 @@ while pre-1.0 releases may still change workflows and configuration formats.
 
 ## Unreleased
 
+## 0.2.19 — 2026-07-17
+
+- Added full-schema and table-focused ER diagrams in dedicated tabs, with relationship-depth
+  controls, refresh, re-layout, zoom-to-fit, and snapshots that remain viewable after disconnecting.
+- Reworked ER diagram layout and rendering for clearer left-to-right relationships and responsive
+  navigation of large schemas, with new diagram toolbar icons and visual snapshots.
+- Kept table and view result controls together with their resizable bottom query editor.
+
 ## 0.2.18 — 2026-07-16
 
 - Count paged table rows asynchronously so results render immediately and the pager updates

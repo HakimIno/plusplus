@@ -1635,6 +1635,48 @@ fn adaptive_editor_renders_on_the_expected_side_of_results() {
 }
 
 #[test]
+fn table_editor_stack_starts_with_the_result_mode_bar() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    connect_fake(&mut app, fake_schema(2, 3));
+    app.tab_mut().kind = crate::components::QueryTabKind::Table;
+    app.tab_mut().sql = "SELECT * FROM table_0 LIMIT 100".into();
+    app.tab_mut().edits.source = Some(EditSource {
+        schema: None,
+        table: "table_0".into(),
+        pk_cols: vec!["field_0".into()],
+    });
+    app.tab_mut().set_result(fake_result(2, 3));
+
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+        });
+    harness.run_steps(4);
+
+    let grid_y = harness.get_by_label("col0").rect().center().y;
+    let modes_y = harness.get_by_label("Data").rect().center().y;
+    let actions_y = harness.get_by_label("Query").rect().center().y;
+    let editor_y = harness.get_by_label("SQL line numbers").rect().center().y;
+    assert!(
+        grid_y < modes_y && modes_y < actions_y && actions_y < editor_y,
+        "the resizable bottom stack must begin with result modes, followed by query actions and SQL"
+    );
+}
+
+#[test]
 fn query_result_controls_sit_between_query_toolbar_and_grid() {
     use egui_kittest::kittest::Queryable;
 
@@ -3325,6 +3367,283 @@ fn follow_foreign_key_opens_filtered_referenced_table() {
     );
 }
 
+/// "Show Diagram" on a table opens the ERD scoped to that table's FK neighborhood;
+/// the depth control can then widen it to the whole schema without losing the root.
+#[test]
+fn show_table_diagram_opens_scoped_erd_and_widens() {
+    let mut app = DbGuiApp::construct();
+    connect_fake(&mut app, fake_schema_with_fk());
+
+    app.apply_action(Action::ShowTableDiagram {
+        schema: None,
+        table: "table_1".into(),
+    });
+    assert_eq!(app.tabs.len(), 2, "the diagram opens in its own tab");
+    assert_eq!(app.tab().kind, crate::components::QueryTabKind::Diagram);
+    assert_eq!(app.tab().title, "table_1");
+    let erd = app.tab().diagram.as_ref().expect("diagram opened");
+    assert_eq!(
+        erd.nodes.len(),
+        2,
+        "table_1 plus its FK parent table_0 — unrelated table_2 stays out"
+    );
+    assert_eq!(erd.focus.as_ref().map(|f| f.depth), Some(1));
+    assert_eq!(
+        erd.selected,
+        Some(1),
+        "the root table (table_1, second in schema order) is highlighted"
+    );
+
+    // Re-opening the same table selects the existing tab instead of stacking one.
+    app.select_tab(0);
+    app.apply_action(Action::ShowTableDiagram {
+        schema: None,
+        table: "table_1".into(),
+    });
+    assert_eq!(app.tabs.len(), 2, "same scope reuses its tab");
+    assert_eq!(app.active_query_tab, 1);
+
+    // Refresh (after DDL / re-introspection) must keep the focus scope.
+    app.apply_action(Action::RefreshErd);
+    let erd = app.tab().diagram.as_ref().expect("diagram survives refresh");
+    assert_eq!(erd.nodes.len(), 2);
+    assert!(erd.focus.is_some());
+
+    // Widening to "All" shows the whole schema — root still highlighted, focus (and
+    // with it the depth control) retained so the user can narrow back down.
+    app.apply_action(Action::SetErdDepth(crate::erd::DEPTH_ALL));
+    let erd = app.tab().diagram.as_ref().expect("diagram still open");
+    assert_eq!(erd.nodes.len(), 3);
+    assert_eq!(
+        erd.focus.as_ref().map(|f| f.depth),
+        Some(crate::erd::DEPTH_ALL)
+    );
+    assert_eq!(erd.selected, Some(1));
+
+    // …and back to 1 hop.
+    app.apply_action(Action::SetErdDepth(1));
+    let erd = app.tab().diagram.as_ref().expect("diagram still open");
+    assert_eq!(erd.nodes.len(), 2, "the All detour is fully reversible");
+    assert_eq!(erd.focus.as_ref().map(|f| f.depth), Some(1));
+}
+
+/// Screenshot generator (ignored): the ER diagram views — table-scoped (depth 1 and 2),
+/// the full layered layout, and the zoomed-out LOD — over a realistic shop schema.
+/// Also prints build timings for a 400-table schema (the old freeze case).
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_erd_views() {
+    let col = |name: &str, ty: &str, pk: bool| dbcore::ColumnInfo {
+        name: name.into(),
+        data_type: ty.into(),
+        nullable: !pk,
+        primary_key: pk,
+    };
+    let fk = |cols: &[&str], ref_table: &str| dbcore::ForeignKeyInfo {
+        name: format!("fk_{ref_table}"),
+        columns: cols.iter().map(|s| s.to_string()).collect(),
+        ref_schema: None,
+        ref_table: ref_table.into(),
+        ref_columns: vec!["id".into()],
+        on_delete: "CASCADE".into(),
+        on_update: "NO ACTION".into(),
+    };
+    let table = |name: &str, columns: Vec<dbcore::ColumnInfo>, fks: Vec<dbcore::ForeignKeyInfo>| {
+        dbcore::TableInfo {
+            schema: None,
+            name: name.into(),
+            columns,
+            indexes: Vec::new(),
+            foreign_keys: fks,
+        }
+    };
+    let schema = SchemaTree {
+        database_name: "shop".into(),
+        views: Vec::new(),
+        routines: Vec::new(),
+        triggers: Vec::new(),
+        tables: vec![
+            table(
+                "users",
+                vec![col("id", "INTEGER", true), col("email", "TEXT", false), col("name", "TEXT", false)],
+                vec![],
+            ),
+            table(
+                "addresses",
+                vec![col("id", "INTEGER", true), col("user_id", "INTEGER", false), col("street", "TEXT", false), col("city", "TEXT", false)],
+                vec![fk(&["user_id"], "users")],
+            ),
+            table(
+                "categories",
+                vec![col("id", "INTEGER", true), col("parent_id", "INTEGER", false), col("name", "TEXT", false)],
+                vec![fk(&["parent_id"], "categories")],
+            ),
+            table(
+                "products",
+                vec![col("id", "INTEGER", true), col("category_id", "INTEGER", false), col("name", "TEXT", false), col("price", "NUMERIC", false)],
+                vec![fk(&["category_id"], "categories")],
+            ),
+            table(
+                "orders",
+                vec![col("id", "INTEGER", true), col("user_id", "INTEGER", false), col("address_id", "INTEGER", false), col("status", "TEXT", false), col("total", "NUMERIC", false)],
+                vec![fk(&["user_id"], "users"), fk(&["address_id"], "addresses")],
+            ),
+            table(
+                "order_items",
+                vec![col("id", "INTEGER", true), col("order_id", "INTEGER", false), col("product_id", "INTEGER", false), col("qty", "INTEGER", false)],
+                vec![fk(&["order_id"], "orders"), fk(&["product_id"], "products")],
+            ),
+            table(
+                "payments",
+                vec![col("id", "INTEGER", true), col("order_id", "INTEGER", false), col("method", "TEXT", false), col("amount", "NUMERIC", false)],
+                vec![fk(&["order_id"], "orders")],
+            ),
+            table(
+                "shipments",
+                vec![col("id", "INTEGER", true), col("order_id", "INTEGER", false), col("carrier", "TEXT", false), col("tracking", "TEXT", false)],
+                vec![fk(&["order_id"], "orders")],
+            ),
+            table(
+                "reviews",
+                vec![col("id", "INTEGER", true), col("user_id", "INTEGER", false), col("product_id", "INTEGER", false), col("rating", "INTEGER", false)],
+                vec![fk(&["user_id"], "users"), fk(&["product_id"], "products")],
+            ),
+            table(
+                "app_settings",
+                vec![col("id", "INTEGER", true), col("key", "TEXT", false), col("value", "TEXT", false)],
+                vec![],
+            ),
+            table(
+                "audit_log",
+                vec![col("id", "INTEGER", true), col("action", "TEXT", false), col("at", "TIMESTAMP", false)],
+                vec![],
+            ),
+        ],
+    };
+
+    // Timing probe: the freeze case was a big schema. 400 tables, chained FKs.
+    let big = SchemaTree {
+        database_name: "big".into(),
+        views: Vec::new(),
+        routines: Vec::new(),
+        triggers: Vec::new(),
+        tables: (0..400)
+            .map(|i| {
+                let fks = if i % 5 != 0 {
+                    vec![fk(&["parent_id"], Box::leak(format!("t{}", i / 5 * 5).into_boxed_str()))]
+                } else {
+                    vec![]
+                };
+                table(
+                    Box::leak(format!("t{i}").into_boxed_str()),
+                    vec![col("id", "INTEGER", true), col("parent_id", "INTEGER", false), col("payload", "TEXT", false)],
+                    fks,
+                )
+            })
+            .collect(),
+    };
+    let t0 = std::time::Instant::now();
+    let big_erd = crate::erd::ErDiagram::build("c1", &big);
+    println!(
+        "BUILD 400 tables: {:?} ({} nodes, {} edges)",
+        t0.elapsed(),
+        big_erd.nodes.len(),
+        big_erd.edges.len()
+    );
+
+    let theme = crate::theme::ThemeRegistry::load().theme_of("plusplus-dark");
+    let schema2 = schema.clone();
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    connect_fake(&mut app, schema);
+    app.apply_action(Action::ShowTableDiagram {
+        schema: None,
+        table: "orders".into(),
+    });
+
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1360.0, 850.0))
+        .with_pixels_per_point(2.0)
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::theme::set_current(theme);
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+        });
+    harness.run_steps(4);
+    harness.snapshot("erd_focused_depth1");
+
+    // Widen to 2 hops via the header's segmented control. Clicked through the
+    // accessibility tree: at pixels_per_point 2 the pointer-simulation path maps
+    // the node rect to the wrong spot.
+    use egui_kittest::kittest::Queryable as _;
+    harness.get_by_label("2").click_accesskit();
+    harness.run_steps(4);
+    println!(
+        "  depth 2 widened: {}",
+        harness
+            .query_by_label("shop · 8 tables · 9 relations")
+            .is_some()
+    );
+    harness.snapshot("erd_focused_depth2");
+
+    // The whole schema, layered; the depth control must survive the widening.
+    harness.get_by_label("All").click_accesskit();
+    harness.run_steps(4);
+    println!(
+        "  after All: {}",
+        harness
+            .query_by_label("shop · 11 tables · 11 relations")
+            .is_some()
+    );
+    harness.snapshot("erd_full");
+
+    // Narrowing back down still works — "All" must not strand the user.
+    harness.get_by_label("1").click_accesskit();
+    harness.run_steps(4);
+    println!(
+        "  back to depth 1: {}",
+        harness
+            .query_by_label("shop · 6 tables · 6 relations")
+            .is_some()
+    );
+    // Two harnesses in one test must funnel their snapshot verdicts through one
+    // `SnapshotResults`, or kittest panics on drop.
+    let mut snapshot_results = harness.take_snapshot_results();
+    drop(harness);
+
+    // The same scoped view on the light theme: dots, borders, and edges must not
+    // wash out against the white canvas.
+    let theme = crate::theme::ThemeRegistry::load().theme_of("daylight");
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    connect_fake(&mut app, schema2);
+    app.apply_action(Action::ShowTableDiagram {
+        schema: None,
+        table: "orders".into(),
+    });
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1360.0, 850.0))
+        .with_pixels_per_point(2.0)
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::theme::set_current(theme);
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+        });
+    harness.run_steps(4);
+    harness.snapshot("erd_focused_daylight");
+    snapshot_results.extend(harness.take_snapshot_results());
+}
+
 #[test]
 fn follow_foreign_key_from_table_keeps_data_first_layout() {
     let mut app = fk_tab(vec![
@@ -3367,38 +3686,36 @@ fn follow_foreign_key_noops_on_non_fk_and_null() {
     assert!(app.status_msg.contains("No foreign key"));
 }
 
-/// ToggleErd needs a live connection; with one it snapshots the schema, and a second
-/// toggle closes the diagram again.
+/// Show Diagram needs a live connection: without one it surfaces an error and
+/// opens nothing.
 #[test]
-fn toggle_erd_builds_from_the_active_connection() {
+fn show_table_diagram_needs_a_connection() {
     let mut app = DbGuiApp::construct();
-    app.apply_action(Action::ToggleErd);
-    assert!(app.erd.is_none());
+    app.apply_action(Action::ShowTableDiagram {
+        schema: None,
+        table: "table_1".into(),
+    });
+    assert_eq!(app.tabs.len(), 1, "no connection, no diagram tab");
     assert!(app.error.is_some(), "no connection should surface an error");
-
-    connect_fake(&mut app, fake_schema_with_fk());
-    app.error = None;
-    app.apply_action(Action::ToggleErd);
-    let erd = app.erd.as_ref().expect("diagram should open");
-    assert_eq!(erd.nodes.len(), 3);
-    assert_eq!(erd.edges.len(), 1);
-    assert_eq!(erd.conn_id, "c1");
-
-    app.apply_action(Action::ToggleErd);
-    assert!(app.erd.is_none());
 }
 
 /// RefreshErd rebuilds from the connection's current schema, keeping the position of
-/// nodes whose table survived; disconnecting closes the stale diagram outright.
+/// nodes whose table survived; after a disconnect the snapshot stays viewable.
 #[test]
-fn erd_refresh_keeps_positions_and_disconnect_closes() {
+fn erd_refresh_keeps_positions_and_disconnect_keeps_snapshot() {
     let mut app = DbGuiApp::construct();
     connect_fake(&mut app, fake_schema_with_fk());
-    app.apply_action(Action::ToggleErd);
+    app.apply_action(Action::ShowTableDiagram {
+        schema: None,
+        table: "table_1".into(),
+    });
+    // Widen to the whole schema so the refresh below can pick up a new table.
+    app.apply_action(Action::SetErdDepth(crate::erd::DEPTH_ALL));
+    assert_eq!(app.tab().diagram.as_ref().unwrap().nodes.len(), 3);
 
     // The user drags table_0 somewhere specific…
     let moved = egui::pos2(1234.0, 567.0);
-    app.erd.as_mut().unwrap().nodes[0].pos = moved;
+    app.tab_mut().diagram.as_mut().unwrap().nodes[0].pos = moved;
 
     // …then the schema gains a table and the diagram refreshes.
     app.active_connections[0].schema = {
@@ -3418,7 +3735,11 @@ fn erd_refresh_keeps_positions_and_disconnect_closes() {
         s
     };
     app.apply_action(Action::RefreshErd);
-    let erd = app.erd.as_ref().expect("refresh keeps the diagram open");
+    let erd = app
+        .tab()
+        .diagram
+        .as_ref()
+        .expect("refresh keeps the diagram open");
     assert_eq!(erd.nodes.len(), 4);
     let kept = erd.nodes.iter().find(|n| n.title == "table_0").unwrap();
     assert_eq!(
@@ -3426,8 +3747,12 @@ fn erd_refresh_keeps_positions_and_disconnect_closes() {
         "surviving nodes keep their dragged position"
     );
 
+    // Disconnecting keeps the snapshot on screen; a refresh without the connection
+    // is a no-op rather than a wipe.
     app.disconnect_conn("c1");
-    assert!(app.erd.is_none(), "diagram closes with its connection");
+    assert!(app.tab().diagram.is_some(), "the snapshot outlives the connection");
+    app.apply_action(Action::RefreshErd);
+    assert_eq!(app.tab().diagram.as_ref().unwrap().nodes.len(), 4);
 }
 
 /// Render the ER diagram headlessly (open over a connected app) and capture ID
@@ -3440,8 +3765,11 @@ fn probe_erd_view_id_clash() {
 
     let mut app = DbGuiApp::construct();
     connect_fake(&mut app, fake_schema_with_fk());
-    app.apply_action(Action::ToggleErd);
-    assert!(app.erd.is_some());
+    app.apply_action(Action::ShowTableDiagram {
+        schema: None,
+        table: "table_1".into(),
+    });
+    assert!(app.tab().diagram.is_some());
 
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
     let mut clashes: Vec<String> = Vec::new();
@@ -3464,7 +3792,10 @@ fn probe_erd_view_id_clash() {
         clashes.extend(collect_clash_text(&out.shapes));
     }
 
-    assert!(app.erd.is_some(), "the diagram must survive drawing");
+    assert!(
+        app.tab().diagram.is_some(),
+        "the diagram must survive drawing"
+    );
     clashes.sort();
     clashes.dedup();
     assert!(

@@ -9,10 +9,6 @@ use crate::icons;
 use crate::style::{self, palette};
 use crate::title_bar;
 
-/// The ER diagram is hidden for now (not ready to ship); flip to `true` to bring
-/// back the toolbar button. The feature code itself is kept intact.
-const ERD_ENABLED: bool = false;
-
 /// Byte offset of the `char_idx`-th character in `s` (its length when out of range), for
 /// turning the editor's char-based caret indices into `str` slice bounds.
 fn char_to_byte(s: &str, char_idx: usize) -> usize {
@@ -330,19 +326,6 @@ impl DbGuiApp {
                             .clicked()
                         {
                             actions.push(Action::OpenSettings);
-                        }
-                        #[cfg(not(target_os = "macos"))]
-                        title_bar::group_separator(ui);
-                        if components::toolbar_icon_button(ui, icons::code(), "Query history")
-                            .clicked()
-                        {
-                            actions.push(Action::ToggleHistory);
-                        }
-                        if ERD_ENABLED
-                            && components::toolbar_icon_button(ui, icons::diagram(), "ER diagram")
-                                .clicked()
-                        {
-                            actions.push(Action::ToggleErd);
                         }
                         #[cfg(not(target_os = "macos"))]
                         title_bar::group_separator(ui);
@@ -888,6 +871,9 @@ impl DbGuiApp {
                             actions.push(Action::SaveCurrentAsFavorite);
                         }
                     }
+                    if components::icon_button(ui, icons::history(), "Query history").clicked() {
+                        actions.push(Action::ToggleHistory);
+                    }
                 });
             });
         });
@@ -917,6 +903,8 @@ impl DbGuiApp {
             crate::components::QueryTabKind::Table | crate::components::QueryTabKind::View => {
                 (190.0, 96.0, 0.55)
             }
+            // Diagram tabs never draw the console (`draw` skips it); inert defaults.
+            crate::components::QueryTabKind::Diagram => (190.0, 96.0, 0.55),
         };
         // Always leave a useful result strip on compact windows. On larger windows the ratio
         // cap prevents either surface from swallowing the other one.
@@ -927,10 +915,31 @@ impl DbGuiApp {
             .editor_size
             .unwrap_or(contextual_default)
             .clamp(min_size, max_size);
+        // On data-first tabs the result-mode bar and query actions belong to the editor's
+        // bottom stack. Including them in the resizable panel puts the drag edge above the
+        // whole stack instead of between its controls and the SQL editor.
+        let mode_bar_height =
+            if placement == QueryEditorPlacement::Bottom && self.structure_table(idx).is_some() {
+                38.0
+            } else {
+                0.0
+            };
+        let bottom_chrome = if placement == QueryEditorPlacement::Bottom {
+            36.0 + mode_bar_height
+        } else {
+            0.0
+        };
+        let panel_min_size = min_size + bottom_chrome;
+        let panel_max_size = (max_size + bottom_chrome).min((available - 80.0).max(panel_min_size));
+        let panel_default_size =
+            (default_size + bottom_chrome).clamp(panel_min_size, panel_max_size);
         let panel_id = egui::Id::new(("query_console", tab_id, placement));
         let footer_id = egui::Id::new(("query_footer", tab_id, placement));
-        let footer = |app: &mut Self, root: &mut egui::Ui, actions: &mut Vec<Action>| {
-            let panel = match placement {
+        let footer = |app: &mut Self,
+                      root: &mut egui::Ui,
+                      dock: QueryEditorPlacement,
+                      actions: &mut Vec<Action>| {
+            let panel = match dock {
                 QueryEditorPlacement::Top => egui::Panel::top(footer_id),
                 QueryEditorPlacement::Bottom => egui::Panel::bottom(footer_id),
             };
@@ -946,11 +955,17 @@ impl DbGuiApp {
         };
         let response = panel
             .resizable(true)
-            .default_size(default_size)
-            .min_size(min_size)
-            .max_size(max_size)
+            .default_size(panel_default_size)
+            .min_size(panel_min_size)
+            .max_size(panel_max_size)
             .frame(egui::Frame::new().inner_margin(egui::Margin::ZERO))
             .show_inside(root, |ui| {
+                if placement == QueryEditorPlacement::Bottom {
+                    if mode_bar_height > 0.0 {
+                        self.view_mode_bar(ui, QueryEditorPlacement::Top, actions);
+                    }
+                    footer(self, ui, QueryEditorPlacement::Top, actions);
+                }
                 let font = egui::TextStyle::Monospace.resolve(ui.style());
                 let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
                     let mut job = crate::highlight::highlight_sql(buf.as_str(), font.clone());
@@ -1136,11 +1151,13 @@ impl DbGuiApp {
                     });
             });
 
-        // Reserve the footer after the editor on the same docking side. For top-docked Query
-        // tabs this puts it below the SQL; for bottom-docked Table/View tabs it puts it above.
-        footer(self, root, actions);
+        // Code-first tabs keep their action row directly below the top-docked editor. Data-first
+        // tabs rendered it inside the resizable stack above, together with the result-mode bar.
+        if placement == QueryEditorPlacement::Top {
+            footer(self, root, QueryEditorPlacement::Top, actions);
+        }
 
-        let rendered_size = response.response.rect.height();
+        let rendered_size = response.response.rect.height() - bottom_chrome;
         let splitter_dragged = root
             .ctx()
             .read_response(panel_id.with("__resize"))
@@ -2606,12 +2623,18 @@ impl DbGuiApp {
                 });
             return;
         }
-        // The ER diagram is app-wide (per connection, not per tab) and wins over
-        // everything else in the central panel while open.
-        if self.erd.is_some() {
-            egui::CentralPanel::default().show_inside(root, |ui| {
-                self.erd_view(ui, actions);
-            });
+        // A Diagram tab owns the whole central panel (the editor and result bars were
+        // already skipped in `draw`). Slim vertical margins keep the header band tight
+        // between the tab strip and the canvas.
+        if self.tabs[idx].kind == crate::components::QueryTabKind::Diagram {
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::central_panel(root.style())
+                        .inner_margin(egui::Margin::symmetric(8, 2)),
+                )
+                .show_inside(root, |ui| {
+                    self.erd_view(ui, actions);
+                });
             return;
         }
         // The schema editor takes over the central panel (like Data/Structure) while open.
@@ -2872,7 +2895,8 @@ impl DbGuiApp {
                         "This definition has not been run",
                     ),
                     crate::components::QueryTabKind::Table
-                    | crate::components::QueryTabKind::View => {
+                    | crate::components::QueryTabKind::View
+                    | crate::components::QueryTabKind::Diagram => {
                         components::empty_illustration(ui);
                     }
                 },
@@ -5132,6 +5156,16 @@ fn table_actions_menu(
         });
         ui.close();
     }
+    if components::button(ui, icons::diagram(), "Show Diagram", true)
+        .on_hover_text("Diagram of this table and the tables it links to")
+        .clicked()
+    {
+        actions.push(Action::ShowTableDiagram {
+            schema: table.schema.clone(),
+            table: table.name.clone(),
+        });
+        ui.close();
+    }
     ui.separator();
     if components::button(ui, icons::edit(), "Edit Table…", true).clicked() {
         actions.push(Action::OpenEditTable(table.clone()));
@@ -5561,50 +5595,90 @@ impl DbGuiApp {
     /// The ER diagram view: a pan/zoom canvas (`egui::Scene`) of draggable table boxes
     /// connected by foreign-key curves. Takes over the central panel while open.
     pub(super) fn erd_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        let Some(erd) = self.erd.as_mut() else { return };
+        let idx = self.active_query_tab;
+        let Some(erd) = self.tabs.get_mut(idx).and_then(|t| t.diagram.as_mut()) else {
+            // A Diagram tab without its snapshot (shouldn't happen at runtime).
+            ui.add_space(24.0);
+            ui.vertical_centered(|ui| {
+                ui.colored_label(palette::TEXT_FAINT(), "This diagram is no longer available.");
+            });
+            return;
+        };
 
+        // Header: `⌗ orders   sample.sqlite · 6 tables · 6 relations` on the left,
+        // the depth control and the canvas actions on the right. The tab strip
+        // already provides close, so there is no ×.
+        // 2 (panel margin) + 2 here = the 4px item-spacing gap below, so the band
+        // sits centered between the tab strip and the separator.
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             icons::show_native(ui, icons::diagram(), icons::SIZE);
             ui.add_space(2.0);
-            ui.label(
-                egui::RichText::new(format!("ER Diagram — {}", erd.database))
-                    .strong()
-                    .color(palette::TEXT()),
-            );
+            let (title, context) = match &erd.focus {
+                Some(f) => (
+                    f.table.clone(),
+                    format!(
+                        "{} · {} tables · {} relations",
+                        erd.database,
+                        erd.nodes.len(),
+                        erd.edges.len()
+                    ),
+                ),
+                None => (
+                    erd.database.clone(),
+                    format!("{} tables · {} relations", erd.nodes.len(), erd.edges.len()),
+                ),
+            };
+            ui.label(egui::RichText::new(title).strong().color(palette::TEXT()));
+            ui.add_space(6.0);
+            ui.colored_label(palette::TEXT_FAINT(), context);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if components::icon_button(ui, icons::close(), "Close the diagram").clicked() {
-                    actions.push(Action::ToggleErd);
-                }
-                if components::Btn::new("Refresh")
-                    .show(ui)
-                    .on_hover_text("Rebuild from the current schema")
-                    .clicked()
+                if components::pill_icon_button(
+                    ui,
+                    icons::refresh(),
+                    "Rebuild from the current schema",
+                )
+                .clicked()
                 {
                     actions.push(Action::RefreshErd);
                 }
-                if components::Btn::new("Re-layout")
-                    .show(ui)
-                    .on_hover_text("Recompute the automatic arrangement")
-                    .clicked()
+                if components::pill_icon_button(
+                    ui,
+                    icons::relayout(),
+                    "Recompute the automatic arrangement",
+                )
+                .clicked()
                 {
                     erd.layout();
                 }
-                if components::Btn::new("Fit")
-                    .show(ui)
-                    .on_hover_text("Zoom to fit all tables")
-                    .clicked()
+                if components::pill_icon_button(ui, icons::fit(), "Zoom to fit all tables").clicked()
                 {
                     erd.request_fit();
                 }
-                ui.add_space(6.0);
-                ui.colored_label(
-                    palette::TEXT_FAINT(),
-                    format!("{} tables · {} relations", erd.nodes.len(), erd.edges.len()),
-                );
+                if let Some(focus) = &erd.focus {
+                    ui.add_space(10.0);
+                    let depths = [1, 2, crate::erd::DEPTH_ALL];
+                    let selected = depths
+                        .iter()
+                        .position(|d| *d == focus.depth)
+                        .unwrap_or(depths.len() - 1);
+                    let choice = components::segmented_sized(
+                        ui,
+                        &[
+                            (icons::diagram(), "1"),
+                            (icons::diagram(), "2"),
+                            (icons::diagram(), "All"),
+                        ],
+                        selected,
+                        132.0,
+                        false,
+                    );
+                    if choice != selected {
+                        actions.push(Action::SetErdDepth(depths[choice]));
+                    }
+                }
             });
         });
-        ui.add_space(2.0);
         ui.separator();
 
         if erd.nodes.is_empty() {
@@ -5638,6 +5712,69 @@ fn erd_canvas(ui: &mut egui::Ui, erd: &mut crate::erd::ErDiagram) {
     let small_font = egui::TextStyle::Small.resolve(ui.style());
     let painter = ui.painter().clone();
 
+    // Nothing below allocates ui space (it's all painter + interact), so tell the
+    // scene the content bounds explicitly — zoom-to-fit and the first frame's clip
+    // rect are computed from `min_rect` and would otherwise see an empty scene.
+    let mut bounds = egui::Rect::NOTHING;
+    for node in &erd.nodes {
+        bounds = bounds.union(node.rect());
+    }
+    ui.expand_to_include_rect(bounds.expand(60.0));
+
+    // The scene clips us to the visible viewport (in scene coordinates): everything
+    // fully outside it can be skipped, which is what keeps huge schemas responsive.
+    // On the fit-request frame the transform (and thus the clip) is degenerate —
+    // draw everything rather than cull against garbage.
+    let clip = ui.clip_rect();
+    let visible = if clip.is_finite() {
+        clip
+    } else {
+        egui::Rect::EVERYTHING
+    };
+    let zoom = ui
+        .ctx()
+        .layer_transform_to_global(ui.layer_id())
+        .map_or(1.0, |t| t.scaling);
+    // Below this zoom the column text is unreadable anyway; draw title-only boxes
+    // and skip the per-row galleys, by far the most expensive part of a big canvas.
+    let detailed = zoom > 0.4;
+
+    // Light themes need the canvas furniture pulled the other way: Daylight's border
+    // and surface tones sit within a few steps of white, so dots and boxes painted
+    // with them disappear. Pulling toward the text colour contrasts in both modes.
+    let is_dark = crate::theme::current().is_dark;
+    let node_fill = if is_dark {
+        palette::SURFACE()
+    } else {
+        // White cards on the grey panel canvas, the way light-mode Figma reads.
+        palette::BASE()
+    };
+    let edge_color = if is_dark {
+        palette::BORDER_STRONG()
+    } else {
+        palette::TEXT_FAINT().gamma_multiply(0.7)
+    };
+
+    // Dot grid under everything, in scene coordinates so it pans and zooms with the
+    // diagram. The spacing doubles until dots stay ≥ ~22 screen px apart, so zooming
+    // out coarsens the grid instead of flooding the canvas.
+    if clip.is_finite() && zoom > 0.0 {
+        let mut spacing = 28.0_f32;
+        while spacing * zoom < 22.0 {
+            spacing *= 2.0;
+        }
+        let dot = palette::TEXT_FAINT().gamma_multiply(0.35);
+        let mut x = (visible.left() / spacing).floor() * spacing;
+        while x <= visible.right() {
+            let mut y = (visible.top() / spacing).floor() * spacing;
+            while y <= visible.bottom() {
+                painter.circle_filled(egui::pos2(x, y), 1.1, dot);
+                y += spacing;
+            }
+            x += spacing;
+        }
+    }
+
     // Measure boxes once with real font metrics (the layout used char-count estimates).
     for node in &mut erd.nodes {
         if node.size != egui::Vec2::ZERO {
@@ -5667,12 +5804,16 @@ fn erd_canvas(ui: &mut egui::Ui, erd: &mut crate::erd::ErDiagram) {
         let color = if highlighted {
             palette::ACCENT()
         } else {
-            palette::BORDER_STRONG()
+            edge_color
         };
         let stroke = egui::Stroke::new(if highlighted { 2.0 } else { 1.4 }, color);
 
         let from_rect = erd.nodes[edge.from].rect();
         let to_rect = erd.nodes[edge.to].rect();
+        // The curve stays within the two boxes' hull plus its control-point reach.
+        if !visible.intersects(from_rect.union(to_rect).expand(150.0)) {
+            continue;
+        }
         let from_y = from_rect.top() + HEADER_H + (edge.from_row as f32 + 0.5) * ROW_H;
         let to_y = match edge.to_row {
             Some(row) => to_rect.top() + HEADER_H + (row as f32 + 0.5) * ROW_H,
@@ -5746,6 +5887,9 @@ fn erd_canvas(ui: &mut egui::Ui, erd: &mut crate::erd::ErDiagram) {
     for (i, node) in erd.nodes.iter_mut().enumerate() {
         let id = ui.id().with(("erd_node", i));
         let rect = node.rect();
+        if !visible.intersects(rect) {
+            continue; // fully off-screen: nothing to draw or interact with
+        }
         let resp = ui.interact(rect, id, egui::Sense::click_and_drag());
         if resp.dragged() {
             node.pos += resp.drag_delta();
@@ -5759,17 +5903,12 @@ fn erd_canvas(ui: &mut egui::Ui, erd: &mut crate::erd::ErDiagram) {
         let border = if selected {
             egui::Stroke::new(1.6, palette::ACCENT())
         } else if resp.hovered() {
-            egui::Stroke::new(1.2, palette::BORDER_STRONG())
+            egui::Stroke::new(1.4, palette::BORDER_STRONG())
         } else {
-            egui::Stroke::new(1.0, palette::BORDER())
+            // BORDER is invisible against a light canvas; the strong tone works in both.
+            egui::Stroke::new(1.0, palette::BORDER_STRONG())
         };
-        painter.rect(
-            rect,
-            6.0,
-            palette::SURFACE(),
-            border,
-            egui::StrokeKind::Inside,
-        );
+        painter.rect(rect, 6.0, node_fill, border, egui::StrokeKind::Inside);
         // Header band + title.
         let header_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), HEADER_H));
         painter.line_segment(
@@ -5777,7 +5916,7 @@ fn erd_canvas(ui: &mut egui::Ui, erd: &mut crate::erd::ErDiagram) {
                 egui::pos2(rect.left(), rect.top() + HEADER_H),
                 egui::pos2(rect.right(), rect.top() + HEADER_H),
             ],
-            egui::Stroke::new(1.0, palette::BORDER()),
+            egui::Stroke::new(1.0, palette::BORDER_STRONG()),
         );
         let title = painter.layout_no_wrap(node.title.clone(), title_font.clone(), palette::TEXT());
         painter.galley(
@@ -5790,7 +5929,9 @@ fn erd_canvas(ui: &mut egui::Ui, erd: &mut crate::erd::ErDiagram) {
         );
 
         // Column rows: a marker (PK dot / FK ring), the name, and the type right-aligned.
-        for (r, col) in node.columns.iter().enumerate() {
+        // Zoomed far out they'd be sub-pixel noise, so the box + title carry the shape.
+        let columns: &[crate::erd::ErdColumn] = if detailed { &node.columns } else { &[] };
+        for (r, col) in columns.iter().enumerate() {
             let y = rect.top() + HEADER_H + (r as f32 + 0.5) * ROW_H;
             let marker = egui::pos2(rect.left() + 11.0, y);
             if col.primary_key {

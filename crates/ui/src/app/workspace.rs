@@ -25,6 +25,8 @@ fn save_tab_kind(kind: crate::components::QueryTabKind) -> dbcore::config::Works
         Ui::Function => Saved::Function,
         Ui::Procedure => Saved::Procedure,
         Ui::Trigger => Saved::Trigger,
+        // Never persisted — `snapshot_workspace` filters Diagram tabs out.
+        Ui::Diagram => Saved::Query,
     }
 }
 
@@ -81,12 +83,22 @@ impl DbGuiApp {
     }
     /// Snapshot the open tabs into the serialisable workspace (no result rows — only SQL,
     /// the bound connection, and the table source needed to re-open editable).
+    /// Diagram tabs are skipped: their content is a schema snapshot that can't be
+    /// rebuilt without a live connection, so they simply don't survive a restart.
     pub(super) fn snapshot_workspace(&self) -> dbcore::config::Workspace {
+        let saved = |t: &&QueryTab| t.kind != crate::components::QueryTabKind::Diagram;
         dbcore::config::Workspace {
-            active_tab: self.active_query_tab,
+            // The saved index must count only the tabs that are actually saved.
+            active_tab: self
+                .tabs
+                .iter()
+                .take(self.active_query_tab)
+                .filter(saved)
+                .count(),
             tabs: self
                 .tabs
                 .iter()
+                .filter(saved)
                 .map(|t| dbcore::config::WorkspaceTab {
                     title: t.title.clone(),
                     conn_id: t.conn_id.clone(),
