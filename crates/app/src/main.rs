@@ -16,6 +16,10 @@ const JETBRAINS_MONO_REGULAR: &[u8] = include_bytes!("../assets/JetBrainsMono-Re
 const THAI_REGULAR: &[u8] = include_bytes!("../assets/Anuphan-Regular.ttf");
 const THAI_SEMIBOLD: &[u8] = include_bytes!("../assets/Anuphan-SemiBold.ttf");
 
+/// GNU Unifont covers the Unicode Basic Multilingual Plane and is the last-resort fallback
+/// for multilingual database values that the primary UI, code, and Thai fonts do not contain.
+const UNIVERSAL_REGULAR: &[u8] = include_bytes!("../assets/Unifont-Regular.otf");
+
 /// macOS: with `FullSizeContentView` + a transparent titlebar, AppKit still treats a
 /// mouse-down in the titlebar strip as a window drag, because the content view's default
 /// `mouseDownCanMoveWindow` answers YES. The drag then swallows the mouse-up, so egui
@@ -146,9 +150,41 @@ fn main() -> eframe::Result<()> {
                     code_regular: JETBRAINS_MONO_REGULAR,
                     thai_regular: THAI_REGULAR,
                     thai_semibold: THAI_SEMIBOLD,
+                    universal_regular: UNIVERSAL_REGULAR,
                 },
             );
             Ok(Box::new(ui::DbGuiApp::new(cc)))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_font_chain_covers_multilingual_cell_text() {
+        let ctx = egui::Context::default();
+        ui::install_fonts(
+            &ctx,
+            &ui::AppFonts {
+                ui_regular: INTER_REGULAR,
+                ui_semibold: INTER_SEMIBOLD,
+                code_regular: JETBRAINS_MONO_REGULAR,
+                thai_regular: THAI_REGULAR,
+                thai_semibold: THAI_SEMIBOLD,
+                universal_regular: UNIVERSAL_REGULAR,
+            },
+        );
+        // Font changes are installed at the start of the next egui pass.
+        let _ = ctx.run_ui(Default::default(), |_| {});
+
+        let samples = "ไทย Ελληνικά Русский العربية עברית हिन्दी বাংলা தமிழ் 中文 日本語 한국어";
+        ctx.fonts_mut(|fonts| {
+            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                let font = egui::FontId::new(12.0, family);
+                assert!(fonts.has_glyphs(&font, samples));
+            }
+        });
+    }
 }

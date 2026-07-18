@@ -22,7 +22,17 @@ impl DbGuiApp {
                         .is_some_and(|ts| ts.eq_ignore_ascii_case(s))
                 })
         });
-        let info = matches.next()?;
+        let Some(info) = matches.next() else {
+            // A newly connected database can execute queries before its background schema
+            // load has returned. Keep the parsed table identity as a read-only candidate so
+            // SchemaLoaded can fill in its primary key instead of leaving this result
+            // permanently non-editable merely because the query won the race.
+            return conn.schema.tables.is_empty().then_some(EditSource {
+                schema,
+                table,
+                pk_cols: Vec::new(),
+            });
+        };
         if matches.next().is_some() {
             return None;
         }
@@ -49,6 +59,61 @@ impl DbGuiApp {
             table: info.name.clone(),
             pk_cols,
         })
+    }
+
+    /// Fill primary-key metadata into edit sources created while the connection schema was
+    /// still loading. The source already carries the table identity used for the executed
+    /// result, so this does not accidentally make an old result editable from newly typed SQL.
+    pub(super) fn refresh_edit_sources(&mut self, conn_id: &str) {
+        let Some(schema) = self
+            .active_connections
+            .iter()
+            .find(|conn| conn.config_id == conn_id)
+            .map(|conn| conn.schema.clone())
+        else {
+            return;
+        };
+        let read_only = self
+            .connections
+            .iter()
+            .find(|config| config.id == conn_id)
+            .is_some_and(|config| config.read_only);
+
+        for tab in self
+            .tabs
+            .iter_mut()
+            .filter(|tab| tab.conn_id.as_deref() == Some(conn_id))
+        {
+            for source in [&mut tab.edits.source, &mut tab.edits.pending_source]
+                .into_iter()
+                .filter_map(Option::as_mut)
+                .filter(|source| source.pk_cols.is_empty())
+            {
+                let mut matches = schema.tables.iter().filter(|table| {
+                    table.name.eq_ignore_ascii_case(&source.table)
+                        && source.schema.as_deref().map_or(true, |wanted| {
+                            table
+                                .schema
+                                .as_deref()
+                                .is_some_and(|actual| actual.eq_ignore_ascii_case(wanted))
+                        })
+                });
+                let Some(table) = matches.next() else {
+                    continue;
+                };
+                if matches.next().is_some() {
+                    continue;
+                }
+                if !read_only {
+                    source.pk_cols = table
+                        .columns
+                        .iter()
+                        .filter(|column| column.primary_key)
+                        .map(|column| column.name.clone())
+                        .collect();
+                }
+            }
+        }
     }
     /// The introspected [`dbcore::TableInfo`] behind the tab at `idx`: the table it was
     /// opened on (loaded or still in flight), looked up in its live connection's schema.

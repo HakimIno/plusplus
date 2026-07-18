@@ -311,23 +311,16 @@ impl DbGuiApp {
         if self.show_schema_panel {
             self.left_panel(ui_root, &mut actions);
         }
-        // History sits outermost on the right, so the details panel stays next to the grid.
-        if self.history_open {
-            self.history_panel(ui_root, &mut actions);
-        }
         if self.show_details_panel {
             self.right_panel(ui_root);
         }
         let editor_placement = query_editor_placement(self.tab().kind);
         // A Diagram tab is just the canvas: no SQL editor, no filter or result-mode bars.
         let diagram_tab = self.tab().kind == crate::components::QueryTabKind::Diagram;
-        let saved_queries_workspace = self.show_query_console
-            && self.show_saved_queries
-            && self.tab().kind == crate::components::QueryTabKind::Query;
-        if self.show_query_console && !saved_queries_workspace && !diagram_tab {
+        if self.show_query_console && !diagram_tab {
             self.query_console(ui_root, editor_placement, &mut actions);
         }
-        if !saved_queries_workspace && !diagram_tab {
+        if !diagram_tab {
             // A top panel after left/right carves the strip directly above the grid.
             self.filter_bar(ui_root);
             // Keep result controls next to the query toolbar: below it on code-first tabs,

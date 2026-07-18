@@ -91,8 +91,8 @@ impl DbGuiApp {
             elapsed_ms,
         };
         let _ = dbcore::history::append(&entry);
-        // Keep an open History dialog live.
-        if self.history_open {
+        // Keep the sidebar's History tab live while it's showing.
+        if self.sidebar_tab == SidebarTab::History {
             self.history_cache.push(entry);
         }
     }

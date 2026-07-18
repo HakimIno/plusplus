@@ -308,16 +308,16 @@ fn query_editor_placement(kind: crate::components::QueryTabKind) -> QueryEditorP
     }
 }
 
-fn query_editor_title(kind: crate::components::QueryTabKind) -> &'static str {
-    match kind {
-        crate::components::QueryTabKind::Query
-        | crate::components::QueryTabKind::Table
-        | crate::components::QueryTabKind::View
-        | crate::components::QueryTabKind::Diagram => "Query",
-        crate::components::QueryTabKind::Function
-        | crate::components::QueryTabKind::Procedure
-        | crate::components::QueryTabKind::Trigger => "Definition",
-    }
+/// Which list fills the left sidebar (TablePlus-style tabs at its top).
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+enum SidebarTab {
+    /// The schema tree: databases, tables, views, routines.
+    #[default]
+    Items,
+    /// Saved queries (favorites).
+    Queries,
+    /// The executed-statement history.
+    History,
 }
 
 /// A live connection plus its introspected schema.
@@ -809,10 +809,8 @@ enum Action {
     CancelDialog,
     OpenSettings,
     CloseSettings,
-    /// Show/hide the query-history side panel.
-    ToggleHistory,
-    /// Switch between the SQL editor and Saved queries tabs.
-    ToggleFavoritesTab,
+    /// Switch the left sidebar between the schema tree, saved queries, and history.
+    SetSidebarTab(SidebarTab),
     /// Open the name dialog to save the active tab's SQL as a favorite.
     SaveCurrentAsFavorite,
     /// Open the name dialog to save a history entry (by cache index) as a favorite.
@@ -1120,7 +1118,7 @@ pub struct DbGuiApp {
     update_check_enabled: bool,
     /// Whether the right-hand panel (History / Favorites) is open; the caches below hold its
     /// rows while it is.
-    history_open: bool,
+    sidebar_tab: SidebarTab,
     history_cache: Vec<dbcore::history::HistoryEntry>,
     /// All saved queries, kept in memory and mirrored to `favorites.json` on every change.
     /// Loaded once at startup so the Saved queries tab count is immediately correct.
@@ -1131,7 +1129,6 @@ pub struct DbGuiApp {
     /// User-arranged table order for each connection, persisted in settings.json.
     schema_table_order: HashMap<String, Vec<String>>,
     /// Whether the Saved queries tab is active inside the SQL editor panel.
-    show_saved_queries: bool,
     /// Open name-this-favorite dialog. `None` = closed.
     favorite_pending: Option<FavoriteDraft>,
     /// Open ER diagram (takes over the central panel, like the schema editor).
@@ -1309,13 +1306,12 @@ impl DbGuiApp {
             history_enabled,
             audit_enabled,
             update_check_enabled,
-            history_open: false,
+            sidebar_tab: SidebarTab::default(),
             history_cache: Vec::new(),
             // Loaded from disk in `new` (this builder stays config-dir-free for tests).
             favorites_cache: Vec::new(),
             bookmarks: Vec::new(),
             schema_table_order,
-            show_saved_queries: false,
             favorite_pending: None,
             show_welcome,
             update: crate::update::UpdatePhase::Idle,
@@ -1489,6 +1485,31 @@ impl DbGuiApp {
         }
         fresh.scene_rect = old.scene_rect;
         self.tabs[tab_idx].diagram = Some(fresh);
+    }
+
+    /// Switch the sidebar list, lazily (re)loading what the target tab shows. The
+    /// history cache lives only while its tab is visible (same lifecycle the old
+    /// side panel had); favorites re-read so out-of-band edits show up.
+    fn set_sidebar_tab(&mut self, tab: SidebarTab) {
+        if self.sidebar_tab == tab {
+            return;
+        }
+        match tab {
+            SidebarTab::History => {
+                self.history_cache =
+                    dbcore::history::load(dbcore::history::MAX_ENTRIES).unwrap_or_default();
+            }
+            SidebarTab::Queries => {
+                if !cfg!(test) {
+                    self.favorites_cache = dbcore::favorites::load().unwrap_or_default();
+                }
+            }
+            SidebarTab::Items => {}
+        }
+        if tab != SidebarTab::History {
+            self.history_cache = Vec::new();
+        }
+        self.sidebar_tab = tab;
     }
 
     /// Change the FK-hop depth of the active tab's focused diagram ([`crate::erd::DEPTH_ALL`]

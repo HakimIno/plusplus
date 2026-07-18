@@ -128,6 +128,9 @@ impl DbGuiApp {
                             let name = self.active_connections[idx].name.clone();
                             self.schema_cache.insert(conn_id.clone(), schema.clone());
                             self.active_connections[idx].schema = schema;
+                            // Queries can finish before full PK metadata arrives. Reconcile the
+                            // edit source now so their grids become editable without a rerun.
+                            self.refresh_edit_sources(&conn_id);
                             self.status_msg = format!("Connected to {name} — {n} tables");
                             self.error = None;
                             // Diagram tabs of this connection track the fresh schema.

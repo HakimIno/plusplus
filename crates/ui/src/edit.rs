@@ -66,11 +66,13 @@ pub struct ActiveEdit {
     pub origin: EditOrigin,
 }
 
-/// Where the cell cursor should move after a commit (Tab / Shift+Tab advance).
+/// Where the cell cursor should move after a commit.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CursorDir {
     Left,
     Right,
+    Up,
+    Down,
 }
 
 /// What [`render_editor`] decided this frame.
@@ -78,7 +80,7 @@ pub enum EditOutcome {
     /// Keep editing.
     Continue,
     /// Finish and stage the value; `advance` asks the caller to move the cell cursor and
-    /// continue editing there (Tab/Shift+Tab), `None` commits in place.
+    /// continue editing there, `None` commits in place.
     Commit { advance: Option<CursorDir> },
     /// Abandon the edit.
     Cancel,
@@ -619,6 +621,8 @@ pub fn render_editor(
 ) -> EditOutcome {
     let valid = active.kind.is_valid(&active.buf);
     // Tab / Shift+Tab: commit and advance to the neighbouring cell, spreadsheet-style.
+    // In a grid editor, Up/Down do the same vertically while keeping the current column;
+    // Left/Right remain available for moving the caret within the single-line value.
     // Consumed *before* the TextEdit is built so egui's focus traversal never sees it.
     // Invalid input swallows the Tab and stays put — same rule as Enter-on-invalid below.
     let advance = ui.input_mut(|i| {
@@ -626,6 +630,14 @@ pub fn render_editor(
             Some(CursorDir::Left)
         } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
             Some(CursorDir::Right)
+        } else if active.origin == EditOrigin::Grid
+            && i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
+        {
+            Some(CursorDir::Up)
+        } else if active.origin == EditOrigin::Grid
+            && i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
+        {
+            Some(CursorDir::Down)
         } else {
             None
         }

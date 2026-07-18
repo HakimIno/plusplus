@@ -1586,7 +1586,7 @@ fn adaptive_editor_renders_on_the_expected_side_of_results() {
         egui::vec2(1000.0, 700.0),
     );
     assert!(
-        query.get_by_label("Query").rect().center().y
+        query.get_by_label("SQL workspace").rect().center().y
             < query.get_by_label("Empty state mascot").rect().center().y
     );
     assert!(
@@ -1595,12 +1595,12 @@ fn adaptive_editor_renders_on_the_expected_side_of_results() {
     );
     assert!(
         query.get_by_label("SQL line numbers").rect().left()
-            < query.get_by_label("Query").rect().left(),
+            < query.get_by_label("SQL workspace").rect().left(),
         "the query editor must reach the panel edge without an outer inset"
     );
     assert!(
         (query.get_by_label("Save query").rect().center().y
-            - query.get_by_label("Query").rect().center().y)
+            - query.get_by_label("SQL workspace").rect().center().y)
             .abs()
             < 0.1,
         "query tabs and actions must share one footer row"
@@ -1613,11 +1613,11 @@ fn adaptive_editor_renders_on_the_expected_side_of_results() {
     );
     assert!(
         table.get_by_label("col0").rect().center().y
-            < table.get_by_label("Query").rect().center().y
+            < table.get_by_label("SQL workspace").rect().center().y
     );
     assert!(
         (table.get_by_label("Save query").rect().center().y
-            - table.get_by_label("Query").rect().center().y)
+            - table.get_by_label("SQL workspace").rect().center().y)
             .abs()
             < 0.1,
         "table-query tabs and actions must share one footer row"
@@ -1628,7 +1628,7 @@ fn adaptive_editor_renders_on_the_expected_side_of_results() {
         None,
         egui::vec2(800.0, 500.0),
     );
-    let editor_y = compact.get_by_label("Query").rect().center().y;
+    let editor_y = compact.get_by_label("SQL workspace").rect().center().y;
     let result_y = compact.get_by_label("Empty state mascot").rect().center().y;
     assert!(editor_y < result_y);
     assert!(result_y - editor_y > 80.0, "compact result area collapsed");
@@ -1668,7 +1668,7 @@ fn table_editor_stack_starts_with_the_result_mode_bar() {
 
     let grid_y = harness.get_by_label("col0").rect().center().y;
     let modes_y = harness.get_by_label("Data").rect().center().y;
-    let actions_y = harness.get_by_label("Query").rect().center().y;
+    let actions_y = harness.get_by_label("Save query").rect().center().y;
     let editor_y = harness.get_by_label("SQL line numbers").rect().center().y;
     assert!(
         grid_y < modes_y && modes_y < actions_y && actions_y < editor_y,
@@ -1708,7 +1708,7 @@ fn query_result_controls_sit_between_query_toolbar_and_grid() {
         });
     harness.run_steps(4);
 
-    let query_y = harness.get_by_label("Query").rect().center().y;
+    let query_y = harness.get_by_label("Save query").rect().center().y;
     let data_y = harness.get_by_label("Data").rect().center().y;
     let grid_y = harness.get_by_label("col0").rect().center().y;
     assert!(harness.query_by_label("Message").is_some());
@@ -2458,11 +2458,10 @@ fn snapshot_adaptive_table_layout() {
 fn snapshot_saved_queries_tab() {
     let mut app = DbGuiApp::construct();
     app.show_welcome = false;
-    app.show_schema_panel = false;
     app.show_details_panel = false;
     app.show_connection_tabs = false;
     app.tab_mut().sql = "SELECT * FROM customers WHERE active = true;".into();
-    app.show_saved_queries = true;
+    app.sidebar_tab = SidebarTab::Queries;
     for (name, sql) in [
         (
             "Active customers",
@@ -3002,10 +3001,10 @@ fn keyboard_cursor_scrolls_into_view() {
     );
 }
 
-/// While a cell editor has focus, arrow keys belong to the text field — the grid cursor
-/// must not move underneath it.
+/// In edit mode Up/Down commit and continue on the adjacent row in the same column, while
+/// Left/Right still belong to the text field and never move the grid cursor across columns.
 #[test]
-fn arrows_ignored_while_typing() {
+fn edit_mode_arrows_move_only_within_the_column() {
     let (ctx, mut app) = grid_nav_app(5, 3);
     app.tab_mut().selection.select_one(1);
     app.tab_mut().selection.set_cursor(1, 1);
@@ -3016,6 +3015,7 @@ fn arrows_ignored_while_typing() {
         vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
     );
     run_frame(&ctx, &mut app, vec![]); // editor takes focus
+    run_frame(&ctx, &mut app, vec![egui::Event::Text("7".into())]);
     run_frame(
         &ctx,
         &mut app,
@@ -3023,10 +3023,31 @@ fn arrows_ignored_while_typing() {
     );
     assert_eq!(
         app.tab().selection.cursor(),
-        Some((1, 1)),
-        "grid cursor must not move while the editor is open"
+        Some((2, 1)),
+        "ArrowDown advances one row without changing the column"
     );
-    assert!(app.tab().edits.is_active(1, 1), "editor stays open");
+    assert!(app.tab().edits.is_active(2, 1), "editor continues on the next row");
+    assert!(
+        app.tab().edits.staged(1, 1).is_some(),
+        "the previous value is committed before advancing"
+    );
+
+    run_frame(&ctx, &mut app, vec![]); // the new editor takes focus
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::ArrowLeft, egui::Modifiers::NONE)],
+    );
+    assert_eq!(app.tab().selection.cursor(), Some((2, 1)));
+    assert!(app.tab().edits.is_active(2, 1));
+
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::ArrowUp, egui::Modifiers::NONE)],
+    );
+    assert_eq!(app.tab().selection.cursor(), Some((1, 1)));
+    assert!(app.tab().edits.is_active(1, 1));
 }
 
 /// Drive the full app layout headlessly while scrolling, and capture egui "ID clash"
@@ -3101,7 +3122,7 @@ fn probe_saved_queries_tab() {
 
     let mut app = DbGuiApp::construct();
     app.tab_mut().sql = "SELECT * FROM t".into();
-    app.show_saved_queries = true;
+    app.sidebar_tab = SidebarTab::Queries;
     for i in 0..3 {
         app.favorites_cache.push(dbcore::Favorite {
             id: format!("id-{i}"),
@@ -3129,123 +3150,6 @@ fn probe_saved_queries_tab() {
         clashes.is_empty(),
         "ID clashes detected:\n{}",
         clashes.join("\n")
-    );
-}
-
-#[test]
-fn saved_queries_switches_as_a_tab_and_use_returns_to_editor() {
-    use egui_kittest::kittest::Queryable;
-
-    let mut app = DbGuiApp::construct();
-    app.show_welcome = false;
-    app.tab_mut().sql = "SELECT current_query".into();
-    app.favorites_cache.push(dbcore::Favorite {
-        id: "saved-1".into(),
-        name: "Customer report".into(),
-        sql: "SELECT * FROM customers".into(),
-        conn_id: None,
-        conn_name: None,
-        created_at: "2026-07-16T00:00:00Z".into(),
-    });
-
-    let mut setup = false;
-    let mut harness = egui_kittest::Harness::builder()
-        .with_size(egui::vec2(1000.0, 700.0))
-        .build_ui(move |ui| {
-            if !setup {
-                egui_extras::install_image_loaders(ui.ctx());
-                crate::style::apply(ui.ctx());
-                setup = true;
-            }
-            app.draw(ui, None);
-        });
-    harness.run_steps(4);
-    assert!(harness.query_by_label("Saved").is_none());
-    let editor_tab_rect = harness.get_by_label("Query").rect();
-    let editor_tab_width = editor_tab_rect.width();
-    let saved_tab_width = harness.get_by_label("Saved (1)").rect().width();
-    assert!(
-        (editor_tab_width - saved_tab_width).abs() < 0.1,
-        "workspace tabs must have equal widths"
-    );
-    assert!(harness.query_by_label("Save query").is_some());
-    harness.get_by_label("Save query").click();
-    harness.run_steps(4);
-    assert!(
-        harness.query_by_label("Save query to favorites").is_some(),
-        "saving must start directly from Query Console"
-    );
-    harness.get_by_label("Cancel").click();
-    harness.run_steps(4);
-    harness.get_by_label("Saved (1)").click();
-    harness.run_steps(4);
-    assert!(harness.query_by_label("Save query").is_none());
-    assert!(harness.query_by_label("Customer report").is_some());
-    let active_saved_width = harness.get_by_label("Saved (1)").rect().width();
-    assert!(
-        (saved_tab_width - active_saved_width).abs() < 0.1,
-        "activating a workspace tab must not resize it"
-    );
-    let active_saved_left = harness.get_by_label("Query").rect().left();
-    assert!(
-        (editor_tab_rect.left() - active_saved_left).abs() < 0.1,
-        "switching workspaces must not change the tab bar's horizontal inset: editor={}, saved={}",
-        editor_tab_rect.left(),
-        active_saved_left
-    );
-    assert!(
-        harness.query_by_label("Empty state mascot").is_none(),
-        "the result pet must be hidden while Saved queries owns the workspace"
-    );
-
-    harness.get_by_label("Query actions").click();
-    harness.run_steps(2);
-    harness.get_by_label("Use").click();
-    harness.run_steps(4);
-    assert!(harness.query_by_label("Query").is_some());
-    assert!(harness.query_by_label("Save query").is_some());
-}
-
-#[test]
-fn saved_queries_workspace_is_hidden_on_table_tabs() {
-    use egui_kittest::kittest::Queryable;
-
-    let mut app = DbGuiApp::construct();
-    app.show_welcome = false;
-    app.tab_mut().kind = crate::components::QueryTabKind::Table;
-    app.tab_mut().sql = "SELECT * FROM customers".into();
-    app.tab_mut().set_result(fake_result(4, 3));
-    app.favorites_cache.push(dbcore::Favorite {
-        id: "saved-1".into(),
-        name: "Customer report".into(),
-        sql: "SELECT * FROM customers".into(),
-        conn_id: None,
-        conn_name: None,
-        created_at: "2026-07-16T00:00:00Z".into(),
-    });
-    // This can remain true after switching away from a Query tab. Table tabs must ignore it.
-    app.show_saved_queries = true;
-
-    let mut setup = false;
-    let mut harness = egui_kittest::Harness::builder()
-        .with_size(egui::vec2(1000.0, 700.0))
-        .build_ui(move |ui| {
-            if !setup {
-                egui_extras::install_image_loaders(ui.ctx());
-                crate::style::apply(ui.ctx());
-                setup = true;
-            }
-            app.draw(ui, None);
-        });
-    harness.run_steps(4);
-
-    assert!(harness.query_by_label("Query").is_some());
-    assert!(harness.query_by_label("Saved").is_none());
-    assert!(harness.query_by_label("Saved (1)").is_none());
-    assert!(harness.query_by_label("Customer report").is_none());
-    assert!(
-        harness.query_by_label("Save query").is_some(),
-        "table query actions must remain available when Saved was open on another tab"
     );
 }
 
@@ -3684,6 +3588,22 @@ fn follow_foreign_key_noops_on_non_fk_and_null() {
     app.apply_action(Action::FollowForeignKey { row: 0, col: 1 });
     assert_eq!(app.tabs.len(), 1, "a NULL FK opens no tab");
     assert!(app.status_msg.contains("No foreign key"));
+}
+
+/// The sidebar History tab owns the history cache: entering loads it, leaving
+/// drops it (same lifecycle the old side panel had).
+#[test]
+fn sidebar_history_tab_owns_the_cache() {
+    let mut app = DbGuiApp::construct();
+    assert_eq!(app.sidebar_tab, SidebarTab::Items);
+    app.apply_action(Action::SetSidebarTab(SidebarTab::History));
+    assert_eq!(app.sidebar_tab, SidebarTab::History);
+    app.apply_action(Action::SetSidebarTab(SidebarTab::Items));
+    assert_eq!(app.sidebar_tab, SidebarTab::Items);
+    assert!(
+        app.history_cache.is_empty(),
+        "leaving the History tab drops the cache"
+    );
 }
 
 /// Show Diagram needs a live connection: without one it surfaces an error and

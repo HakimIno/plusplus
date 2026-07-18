@@ -1,6 +1,6 @@
 use super::{
-    query_editor_title, result_status, schema_table_key, Action, ActiveConnection, Busy, ConnField,
-    ConnTestState, DbGuiApp, PageNav, QueryEditorPlacement, QueryTab, SchemaTableDrag, TabView,
+    result_status, schema_table_key, Action, ActiveConnection, Busy, ConnField, ConnTestState,
+    DbGuiApp, PageNav, QueryEditorPlacement, QueryTab, SchemaTableDrag, SidebarTab, TabView,
 };
 use crate::components;
 use crate::filter::{self, FilterEvent};
@@ -765,16 +765,9 @@ impl DbGuiApp {
         });
     }
 
-    fn query_workspace_bar(
-        &mut self,
-        ui: &mut egui::Ui,
-        kind: crate::components::QueryTabKind,
-        actions: &mut Vec<Action>,
-    ) {
+    fn query_workspace_bar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let dialect_label = self.active().map(|a| a.db.kind().label()).unwrap_or("SQL");
         let has_sql = !self.tab().sql.trim().is_empty();
-        let supports_saved_queries = kind == crate::components::QueryTabKind::Query;
-        let showing_saved_queries = supports_saved_queries && self.show_saved_queries;
         let bar_h = 36.0;
         let row_h = 28.0;
         let (bar_rect, _) = ui.allocate_exact_size(
@@ -786,34 +779,6 @@ impl DbGuiApp {
         ui.scope_builder(egui::UiBuilder::new().max_rect(row_rect), |ui| {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                if supports_saved_queries {
-                    let saved_label = match self.favorites_cache.len() {
-                        0 => "Saved".to_string(),
-                        count => format!("Saved ({count})"),
-                    };
-                    let selected = usize::from(showing_saved_queries);
-                    let choice = components::segmented_sized(
-                        ui,
-                        &[
-                            (icons::code(), query_editor_title(kind)),
-                            (icons::star_filled(), saved_label.as_str()),
-                        ],
-                        selected,
-                        210.0,
-                        false,
-                    );
-                    if choice != selected {
-                        actions.push(Action::ToggleFavoritesTab);
-                    }
-                } else {
-                    components::segmented_sized(
-                        ui,
-                        &[(icons::code(), query_editor_title(kind))],
-                        0,
-                        108.0,
-                        false,
-                    );
-                }
                 ui.label(
                     egui::RichText::new(format!("{dialect_label} workspace"))
                         .size(11.0)
@@ -828,51 +793,46 @@ impl DbGuiApp {
                     ui.allocate_exact_size(egui::vec2(8.0, row_h), egui::Sense::hover());
                 ui.painter().circle_filled(dot_rect.center(), 3.0, dot);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if !showing_saved_queries {
-                        if self.busy == Busy::Querying {
-                            let resp = ui
-                                .add(
-                                    egui::Button::new(
-                                        egui::RichText::new("Cancel")
-                                            .color(palette::ON_ACCENT())
-                                            .strong(),
-                                    )
-                                    .fill(palette::DANGER()),
+                    if self.busy == Busy::Querying {
+                        let resp = ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("Cancel")
+                                        .color(palette::ON_ACCENT())
+                                        .strong(),
                                 )
-                                .on_hover_text("Abort the running query");
-                            if resp.clicked() {
-                                actions.push(Action::CancelQuery);
-                            }
-                        } else {
-                            let can_run = self.active().is_some() && self.busy == Busy::Idle;
-                            if components::primary_button(ui, icons::play(), "Run", can_run)
-                                .on_hover_text("Cmd/Ctrl+Enter")
-                                .clicked()
-                            {
-                                actions.push(Action::RunQuery);
-                            }
+                                .fill(palette::DANGER()),
+                            )
+                            .on_hover_text("Abort the running query");
+                        if resp.clicked() {
+                            actions.push(Action::CancelQuery);
                         }
-                        let resp = components::beautify_button(
-                            ui,
-                            &mut self.beautify,
-                            has_sql,
-                            dialect_label,
-                        );
-                        if resp.clicked {
-                            actions.push(Action::BeautifySql);
-                        }
-                        if resp.prefs_changed {
-                            self.persist_settings();
-                        }
-                        if components::button(ui, icons::save(), "Save query", has_sql)
-                            .on_hover_text("Save the current editor query")
+                    } else {
+                        let can_run = self.active().is_some() && self.busy == Busy::Idle;
+                        if components::primary_button(ui, icons::play(), "Run", can_run)
+                            .on_hover_text("Cmd/Ctrl+Enter")
                             .clicked()
                         {
-                            actions.push(Action::SaveCurrentAsFavorite);
+                            actions.push(Action::RunQuery);
                         }
                     }
-                    if components::icon_button(ui, icons::history(), "Query history").clicked() {
-                        actions.push(Action::ToggleHistory);
+                    let resp = components::beautify_button(
+                        ui,
+                        &mut self.beautify,
+                        has_sql,
+                        dialect_label,
+                    );
+                    if resp.clicked {
+                        actions.push(Action::BeautifySql);
+                    }
+                    if resp.prefs_changed {
+                        self.persist_settings();
+                    }
+                    if components::button(ui, icons::save(), "Save query", has_sql)
+                        .on_hover_text("Save the current editor query")
+                        .clicked()
+                    {
+                        actions.push(Action::SaveCurrentAsFavorite);
                     }
                 });
             });
@@ -946,7 +906,7 @@ impl DbGuiApp {
             panel
                 .exact_size(36.0)
                 .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 0)))
-                .show_inside(root, |ui| app.query_workspace_bar(ui, kind, actions));
+                .show_inside(root, |ui| app.query_workspace_bar(ui, actions));
         };
 
         let panel = match placement {
@@ -1788,106 +1748,144 @@ impl DbGuiApp {
             .show_separator_line(true)
             .show_inside(root, |ui| {
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    components::section_header(ui, "Schema");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let connected = self.active().is_some();
-                        // SQLite has no stored functions or procedures.
-                        let supports_routines = self
-                            .active()
-                            .is_some_and(|a| a.db.kind() != dbcore::DbKind::Sqlite);
-                        let menu = ui.add_enabled_ui(connected, |ui| {
-                            let plus = egui::Image::new(icons::plus())
-                                .fit_to_exact_size(egui::vec2(icons::SIZE, icons::SIZE))
-                                .tint(ui.visuals().widgets.inactive.fg_stroke.color);
-                            ui.menu_button(plus, |ui| {
-                                ui.set_min_width(150.0);
-                                if components::button(ui, icons::table(), "New Table…", true)
-                                    .clicked()
-                                {
-                                    actions.push(Action::OpenNewTable);
-                                    ui.close();
-                                }
-                                if components::button(ui, icons::view(), "New View…", true)
-                                    .clicked()
-                                {
-                                    actions.push(Action::OpenNewView);
-                                    ui.close();
-                                }
-                                if components::button(ui, icons::play(), "New Trigger…", true)
-                                    .clicked()
-                                {
-                                    actions.push(Action::OpenNewTrigger);
-                                    ui.close();
-                                }
-                                if supports_routines {
-                                    ui.separator();
-                                    if components::button(ui, icons::code(), "New Function…", true)
-                                        .clicked()
-                                    {
-                                        actions.push(Action::OpenNewRoutine(
-                                            dbcore::RoutineKind::Function,
-                                        ));
-                                        ui.close();
-                                    }
-                                    if components::button(ui, icons::code(), "New Procedure…", true)
-                                        .clicked()
-                                    {
-                                        actions.push(Action::OpenNewRoutine(
-                                            dbcore::RoutineKind::Procedure,
-                                        ));
-                                        ui.close();
-                                    }
-                                }
-                            })
-                            .response
-                            .on_hover_text("Create a new object");
-                        });
-                        if !connected {
-                            let _ = menu
-                                .response
-                                .on_disabled_hover_text("Connect to a database first");
-                        }
-                    });
-                });
-                components::icon_text_input(
+                // TablePlus-style sidebar: one strip of tabs picks which list fills
+                // the panel — schema objects, saved queries, or query history.
+                let tabs = [SidebarTab::Items, SidebarTab::Queries, SidebarTab::History];
+                let selected = tabs
+                    .iter()
+                    .position(|t| *t == self.sidebar_tab)
+                    .unwrap_or(0);
+                let choice = components::segmented_sized(
                     ui,
-                    &mut self.schema_filter,
-                    "filter tables…",
-                    icons::filter(),
+                    &[
+                        (icons::table(), "Items"),
+                        (icons::star(), "Queries"),
+                        (icons::history(), "History"),
+                    ],
+                    selected,
                     ui.available_width(),
+                    false,
                 );
-                ui.add_space(4.0);
-
-                if self.active().is_some() {
-                    egui::ScrollArea::vertical()
-                        .id_salt("schema_scroll")
-                        .show(ui, |ui| {
-                            // Keep tree content within the panel — long names must not widen it.
-                            ui.set_width(ui.available_width());
-                            self.schema_tree(ui, actions);
-                        });
-                } else {
-                    ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                        let avail = ui.available_height();
-                        ui.add_space(avail * 0.4);
-                        if self.busy == Busy::Connecting {
-                            ui.add(components::spinner(32.0));
-                            ui.add_space(16.0);
-                            ui.label(
-                                egui::RichText::new("Connecting...")
-                                    .color(palette::TEXT_WEAK())
-                                    .size(14.0),
-                            );
-                        } else {
-                            ui.label(
-                                egui::RichText::new("Connect to a database to browse its schema.")
-                                    .color(palette::TEXT_FAINT()),
-                            );
-                        }
-                    });
+                if choice != selected {
+                    actions.push(Action::SetSidebarTab(tabs[choice]));
+                }
+                ui.add_space(6.0);
+                match self.sidebar_tab {
+                    SidebarTab::Items => self.sidebar_items(ui, actions),
+                    SidebarTab::Queries => self.favorites_tab(ui, actions),
+                    SidebarTab::History => self.sidebar_history(ui, actions),
                 }
             });
+    }
+
+    /// The Items tab: create-object menu, table filter, and the schema tree.
+    fn sidebar_items(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        ui.horizontal(|ui| {
+            components::section_header(ui, "Schema");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let connected = self.active().is_some();
+                // SQLite has no stored functions or procedures.
+                let supports_routines = self
+                    .active()
+                    .is_some_and(|a| a.db.kind() != dbcore::DbKind::Sqlite);
+                let menu = ui.add_enabled_ui(connected, |ui| {
+                    let plus = egui::Image::new(icons::plus())
+                        .fit_to_exact_size(egui::vec2(icons::SIZE, icons::SIZE))
+                        .tint(ui.visuals().widgets.inactive.fg_stroke.color);
+                    ui.menu_button(plus, |ui| {
+                        ui.set_min_width(150.0);
+                        if components::button(ui, icons::table(), "New Table…", true).clicked() {
+                            actions.push(Action::OpenNewTable);
+                            ui.close();
+                        }
+                        if components::button(ui, icons::view(), "New View…", true).clicked() {
+                            actions.push(Action::OpenNewView);
+                            ui.close();
+                        }
+                        if components::button(ui, icons::play(), "New Trigger…", true).clicked() {
+                            actions.push(Action::OpenNewTrigger);
+                            ui.close();
+                        }
+                        if supports_routines {
+                            ui.separator();
+                            if components::button(ui, icons::code(), "New Function…", true)
+                                .clicked()
+                            {
+                                actions.push(Action::OpenNewRoutine(dbcore::RoutineKind::Function));
+                                ui.close();
+                            }
+                            if components::button(ui, icons::code(), "New Procedure…", true)
+                                .clicked()
+                            {
+                                actions
+                                    .push(Action::OpenNewRoutine(dbcore::RoutineKind::Procedure));
+                                ui.close();
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Create a new object");
+                });
+                if !connected {
+                    let _ = menu
+                        .response
+                        .on_disabled_hover_text("Connect to a database first");
+                }
+            });
+        });
+        components::icon_text_input(
+            ui,
+            &mut self.schema_filter,
+            "filter tables…",
+            icons::filter(),
+            ui.available_width(),
+        );
+        ui.add_space(4.0);
+
+        if self.active().is_some() {
+            egui::ScrollArea::vertical()
+                .id_salt("schema_scroll")
+                .show(ui, |ui| {
+                    // Keep tree content within the panel — long names must not widen it.
+                    ui.set_width(ui.available_width());
+                    self.schema_tree(ui, actions);
+                });
+        } else {
+            ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                let avail = ui.available_height();
+                ui.add_space(avail * 0.4);
+                if self.busy == Busy::Connecting {
+                    ui.add(components::spinner(32.0));
+                    ui.add_space(16.0);
+                    ui.label(
+                        egui::RichText::new("Connecting...")
+                            .color(palette::TEXT_WEAK())
+                            .size(14.0),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new("Connect to a database to browse its schema.")
+                            .color(palette::TEXT_FAINT()),
+                    );
+                }
+            });
+        }
+    }
+
+    /// The History tab: the clear-all control above the executed-statement list.
+    fn sidebar_history(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        ui.horizontal(|ui| {
+            components::section_header(ui, "Query History");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if components::icon_button(ui, icons::trash(), "Delete the entire history")
+                    .clicked()
+                {
+                    actions.push(Action::ClearHistory);
+                }
+            });
+        });
+        ui.add_space(4.0);
+        self.history_list(ui, actions);
     }
 
     fn schema_tree(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -2605,24 +2603,6 @@ impl DbGuiApp {
 
     pub(super) fn central_panel(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
         let idx = self.active_query_tab;
-        // Saved queries is a workspace tab, not editor content. It owns the entire center so the
-        // result grid and its empty/error states never compete with the saved-query list.
-        if self.show_query_console
-            && self.show_saved_queries
-            && self.tabs[idx].kind == crate::components::QueryTabKind::Query
-        {
-            let kind = self.tabs[idx].kind;
-            let frame = egui::Frame::central_panel(root.style())
-                .inner_margin(egui::Margin::symmetric(8, 2));
-            egui::CentralPanel::default()
-                .frame(frame)
-                .show_inside(root, |ui| {
-                    self.query_workspace_bar(ui, kind, actions);
-                    ui.separator();
-                    self.favorites_tab(ui, actions);
-                });
-            return;
-        }
         // A Diagram tab owns the whole central panel (the editor and result bars were
         // already skipped in `draw`). Slim vertical margins keep the header band tight
         // between the tab strip and the canvas.
@@ -2797,13 +2777,16 @@ impl DbGuiApp {
                     }
                     if let Some(advance) = resp.commit_edit {
                         settle_active(edits, result);
-                        // Tab/Shift+Tab: the commit landed → move the cursor and keep editing
-                        // there (skipping bools/binary — the cursor still parks on them).
+                        // The commit landed → move the cursor and keep editing there. Up/Down
+                        // retain the column; Tab/Shift+Tab retain the row. Bool/binary cells are
+                        // skipped as editors, though the cursor still parks on them.
                         if edits.active.is_none() {
                             if let Some(dir) = advance {
                                 let (dr, dc) = match dir {
                                     crate::edit::CursorDir::Left => (0, -1),
                                     crate::edit::CursorDir::Right => (0, 1),
+                                    crate::edit::CursorDir::Up => (-1, 0),
+                                    crate::edit::CursorDir::Down => (1, 0),
                                 };
                                 let len = row_order.len() + edits.new_rows;
                                 if selection.move_cursor(dr, dc, len, result.column_count(), false)
@@ -3363,37 +3346,9 @@ impl DbGuiApp {
         }
     }
 
-    /// Right-hand query-history panel: every executed statement with its connection,
-    /// time, duration, and outcome, newest first. Toggled from the title bar. (The
-    /// append-only compliance record is separate — see `dbcore::audit`.)
-    /// (Favorites live in the query bar's ★ menu, next to where queries are written.)
-    pub(super) fn history_panel(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
-        egui::Panel::right("history_panel")
-            .resizable(true)
-            .default_size(300.0)
-            .show_separator_line(true)
-            .show_inside(root, |ui| {
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    components::section_header(ui, "Query History");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if components::icon_button(ui, icons::close(), "Hide history").clicked() {
-                            actions.push(Action::ToggleHistory);
-                        }
-                        if components::icon_button(ui, icons::trash(), "Delete the entire history")
-                            .clicked()
-                        {
-                            actions.push(Action::ClearHistory);
-                        }
-                    });
-                });
-                ui.add_space(4.0);
-                self.history_list(ui, actions);
-            });
-    }
-
     /// The query-history list (newest first): each executed statement with its connection,
-    /// time, duration, and outcome. Rendered inside [`Self::history_panel`].
+    /// time, duration, and outcome. Rendered inside the sidebar's History tab. (The
+    /// append-only compliance record is separate — see `dbcore::audit`.)
     fn history_list(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         if self.history_cache.is_empty() {
             ui.label(egui::RichText::new("No queries recorded yet.").color(palette::TEXT_WEAK()));
@@ -5600,7 +5555,10 @@ impl DbGuiApp {
             // A Diagram tab without its snapshot (shouldn't happen at runtime).
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
-                ui.colored_label(palette::TEXT_FAINT(), "This diagram is no longer available.");
+                ui.colored_label(
+                    palette::TEXT_FAINT(),
+                    "This diagram is no longer available.",
+                );
             });
             return;
         };
@@ -5651,7 +5609,8 @@ impl DbGuiApp {
                 {
                     erd.layout();
                 }
-                if components::pill_icon_button(ui, icons::fit(), "Zoom to fit all tables").clicked()
+                if components::pill_icon_button(ui, icons::fit(), "Zoom to fit all tables")
+                    .clicked()
                 {
                     erd.request_fit();
                 }

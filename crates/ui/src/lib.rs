@@ -43,9 +43,11 @@ pub struct AppFonts<'a> {
     pub thai_regular: &'a [u8],
     /// Anuphan Semibold — Thai weight for the [`HEADING_FAMILY`] family.
     pub thai_semibold: &'a [u8],
+    /// GNU Unifont — broad Unicode fallback used only when the fonts above lack a glyph.
+    pub universal_regular: &'a [u8],
 }
 
-/// Install Inter for UI, JetBrains Mono for SQL/code, and Anuphan as Thai fallback.
+/// Install the primary UI/code fonts followed by Thai and broad Unicode fallbacks.
 pub fn install_fonts(ctx: &egui::Context, app_fonts: &AppFonts) {
     use egui::{FontData, FontDefinitions, FontFamily};
     use std::sync::Arc;
@@ -72,15 +74,21 @@ pub fn install_fonts(ctx: &egui::Context, app_fonts: &AppFonts) {
         "thai_semibold".to_owned(),
         Arc::new(FontData::from_owned(app_fonts.thai_semibold.to_vec())),
     );
+    fonts.font_data.insert(
+        "unifont".to_owned(),
+        Arc::new(FontData::from_owned(app_fonts.universal_regular.to_vec())),
+    );
 
     // Inter leads the proportional family; Anuphan trails as the Thai fallback.
     let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
     proportional.insert(0, "inter".to_owned());
     proportional.push("thai".to_owned());
+    proportional.push("unifont".to_owned());
 
     let monospace = fonts.families.entry(FontFamily::Monospace).or_default();
     monospace.insert(0, "jetbrains_mono".to_owned());
     monospace.push("thai".to_owned());
+    monospace.push("unifont".to_owned());
 
     // A heavier family for headings: Inter Semibold first, Anuphan Semibold for Thai.
     fonts.families.insert(
@@ -90,6 +98,7 @@ pub fn install_fonts(ctx: &egui::Context, app_fonts: &AppFonts) {
             "thai_semibold".to_owned(),
             "inter".to_owned(),
             "thai".to_owned(),
+            "unifont".to_owned(),
         ],
     );
 

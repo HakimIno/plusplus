@@ -330,7 +330,7 @@ pub struct GridResponse {
     /// A fill handle drag completed.
     pub fill: Option<FillRequest>,
     /// The open editor should be committed (Enter pressed or focus lost). The inner value
-    /// is a Tab/Shift+Tab advance request: move the cursor that way and keep editing.
+    /// is a keyboard advance request: move the cursor that way and keep editing.
     pub commit_edit: Option<Option<crate::edit::CursorDir>>,
     /// The open editor should be discarded (Escape pressed).
     pub cancel_edit: bool,

@@ -184,9 +184,9 @@ impl DbGuiApp {
                     conn_name: draft.conn_name,
                     created_at: dbcore::history::now_rfc3339(),
                 });
-                // Reveal the tab so the just-saved query is visible (e.g. when saving from a
-                // history entry while the editor tab was active).
-                self.show_saved_queries = true;
+                // Reveal the sidebar's Queries tab so the just-saved query is visible
+                // (the cache is already current — no disk round-trip needed).
+                self.sidebar_tab = SidebarTab::Queries;
                 self.status_msg = "Saved to favorites".to_string();
             }
         }

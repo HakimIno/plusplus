@@ -110,23 +110,7 @@ impl DbGuiApp {
             Action::CancelDialog => self.editor = None,
             Action::OpenSettings => self.settings_open = true,
             Action::CloseSettings => self.settings_open = false,
-            Action::ToggleHistory => {
-                if self.history_open {
-                    self.history_open = false;
-                    self.history_cache = Vec::new();
-                } else {
-                    self.history_cache =
-                        dbcore::history::load(dbcore::history::MAX_ENTRIES).unwrap_or_default();
-                    self.history_open = true;
-                }
-            }
-            Action::ToggleFavoritesTab => {
-                self.show_saved_queries = !self.show_saved_queries;
-                // Re-read on reveal so the list reflects any out-of-band change.
-                if self.show_saved_queries && !cfg!(test) {
-                    self.favorites_cache = dbcore::favorites::load().unwrap_or_default();
-                }
-            }
+            Action::SetSidebarTab(tab) => self.set_sidebar_tab(tab),
             Action::SaveCurrentAsFavorite => {
                 let sql = self.tab().sql.trim().to_string();
                 if sql.is_empty() {
@@ -169,7 +153,6 @@ impl DbGuiApp {
             Action::UseFavorite(i) => {
                 if let Some(fav) = self.favorites_cache.get(i) {
                     self.tab_mut().sql = fav.sql.clone();
-                    self.show_saved_queries = false;
                     self.workspace_dirty = true;
                 }
             }
