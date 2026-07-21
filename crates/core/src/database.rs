@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 use crate::error::Result;
 use crate::export::RowSink;
 use crate::model::{DbKind, QueryResult, SchemaTree};
+use crate::safety::{DangerousStatement, ProductionPreflight};
 
 /// A live connection to a database backend.
 ///
@@ -53,6 +54,72 @@ pub trait Database: Send + Sync {
     /// (counts, introspection helpers) and for tests.
     async fn execute(&self, sql: &str) -> Result<QueryResult> {
         self.execute_capped(sql, usize::MAX).await
+    }
+
+    /// Run read-only Production Guardian checks. Each server call has a short timeout and
+    /// failures become warnings, never permission to bypass confirmation.
+    async fn production_preflight(&self, statement: &DangerousStatement) -> ProductionPreflight {
+        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+        let mut preflight = ProductionPreflight::default();
+
+        if let Some(count_sql) = &statement.count_sql {
+            match tokio::time::timeout(TIMEOUT, self.execute_capped(count_sql, 1)).await {
+                Ok(Ok(result)) => {
+                    preflight.affected_rows = crate::safety::query_count(&result);
+                    if preflight.affected_rows.is_none() {
+                        preflight
+                            .warnings
+                            .push("Exact row count returned an unsupported value".to_string());
+                    }
+                }
+                Ok(Err(error)) => preflight
+                    .warnings
+                    .push(format!("Exact row count unavailable: {error}")),
+                Err(_) => preflight
+                    .warnings
+                    .push("Exact row count timed out after 5 seconds".to_string()),
+            }
+        } else if matches!(
+            statement.kind,
+            crate::safety::DangerKind::Update | crate::safety::DangerKind::Delete
+        ) {
+            preflight.warnings.push(
+                "Exact row count skipped: predicate or target is too complex to rewrite safely"
+                    .to_string(),
+            );
+        }
+
+        if let Some(explain_sql) = statement.explain_sql(self.kind()) {
+            match tokio::time::timeout(TIMEOUT, self.execute_capped(&explain_sql, 64)).await {
+                Ok(Ok(result)) => {
+                    preflight.plan = crate::safety::summarize_plan(self.kind(), &result);
+                    if preflight.plan.is_none() {
+                        preflight
+                            .warnings
+                            .push("Query plan returned no readable details".to_string());
+                    }
+                }
+                Ok(Err(error)) => preflight
+                    .warnings
+                    .push(format!("Query plan unavailable: {error}")),
+                Err(_) => preflight
+                    .warnings
+                    .push("Query plan timed out after 5 seconds".to_string()),
+            }
+        } else if self.kind() == DbKind::SqlServer
+            && matches!(
+                statement.kind,
+                crate::safety::DangerKind::Update
+                    | crate::safety::DangerKind::Delete
+                    | crate::safety::DangerKind::Merge
+            )
+        {
+            preflight.warnings.push(
+                "SQL Server query plan skipped: SHOWPLAN is unsafe on a pooled session".to_string(),
+            );
+        }
+
+        preflight
     }
 
     /// Execute a batch of DML statements as a single atomic transaction: either every
@@ -244,6 +311,61 @@ pub(crate) fn split_statements(sql: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct RecordingDb(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait]
+    impl Database for RecordingDb {
+        fn kind(&self) -> DbKind {
+            DbKind::Sqlite
+        }
+
+        async fn introspect(&self) -> Result<SchemaTree> {
+            unreachable!()
+        }
+
+        async fn execute_capped(&self, sql: &str, _max_rows: usize) -> Result<QueryResult> {
+            self.0.lock().unwrap().push(sql.to_string());
+            let value = if sql.starts_with("SELECT COUNT(*)") {
+                crate::Value::Int(1)
+            } else {
+                crate::Value::Text("SEARCH users USING INDEX users_pkey (id=?)".to_string())
+            };
+            Ok(QueryResult {
+                rows: vec![vec![value]],
+                ..QueryResult::default()
+            })
+        }
+
+        async fn execute_transaction(&self, _stmts: &[String]) -> Result<usize> {
+            unreachable!()
+        }
+
+        async fn export_query(
+            &self,
+            _sql: &str,
+            _sink: &mut (dyn crate::export::RowSink + Send),
+        ) -> Result<u64> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn production_preflight_never_executes_the_guarded_dml() {
+        let db = RecordingDb(std::sync::Mutex::new(Vec::new()));
+        let statement = crate::safety::dangerous_statements(
+            DbKind::Sqlite,
+            "UPDATE users SET active = false WHERE id = 7",
+        )
+        .remove(0);
+        let preflight = db.production_preflight(&statement).await;
+        assert_eq!(preflight.affected_rows, Some(1));
+        let calls = db.0.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].starts_with("SELECT COUNT(*)"));
+        assert!(calls[1].starts_with("EXPLAIN QUERY PLAN"));
+        assert!(calls.iter().all(|sql| sql != &statement.sql));
+    }
 
     #[test]
     fn single_statement_matches_leading_keyword() {

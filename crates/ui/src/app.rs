@@ -85,6 +85,13 @@ enum AppMessage {
         conn_id: String,
         result: Result<(), String>,
     },
+    /// Read-only Production Guardian checks finished for the exact tab/query snapshot.
+    ProductionGuarded {
+        tab_id: u64,
+        conn_id: String,
+        sql: String,
+        preflights: Vec<dbcore::safety::ProductionPreflight>,
+    },
     /// A query finished. `tab_id` routes the result back to the tab that started it, even
     /// if the user has since switched tabs. `conn_id`/`sql` carry what actually ran,
     /// for the query history.
@@ -160,6 +167,87 @@ enum Busy {
     Connecting,
     Querying,
     Importing,
+}
+
+#[derive(Clone, Copy)]
+enum ProductionGuardContinuation {
+    Query,
+    Edits,
+    Schema,
+}
+
+#[derive(Clone)]
+struct ProductionGuardPending {
+    tab_id: u64,
+    conn_id: String,
+    connection_name: String,
+    database: String,
+    sql: String,
+    statements: Vec<dbcore::safety::DangerousStatement>,
+    preflights: Option<Vec<dbcore::safety::ProductionPreflight>>,
+    confirmation: String,
+    preflight_cancel: tokio_util::sync::CancellationToken,
+    continuation: ProductionGuardContinuation,
+}
+
+impl ProductionGuardPending {
+    fn risk(&self, index: usize) -> dbcore::safety::RiskLevel {
+        self.preflights
+            .as_ref()
+            .and_then(|items| items.get(index))
+            .map(|preflight| self.statements[index].risk(preflight))
+            .unwrap_or(dbcore::safety::RiskLevel::Critical)
+    }
+
+    fn confirmation_phrase(&self) -> Option<&str> {
+        self.preflights.as_ref()?;
+        self.statements
+            .iter()
+            .enumerate()
+            .find(|(index, _)| self.risk(*index) == dbcore::safety::RiskLevel::Critical)
+            .map(|(_, statement)| statement.confirmation_phrase())
+    }
+
+    fn can_confirm(&self) -> bool {
+        if self.preflights.is_none() {
+            return false;
+        }
+        self.confirmation_phrase()
+            .map_or(true, |phrase| self.confirmation.trim() == phrase)
+    }
+
+    fn audit_details(&self, decision: &str) -> String {
+        let risks = self
+            .statements
+            .iter()
+            .enumerate()
+            .map(|(index, statement)| {
+                let risk = self
+                    .preflights
+                    .as_ref()
+                    .and_then(|items| items.get(index))
+                    .map(|preflight| statement.risk(preflight))
+                    .unwrap_or_else(|| statement.base_risk());
+                let rows = self
+                    .preflights
+                    .as_ref()
+                    .and_then(|items| items.get(index))
+                    .and_then(|item| {
+                        item.affected_rows
+                            .or_else(|| item.plan.as_ref().and_then(|plan| plan.estimated_rows))
+                    })
+                    .map(|rows| rows.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                format!(
+                    "{}:{}:rows={rows}",
+                    statement.kind.label(),
+                    risk.label()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("decision={decision}; {risks}")
+    }
 }
 
 /// In-progress "save / rename favorite" dialog state: the editable name plus the snapshot of
@@ -921,6 +1009,8 @@ enum Action {
     CancelEdits,
     /// User confirmed running destructive SQL on a production connection.
     ConfirmDangerQuery,
+    /// Update the typed Critical-risk confirmation phrase.
+    SetDangerConfirmation(String),
     /// User backed out of the production-confirmation dialog.
     CancelDangerQuery,
     /// Open the schema editor to create a brand-new table.
@@ -1076,6 +1166,8 @@ pub struct DbGuiApp {
     details_date_pick: Option<(usize, usize)>,
     settings_open: bool,
     schema_filter: String,
+    /// Queries tab: live name/SQL filter over the saved-query list.
+    favorites_filter: String,
     /// SQL editor autocomplete (table/column/keyword popup). Transient; not persisted.
     autocomplete: crate::autocomplete::State,
     /// Recently-run, successful SQL — the pool the editor's ghost-text autosuggestion
@@ -1106,7 +1198,7 @@ pub struct DbGuiApp {
     schema_pending: Option<Vec<String>>,
     /// Destructive statements found when running a query against a production
     /// connection, held for the confirmation dialog. `None` = dialog closed.
-    danger_pending: Option<Vec<dbcore::safety::DangerousStatement>>,
+    danger_pending: Option<ProductionGuardPending>,
     /// Open "import file into table" dialog, with its column mapping. `None` = dialog closed.
     import_pending: Option<ImportDraft>,
     /// Record executed statements to the on-disk query history (settings toggle).
@@ -1284,6 +1376,7 @@ impl DbGuiApp {
             details_date_pick: None,
             settings_open: false,
             schema_filter: String::new(),
+            favorites_filter: String::new(),
             autocomplete: crate::autocomplete::State::default(),
             suggest_pool: Vec::new(),
             ghost_suggestion: None,

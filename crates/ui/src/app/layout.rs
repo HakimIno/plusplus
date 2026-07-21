@@ -317,10 +317,13 @@ impl DbGuiApp {
         let editor_placement = query_editor_placement(self.tab().kind);
         // A Diagram tab is just the canvas: no SQL editor, no filter or result-mode bars.
         let diagram_tab = self.tab().kind == crate::components::QueryTabKind::Diagram;
-        if self.show_query_console && !diagram_tab {
+        // An open object designer (Create/Edit Table, View, Trigger, Routine) owns the whole
+        // tab the same way: the SQL console and result bars would only crowd the form.
+        let designing = self.tab().schema_editor.is_some();
+        if self.show_query_console && !diagram_tab && !designing {
             self.query_console(ui_root, editor_placement, &mut actions);
         }
-        if !diagram_tab {
+        if !diagram_tab && !designing {
             // A top panel after left/right carves the strip directly above the grid.
             self.filter_bar(ui_root);
             // Keep result controls next to the query toolbar: below it on code-first tabs,
@@ -331,6 +334,11 @@ impl DbGuiApp {
             if editor_placement == QueryEditorPlacement::Top || !self.show_query_console {
                 self.view_mode_bar(ui_root, editor_placement, &mut actions);
             }
+        }
+        // While designing on a Table/View tab, keep Data / Structure / Edit Table visible as
+        // the way back out (Query tabs' Data/Message/Chart switch is meaningless here).
+        if designing && !diagram_tab && self.tab().kind != crate::components::QueryTabKind::Query {
+            self.view_mode_bar(ui_root, editor_placement, &mut actions);
         }
         self.central_panel(ui_root, &mut actions);
         self.connection_dialog(&ctx, &mut actions);

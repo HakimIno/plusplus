@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.19"
+version = "0.2.20"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 rust-version = "1.80"
@@ -69,6 +69,9 @@ polars = { version = "0.54", default-features = false, features = ["lazy", "desc
 
 # --- SQL formatting (the query editor's Beautify action) ---
 sqlformat = "0.5"
+# Dialect-aware AST parsing for production-query safety analysis. Keeping the parser in
+# `core` lets the UI consume structured risk facts instead of re-interpreting SQL text.
+sqlparser = { version = "0.62", features = ["visitor"] }
 
 # --- supporting crates ---
 # Stream combinators for row-by-row fetches (both sqlx and tiberius already pull this in).

@@ -111,6 +111,50 @@ pub struct ErDiagram {
     pub focus: Option<ErdFocus>,
 }
 
+/// Resolve FK targets without ever guessing across schemas. Backends that cannot
+/// qualify an FK may use a bare table name, but only when that name is unambiguous.
+struct TableLookup {
+    by_key: BTreeMap<(String, String), usize>,
+    by_name: BTreeMap<String, Option<usize>>,
+}
+
+impl TableLookup {
+    fn new(schema: &SchemaTree) -> Self {
+        let mut by_key = BTreeMap::new();
+        let mut by_name = BTreeMap::new();
+        for (i, table) in schema.tables.iter().enumerate() {
+            by_key.insert(
+                (table.schema.clone().unwrap_or_default(), table.name.clone()),
+                i,
+            );
+            by_name
+                .entry(table.name.clone())
+                .and_modify(|match_| *match_ = None)
+                .or_insert(Some(i));
+        }
+        Self { by_key, by_name }
+    }
+
+    fn resolve(
+        &self,
+        table: &dbcore::TableInfo,
+        fk: &dbcore::ForeignKeyInfo,
+    ) -> Option<usize> {
+        if let Some(ref_schema) = &fk.ref_schema {
+            return self
+                .by_key
+                .get(&(ref_schema.clone(), fk.ref_table.clone()))
+                .copied();
+        }
+
+        let same_schema = table.schema.clone().unwrap_or_default();
+        self.by_key
+            .get(&(same_schema, fk.ref_table.clone()))
+            .copied()
+            .or_else(|| self.by_name.get(&fk.ref_table).copied().flatten())
+    }
+}
+
 impl ErDiagram {
     /// Snapshot `schema` into nodes and edges and run the initial layout.
     pub fn build(conn_id: &str, schema: &SchemaTree) -> Self {
@@ -131,17 +175,7 @@ impl ErDiagram {
             }
         };
 
-        // Tables keyed by (schema, name) — and by bare name for backends/FKs that don't
-        // qualify the referenced table — so edge targets resolve in one lookup.
-        let mut by_key: BTreeMap<(String, String), usize> = BTreeMap::new();
-        let mut by_name: BTreeMap<String, usize> = BTreeMap::new();
-        for (i, t) in schema.tables.iter().enumerate() {
-            by_key.insert(
-                (t.schema.clone().unwrap_or_default(), t.name.clone()),
-                i,
-            );
-            by_name.entry(t.name.clone()).or_insert(i);
-        }
+        let tables = TableLookup::new(schema);
 
         let nodes: Vec<ErdNode> = schema
             .tables
@@ -169,17 +203,7 @@ impl ErDiagram {
         let mut edges = Vec::new();
         for (i, t) in schema.tables.iter().enumerate() {
             for fk in &t.foreign_keys {
-                // Prefer the schema-qualified target (same schema when unqualified);
-                // fall back to the first table with that bare name.
-                let target_schema = fk
-                    .ref_schema
-                    .clone()
-                    .or_else(|| t.schema.clone())
-                    .unwrap_or_default();
-                let Some(&to) = by_key
-                    .get(&(target_schema, fk.ref_table.clone()))
-                    .or_else(|| by_name.get(&fk.ref_table))
-                else {
+                let Some(to) = tables.resolve(t, fk) else {
                     continue; // referenced table not in the snapshot (filtered/system)
                 };
                 let from_row = fk
@@ -277,28 +301,12 @@ impl ErDiagram {
         }
 
         // Undirected FK adjacency over the full schema, resolving targets with the
-        // same rules as `build` (schema-qualified first, then bare table name).
-        let mut by_key: BTreeMap<(String, String), usize> = BTreeMap::new();
-        let mut by_name: BTreeMap<String, usize> = BTreeMap::new();
-        for (i, t) in schema.tables.iter().enumerate() {
-            by_key.insert(
-                (t.schema.clone().unwrap_or_default(), t.name.clone()),
-                i,
-            );
-            by_name.entry(t.name.clone()).or_insert(i);
-        }
+        // same strict rules as `build`.
+        let tables = TableLookup::new(schema);
         let mut adjacent: Vec<Vec<usize>> = vec![Vec::new(); schema.tables.len()];
         for (i, t) in schema.tables.iter().enumerate() {
             for fk in &t.foreign_keys {
-                let target_schema = fk
-                    .ref_schema
-                    .clone()
-                    .or_else(|| t.schema.clone())
-                    .unwrap_or_default();
-                let Some(&to) = by_key
-                    .get(&(target_schema, fk.ref_table.clone()))
-                    .or_else(|| by_name.get(&fk.ref_table))
-                else {
+                let Some(to) = tables.resolve(t, fk) else {
                     continue;
                 };
                 adjacent[i].push(to);
@@ -642,6 +650,58 @@ mod tests {
         schema.tables[1].foreign_keys[0].ref_table = "missing".into();
         let d = ErDiagram::build("c1", &schema);
         assert_eq!(d.edges.len(), 1); // only the employees self-reference survives
+    }
+
+    #[test]
+    fn qualified_fk_never_falls_back_to_a_same_named_table() {
+        let mut schema = sample_schema();
+        schema.tables[0].schema = Some("public".into());
+        schema.tables[1].schema = Some("sales".into());
+        schema.tables[1].foreign_keys[0].ref_schema = Some("private".into());
+
+        let d = ErDiagram::build("c1", &schema);
+        assert_eq!(
+            d.edges.len(),
+            1,
+            "private.users is absent, so the FK must not point at public.users"
+        );
+
+        let focused = ErDiagram::build_focused(
+            "c1",
+            &schema,
+            ErdFocus {
+                schema: Some("sales".into()),
+                table: "orders".into(),
+                depth: 1,
+            },
+        );
+        assert_eq!(
+            focused.nodes.len(),
+            1,
+            "the missing target is not a neighbor"
+        );
+        assert!(focused.edges.is_empty());
+    }
+
+    #[test]
+    fn unqualified_fk_falls_back_only_when_the_table_name_is_unique() {
+        let mut schema = sample_schema();
+        schema.tables[0].schema = Some("auth".into());
+        schema.tables[1].schema = Some("sales".into());
+        schema.tables.push(TableInfo {
+            schema: Some("archive".into()),
+            name: "users".into(),
+            columns: vec![col("id", true)],
+            indexes: Vec::new(),
+            foreign_keys: Vec::new(),
+        });
+
+        let d = ErDiagram::build("c1", &schema);
+        assert_eq!(
+            d.edges.len(),
+            1,
+            "an ambiguous bare users reference must be skipped"
+        );
     }
 
     #[test]

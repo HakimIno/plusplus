@@ -17,8 +17,10 @@ impl dbcore::Database for DummyDb {
         // that only assert on the UI-side state; an empty result keeps them quiet.
         Ok(QueryResult::default())
     }
-    async fn execute_transaction(&self, _stmts: &[String]) -> dbcore::Result<usize> {
-        unreachable!()
+    async fn execute_transaction(&self, stmts: &[String]) -> dbcore::Result<usize> {
+        // Like query execution above, some UI-state tests intentionally stop before polling
+        // the background completion message.
+        Ok(stmts.len())
     }
     async fn export_query(
         &self,
@@ -353,7 +355,8 @@ fn production_connection_gates_destructive_queries() {
     app.tab_mut().sql = "DELETE FROM table_0".into();
     app.apply_action(Action::RunQuery);
     let pending = app.danger_pending.as_ref().expect("query held back");
-    assert!(pending[0].missing_where);
+    assert!(pending.statements[0].missing_where);
+    assert!(pending.preflights.is_none());
     assert_eq!(app.busy, Busy::Idle);
 
     // Cancel drops it without running.
@@ -361,8 +364,18 @@ fn production_connection_gates_destructive_queries() {
     assert!(app.danger_pending.is_none());
     assert_eq!(app.busy, Busy::Idle);
 
-    // Confirm actually starts the query.
+    // Confirmation cannot bypass an in-flight preflight.
     app.apply_action(Action::RunQuery);
+    app.apply_action(Action::ConfirmDangerQuery);
+    assert!(app.danger_pending.is_some());
+    assert_eq!(app.busy, Busy::Idle);
+
+    // Critical risk additionally requires the exact target phrase.
+    app.danger_pending.as_mut().unwrap().preflights =
+        Some(vec![dbcore::safety::ProductionPreflight::default()]);
+    app.apply_action(Action::ConfirmDangerQuery);
+    assert!(app.danger_pending.is_some());
+    app.apply_action(Action::SetDangerConfirmation("table_0".into()));
     app.apply_action(Action::ConfirmDangerQuery);
     assert!(app.danger_pending.is_none());
     assert_eq!(app.busy, Busy::Querying);
@@ -372,6 +385,162 @@ fn production_connection_gates_destructive_queries() {
     app.connections[0].production = false;
     app.apply_action(Action::RunQuery);
     assert!(app.danger_pending.is_none());
+    assert_eq!(app.busy, Busy::Querying);
+}
+
+#[test]
+fn production_guard_never_runs_a_query_changed_after_preflight() {
+    let mut app = DbGuiApp::construct();
+    app.connections.clear();
+    let mut cfg = dbcore::ConnectionConfig::new(dbcore::DbKind::Sqlite);
+    cfg.id = "c1".into();
+    cfg.production = true;
+    app.connections.push(cfg);
+    app.active_connections.push(ActiveConnection {
+        config_id: "c1".into(),
+        name: "prod".into(),
+        db: std::sync::Arc::new(DummyDb),
+        databases: Vec::new(),
+        schema: fake_schema(1, 1),
+    });
+    app.tab_mut().conn_id = Some("c1".into());
+    app.tab_mut().sql = "UPDATE table_0 SET field_0 = 'safe' WHERE field_0 = 'old'".into();
+    app.apply_action(Action::RunQuery);
+    app.danger_pending.as_mut().unwrap().preflights =
+        Some(vec![dbcore::safety::ProductionPreflight {
+            affected_rows: Some(1),
+            ..dbcore::safety::ProductionPreflight::default()
+        }]);
+
+    // Even a lower-risk reviewed query cannot authorize different SQL typed behind the modal.
+    app.tab_mut().sql = "DELETE FROM table_0".into();
+    app.apply_action(Action::ConfirmDangerQuery);
+    assert!(app.danger_pending.is_none());
+    assert_eq!(app.busy, Busy::Idle);
+    assert!(app.error.as_deref().unwrap_or("").contains("changed"));
+}
+
+#[test]
+fn production_guard_audit_failure_is_fail_closed_and_visible() {
+    let mut app = DbGuiApp::construct();
+    let result = app.handle_guard_audit_result(Err(dbcore::CoreError::Config(
+        "audit disk is read-only".into(),
+    )));
+
+    assert!(!result);
+    assert_eq!(app.status_msg, "Blocked: audit trail unavailable");
+    assert!(app
+        .error
+        .as_deref()
+        .is_some_and(|message| message.contains("mandatory audit event")));
+}
+
+#[test]
+fn production_guard_also_intercepts_schema_preview_ddl() {
+    let mut app = DbGuiApp::construct();
+    app.connections.clear();
+    let mut cfg = dbcore::ConnectionConfig::new(dbcore::DbKind::Sqlite);
+    cfg.id = "c1".into();
+    cfg.production = true;
+    app.connections.push(cfg);
+    app.active_connections.push(ActiveConnection {
+        config_id: "c1".into(),
+        name: "prod".into(),
+        db: std::sync::Arc::new(DummyDb),
+        databases: Vec::new(),
+        schema: fake_schema(1, 1),
+    });
+    app.tab_mut().conn_id = Some("c1".into());
+    app.schema_pending = Some(vec!["DROP TABLE table_0".into()]);
+
+    app.apply_action(Action::ApplySchema);
+    let pending = app.danger_pending.as_ref().expect("DDL must be guarded");
+    assert!(matches!(
+        pending.continuation,
+        ProductionGuardContinuation::Schema
+    ));
+    assert_eq!(pending.statements[0].targets, ["table_0"]);
+    assert!(
+        app.schema_pending.is_some(),
+        "preview must survive cancellation"
+    );
+    assert_eq!(app.busy, Busy::Idle);
+
+    app.apply_action(Action::CancelDangerQuery);
+    assert!(app.danger_pending.is_none());
+    assert!(app.schema_pending.is_some());
+}
+
+#[test]
+fn production_guard_returns_to_the_staged_edit_tab_before_commit() {
+    let mut app = DbGuiApp::construct();
+    app.connections.clear();
+    let mut cfg = dbcore::ConnectionConfig::new(dbcore::DbKind::Sqlite);
+    cfg.id = "c1".into();
+    cfg.production = true;
+    app.connections.push(cfg);
+    app.active_connections.push(ActiveConnection {
+        config_id: "c1".into(),
+        name: "prod".into(),
+        db: std::sync::Arc::new(DummyDb),
+        databases: Vec::new(),
+        schema: fake_schema(1, 1),
+    });
+    app.tab_mut().conn_id = Some("c1".into());
+    app.tab_mut().set_result(QueryResult {
+        columns: vec![ColumnMeta {
+            name: "field_0".into(),
+            type_name: "INTEGER".into(),
+        }],
+        rows: vec![vec![Value::Int(1)]],
+        ..QueryResult::default()
+    });
+    app.tab_mut().edits.source = Some(EditSource {
+        schema: None,
+        table: "table_0".into(),
+        pk_cols: vec!["field_0".into()],
+    });
+    app.tab_mut().edits.toggle_delete(0);
+
+    // Save skips the generic transaction preview and launches the one Guardian dialog.
+    app.apply_action(Action::PreviewEdits);
+    assert!(
+        app.commit_pending.is_some(),
+        "transaction snapshot must be retained"
+    );
+    let pending = app
+        .danger_pending
+        .as_mut()
+        .expect("staged edit must be guarded");
+    assert!(matches!(
+        pending.continuation,
+        ProductionGuardContinuation::Edits
+    ));
+    app.apply_action(Action::CancelDangerQuery);
+    assert!(app.danger_pending.is_none());
+    assert!(app.commit_pending.is_none());
+    assert!(
+        app.tab().edits.has_pending(),
+        "staged deletion must survive cancellation"
+    );
+
+    app.apply_action(Action::PreviewEdits);
+    let pending = app
+        .danger_pending
+        .as_mut()
+        .expect("saving again must reopen Guardian directly");
+    pending.preflights = Some(vec![dbcore::safety::ProductionPreflight {
+        affected_rows: Some(1),
+        ..dbcore::safety::ProductionPreflight::default()
+    }]);
+
+    // Even if selection changes while the background checks run, execution belongs to
+    // the immutable source tab and connection captured by the guardian.
+    app.apply_action(Action::NewTab);
+    assert_eq!(app.active_query_tab, 1);
+    app.apply_action(Action::ConfirmDangerQuery);
+    assert_eq!(app.active_query_tab, 0);
+    assert!(app.commit_pending.is_none());
     assert_eq!(app.busy, Busy::Querying);
 }
 
@@ -1676,6 +1845,70 @@ fn table_editor_stack_starts_with_the_result_mode_bar() {
     );
 }
 
+/// Regression: an open object designer owns the whole tab — the SQL console and the
+/// Data/Message/Chart switch must not render around it. On a Table tab the
+/// Data/Structure/Edit Table bar stays as the way back out.
+#[test]
+fn open_designer_owns_the_tab() {
+    use egui_kittest::kittest::Queryable;
+
+    let build = |kind: crate::components::QueryTabKind| {
+        let mut app = DbGuiApp::construct();
+        app.show_welcome = false;
+        app.show_schema_panel = false;
+        app.show_details_panel = false;
+        app.show_connection_tabs = false;
+        connect_fake(&mut app, fake_schema(2, 3));
+        app.tab_mut().kind = kind;
+        if kind == crate::components::QueryTabKind::Table {
+            app.tab_mut().edits.source = Some(EditSource {
+                schema: None,
+                table: "table_0".into(),
+                pk_cols: vec!["field_0".into()],
+            });
+            let info = app.structure_table(0).cloned().expect("table resolves");
+            app.apply_action(Action::OpenEditTable(info));
+        } else {
+            app.apply_action(Action::OpenNewTable);
+        }
+        let mut setup = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1000.0, 700.0))
+            .build_ui(move |ui| {
+                if !setup {
+                    egui_extras::install_image_loaders(ui.ctx());
+                    crate::style::apply(ui.ctx());
+                    setup = true;
+                }
+                app.draw(ui, None);
+            });
+        harness.run_steps(4);
+        harness
+    };
+
+    let query = build(crate::components::QueryTabKind::Query);
+    query.get_by_label("Create Table");
+    assert!(
+        query.query_by_label("Save query").is_none(),
+        "the query workspace bar must hide while designing"
+    );
+    assert!(
+        query.query_by_label("SQL line numbers").is_none(),
+        "the SQL editor must hide while designing"
+    );
+    assert!(
+        query.query_by_label("Message").is_none(),
+        "the result-mode switch is meaningless while designing"
+    );
+
+    let table = build(crate::components::QueryTabKind::Table);
+    table.get_by_label("Structure");
+    assert!(
+        table.query_by_label("SQL line numbers").is_none(),
+        "the SQL editor must hide while designing a table"
+    );
+}
+
 #[test]
 fn query_result_controls_sit_between_query_toolbar_and_grid() {
     use egui_kittest::kittest::Queryable;
@@ -2470,6 +2703,11 @@ fn snapshot_saved_queries_tab() {
         (
             "Monthly revenue",
             "SELECT month, SUM(total) FROM orders GROUP BY month",
+        ),
+        // Saved without a title: the SQL doubles as the name and must render once.
+        (
+            "SELECT * FROM \"backend\".\"Document\" LIMIT 10",
+            "SELECT * FROM \"backend\".\"Document\" LIMIT 10",
         ),
     ] {
         app.favorites_cache.push(dbcore::Favorite {
@@ -3329,6 +3567,25 @@ fn show_table_diagram_opens_scoped_erd_and_widens() {
     let erd = app.tab().diagram.as_ref().expect("diagram still open");
     assert_eq!(erd.nodes.len(), 2, "the All detour is fully reversible");
     assert_eq!(erd.focus.as_ref().map(|f| f.depth), Some(1));
+}
+
+#[test]
+fn show_table_diagram_waits_for_full_schema_metadata() {
+    let mut app = DbGuiApp::construct();
+    connect_fake(&mut app, fake_schema(3, 0));
+    app.connection_jobs.insert("c1".into());
+
+    app.apply_action(Action::ShowTableDiagram {
+        schema: None,
+        table: "table_1".into(),
+    });
+
+    assert_eq!(
+        app.tabs.len(),
+        1,
+        "overview metadata must not open an empty ERD"
+    );
+    assert_eq!(app.status_msg, "Loading table relationships…");
 }
 
 /// Screenshot generator (ignored): the ER diagram views — table-scoped (depth 1 and 2),

@@ -3,6 +3,61 @@
 use super::*;
 
 impl DbGuiApp {
+    /// Record the user's Production Guardian decision, including the risk and row evidence.
+    pub(super) fn record_guard_decision(
+        &mut self,
+        pending: &ProductionGuardPending,
+        decision: &str,
+    ) -> bool {
+        if cfg!(test) {
+            return true;
+        }
+        let rows = pending.preflights.as_ref().and_then(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    item.affected_rows
+                        .or_else(|| item.plan.as_ref().and_then(|plan| plan.estimated_rows))
+                })
+                .try_fold(0u64, |sum, value| {
+                    value.map(|value| sum.saturating_add(value))
+                })
+        });
+        let target = self
+            .connections
+            .iter()
+            .find(|config| config.id == pending.conn_id)
+            .map(dbcore::ConnectionConfig::target_summary)
+            .unwrap_or_default();
+        let entry = dbcore::audit::AuditEntry {
+            at: dbcore::history::now_rfc3339(),
+            action: dbcore::audit::AuditAction::ProductionGuard,
+            conn_id: pending.conn_id.clone(),
+            conn_name: pending.connection_name.clone(),
+            target,
+            sql: pending.sql.clone(),
+            ok: decision != "invalidated",
+            error: None,
+            details: Some(pending.audit_details(decision)),
+            rows,
+            elapsed_ms: 0.0,
+        };
+        self.handle_guard_audit_result(dbcore::audit::append(&entry))
+    }
+
+    pub(super) fn handle_guard_audit_result(&mut self, result: dbcore::Result<()>) -> bool {
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                self.error = Some(format!(
+                    "Production Guardian could not write its mandatory audit event: {error}"
+                ));
+                self.status_msg = "Blocked: audit trail unavailable".to_string();
+                false
+            }
+        }
+    }
+
     /// Append one event to the append-only audit trail (`dbcore::audit`). Separate from
     /// history: audit also records connection events, rotates monthly instead of being
     /// compacted, and has no in-app clear. Best effort — never load-bearing.
@@ -35,6 +90,7 @@ impl DbGuiApp {
             sql: sql.to_string(),
             ok,
             error,
+            details: None,
             rows,
             elapsed_ms,
         });

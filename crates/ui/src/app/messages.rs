@@ -198,6 +198,28 @@ impl DbGuiApp {
                         }
                     }
                 }
+                AppMessage::ProductionGuarded {
+                    tab_id,
+                    conn_id,
+                    sql,
+                    preflights,
+                } => {
+                    let Some(pending) = &mut self.danger_pending else {
+                        continue;
+                    };
+                    // A cancel, edited query, tab switch, or reconnect can race preflight.
+                    // Only the exact snapshot that launched the checks may unlock the dialog.
+                    if pending.tab_id != tab_id
+                        || pending.conn_id != conn_id
+                        || pending.sql != sql
+                        || pending.statements.len() != preflights.len()
+                    {
+                        continue;
+                    }
+                    pending.preflights = Some(preflights);
+                    self.status_msg = "Production Guardian review ready".to_string();
+                    self.error = None;
+                }
                 AppMessage::Queried {
                     tab_id,
                     conn_id,

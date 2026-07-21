@@ -153,6 +153,10 @@ impl DbGuiApp {
     /// Take the previewed statements and execute them as a single atomic transaction on
     /// the background runtime. On success the grid reloads; on failure the error is shown.
     pub(super) fn confirm_edits(&mut self) {
+        if self.tab_connection_is_read_only(self.active_query_tab) {
+            self.refuse_read_only("staged edits can't be saved.");
+            return;
+        }
         let Some(stmts) = self.commit_pending.take() else {
             return;
         };

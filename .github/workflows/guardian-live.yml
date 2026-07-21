@@ -1,0 +1,70 @@
+name: Guardian Live Backends
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  production-preflight:
+    name: ${{ matrix.kind }} preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kind: postgres
+            image: postgres:17
+            port: 5432
+            user: plusplus
+            database: plusplus
+          - kind: mysql
+            image: mysql:8.4
+            port: 3306
+            user: root
+            database: plusplus
+          - kind: sqlserver
+            image: mcr.microsoft.com/mssql/server:2022-latest
+            port: 1433
+            user: sa
+            database: master
+
+    services:
+      database:
+        image: ${{ matrix.image }}
+        env:
+          POSTGRES_USER: plusplus
+          POSTGRES_PASSWORD: "Plusplus-ci-2026!"
+          POSTGRES_DB: plusplus
+          MYSQL_ROOT_PASSWORD: "Plusplus-ci-2026!"
+          MYSQL_ROOT_HOST: "%"
+          MYSQL_DATABASE: plusplus
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "Plusplus-ci-2026!"
+        ports:
+          - "${{ matrix.port }}:${{ matrix.port }}"
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libdbus-1-dev
+
+      - name: Verify Production Guardian preflight
+        env:
+          PLUSPLUS_LIVE_KIND: ${{ matrix.kind }}
+          PLUSPLUS_LIVE_HOST: 127.0.0.1
+          PLUSPLUS_LIVE_PORT: ${{ matrix.port }}
+          PLUSPLUS_LIVE_USER: ${{ matrix.user }}
+          PLUSPLUS_LIVE_PASSWORD: "Plusplus-ci-2026!"
+          PLUSPLUS_LIVE_DATABASE: ${{ matrix.database }}
+          PLUSPLUS_LIVE_CONNECT_ATTEMPTS: 30
+        run: cargo test -p plusplus-core --test live_backends -- --ignored --nocapture

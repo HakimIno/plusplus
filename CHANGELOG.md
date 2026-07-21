@@ -5,6 +5,17 @@ while pre-1.0 releases may still change workflows and configuration formats.
 
 ## Unreleased
 
+## 0.2.20 — 2026-07-21
+
+- Added Production Guardian for destructive SQL on production connections, with dialect-aware
+  AST analysis, safe row estimates, compact query-plan evidence, risk levels, typed confirmation
+  for critical operations, immutable query snapshots, mandatory fail-closed audit events, and
+  live preflight verification for PostgreSQL, MySQL, and SQL Server.
+- Fixed ER diagram relationship resolution across PostgreSQL schemas, skipped ambiguous fallback
+  targets, and prevented diagrams from opening before full relationship metadata is available.
+- Let table and schema-object designers use the full tab workspace without unrelated query and
+  result controls surrounding the form.
+
 ## 0.2.19 — 2026-07-17
 
 - Added full-schema and table-focused ER diagrams in dedicated tabs, with relationship-depth

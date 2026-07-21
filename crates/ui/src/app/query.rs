@@ -1,8 +1,95 @@
 //! Running queries and walking result pages.
 
+use futures_util::StreamExt;
+
 use super::*;
 
 impl DbGuiApp {
+    /// Hold a destructive production query, run only read-only preflight checks in the
+    /// background, then let the dialog decide whether the exact snapshot may execute.
+    pub(super) fn start_production_guard(
+        &mut self,
+        idx: usize,
+        sql: String,
+        statements: Vec<dbcore::safety::DangerousStatement>,
+        continuation: ProductionGuardContinuation,
+    ) {
+        let Some(tab) = self.tabs.get(idx) else {
+            return;
+        };
+        let Some(conn_id) = tab.conn_id.clone() else {
+            return;
+        };
+        let Some(active) = self
+            .active_connections
+            .iter()
+            .find(|connection| connection.config_id == conn_id)
+        else {
+            self.error = Some("Production Guardian requires an active connection.".to_string());
+            return;
+        };
+        let Some(config) = self.connections.iter().find(|config| config.id == conn_id) else {
+            return;
+        };
+        let database = if !active.schema.database_name.is_empty() {
+            active.schema.database_name.clone()
+        } else if config.kind == DbKind::Sqlite {
+            config.sqlite_path.clone()
+        } else {
+            config.database.clone()
+        };
+        let connection_name = config.name.clone();
+        let tab_id = tab.id;
+        let db = active.db.clone();
+        let tx = self.tx.clone();
+        self.error = None;
+        if let Some(previous) = self.danger_pending.take() {
+            previous.preflight_cancel.cancel();
+            if !self.record_guard_decision(&previous, "superseded") {
+                return;
+            }
+        }
+        let preflight_cancel = tokio_util::sync::CancellationToken::new();
+        let pending = ProductionGuardPending {
+            tab_id,
+            conn_id: conn_id.clone(),
+            connection_name,
+            database,
+            sql: sql.clone(),
+            statements: statements.clone(),
+            preflights: None,
+            confirmation: String::new(),
+            preflight_cancel: preflight_cancel.clone(),
+            continuation,
+        };
+        if !self.record_guard_decision(&pending, "started") {
+            return;
+        }
+        self.danger_pending = Some(pending);
+        self.status_msg = "Production Guardian is analyzing the query…".to_string();
+        self.rt.spawn(async move {
+            // Bound concurrency: a large batch should not serialize every timeout, but it
+            // also must not flood the production pool with COUNT/EXPLAIN requests.
+            let work = futures_util::stream::iter(statements)
+                .map(|statement| {
+                    let db = db.clone();
+                    async move { db.production_preflight(&statement).await }
+                })
+                .buffered(4)
+                .collect::<Vec<_>>();
+            let preflights = tokio::select! {
+                _ = preflight_cancel.cancelled() => return,
+                preflights = work => preflights,
+            };
+            let _ = tx.send(AppMessage::ProductionGuarded {
+                tab_id,
+                conn_id,
+                sql,
+                preflights,
+            });
+        });
+    }
+
     /// Run the SQL of the tab at `idx` against its bound connection.
     pub(super) fn start_query_for(&mut self, idx: usize) {
         let Some(tab) = self.tabs.get(idx) else {

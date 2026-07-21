@@ -165,7 +165,13 @@ impl DbGuiApp {
             }
             Action::RefreshErd => self.refresh_diagram_tab(self.active_query_tab),
             Action::ShowTableDiagram { schema, table } => {
-                if let Some(active) = self.active() {
+                let metadata_loading = self.active().is_some_and(|active| {
+                    self.connection_jobs.contains(&active.config_id)
+                        && !self.schema_cache.contains_key(&active.config_id)
+                });
+                if metadata_loading {
+                    self.status_msg = "Loading table relationships…".to_string();
+                } else if let Some(active) = self.active() {
                     let erd = crate::erd::ErDiagram::build_focused(
                         &active.config_id,
                         &active.schema,
@@ -255,9 +261,29 @@ impl DbGuiApp {
                 }
                 // A production connection holds destructive SQL for confirmation first.
                 if self.tab_connection_is_production(idx) {
-                    let found = dbcore::safety::dangerous_statements(&self.tabs[idx].sql);
+                    let Some(kind) = self.tabs[idx]
+                        .conn_id
+                        .as_deref()
+                        .and_then(|id| {
+                            self.active_connections
+                                .iter()
+                                .find(|connection| connection.config_id == id)
+                        })
+                        .map(|connection| connection.db.kind())
+                    else {
+                        self.error =
+                            Some("Production Guardian requires an active connection.".into());
+                        return;
+                    };
+                    let sql = self.tabs[idx].sql.trim().to_string();
+                    let found = dbcore::safety::dangerous_statements(kind, &sql);
                     if !found.is_empty() {
-                        self.danger_pending = Some(found);
+                        self.start_production_guard(
+                            idx,
+                            sql,
+                            found,
+                            ProductionGuardContinuation::Query,
+                        );
                         return;
                     }
                 }
@@ -270,11 +296,87 @@ impl DbGuiApp {
                 }
             }
             Action::ConfirmDangerQuery => {
-                if self.danger_pending.take().is_some() {
-                    self.start_query_for(self.active_query_tab);
+                let Some(pending) = self.danger_pending.as_ref() else {
+                    return;
+                };
+                if !pending.can_confirm() {
+                    self.error = Some(
+                        "Production Guardian checks must finish and the confirmation must match."
+                            .to_string(),
+                    );
+                    return;
+                }
+                let Some(idx) = self.tabs.iter().position(|tab| tab.id == pending.tab_id) else {
+                    self.error = Some("The guarded query tab no longer exists.".to_string());
+                    let pending = self.danger_pending.take().expect("guardian checked above");
+                    self.record_guard_decision(&pending, "invalidated");
+                    if matches!(pending.continuation, ProductionGuardContinuation::Edits) {
+                        self.commit_pending = None;
+                    }
+                    return;
+                };
+                let source_unchanged = match pending.continuation {
+                    ProductionGuardContinuation::Query => self.tabs[idx].sql.trim() == pending.sql,
+                    ProductionGuardContinuation::Edits => self
+                        .commit_pending
+                        .as_ref()
+                        .is_some_and(|statements| statements.join("\n") == pending.sql),
+                    ProductionGuardContinuation::Schema => self
+                        .schema_pending
+                        .as_ref()
+                        .is_some_and(|statements| statements.join("\n") == pending.sql),
+                };
+                let unchanged = source_unchanged
+                    && self.tabs[idx].conn_id.as_deref() == Some(pending.conn_id.as_str())
+                    && self.tab_connection_is_production(idx)
+                    && !self.tab_connection_is_read_only(idx)
+                    && self
+                        .active_connections
+                        .iter()
+                        .any(|connection| connection.config_id == pending.conn_id);
+                if !unchanged {
+                    self.error = Some(
+                        "The query, connection, or production setting changed. Analyze it again."
+                            .to_string(),
+                    );
+                    let pending = self.danger_pending.take().expect("guardian checked above");
+                    self.record_guard_decision(&pending, "invalidated");
+                    if matches!(pending.continuation, ProductionGuardContinuation::Edits) {
+                        self.commit_pending = None;
+                    }
+                    return;
+                }
+                let pending = self.danger_pending.take().expect("guardian checked above");
+                if !self.record_guard_decision(&pending, "confirmed") {
+                    self.danger_pending = Some(pending);
+                    return;
+                }
+                // Staged-edit and schema continuations operate on the active tab. Restore the
+                // guarded tab explicitly in case selection changed while preflight was running.
+                self.active_query_tab = idx;
+                match pending.continuation {
+                    ProductionGuardContinuation::Query => self.start_query_for(idx),
+                    ProductionGuardContinuation::Edits => self.confirm_edits(),
+                    ProductionGuardContinuation::Schema => self.apply_schema_confirmed(),
                 }
             }
-            Action::CancelDangerQuery => self.danger_pending = None,
+            Action::SetDangerConfirmation(value) => {
+                if let Some(pending) = &mut self.danger_pending {
+                    pending.confirmation = value;
+                }
+            }
+            Action::CancelDangerQuery => {
+                if let Some(pending) = self.danger_pending.take() {
+                    pending.preflight_cancel.cancel();
+                    self.record_guard_decision(&pending, "cancelled");
+                    if matches!(pending.continuation, ProductionGuardContinuation::Edits) {
+                        // Keep the staged cell edits, but drop the reviewed SQL snapshot so
+                        // cancelling Guardian cannot reveal the legacy preview underneath it.
+                        self.commit_pending = None;
+                    }
+                }
+                self.status_msg = "Production query cancelled".to_string();
+            }
             Action::BeautifySql => self.beautify_sql(),
             Action::OpenTable {
                 sql,
@@ -334,10 +436,19 @@ impl DbGuiApp {
             }
             Action::ConfirmImport => self.confirm_import(),
             Action::CancelImport => self.import_pending = None,
-            Action::PreviewEdits => self.commit_edits(),
+            Action::PreviewEdits => {
+                self.commit_edits();
+                self.start_pending_edits_guard(self.active_query_tab);
+            }
             Action::Undo => self.undo_edits(),
             Action::Redo => self.redo_edits(),
-            Action::ConfirmEdits => self.confirm_edits(),
+            Action::ConfirmEdits => {
+                let idx = self.active_query_tab;
+                if self.start_pending_edits_guard(idx) {
+                    return;
+                }
+                self.confirm_edits();
+            }
             Action::CancelEdits => {
                 self.commit_pending = None;
             }
@@ -570,35 +681,27 @@ impl DbGuiApp {
                     self.refuse_read_only("schema changes can't be applied.");
                     return;
                 }
-                let Some(stmts) = self.schema_pending.take() else {
-                    return;
-                };
-                let Some((db, conn_id)) =
-                    self.active().map(|a| (a.db.clone(), a.config_id.clone()))
-                else {
-                    return;
-                };
-                let n = stmts.len();
-                let tab_id = self.tab().id;
-                let tx = self.tx.clone();
-                self.busy = Busy::Querying;
-                self.error = None;
-                self.status_msg = format!("Applying {n} DDL statement(s)…");
-                self.rt.spawn(async move {
-                    let start = std::time::Instant::now();
-                    let result = db
-                        .execute_transaction(&stmts)
-                        .await
-                        .map(|_| format!("Schema migration applied ({n} statement(s))"))
-                        .map_err(|e| e.to_string());
-                    let _ = tx.send(AppMessage::SchemaApplied {
-                        tab_id,
-                        conn_id,
-                        sql: stmts.join("\n"),
-                        elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
-                        result,
-                    });
-                });
+                let idx = self.active_query_tab;
+                if self.tab_connection_is_production(idx) {
+                    let Some(statements) = self.schema_pending.as_ref() else {
+                        return;
+                    };
+                    let sql = statements.join("\n");
+                    let Some(kind) = self.active().map(|active| active.db.kind()) else {
+                        return;
+                    };
+                    let found = dbcore::safety::dangerous_statements(kind, &sql);
+                    if !found.is_empty() {
+                        self.start_production_guard(
+                            idx,
+                            sql,
+                            found,
+                            ProductionGuardContinuation::Schema,
+                        );
+                        return;
+                    }
+                }
+                self.apply_schema_confirmed();
             }
             Action::CancelSchema => {
                 if self.schema_pending.is_some() {
@@ -634,5 +737,71 @@ impl DbGuiApp {
             }
             Action::DismissWhatsNew => self.show_whats_new = false,
         }
+    }
+
+    /// Start the single production confirmation for a staged UPDATE/DELETE transaction.
+    /// INSERT-only previews keep the ordinary transaction review dialog.
+    fn start_pending_edits_guard(&mut self, idx: usize) -> bool {
+        if !self.tab_connection_is_production(idx) || self.tab_connection_is_read_only(idx) {
+            return false;
+        }
+        let Some(statements) = self.commit_pending.as_ref() else {
+            return false;
+        };
+        let sql = statements.join("\n");
+        let Some(kind) = self.tabs[idx]
+            .conn_id
+            .as_deref()
+            .and_then(|conn_id| {
+                self.active_connections
+                    .iter()
+                    .find(|connection| connection.config_id == conn_id)
+            })
+            .map(|connection| connection.db.kind())
+        else {
+            return false;
+        };
+        let found = dbcore::safety::dangerous_statements(kind, &sql);
+        if found.is_empty() {
+            return false;
+        }
+        self.start_production_guard(idx, sql, found, ProductionGuardContinuation::Edits);
+        true
+    }
+
+    /// Execute DDL that has already passed read-only checks, preview, and (for production)
+    /// Production Guardian. Kept separate so Guardian confirmation cannot recurse into itself.
+    fn apply_schema_confirmed(&mut self) {
+        if self.tab_connection_is_read_only(self.active_query_tab) {
+            self.refuse_read_only("schema changes can't be applied.");
+            return;
+        }
+        let Some(stmts) = self.schema_pending.take() else {
+            return;
+        };
+        let Some((db, conn_id)) = self.active().map(|a| (a.db.clone(), a.config_id.clone())) else {
+            return;
+        };
+        let n = stmts.len();
+        let tab_id = self.tab().id;
+        let tx = self.tx.clone();
+        self.busy = Busy::Querying;
+        self.error = None;
+        self.status_msg = format!("Applying {n} DDL statement(s)…");
+        self.rt.spawn(async move {
+            let start = std::time::Instant::now();
+            let result = db
+                .execute_transaction(&stmts)
+                .await
+                .map(|_| format!("Schema migration applied ({n} statement(s))"))
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AppMessage::SchemaApplied {
+                tab_id,
+                conn_id,
+                sql: stmts.join("\n"),
+                elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
+                result,
+            });
+        });
     }
 }

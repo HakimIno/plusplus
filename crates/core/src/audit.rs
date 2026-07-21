@@ -7,7 +7,8 @@
 //! One JSON Lines file per month (`<config>/audit/audit-YYYY-MM.jsonl`), append-only.
 //! Entries never contain secrets: passwords live in the OS keychain and are not part of
 //! any event. Statement text *is* recorded (it can contain data values), so the audit
-//! log can be disabled entirely in Settings for sensitive work.
+//! general audit log can be disabled in Settings for sensitive work. Production Guardian
+//! events remain mandatory so a destructive production action is never unaudited.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -25,6 +26,8 @@ pub enum AuditAction {
     Connect,
     /// A user-initiated statement or batch.
     Query,
+    /// Production Guardian review decision made before a destructive query.
+    ProductionGuard,
     /// Staged in-grid edits committed as a transaction.
     EditCommit,
     /// A schema migration (DDL) applied from the structure editor.
@@ -51,6 +54,9 @@ pub struct AuditEntry {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Structured human-readable context for non-query events such as guardian decisions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
     /// Rows returned or affected, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows: Option<u64>,
@@ -101,7 +107,8 @@ fn append_at(path: &Path, entry: &AuditEntry) -> Result<()> {
     if file.metadata().map(|m| m.len()).unwrap_or(0) > 0 {
         file.write_all(b"\n").map_err(|e| io_err(path, e))?;
     }
-    file.write_all(&line).map_err(|e| io_err(path, e))
+    file.write_all(&line).map_err(|e| io_err(path, e))?;
+    file.sync_data().map_err(|e| io_err(path, e))
 }
 
 fn load_at(path: &Path, limit: usize) -> Result<Vec<AuditEntry>> {
@@ -146,6 +153,7 @@ mod tests {
             sql: sql.into(),
             ok,
             error: (!ok).then(|| "permission denied".into()),
+            details: None,
             rows: ok.then_some(1),
             elapsed_ms: 0.4,
         }
@@ -196,5 +204,9 @@ mod tests {
 
         let line = serde_json::to_string(&entry(AuditAction::Import, "-- IMPORT…", true)).unwrap();
         assert!(line.contains("\"action\":\"import\""));
+
+        let line =
+            serde_json::to_string(&entry(AuditAction::ProductionGuard, "DELETE…", true)).unwrap();
+        assert!(line.contains("\"action\":\"production_guard\""));
     }
 }
