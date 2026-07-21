@@ -43,6 +43,7 @@ queries or results to a third party.
 ### Built for everyday database work
 
 - **Explore quickly.** Filter tables, columns, keys, indexes, views, routines, and triggers; preview rows with one click.
+- **Design once, target any connection.** Edit ER models, keep them as portable JSON, and preview dialect-specific DDL before applying it to PostgreSQL, MySQL/MariaDB, SQL Server, or SQLite.
 - **Keep working during long operations.** Queries, counts, and exports run away from the UI thread.
 - **Edit deliberately.** Cell edits, inserted rows, and deletions remain staged until you save or discard them.
 - **Move complete datasets.** Stream table exports to CSV or JSON without loading the whole table into memory.

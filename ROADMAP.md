@@ -15,7 +15,7 @@ work items.
 
 ## Next — workflow depth
 
-- Finish and enable the ER diagram after interaction and layout quality meet the release bar ([#5](https://github.com/HakimIno/plusplus/issues/5)).
+- Continue hardening the editable ER designer and cross-database forward engineering ([#5](https://github.com/HakimIno/plusplus/issues/5)).
 - Improve explain-plan inspection and database-specific query diagnostics.
 - Expand keyboard navigation and accessibility coverage ([#6](https://github.com/HakimIno/plusplus/issues/6)).
 - Add safe backup/restore hand-offs where the native database tools are available.

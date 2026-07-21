@@ -170,6 +170,219 @@ impl DbGuiApp {
                 }
             }
             Action::RefreshErd => self.refresh_diagram_tab(self.active_query_tab),
+            Action::ShowDatabaseDiagram => {
+                let metadata_loading = self.active().is_some_and(|active| {
+                    self.connection_jobs.contains(&active.config_id)
+                        && !self.schema_cache.contains_key(&active.config_id)
+                });
+                if metadata_loading {
+                    self.status_msg = "Loading schema relationships…".to_string();
+                } else if let Some(active) = self.active() {
+                    let diagram = crate::erd::ErDiagram::build(&active.config_id, &active.schema);
+                    self.open_diagram_tab(active.schema.database_name.clone(), diagram);
+                } else {
+                    self.error = Some("Connect to a database to open its diagram.".into());
+                }
+            }
+            Action::ImportErd => {
+                let Some(conn_id) = self.active().map(|active| active.config_id.clone()) else {
+                    self.error = Some("Connect to a target database before importing an ER design.".into());
+                    return;
+                };
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter("PlusPlus ER design", &["json"])
+                    .pick_file()
+                else {
+                    return;
+                };
+                match std::fs::read_to_string(&path)
+                    .map_err(|error| error.to_string())
+                    .and_then(|json| dbcore::ErDesign::from_json(&json))
+                {
+                    Ok(design) => {
+                        let title = design.name.clone();
+                        let diagram = crate::erd::ErDiagram::build_design(&conn_id, design);
+                        self.open_diagram_tab(title, diagram);
+                        self.status_msg = format!("Imported ER design from {}", path.display());
+                    }
+                    Err(error) => self.error = Some(format!("Could not import ER design: {error}")),
+                }
+            }
+            Action::ExportErd => {
+                let Some(design) = self.tab().diagram.as_ref().map(|erd| {
+                    let mut design = erd.design.clone();
+                    for (table, node) in design.tables.iter_mut().zip(&erd.nodes) {
+                        table.layout_x = Some(node.pos.x);
+                        table.layout_y = Some(node.pos.y);
+                    }
+                    design
+                }) else {
+                    return;
+                };
+                let file_name = format!(
+                    "{}.plusplus-er.json",
+                    design
+                        .name
+                        .chars()
+                        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '_' })
+                        .collect::<String>()
+                );
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter("PlusPlus ER design", &["json"])
+                    .set_file_name(&file_name)
+                    .save_file()
+                else {
+                    return;
+                };
+                match design
+                    .to_json_pretty()
+                    .and_then(|json| std::fs::write(&path, json).map_err(|error| error.to_string()))
+                {
+                    Ok(()) => self.status_msg = format!("ER design saved to {}", path.display()),
+                    Err(error) => self.error = Some(format!("Could not export ER design: {error}")),
+                }
+            }
+            Action::ForwardEngineerErd => {
+                if self.tab_connection_is_read_only(self.active_query_tab) {
+                    self.refuse_read_only("an ER design can't be forward-engineered.");
+                    return;
+                }
+                let Some(active) = self.active() else {
+                    self.error = Some("Connect this diagram to a target database first.".into());
+                    return;
+                };
+                let kind = active.db.kind();
+                let target_schema = active
+                    .schema
+                    .tables
+                    .first()
+                    .and_then(|table| table.schema.clone())
+                    .or_else(|| match kind {
+                        DbKind::Postgres => Some("public".into()),
+                        DbKind::SqlServer => Some("dbo".into()),
+                        _ => None,
+                    });
+                let design = self.tab().diagram.as_ref().map(|erd| erd.design.clone());
+                match design.expect("diagram action requires a diagram").forward_ddl(
+                    kind,
+                    target_schema.as_deref(),
+                ) {
+                    Ok(statements) if statements.is_empty() => {
+                        self.error = Some("Add at least one table before forward engineering.".into());
+                    }
+                    Ok(statements) => {
+                        self.schema_pending = Some(statements);
+                        self.error = None;
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
+            Action::AddErdTable => {
+                let kind = self.active().map(|active| active.db.kind()).unwrap_or(DbKind::Sqlite);
+                let default_schema = self
+                    .tab()
+                    .diagram
+                    .as_ref()
+                    .and_then(|erd| erd.design.tables.first())
+                    .and_then(|table| table.schema.clone());
+                self.tab_mut().schema_editor = Some(ObjectEditor::Table(
+                    SchemaEditor::design_table(None, kind, default_schema.as_deref()),
+                ));
+                self.tab_mut().design_edit_index = Some(None);
+            }
+            Action::EditErdTable(table_index) => {
+                let kind = self.active().map(|active| active.db.kind()).unwrap_or(DbKind::Sqlite);
+                let table = self
+                    .tab()
+                    .diagram
+                    .as_ref()
+                    .and_then(|erd| erd.design.tables.get(table_index))
+                    .cloned();
+                let Some(table) = table else { return };
+                self.tab_mut().schema_editor = Some(ObjectEditor::Table(
+                    SchemaEditor::design_table(Some(&table), kind, None),
+                ));
+                self.tab_mut().design_edit_index = Some(Some(table_index));
+            }
+            Action::SaveErdTable => {
+                let edit_index = self.tab().design_edit_index.flatten();
+                let table = match self.tab().schema_editor.as_ref() {
+                    Some(ObjectEditor::Table(editor)) => editor.to_design_table(),
+                    _ => return,
+                };
+                let Ok(mut table) = table else {
+                    self.error = table.err();
+                    return;
+                };
+                let Some(old) = self.tab_mut().diagram.take() else { return };
+                let mut next_design = old.design.clone();
+                if let Some(index) = edit_index {
+                    if let Some(node) = old.nodes.get(index) {
+                        table.layout_x = Some(node.pos.x);
+                        table.layout_y = Some(node.pos.y);
+                    }
+                }
+                let old_name = edit_index
+                    .and_then(|index| old.design.tables.get(index))
+                    .map(|table| (table.schema.clone(), table.name.clone()));
+                if let Some(index) = edit_index {
+                    if index >= next_design.tables.len() {
+                        self.tab_mut().diagram = Some(old);
+                        return;
+                    }
+                    next_design.tables[index] = table.clone();
+                } else {
+                    next_design.tables.push(table.clone());
+                }
+                if let Some((old_schema, old_table)) = old_name {
+                    if old_table != table.name || old_schema != table.schema {
+                        for candidate in &mut next_design.tables {
+                            for fk in &mut candidate.foreign_keys {
+                                if fk.ref_table == old_table
+                                    && (fk.ref_schema.is_none() || fk.ref_schema == old_schema)
+                                {
+                                    fk.ref_table = table.name.clone();
+                                    fk.ref_schema = table.schema.clone();
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Err(error) = next_design.validate() {
+                    self.tab_mut().diagram = Some(old);
+                    self.error = Some(error);
+                    return;
+                }
+                let mut fresh = crate::erd::ErDiagram::build_design(&old.conn_id, next_design);
+                fresh.scene_rect = old.scene_rect;
+                for node in &mut fresh.nodes {
+                    if let Some(previous) = old.nodes.iter().find(|old_node| old_node.title == node.title) {
+                        node.pos = previous.pos;
+                    }
+                }
+                self.tab_mut().diagram = Some(fresh);
+                self.tab_mut().schema_editor = None;
+                self.tab_mut().design_edit_index = None;
+                self.status_msg = "ER design updated".into();
+                self.error = None;
+            }
+            Action::DeleteErdTable(table_index) => {
+                let Some(mut old) = self.tab_mut().diagram.take() else { return };
+                if table_index >= old.design.tables.len() {
+                    self.tab_mut().diagram = Some(old);
+                    return;
+                }
+                let removed = old.design.tables.remove(table_index);
+                for table in &mut old.design.tables {
+                    table.foreign_keys.retain(|fk| {
+                        !(fk.ref_table == removed.name
+                            && (fk.ref_schema.is_none() || fk.ref_schema == removed.schema))
+                    });
+                }
+                let fresh = crate::erd::ErDiagram::build_design(&old.conn_id, old.design);
+                self.tab_mut().diagram = Some(fresh);
+                self.status_msg = format!("Removed '{}' from the ER design", removed.name);
+            }
             Action::ShowTableDiagram { schema, table } => {
                 let metadata_loading = self.active().is_some_and(|active| {
                     self.connection_jobs.contains(&active.config_id)
@@ -241,6 +454,17 @@ impl DbGuiApp {
                 }
             }
             Action::RunQuery => {
+                // The Run button is disabled while busy, but the Cmd+Enter / Cmd+R shortcuts
+                // land here unconditionally. Refuse instead of silently racing a second run
+                // against the one in flight (or against a connect/import in progress).
+                if self.busy != Busy::Idle {
+                    self.status_msg = if self.busy == Busy::Querying {
+                        "A query is already running — cancel it first to run again.".to_string()
+                    } else {
+                        "Busy — wait for the current operation to finish.".to_string()
+                    };
+                    return;
+                }
                 let idx = self.active_query_tab;
                 // Editability is re-derived from the SQL itself on every run: any simple
                 // single-table `SELECT *` — including a hand-tuned LIMIT/WHERE/ORDER BY —
@@ -714,6 +938,7 @@ impl DbGuiApp {
                     self.schema_pending = None;
                 } else {
                     self.tab_mut().schema_editor = None;
+                    self.tab_mut().design_edit_index = None;
                 }
             }
             Action::OpenUpdateDialog => self.update_dialog_open = true,

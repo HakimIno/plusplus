@@ -143,9 +143,14 @@ pub trait Database: Send + Sync {
 }
 
 /// First keywords that mark a statement as row-returning, for the common SQL dialects.
+/// `call` is included because stored procedures return result sets on MySQL/MariaDB (and
+/// may on Postgres); a `CALL` that returns nothing just streams zero rows, which is harmless.
 pub(crate) const ROW_KEYWORDS: &[&str] = &[
-    "select", "with", "show", "describe", "desc", "pragma", "explain", "values", "table",
+    "select", "with", "show", "describe", "desc", "pragma", "explain", "values", "table", "call",
 ];
+
+/// Leading DML keywords that may carry a `RETURNING` clause (Postgres, SQLite, MariaDB).
+const RETURNING_DML: &[&str] = &["insert", "update", "delete", "replace"];
 
 /// Heuristic: does this SQL batch return rows? Used to pick `fetch_all` vs `execute`.
 ///
@@ -168,6 +173,9 @@ pub(crate) fn statements_return_rows(sql: &str, keywords: &[&str]) -> bool {
 
 /// Does a single statement start with one of `keywords`? Leading whitespace, comments, and
 /// `(` (as in a parenthesised `SELECT`) are skipped before reading the first keyword.
+///
+/// DML with a `RETURNING` clause is also row-returning: `INSERT … RETURNING id` must go
+/// through the fetch path or its rows are silently dropped.
 fn statement_returns_rows(stmt: &str, keywords: &[&str]) -> bool {
     let head = skip_leading_noise(stmt);
     let first = head
@@ -175,7 +183,136 @@ fn statement_returns_rows(stmt: &str, keywords: &[&str]) -> bool {
         .next()
         .unwrap_or("")
         .to_ascii_lowercase();
-    keywords.contains(&first.as_str())
+    if keywords.contains(&first.as_str()) {
+        return true;
+    }
+    RETURNING_DML.contains(&first.as_str()) && has_top_level_returning(head)
+}
+
+/// Is `b` a byte that can continue a SQL identifier? Non-ASCII bytes count as identifier
+/// characters (conservative: fewer false keyword matches inside exotic identifiers).
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80
+}
+
+/// Lexical scan for a `RETURNING` keyword outside string literals, quoted identifiers,
+/// comments, and dollar-quoted bodies. `RETURNING` is reserved in the dialects that support
+/// the clause, so an unquoted, word-bounded match is in practice always the clause itself.
+fn has_top_level_returning(sql: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let n = bytes.len();
+    let mut i = 0usize;
+    while i < n {
+        match bytes[i] {
+            quote @ (b'\'' | b'"' | b'`') => i = skip_quoted(bytes, i, quote),
+            b'[' => i = skip_bracketed(bytes, i),
+            b'-' if i + 1 < n && bytes[i + 1] == b'-' => {
+                i += 2;
+                while i < n && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if i + 1 < n && bytes[i + 1] == b'*' => i = skip_block(bytes, i),
+            b'$' => match skip_dollar_quote(bytes, i) {
+                Some(end) => i = end,
+                None => i += 1,
+            },
+            b'r' | b'R' => {
+                let word_start = i == 0 || !is_ident_byte(bytes[i - 1]);
+                if word_start
+                    && i + 9 <= n
+                    && bytes[i..i + 9].eq_ignore_ascii_case(b"returning")
+                    && (i + 9 == n || !is_ident_byte(bytes[i + 9]))
+                {
+                    return true;
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    false
+}
+
+/// Consume a `quote`-delimited literal starting at `i` (where `bytes[i] == quote`); a doubled
+/// quote escapes the delimiter. Returns the index just past the closing quote.
+fn skip_quoted(bytes: &[u8], mut i: usize, quote: u8) -> usize {
+    let n = bytes.len();
+    i += 1;
+    while i < n {
+        if bytes[i] == quote {
+            if i + 1 < n && bytes[i + 1] == quote {
+                i += 2;
+                continue;
+            }
+            return i + 1;
+        }
+        i += 1;
+    }
+    n
+}
+
+/// Consume a SQL Server `[bracket]` identifier starting at `i`; `]]` escapes a literal `]`.
+fn skip_bracketed(bytes: &[u8], mut i: usize) -> usize {
+    let n = bytes.len();
+    i += 1;
+    while i < n {
+        if bytes[i] == b']' {
+            if i + 1 < n && bytes[i + 1] == b']' {
+                i += 2;
+                continue;
+            }
+            return i + 1;
+        }
+        i += 1;
+    }
+    n
+}
+
+/// Consume a (possibly nested, per T-SQL) `/* … */` block comment starting at `i`.
+fn skip_block(bytes: &[u8], mut i: usize) -> usize {
+    let n = bytes.len();
+    i += 2;
+    let mut depth = 1u32;
+    while i < n && depth > 0 {
+        if bytes[i] == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
+            depth += 1;
+            i += 2;
+        } else if bytes[i] == b'*' && i + 1 < n && bytes[i + 1] == b'/' {
+            depth -= 1;
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    i
+}
+
+/// If `bytes[i..]` starts a Postgres dollar-quoted string (`$tag$ … $tag$`), return the index
+/// just past its closing delimiter (or `bytes.len()` if unterminated). `None` when this `$`
+/// does not open a dollar quote — e.g. a positional parameter (`$1`), whose tag would start
+/// with a digit, or a lone `$` inside an identifier.
+fn skip_dollar_quote(bytes: &[u8], i: usize) -> Option<usize> {
+    let n = bytes.len();
+    let mut j = i + 1;
+    while j < n && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+        j += 1;
+    }
+    if j >= n || bytes[j] != b'$' {
+        return None;
+    }
+    if bytes[i + 1].is_ascii_digit() {
+        return None; // `$1$…` is far more likely a positional parameter than a tag
+    }
+    let delim = &bytes[i..=j];
+    let mut k = j + 1;
+    while k + delim.len() <= n {
+        if &bytes[k..k + delim.len()] == delim {
+            return Some(k + delim.len());
+        }
+        k += 1;
+    }
+    Some(n)
 }
 
 /// Strip leading whitespace, line/block comments, and `(` from a statement so the next token
@@ -202,31 +339,14 @@ pub(crate) fn skip_leading_noise(stmt: &str) -> &str {
 /// Consume a leading `/* ... */` block comment (T-SQL allows nesting) and return the rest.
 /// `s` must start with `/*`. If the comment is unterminated, returns `""`.
 fn skip_block_comment(s: &str) -> &str {
-    let bytes = s.as_bytes();
-    let mut i = 2; // past the opening "/*"
-    let mut depth = 1u32;
-    while i + 1 < bytes.len() && depth > 0 {
-        match (bytes[i], bytes[i + 1]) {
-            (b'/', b'*') => {
-                depth += 1;
-                i += 2;
-            }
-            (b'*', b'/') => {
-                depth -= 1;
-                i += 2;
-            }
-            _ => i += 1,
-        }
-    }
-    if depth == 0 {
-        &s[i..]
-    } else {
-        ""
-    }
+    // The end index is either `s.len()` or just past an ASCII `*/`, so it is always a
+    // valid char boundary.
+    &s[skip_block(s.as_bytes(), 0)..]
 }
 
 /// Split a SQL batch into its individual statements on top-level `;`, ignoring semicolons
-/// inside string literals, quoted identifiers, and comments. Returned slices are trimmed and
+/// inside string literals, quoted identifiers, comments, and dollar-quoted bodies (a Postgres
+/// `CREATE FUNCTION … $$ … ; … $$` stays one statement). Returned slices are trimmed and
 /// empty statements are dropped. This is a lexical split only — it does not parse or validate
 /// SQL — but it's robust enough to classify the statements in a batch.
 pub(crate) fn split_statements(sql: &str) -> Vec<&str> {
@@ -241,35 +361,9 @@ pub(crate) fn split_statements(sql: &str) -> Vec<&str> {
     while i < n {
         match bytes[i] {
             // String literal or quoted identifier; a doubled quote escapes the delimiter.
-            quote @ (b'\'' | b'"' | b'`') => {
-                i += 1;
-                while i < n {
-                    if bytes[i] == quote {
-                        if i + 1 < n && bytes[i + 1] == quote {
-                            i += 2; // escaped quote, stay inside the literal
-                            continue;
-                        }
-                        i += 1;
-                        break;
-                    }
-                    i += 1;
-                }
-            }
+            quote @ (b'\'' | b'"' | b'`') => i = skip_quoted(bytes, i, quote),
             // SQL Server bracket identifier; `]]` escapes a literal `]`.
-            b'[' => {
-                i += 1;
-                while i < n {
-                    if bytes[i] == b']' {
-                        if i + 1 < n && bytes[i + 1] == b']' {
-                            i += 2;
-                            continue;
-                        }
-                        i += 1;
-                        break;
-                    }
-                    i += 1;
-                }
-            }
+            b'[' => i = skip_bracketed(bytes, i),
             // Line comment, runs to end of line.
             b'-' if i + 1 < n && bytes[i + 1] == b'-' => {
                 i += 2;
@@ -278,21 +372,12 @@ pub(crate) fn split_statements(sql: &str) -> Vec<&str> {
                 }
             }
             // Block comment, which T-SQL allows to nest.
-            b'/' if i + 1 < n && bytes[i + 1] == b'*' => {
-                i += 2;
-                let mut depth = 1u32;
-                while i < n && depth > 0 {
-                    if bytes[i] == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
-                        depth += 1;
-                        i += 2;
-                    } else if bytes[i] == b'*' && i + 1 < n && bytes[i + 1] == b'/' {
-                        depth -= 1;
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
-                }
-            }
+            b'/' if i + 1 < n && bytes[i + 1] == b'*' => i = skip_block(bytes, i),
+            // Postgres dollar-quoted string: `$tag$ … $tag$`.
+            b'$' => match skip_dollar_quote(bytes, i) {
+                Some(end) => i = end,
+                None => i += 1,
+            },
             b';' => {
                 statements.push(sql[start..i].trim());
                 i += 1;
@@ -429,5 +514,39 @@ mod tests {
         let mssql = &["select", "exec", "execute"];
         assert!(statements_return_rows("EXEC sp_helpindex 'dbo.t'", mssql));
         assert!(!returns_rows("EXEC sp_helpindex 'dbo.t'"));
+    }
+
+    #[test]
+    fn dollar_quoted_bodies_do_not_split() {
+        // The classic trap: a function body full of semicolons must stay one statement.
+        let sql = "CREATE FUNCTION f() RETURNS void AS $$ BEGIN UPDATE t SET a = 1; DELETE FROM u; END $$ LANGUAGE plpgsql";
+        assert_eq!(split_statements(sql).len(), 1);
+        // Tagged form, plus a real second statement after it.
+        let tagged = "CREATE FUNCTION f() AS $body$ SELECT 1; $body$ LANGUAGE sql; SELECT 2";
+        assert_eq!(split_statements(tagged).len(), 2);
+        // A lone `$` or a positional parameter must not swallow the rest of the batch.
+        assert_eq!(split_statements("SELECT '$'; SELECT 1").len(), 2);
+        assert_eq!(split_statements("SELECT $1; SELECT 2").len(), 2);
+    }
+
+    #[test]
+    fn returning_dml_takes_the_row_path() {
+        assert!(returns_rows("INSERT INTO t (a) VALUES (1) RETURNING id"));
+        assert!(returns_rows("DELETE FROM t WHERE id = 1 RETURNING *"));
+        assert!(returns_rows("update t set a = 1 returning a"));
+        // Plain DML stays on the execute path.
+        assert!(!returns_rows("INSERT INTO t (a) VALUES (1)"));
+        // `returning` inside a literal or a quoted identifier is not the clause.
+        assert!(!returns_rows("INSERT INTO t (a) VALUES ('returning')"));
+        assert!(!returns_rows("UPDATE t SET \"returning\" = 1"));
+        // ...and inside an identifier word it does not match.
+        assert!(!returns_rows("UPDATE t SET not_returning_x = 1"));
+    }
+
+    #[test]
+    fn call_takes_the_row_path() {
+        // Stored procedures return result sets on MySQL/MariaDB; routing CALL through
+        // execute() would silently drop them.
+        assert!(returns_rows("CALL my_proc(1)"));
     }
 }

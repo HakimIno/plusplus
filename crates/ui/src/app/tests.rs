@@ -1015,6 +1015,7 @@ fn background_page_count_updates_only_the_matching_query() {
             tab_id,
             sql: "SELECT * FROM table_0 LIMIT 100;".into(),
             total: Some(12_345),
+            seq: app.query_seq,
         })
         .unwrap();
     app.poll_messages(&egui::Context::default());
@@ -1027,6 +1028,7 @@ fn background_page_count_updates_only_the_matching_query() {
             tab_id,
             sql: "SELECT * FROM table_0 LIMIT 100;".into(),
             total: Some(99_999),
+            seq: app.query_seq,
         })
         .unwrap();
     app.poll_messages(&egui::Context::default());
@@ -1973,6 +1975,52 @@ fn query_result_controls_sit_between_query_toolbar_and_grid() {
         .is_some());
 }
 
+/// A result arriving from a superseded run (the user started a newer query before the old
+/// one finished) must be dropped whole: whichever run finished last used to win, showing
+/// stale rows, clearing the newer run's busy flag, or surfacing an outdated error.
+#[test]
+fn superseded_query_result_never_touches_ui_state() {
+    let mut app = DbGuiApp::construct();
+    let tab_id = app.tab().id;
+    // A newer run is in flight: its stamp (1) is ahead of the late result below (0).
+    app.query_seq = 1;
+    app.busy = Busy::Querying;
+    app.querying_tab_id = Some(tab_id);
+    app.tx
+        .send(AppMessage::Queried {
+            tab_id,
+            conn_id: String::new(),
+            sql: "SELECT 1".into(),
+            result: Err("stale failure".into()),
+            canceled: false,
+            seq: 0,
+        })
+        .unwrap();
+    app.poll_messages(&egui::Context::default());
+    assert_eq!(
+        app.busy,
+        Busy::Querying,
+        "a stale result must not clear the newer run's busy state"
+    );
+    assert_eq!(app.querying_tab_id, Some(tab_id));
+    assert!(
+        app.tab().query_error.is_none(),
+        "a stale failure must not surface on the tab"
+    );
+}
+
+/// Cmd+Enter / Cmd+R land in `RunQuery` unconditionally; while any operation is in flight
+/// they must refuse (with a status hint) instead of racing a second run against the first.
+#[test]
+fn run_query_is_refused_while_busy() {
+    let mut app = DbGuiApp::construct();
+    app.tab_mut().sql = "SELECT 1".into();
+    app.busy = Busy::Querying;
+    app.apply_action(Action::RunQuery);
+    assert_eq!(app.query_seq, 0, "no new run may start while one is in flight");
+    assert!(app.status_msg.contains("already running"));
+}
+
 #[test]
 fn query_failure_is_kept_on_its_tab_and_rendered_in_results() {
     use egui_kittest::kittest::Queryable;
@@ -1992,6 +2040,7 @@ fn query_failure_is_kept_on_its_tab_and_rendered_in_results() {
             sql: app.tab().sql.clone(),
             result: Err("no such column: missing_column".into()),
             canceled: false,
+            seq: app.query_seq,
         })
         .unwrap();
     app.poll_messages(&egui::Context::default());
@@ -3501,6 +3550,49 @@ fn connect_fake(app: &mut DbGuiApp, schema: SchemaTree) {
         schema,
     });
     app.tab_mut().conn_id = Some("c1".into());
+}
+
+#[test]
+fn full_erd_can_be_edited_and_forward_engineered() {
+    let mut app = DbGuiApp::construct();
+    app.connections.clear();
+    connect_fake(&mut app, fake_schema_with_fk());
+
+    app.apply_action(Action::ShowDatabaseDiagram);
+    assert_eq!(app.tab().kind, crate::components::QueryTabKind::Diagram);
+    assert_eq!(app.tab().diagram.as_ref().unwrap().design.tables.len(), 3);
+
+    // Rename the referenced table in the portable editor. Incoming FK references must follow
+    // the rename so the design remains valid and its diagram can be rebuilt.
+    app.apply_action(Action::EditErdTable(0));
+    let Some(ObjectEditor::Table(editor)) = app.tab_mut().schema_editor.as_mut() else {
+        panic!("ER table editor did not open");
+    };
+    editor.table_name = "accounts".into();
+    app.apply_action(Action::SaveErdTable);
+
+    let design = &app.tab().diagram.as_ref().unwrap().design;
+    assert_eq!(design.tables[0].name, "accounts");
+    assert_eq!(design.tables[1].foreign_keys[0].ref_table, "accounts");
+    assert!(app.tab().schema_editor.is_none());
+
+    // A rejected edit must not leak into the canvas if the user cancels afterward.
+    app.apply_action(Action::EditErdTable(0));
+    let Some(ObjectEditor::Table(editor)) = app.tab_mut().schema_editor.as_mut() else {
+        panic!("ER table editor did not reopen");
+    };
+    editor.table_name = "table_1".into();
+    app.apply_action(Action::SaveErdTable);
+    assert!(app.error.as_deref().is_some_and(|error| error.contains("Duplicate table")));
+    app.apply_action(Action::CancelSchema);
+    assert_eq!(app.tab().diagram.as_ref().unwrap().design.tables[0].name, "accounts");
+
+    app.apply_action(Action::ForwardEngineerErd);
+    let ddl = app.schema_pending.as_ref().expect("DDL preview was not staged");
+    assert!(ddl.iter().any(|statement| statement.contains("CREATE TABLE \"accounts\"")));
+    assert!(ddl
+        .iter()
+        .any(|statement| statement.contains("REFERENCES \"accounts\"")));
 }
 
 /// A result over `field_0..field_{n-1}` (matching [`fake_schema`]'s column names) with one row.

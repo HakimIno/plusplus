@@ -47,6 +47,12 @@ pub enum CoreError {
     #[error("import error: {0}")]
     Import(String),
 
+    /// One statement of a multi-statement batch failed. Carries the 1-based position of the
+    /// failing statement so the user can locate it in the editor; statements before it have
+    /// already executed (the batch runs in autocommit, statement by statement).
+    #[error("statement {0} failed: {1}")]
+    Statement(usize, Box<CoreError>),
+
     /// The query was cancelled by the user (Cancel button). Carried as a distinct variant —
     /// not a generic failure — so the UI can show "Query cancelled" instead of a red error
     /// and skip recording it as a failed statement.

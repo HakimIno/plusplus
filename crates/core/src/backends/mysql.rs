@@ -8,7 +8,7 @@ use sqlx::mysql::{MySqlPool, MySqlPoolOptions, MySqlRow};
 use sqlx::{AssertSqlSafe, Column, ConnectOptions, Executor, Row, TypeInfo, ValueRef};
 use tokio_util::sync::CancellationToken;
 
-use crate::database::{returns_rows, Database};
+use crate::database::{returns_rows, split_statements, Database};
 use crate::error::{CoreError, Result};
 use crate::model::{
     ColumnInfo, ColumnMeta, ConnectionConfig, DbKind, ForeignKeyInfo, IndexInfo, ParamMode,
@@ -89,6 +89,94 @@ impl MySqlDb {
         let _ = sqlx::query(AssertSqlSafe(format!("KILL QUERY {conn_id}")))
             .execute(&self.pool)
             .await;
+    }
+
+    /// Run the statements of a multi-statement batch sequentially on one connection.
+    ///
+    /// `sqlx` does not enable `CLIENT_MULTI_STATEMENTS`, so sending the raw batch to the
+    /// server fails with a syntax error at the first `;` even when every statement is valid.
+    /// Statements run in autocommit order: the grid shows the last row-returning statement's
+    /// result (capped at `max_rows`), `rows_affected` sums the DML statements, and a failure
+    /// stops the batch — reported with its 1-based statement number, keeping what already ran.
+    async fn run_batch(
+        &self,
+        conn: &mut sqlx::pool::PoolConnection<sqlx::MySql>,
+        conn_id: u64,
+        statements: &[&str],
+        max_rows: usize,
+        cancel: &CancellationToken,
+    ) -> Result<QueryResult> {
+        use futures_util::TryStreamExt;
+        let start = Instant::now();
+        let mut columns: Vec<ColumnMeta> = Vec::new();
+        let mut rows: Vec<Vec<Value>> = Vec::new();
+        let mut truncated = false;
+        let mut affected: u64 = 0;
+        let mut saw_dml = false;
+        for (pos, stmt) in statements.iter().enumerate() {
+            let fail = |e: CoreError| match e {
+                CoreError::Canceled => CoreError::Canceled,
+                other => CoreError::Statement(pos + 1, Box::new(other)),
+            };
+            if returns_rows(stmt) {
+                let mut stmt_columns: Vec<ColumnMeta> = Vec::new();
+                let mut types: Vec<String> = Vec::new();
+                let mut stmt_rows: Vec<Vec<Value>> = Vec::new();
+                let mut stmt_truncated = false;
+                let mut stream = (&mut **conn).fetch(AssertSqlSafe(stmt.to_string()));
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            drop(stream);
+                            self.kill_query(conn_id).await;
+                            return Err(CoreError::Canceled);
+                        }
+                        row = stream.try_next() => {
+                            let Some(row) = row.map_err(|e| fail(e.into()))? else { break };
+                            if stmt_columns.is_empty() {
+                                stmt_columns = column_meta(&row);
+                                types = stmt_columns
+                                    .iter()
+                                    .map(|c| c.type_name.to_ascii_uppercase())
+                                    .collect();
+                            }
+                            if stmt_rows.len() >= max_rows {
+                                stmt_truncated = true;
+                                break;
+                            }
+                            stmt_rows.push(
+                                (0..stmt_columns.len()).map(|i| decode(&row, i, &types[i])).collect(),
+                            );
+                        }
+                    }
+                }
+                columns = stmt_columns;
+                rows = stmt_rows;
+                truncated = stmt_truncated;
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        self.kill_query(conn_id).await;
+                        return Err(CoreError::Canceled);
+                    }
+                    res = (&mut **conn).execute(AssertSqlSafe(stmt.to_string())) => {
+                        affected += res.map_err(|e| fail(e.into()))?.rows_affected();
+                        saw_dml = true;
+                    }
+                }
+            }
+        }
+        Ok(QueryResult {
+            columns,
+            rows,
+            stats: QueryStats {
+                elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
+                rows_affected: saw_dml.then_some(affected),
+            },
+            truncated,
+        })
     }
 }
 
@@ -408,6 +496,21 @@ impl Database for MySqlDb {
 
     async fn execute_capped(&self, sql: &str, max_rows: usize) -> Result<QueryResult> {
         use futures_util::TryStreamExt;
+        // Multi-statement batches must run statement by statement (see `run_batch`). The
+        // cancellation token is never fired here, so `conn_id` is only a placeholder.
+        let statements = split_statements(sql);
+        if statements.len() > 1 {
+            let mut conn = self.pool.acquire().await?;
+            return self
+                .run_batch(
+                    &mut conn,
+                    0,
+                    &statements,
+                    max_rows,
+                    &CancellationToken::new(),
+                )
+                .await;
+        }
         let start = Instant::now();
         if returns_rows(sql) {
             // Stream rows instead of fetch_all: a SELECT over a huge table materializes at
@@ -481,6 +584,15 @@ impl Database for MySqlDb {
         let conn_id: u64 = sqlx::query_scalar("SELECT CONNECTION_ID()")
             .fetch_one(&mut *conn)
             .await?;
+
+        // The driver can't send a multi-statement batch in one round trip; run it
+        // statement by statement instead of surfacing a misleading syntax error.
+        let statements = split_statements(sql);
+        if statements.len() > 1 {
+            return self
+                .run_batch(&mut conn, conn_id, &statements, max_rows, &cancel)
+                .await;
+        }
 
         if returns_rows(sql) {
             let mut stream = (&mut *conn).fetch(AssertSqlSafe(sql.to_string()));

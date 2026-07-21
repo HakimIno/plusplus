@@ -18,6 +18,7 @@ impl DbGuiApp {
             return;
         };
         let Some(conn_id) = tab.conn_id.clone() else {
+            self.error = Some("This tab is not bound to a connection.".to_string());
             return;
         };
         let Some(active) = self
@@ -29,6 +30,8 @@ impl DbGuiApp {
             return;
         };
         let Some(config) = self.connections.iter().find(|config| config.id == conn_id) else {
+            self.error =
+                Some("The saved connection for this tab no longer exists.".to_string());
             return;
         };
         let database = if !active.schema.database_name.is_empty() {
@@ -123,6 +126,15 @@ impl DbGuiApp {
             }
         };
         let tx = self.tx.clone();
+        // Supersede any run still in flight: cancel it and advance the generation stamp so
+        // its (or any earlier run's) late result cannot clobber this run's result or state.
+        // This point is only reached when the new run definitely starts — cancelling on an
+        // earlier bail-out path would strand `busy` with no message left to reset it.
+        if let Some(previous) = self.query_cancel.take() {
+            previous.cancel();
+        }
+        self.query_seq += 1;
+        let seq = self.query_seq;
         let cancel = tokio_util::sync::CancellationToken::new();
         self.query_cancel = Some(cancel.clone());
         self.busy = Busy::Querying;
@@ -152,6 +164,7 @@ impl DbGuiApp {
                     tab_id,
                     sql: count_query_sql,
                     total,
+                    seq,
                 });
             });
         } else {
@@ -170,6 +183,7 @@ impl DbGuiApp {
                 sql,
                 result,
                 canceled,
+                seq,
             });
         });
     }

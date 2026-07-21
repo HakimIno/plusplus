@@ -3,7 +3,25 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
-## Unreleased
+## 0.2.22 — 2026-07-21
+
+- Fixed intermittent query failures caused by concurrent runs racing each other: starting a
+  query now supersedes (cancels) the one still in flight, late results from superseded runs
+  can no longer overwrite fresh rows, steal a tab's editability, or corrupt the busy state,
+  and Cmd/Ctrl+Enter while busy shows a clear status hint instead of silently double-running.
+- Made multi-statement scripts work on MySQL/MariaDB by running them statement by statement
+  (the driver cannot send a `;`-separated batch); the grid shows the last result set, rows
+  affected are summed, and a failure reports its statement number.
+- Fixed `INSERT/UPDATE/DELETE … RETURNING` and `CALL` showing an empty result: they are now
+  routed through the row-returning path instead of silently dropping their rows.
+- Taught the statement splitter Postgres dollar-quoting, so `CREATE FUNCTION … $$ … ; … $$`
+  bodies are no longer split at inner semicolons by Production Guardian and batch analysis.
+- Turned full-schema ER diagrams into portable designers: tables, columns, indexes, and foreign
+  keys can be edited, exported/imported as versioned `.plusplus-er.json` files (including canvas
+  layout), and forward-engineered through the existing migration preview into PostgreSQL,
+  MySQL/MariaDB, SQL Server, or SQLite.
+- Added portable type translation, schema remapping, relationship validation, and two-phase
+  foreign-key creation so one design can safely target different database connections.
 
 ## 0.2.21 — 2026-07-21
 

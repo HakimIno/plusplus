@@ -12,7 +12,12 @@ impl DbGuiApp {
         let id = cfg.id.clone();
         let name = cfg.name.clone();
         let live = self.active_connections.iter().any(|c| c.config_id == id);
-        self.tab_mut().conn_id = Some(id);
+        self.tab_mut().conn_id = Some(id.clone());
+        // A portable diagram can be retargeted from the normal connection switcher. Keep
+        // its refresh/apply routing in sync with the tab while leaving the design untouched.
+        if let Some(diagram) = self.tab_mut().diagram.as_mut() {
+            diagram.conn_id = id;
+        }
         self.workspace_dirty = true;
         if force || !live {
             self.start_connect(idx);
@@ -36,6 +41,7 @@ impl DbGuiApp {
                 tab.edits.pending_source = None;
                 // A schema editor against a dropped connection is stale; close it.
                 tab.schema_editor = None;
+                tab.design_edit_index = None;
             }
         }
         if self.querying_tab_id.is_some_and(|qid| {

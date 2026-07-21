@@ -99,6 +99,10 @@ pub struct ErDiagram {
     /// Saved-connection id the snapshot was built from (shown alongside the database).
     pub conn_id: String,
     pub database: String,
+    /// Connection-independent source of truth used for editing, export and forward engineering.
+    pub design: dbcore::ErDesign,
+    /// Live snapshots follow background introspection; imported/edited designs stay detached.
+    pub tracks_schema: bool,
     pub nodes: Vec<ErdNode>,
     pub edges: Vec<ErdEdge>,
     /// Pan/zoom state for `egui::Scene`. An empty rect makes the scene auto-fit the
@@ -155,9 +159,75 @@ impl TableLookup {
     }
 }
 
+fn schema_from_design(design: &dbcore::ErDesign) -> SchemaTree {
+    SchemaTree {
+        database_name: design.name.clone(),
+        tables: design
+            .tables
+            .iter()
+            .map(|table| dbcore::TableInfo {
+                schema: table.schema.clone(),
+                name: table.name.clone(),
+                columns: table
+                    .columns
+                    .iter()
+                    .map(|column| dbcore::ColumnInfo {
+                        name: column.name.clone(),
+                        data_type: column.data_type.clone(),
+                        nullable: column.nullable,
+                        primary_key: column.primary_key,
+                    })
+                    .collect(),
+                indexes: table
+                    .indexes
+                    .iter()
+                    .map(|index| dbcore::IndexInfo {
+                        name: index.name.clone(),
+                        unique: index.unique,
+                        columns: index.columns.clone(),
+                    })
+                    .collect(),
+                foreign_keys: table
+                    .foreign_keys
+                    .iter()
+                    .map(|fk| dbcore::ForeignKeyInfo {
+                        name: fk.name.clone(),
+                        columns: fk.columns.clone(),
+                        ref_schema: fk.ref_schema.clone(),
+                        ref_table: fk.ref_table.clone(),
+                        ref_columns: fk.ref_columns.clone(),
+                        on_delete: fk.on_delete.label().to_string(),
+                        on_update: "NO ACTION".to_string(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        views: Vec::new(),
+        routines: Vec::new(),
+        triggers: Vec::new(),
+    }
+}
+
 impl ErDiagram {
     /// Snapshot `schema` into nodes and edges and run the initial layout.
     pub fn build(conn_id: &str, schema: &SchemaTree) -> Self {
+        let design = dbcore::ErDesign::from_schema(schema);
+        Self::build_with_design(conn_id, schema, design, true)
+    }
+
+    /// Open a connection-independent design on `conn_id`. The connection determines only the
+    /// target dialect when the user forward-engineers; it is never serialized into the file.
+    pub fn build_design(conn_id: &str, design: dbcore::ErDesign) -> Self {
+        let schema = schema_from_design(&design);
+        Self::build_with_design(conn_id, &schema, design, false)
+    }
+
+    fn build_with_design(
+        conn_id: &str,
+        schema: &SchemaTree,
+        design: dbcore::ErDesign,
+        tracks_schema: bool,
+    ) -> Self {
         // Qualify titles only when tables span more than one schema/namespace.
         let mut namespaces: Vec<&str> = schema
             .tables
@@ -269,6 +339,8 @@ impl ErDiagram {
         let mut diagram = Self {
             conn_id: conn_id.to_string(),
             database: schema.database_name.clone(),
+            design,
+            tracks_schema,
             nodes,
             edges,
             scene_rect: Rect::NOTHING,
@@ -276,6 +348,11 @@ impl ErDiagram {
             focus: None,
         };
         diagram.layout();
+        for (node, table) in diagram.nodes.iter_mut().zip(&diagram.design.tables) {
+            if let (Some(x), Some(y)) = (table.layout_x, table.layout_y) {
+                node.pos = pos2(x, y);
+            }
+        }
         diagram
     }
 
@@ -813,6 +890,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn imported_design_is_detached_and_restores_saved_layout() {
+        let live = ErDiagram::build("c1", &sample_schema());
+        assert!(live.tracks_schema);
+        let mut design = live.design.clone();
+        design.tables[0].layout_x = Some(321.0);
+        design.tables[0].layout_y = Some(123.0);
+
+        let imported = ErDiagram::build_design("c2", design);
+        assert!(!imported.tracks_schema);
+        assert_eq!(imported.nodes[0].pos, pos2(321.0, 123.0));
     }
 
     #[test]

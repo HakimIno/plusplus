@@ -138,7 +138,7 @@ impl DbGuiApp {
                                 if self.tabs[i]
                                     .diagram
                                     .as_ref()
-                                    .is_some_and(|d| d.conn_id == conn_id)
+                                    .is_some_and(|d| d.conn_id == conn_id && d.tracks_schema)
                                 {
                                     self.refresh_diagram_tab(i);
                                 }
@@ -226,15 +226,25 @@ impl DbGuiApp {
                     sql,
                     result,
                     canceled,
+                    seq,
                 } => {
-                    self.busy = Busy::Idle;
-                    self.querying_tab_id = None;
-                    self.query_cancel = None;
+                    // A result from a superseded run (the user started a newer query before
+                    // this one finished) must not touch busy/status or the tab: whichever run
+                    // finished last would otherwise win, showing stale rows or stealing the
+                    // pending edit source. It did execute, though, so it still goes to history.
+                    let stale = seq != self.query_seq;
+                    if !stale {
+                        self.busy = Busy::Idle;
+                        self.querying_tab_id = None;
+                        self.query_cancel = None;
+                    }
                     // A user cancel isn't a failure: don't log it as a failed statement and
                     // don't flag a red error — just note it and leave the previous result up.
                     if canceled {
-                        self.status_msg = "Query cancelled".to_string();
-                        self.error = None;
+                        if !stale {
+                            self.status_msg = "Query cancelled".to_string();
+                            self.error = None;
+                        }
                         continue;
                     }
                     match &result {
@@ -259,6 +269,9 @@ impl DbGuiApp {
                             None,
                             0.0,
                         ),
+                    }
+                    if stale {
+                        continue;
                     }
                     let is_active = self
                         .tabs
@@ -382,7 +395,17 @@ impl DbGuiApp {
                         }
                     }
                 }
-                AppMessage::PageCounted { tab_id, sql, total } => {
+                AppMessage::PageCounted {
+                    tab_id,
+                    sql,
+                    total,
+                    seq,
+                } => {
+                    // A count from a superseded run must not clear the pending flag (a fresh
+                    // count for the same tab may still be in flight) or attach its total.
+                    if seq != self.query_seq {
+                        continue;
+                    }
                     self.pending_page_counts.remove(&tab_id);
                     let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
                         continue;

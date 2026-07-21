@@ -146,6 +146,8 @@ pub struct FkDraft {
     pub constraint_name: String,
     pub columns_raw: String,
     pub ref_table: String,
+    /// Preserved for portable multi-schema designs; the compact UI edits the table name only.
+    pub ref_schema: Option<String>,
     pub ref_columns_raw: String,
     pub on_delete: FkAction,
     pub is_existing: bool,
@@ -158,6 +160,7 @@ impl FkDraft {
             constraint_name: String::new(),
             columns_raw: String::new(),
             ref_table: String::new(),
+            ref_schema: None,
             ref_columns_raw: String::new(),
             on_delete: FkAction::NoAction,
             is_existing: false,
@@ -170,6 +173,7 @@ impl FkDraft {
             constraint_name: fk.name.clone(),
             columns_raw: fk.columns.join(", "),
             ref_table: fk.ref_table.clone(),
+            ref_schema: fk.ref_schema.clone(),
             ref_columns_raw: fk.ref_columns.join(", "),
             // SET DEFAULT and other actions the editor doesn't offer display as NO ACTION;
             // existing FKs are only ever dropped wholesale, so this is cosmetic.
@@ -203,6 +207,8 @@ impl FkDraft {
 pub enum SchemaEditorMode {
     NewTable,
     EditTable,
+    DesignNewTable,
+    DesignEditTable,
 }
 
 // ─── Tab ─────────────────────────────────────────────────────────────────────
@@ -272,6 +278,122 @@ impl SchemaEditor {
             active_tab: SchemaTab::Columns,
             original_table_name: Some(table.name.clone()),
         }
+    }
+
+    pub fn design_table(
+        table: Option<&dbcore::DesignTable>,
+        db_kind: DbKind,
+        default_schema: Option<&str>,
+    ) -> Self {
+        let Some(table) = table else {
+            let mut editor = Self::new_table(db_kind, default_schema);
+            editor.mode = SchemaEditorMode::DesignNewTable;
+            return editor;
+        };
+        let columns = table
+            .columns
+            .iter()
+            .map(|column| {
+                let mut draft = ColumnDraft::from_existing(
+                    &column.name,
+                    &column.data_type,
+                    column.nullable,
+                    column.primary_key,
+                );
+                draft.default = column.default.clone().unwrap_or_default();
+                draft
+            })
+            .collect();
+        let indexes = table
+            .indexes
+            .iter()
+            .map(|index| IndexDraft::from_existing(&index.name, &index.columns, index.unique))
+            .collect();
+        let fks = table
+            .foreign_keys
+            .iter()
+            .map(|fk| FkDraft {
+                constraint_name: fk.name.clone(),
+                columns_raw: fk.columns.join(", "),
+                ref_table: fk.ref_table.clone(),
+                ref_schema: fk.ref_schema.clone(),
+                ref_columns_raw: fk.ref_columns.join(", "),
+                on_delete: fk.on_delete,
+                is_existing: true,
+                drop: false,
+            })
+            .collect();
+        Self {
+            mode: SchemaEditorMode::DesignEditTable,
+            table_name: table.name.clone(),
+            schema_name: table.schema.clone().unwrap_or_default(),
+            db_kind,
+            columns,
+            indexes,
+            fks,
+            active_tab: SchemaTab::Columns,
+            original_table_name: Some(table.name.clone()),
+        }
+    }
+
+    /// Convert the portable table editor back into an ER design table. Cross-table reference
+    /// validation is performed when the whole design is saved.
+    pub fn to_design_table(&self) -> Result<dbcore::DesignTable, String> {
+        let name = self.table_name.trim();
+        if name.is_empty() {
+            return Err("Table name is required.".into());
+        }
+        let columns: Vec<dbcore::DesignColumn> = self
+            .columns
+            .iter()
+            .filter(|column| !column.drop)
+            .map(|column| dbcore::DesignColumn {
+                name: column.name.trim().to_string(),
+                data_type: column.data_type.trim().to_string(),
+                nullable: column.nullable,
+                primary_key: column.primary_key,
+                default: (!column.default.trim().is_empty())
+                    .then(|| column.default.trim().to_string()),
+            })
+            .collect();
+        if columns.is_empty()
+            || columns
+                .iter()
+                .any(|column| column.name.is_empty() || column.data_type.is_empty())
+        {
+            return Err("Every table needs at least one named, typed column.".into());
+        }
+        Ok(dbcore::DesignTable {
+            schema: (!self.schema_name.trim().is_empty())
+                .then(|| self.schema_name.trim().to_string()),
+            name: name.to_string(),
+            columns,
+            indexes: self
+                .indexes
+                .iter()
+                .filter(|index| !index.drop)
+                .map(|index| dbcore::DesignIndex {
+                    name: index.name.trim().to_string(),
+                    columns: index.columns(),
+                    unique: index.unique,
+                })
+                .collect(),
+            foreign_keys: self
+                .fks
+                .iter()
+                .filter(|fk| !fk.drop)
+                .map(|fk| dbcore::DesignForeignKey {
+                    name: fk.constraint_name.trim().to_string(),
+                    columns: FkDraft::split_cols(&fk.columns_raw),
+                    ref_schema: fk.ref_schema.clone(),
+                    ref_table: fk.ref_table.trim().to_string(),
+                    ref_columns: FkDraft::split_cols(&fk.ref_columns_raw),
+                    on_delete: fk.on_delete,
+                })
+                .collect(),
+            layout_x: None,
+            layout_y: None,
+        })
     }
 
     fn schema(&self) -> Option<&str> {
@@ -462,6 +584,9 @@ impl SchemaEditor {
                     }
                     stmts.push(build_add_fk_sql(self.db_kind, self.schema(), table, &def));
                 }
+            }
+            SchemaEditorMode::DesignNewTable | SchemaEditorMode::DesignEditTable => {
+                return Err("Save ER table changes from the diagram editor.".into());
             }
         }
 

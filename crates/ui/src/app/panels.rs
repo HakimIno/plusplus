@@ -1839,6 +1839,26 @@ impl DbGuiApp {
                         .response
                         .on_disabled_hover_text("Connect to a database first");
                 }
+                let diagram = egui::Image::new(icons::diagram())
+                    .fit_to_exact_size(egui::vec2(icons::SIZE, icons::SIZE))
+                    .tint(ui.visuals().widgets.inactive.fg_stroke.color);
+                ui.menu_button(diagram, |ui| {
+                    ui.set_min_width(210.0);
+                    if components::button(ui, icons::diagram(), "Open ER Designer", connected)
+                        .clicked()
+                    {
+                        actions.push(Action::ShowDatabaseDiagram);
+                        ui.close();
+                    }
+                    if components::button(ui, icons::database(), "Import ER Design…", connected)
+                        .clicked()
+                    {
+                        actions.push(Action::ImportErd);
+                        ui.close();
+                    }
+                })
+                .response
+                .on_hover_text("ER designer and portable designs");
             });
         });
         components::icon_text_input(
@@ -2611,6 +2631,13 @@ impl DbGuiApp {
 
     pub(super) fn central_panel(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
         let idx = self.active_query_tab;
+        // A portable table editor temporarily replaces its Diagram canvas, then returns to it.
+        if self.tabs[idx].schema_editor.is_some() {
+            egui::CentralPanel::default().show_inside(root, |ui| {
+                self.schema_editor_view(ui, actions);
+            });
+            return;
+        }
         // A Diagram tab owns the whole central panel (the editor and result bars were
         // already skipped in `draw`). Slim vertical margins keep the header band tight
         // between the tab strip and the canvas.
@@ -2623,13 +2650,6 @@ impl DbGuiApp {
                 .show_inside(root, |ui| {
                     self.erd_view(ui, actions);
                 });
-            return;
-        }
-        // The schema editor takes over the central panel (like Data/Structure) while open.
-        if self.tabs[idx].schema_editor.is_some() {
-            egui::CentralPanel::default().show_inside(root, |ui| {
-                self.schema_editor_view(ui, actions);
-            });
             return;
         }
         // Structure mode replaces the whole grid with the table's introspected definition.
@@ -5320,20 +5340,50 @@ fn table_editor_view(
     let title = match editor.mode {
         SchemaEditorMode::NewTable => "Create Table".to_string(),
         SchemaEditorMode::EditTable => format!("Edit Table — {}", editor.table_name),
+        SchemaEditorMode::DesignNewTable => "Add Table to ER Design".to_string(),
+        SchemaEditorMode::DesignEditTable => format!("Edit ER Table — {}", editor.table_name),
     };
-    object_editor_header(ui, actions, &title);
+    let design_mode = matches!(
+        editor.mode,
+        SchemaEditorMode::DesignNewTable | SchemaEditorMode::DesignEditTable
+    );
+    if design_mode {
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(title)
+                    .size(16.0)
+                    .strong()
+                    .color(palette::TEXT()),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if components::primary_button(ui, icons::save(), "Save to Design", true).clicked() {
+                    actions.push(Action::SaveErdTable);
+                }
+                ui.add_space(6.0);
+                if components::button(ui, icons::close(), "Cancel", true).clicked() {
+                    actions.push(Action::CancelSchema);
+                }
+            });
+        });
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(10.0);
+    } else {
+        object_editor_header(ui, actions, &title);
+    }
 
-    // Table name (only editable in NewTable mode; read-only in EditTable).
+    // Live EditTable keeps the database object's name fixed; portable designs allow renames.
     ui.horizontal(|ui| {
         ui.label("Table name:");
         components::text_input_enabled(
             ui,
-            editor.mode == SchemaEditorMode::NewTable,
+            editor.mode != SchemaEditorMode::EditTable,
             &mut editor.table_name,
             "my_table",
             200.0,
         );
-        if !editor.schema_name.is_empty() || editor.mode == SchemaEditorMode::NewTable {
+        if !editor.schema_name.is_empty() || editor.mode != SchemaEditorMode::EditTable {
             ui.label("Schema:");
             components::text_input(ui, &mut editor.schema_name, "public", 120.0);
         }
@@ -6241,6 +6291,10 @@ impl DbGuiApp {
     /// connected by foreign-key curves. Takes over the central panel while open.
     pub(super) fn erd_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let idx = self.active_query_tab;
+        let target = self
+            .active()
+            .map(|active| format!("{} ({})", active.name, active.db.kind().label()))
+            .unwrap_or_else(|| "disconnected".to_string());
         let Some(erd) = self.tabs.get_mut(idx).and_then(|t| t.diagram.as_mut()) else {
             // A Diagram tab without its snapshot (shouldn't happen at runtime).
             ui.add_space(24.0);
@@ -6280,15 +6334,21 @@ impl DbGuiApp {
             ui.label(egui::RichText::new(title).strong().color(palette::TEXT()));
             ui.add_space(6.0);
             ui.colored_label(palette::TEXT_FAINT(), context);
+            if erd.focus.is_none() {
+                ui.add_space(6.0);
+                ui.colored_label(palette::TEXT_FAINT(), format!("Target: {target}"));
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if components::pill_icon_button(
-                    ui,
-                    icons::refresh(),
-                    "Rebuild from the current schema",
-                )
-                .clicked()
-                {
-                    actions.push(Action::RefreshErd);
+                if erd.tracks_schema {
+                    if components::pill_icon_button(
+                        ui,
+                        icons::refresh(),
+                        "Rebuild from the current schema",
+                    )
+                    .clicked()
+                    {
+                        actions.push(Action::RefreshErd);
+                    }
                 }
                 if components::pill_icon_button(
                     ui,
@@ -6303,6 +6363,50 @@ impl DbGuiApp {
                     .clicked()
                 {
                     erd.request_fit();
+                }
+                if erd.focus.is_none() {
+                    ui.add_space(10.0);
+                    if components::primary_button(
+                        ui,
+                        icons::code(),
+                        "Forward Engineer",
+                        !erd.design.tables.is_empty(),
+                    )
+                    .on_hover_text("Preview target-dialect DDL before creating this schema")
+                    .clicked()
+                    {
+                        actions.push(Action::ForwardEngineerErd);
+                    }
+                    if components::pill_icon_button(
+                        ui,
+                        icons::save(),
+                        "Export a connection-independent .plusplus-er.json file",
+                    )
+                    .clicked()
+                    {
+                        actions.push(Action::ExportErd);
+                    }
+                    if components::pill_icon_button(ui, icons::plus(), "Add table to this design")
+                        .clicked()
+                    {
+                        actions.push(Action::AddErdTable);
+                    }
+                    if let Some(selected) = erd.selected {
+                        if components::pill_icon_button(ui, icons::edit(), "Edit selected table")
+                            .clicked()
+                        {
+                            actions.push(Action::EditErdTable(selected));
+                        }
+                        if components::pill_icon_button(
+                            ui,
+                            icons::trash(),
+                            "Remove selected table",
+                        )
+                        .clicked()
+                        {
+                            actions.push(Action::DeleteErdTable(selected));
+                        }
+                    }
                 }
                 if let Some(focus) = &erd.focus {
                     ui.add_space(10.0);

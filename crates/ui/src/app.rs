@@ -103,6 +103,9 @@ enum AppMessage {
         /// True when the query was aborted via the Cancel button (a `CoreError::Canceled`),
         /// so the UI shows "Query cancelled" instead of a red error and doesn't log a failure.
         canceled: bool,
+        /// Generation stamp of the run that produced this result; results from a superseded
+        /// run (`seq != query_seq`) are logged to history but never touch UI state.
+        seq: u64,
     },
     /// The background COUNT(*) for a paged table query finished. Kept separate from
     /// [`Queried`](Self::Queried) so rows render immediately without waiting for the count.
@@ -110,6 +113,8 @@ enum AppMessage {
         tab_id: u64,
         sql: String,
         total: Option<u64>,
+        /// Generation stamp of the run whose page this count belongs to (see `Queried::seq`).
+        seq: u64,
     },
     /// A batch of staged edits was saved (`Ok` carries the number of rows updated).
     Committed {
@@ -492,8 +497,10 @@ struct QueryTab {
     /// moves). Consumed by `central_panel` when it renders the grid.
     pending_scroll: Option<usize>,
     /// The ER diagram shown by a `QueryTabKind::Diagram` tab. A schema snapshot, so it
-    /// stays viewable after a disconnect; not persisted with the workspace.
+    /// stays viewable after a disconnect; its portable design can be exported to disk.
     diagram: Option<crate::erd::ErDiagram>,
+    /// Table index being edited inside a diagram (`None` means a newly-added table).
+    design_edit_index: Option<Option<usize>>,
 }
 
 impl QueryTab {
@@ -518,6 +525,7 @@ impl QueryTab {
             schema_editor: None,
             pending_scroll: None,
             diagram: None,
+            design_edit_index: None,
         }
     }
 
@@ -924,6 +932,17 @@ enum Action {
     DeleteFavorite(usize),
     /// Rebuild the open ER diagram from the current schema (after DDL / re-introspection).
     RefreshErd,
+    /// Open the complete current schema as an editable portable design.
+    ShowDatabaseDiagram,
+    /// Load/save a connection-independent `.plusplus-er.json` design.
+    ImportErd,
+    ExportErd,
+    /// Generate target-dialect DDL from the active diagram and open the normal preview.
+    ForwardEngineerErd,
+    AddErdTable,
+    EditErdTable(usize),
+    SaveErdTable,
+    DeleteErdTable(usize),
     /// Open the diagram scoped to one table and its FK neighborhood (depth 1).
     ShowTableDiagram {
         schema: Option<String>,
@@ -1132,6 +1151,12 @@ pub struct DbGuiApp {
     next_connection_test_id: u64,
     /// Tab id of the in-flight `SELECT` (cleared when [`AppMessage::Queried`] arrives).
     querying_tab_id: Option<u64>,
+    /// Generation stamp of the most recently started query run. Every `start_query_for`
+    /// increments it and tags the run's result messages; a [`AppMessage::Queried`] or
+    /// [`AppMessage::PageCounted`] carrying an older stamp is a superseded run whose result
+    /// must not touch UI state (it may otherwise clobber the newer run's result, busy flag,
+    /// or the tab's pending edit source, depending on which run finishes last).
+    query_seq: u64,
     /// Tabs waiting for a background COUNT(*) so the pager can repaint as soon as totals arrive.
     pending_page_counts: HashSet<u64>,
     /// Cancellation handle for the in-flight query; firing it asks the backend to abort and
@@ -1386,6 +1411,7 @@ impl DbGuiApp {
             busy: Busy::Idle,
             next_connection_test_id: 1,
             querying_tab_id: None,
+            query_seq: 0,
             pending_page_counts: HashSet::new(),
             query_cancel: None,
             active_connections: Vec::new(),
@@ -1563,7 +1589,9 @@ impl DbGuiApp {
         let same_scope = |t: &QueryTab| {
             t.kind == crate::components::QueryTabKind::Diagram
                 && t.diagram.as_ref().is_some_and(|d| {
-                    d.conn_id == diagram.conn_id && root(d) == root(&diagram)
+                    d.conn_id == diagram.conn_id
+                        && root(d) == root(&diagram)
+                        && d.design == diagram.design
                 })
         };
         if let Some(i) = self.tabs.iter().position(same_scope) {
