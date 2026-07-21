@@ -17,8 +17,14 @@ impl DbGuiApp {
                     self.disconnect_conn(&id);
                 }
             }
-            Action::NewTab => self.new_tab(),
-            Action::SelectTab(i) => self.select_tab(i),
+            Action::NewTab => {
+                self.settings_open = false;
+                self.new_tab();
+            }
+            Action::SelectTab(i) => {
+                self.settings_open = false;
+                self.select_tab(i);
+            }
             Action::CloseTab(i) => self.close_tab(i),
             Action::CloseOtherTabs(i) => self.close_other_tabs(i),
             Action::CloseTabsToRight(i) => self.close_tabs_to_right(i),

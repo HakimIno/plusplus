@@ -1133,6 +1133,7 @@ fn copy_event_pushes_selection_to_clipboard() {
     crate::style::apply(&ctx);
 
     let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
     let result = QueryResult {
         columns: vec![
             ColumnMeta {
@@ -1569,6 +1570,7 @@ fn drag_reorders_tabs_headlessly() {
     crate::style::apply(&ctx);
 
     let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
     app.tab_mut().sql = "q0".into();
     app.new_tab();
     app.tab_mut().sql = "q1".into();
@@ -2651,6 +2653,51 @@ fn snapshot_import_dialog_many_columns() {
 /// `UPDATE_SNAPSHOTS=1 cargo test -p plusplus-ui snapshot_ -- --ignored`.
 #[test]
 #[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_welcome_page() {
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = true;
+    render_and_snapshot(app, "welcome_page", false);
+}
+
+#[test]
+fn settings_is_a_transient_utility_tab() {
+    let mut app = DbGuiApp::construct();
+    let tab_count = app.tabs.len();
+
+    app.apply_action(Action::OpenSettings);
+    assert!(app.settings_open);
+    assert_eq!(app.tabs.len(), tab_count);
+
+    app.apply_action(Action::NewTab);
+    assert!(!app.settings_open);
+    assert_eq!(app.tabs.len(), tab_count + 1);
+
+    app.apply_action(Action::OpenSettings);
+    app.apply_action(Action::SelectTab(0));
+    assert!(!app.settings_open);
+}
+
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_settings_page() {
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.settings_open = true;
+    render_and_snapshot(app, "settings_page", false);
+}
+
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_settings_appearance_page() {
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.settings_open = true;
+    app.settings_section = SettingsSection::Appearance;
+    render_and_snapshot(app, "settings_appearance_page", false);
+}
+
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
 fn snapshot_object_browser() {
     let (app, dir) = demo_app_with_objects();
     render_and_snapshot(app, "object_browser", true);
@@ -2916,6 +2963,7 @@ fn details_box_click_then_type() {
     crate::style::apply(&ctx);
 
     let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
     let result = QueryResult {
         columns: vec![
             ColumnMeta {
@@ -3037,6 +3085,9 @@ fn grid_nav_app(rows: usize, cols: usize) -> (egui::Context, DbGuiApp) {
     egui_extras::install_image_loaders(&ctx);
     crate::style::apply(&ctx);
     let mut app = DbGuiApp::construct();
+    // `construct` reads the machine's settings.json; on a box that hasn't been "welcomed"
+    // the welcome page would replace the grid and every navigation assertion below.
+    app.show_welcome = false;
     let tab = app.tab_mut();
     tab.set_result(fake_result(rows, cols));
     tab.edits.source = Some(crate::edit::EditSource {
@@ -3288,6 +3339,39 @@ fn edit_mode_arrows_move_only_within_the_column() {
     assert!(app.tab().edits.is_active(1, 1));
 }
 
+/// The welcome page rendered through `Context::run_ui`, whose root max_rect is effectively
+/// unbounded. Locks in the fixed-size rasterization of the hills SVG: sizing that texture
+/// from the painted rect requested rect × pixels_per_point texels and panicked on the GPU
+/// max-texture-side limit. Also sweeps for ID clashes among the welcome widgets.
+#[test]
+fn welcome_page_renders_headless() {
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+    ctx.set_pixels_per_point(2.0);
+
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = true;
+
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+    let mut clashes: Vec<String> = Vec::new();
+    for _ in 0..3 {
+        let raw = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        let out = ctx.run_ui(raw, |ui| app.draw(ui, None));
+        clashes.extend(collect_clash_text(&out.shapes));
+    }
+    clashes.sort();
+    clashes.dedup();
+    assert!(
+        clashes.is_empty(),
+        "ID clashes on welcome page:\n{}",
+        clashes.join("\n")
+    );
+}
+
 /// Drive the full app layout headlessly while scrolling, and capture egui "ID clash"
 /// markers (🔥) to pinpoint the offending widget.
 #[test]
@@ -3298,6 +3382,7 @@ fn probe_full_app_id_clash() {
     ctx.set_pixels_per_point(2.0); // emulate a retina display
 
     let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
     // Add a second tab so the query-tab bar renders multiple chips (exercises its ids).
     app.new_tab();
     app.select_tab(0);

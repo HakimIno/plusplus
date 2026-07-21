@@ -7,7 +7,7 @@
 //! is just [`set_current`] followed by re-applying the style.
 //!
 //! Themes come from two places, both surfaced through a [`ThemeRegistry`]:
-//!   * the built-in palettes ([`carbon`], [`midnight`], [`daylight`]), compiled in; and
+//!   * the built-in palettes returned by [`builtins`], compiled in; and
 //!   * user-installed `*.json` files dropped into [`dbcore::config::themes_dir`] — these
 //!     deserialize into a [`ThemeFile`] (hex colours) and let anyone ship a theme without
 //!     touching the binary. This is the first plugin "contribution point".
@@ -221,7 +221,7 @@ impl ThemeRegistry {
     }
 
     /// Re-scan the themes directory. Lets the user install a theme and pick it up without a
-    /// restart (the Settings dialog exposes this).
+    /// restart (the Settings screen exposes this).
     pub fn reload(&mut self) {
         *self = Self::load();
     }
@@ -325,6 +325,27 @@ fn builtins() -> Vec<ThemeEntry> {
             author: None,
             builtin: true,
             theme: daylight(),
+        },
+        ThemeEntry {
+            key: "lotus-dusk".into(),
+            name: "Lotus Dusk".into(),
+            author: None,
+            builtin: true,
+            theme: lotus_dusk(),
+        },
+        ThemeEntry {
+            key: "tidal-ledger".into(),
+            name: "Tidal Ledger".into(),
+            author: None,
+            builtin: true,
+            theme: tidal_ledger(),
+        },
+        ThemeEntry {
+            key: "copper-circuit".into(),
+            name: "Copper Circuit".into(),
+            author: None,
+            builtin: true,
+            theme: copper_circuit(),
         },
     ]
 }
@@ -433,6 +454,81 @@ fn daylight() -> Theme {
     }
 }
 
+/// Dusky aubergine surfaces with a warm lotus-pink accent.
+fn lotus_dusk() -> Theme {
+    Theme {
+        is_dark: true,
+        base: rgb(0x15, 0x13, 0x1c),
+        panel: rgb(0x1c, 0x19, 0x26),
+        surface: rgb(0x29, 0x23, 0x35),
+        surface_hover: rgb(0x38, 0x2f, 0x46),
+        code_bg: rgb(0x10, 0x0e, 0x16),
+        stripe: rgb(0x21, 0x1c, 0x2a),
+        selection: rgb(0x49, 0x35, 0x52),
+        border: rgb(0x30, 0x29, 0x3b),
+        border_strong: rgb(0x4b, 0x40, 0x59),
+        text: rgb(0xf1, 0xea, 0xf4),
+        text_weak: rgb(0xb8, 0xaa, 0xbd),
+        text_faint: rgb(0x89, 0x7b, 0x91),
+        accent: rgb(0xe1, 0x8b, 0xb7),
+        accent_hover: rgb(0xef, 0xa4, 0xcb),
+        on_accent: rgb(0x25, 0x12, 0x1d),
+        success: rgb(0x65, 0xc9, 0x9a),
+        danger: rgb(0xff, 0x7f, 0x8e),
+        warning: rgb(0xe3, 0xb8, 0x6f),
+    }
+}
+
+/// A cool, paper-bright palette tuned for scanning dense tables in daylight.
+fn tidal_ledger() -> Theme {
+    Theme {
+        is_dark: false,
+        base: rgb(0xf7, 0xfb, 0xfc),
+        panel: rgb(0xea, 0xf2, 0xf4),
+        surface: rgb(0xdc, 0xe9, 0xec),
+        surface_hover: rgb(0xcd, 0xdf, 0xe3),
+        code_bg: rgb(0xfc, 0xfe, 0xff),
+        stripe: rgb(0xe7, 0xf1, 0xf3),
+        selection: rgb(0xb9, 0xdc, 0xe2),
+        border: rgb(0xc9, 0xda, 0xde),
+        border_strong: rgb(0x9f, 0xb8, 0xbe),
+        text: rgb(0x16, 0x34, 0x3a),
+        text_weak: rgb(0x3f, 0x5f, 0x65),
+        text_faint: rgb(0x5b, 0x77, 0x7c),
+        accent: rgb(0x08, 0x7f, 0x8c),
+        accent_hover: rgb(0x05, 0x6c, 0x77),
+        on_accent: rgb(0xff, 0xff, 0xff),
+        success: rgb(0x14, 0x7a, 0x55),
+        danger: rgb(0xc4, 0x3f, 0x4d),
+        warning: rgb(0x98, 0x63, 0x00),
+    }
+}
+
+/// Blue-black instrument panels with a restrained copper control colour.
+fn copper_circuit() -> Theme {
+    Theme {
+        is_dark: true,
+        base: rgb(0x10, 0x16, 0x1b),
+        panel: rgb(0x15, 0x1e, 0x24),
+        surface: rgb(0x20, 0x2b, 0x32),
+        surface_hover: rgb(0x2c, 0x39, 0x41),
+        code_bg: rgb(0x0b, 0x10, 0x14),
+        stripe: rgb(0x19, 0x22, 0x29),
+        selection: rgb(0x49, 0x35, 0x25),
+        border: rgb(0x29, 0x36, 0x3d),
+        border_strong: rgb(0x42, 0x53, 0x5b),
+        text: rgb(0xed, 0xf1, 0xef),
+        text_weak: rgb(0xae, 0xbb, 0xb8),
+        text_faint: rgb(0x71, 0x82, 0x7f),
+        accent: rgb(0xd9, 0x8a, 0x48),
+        accent_hover: rgb(0xeb, 0xa2, 0x61),
+        on_accent: rgb(0x21, 0x15, 0x0c),
+        success: rgb(0x55, 0xc4, 0x9a),
+        danger: rgb(0xef, 0x73, 0x7b),
+        warning: rgb(0xe0, 0xbd, 0x5b),
+    }
+}
+
 thread_local! {
     static CURRENT: Cell<Theme> = Cell::new(midnight_conversational());
 }
@@ -455,16 +551,30 @@ mod tests {
     /// The default key always resolves to a built-in entry.
     #[test]
     fn default_key_is_a_builtin() {
-        let reg = ThemeRegistry { entries: builtins() };
+        let reg = ThemeRegistry {
+            entries: builtins(),
+        };
         let entry = reg.get(DEFAULT_KEY).expect("default present");
         assert!(entry.builtin);
         assert_eq!(entry.key, DEFAULT_KEY);
     }
 
+    #[test]
+    fn bundled_presets_are_built_in() {
+        let reg = ThemeRegistry {
+            entries: builtins(),
+        };
+        for key in ["lotus-dusk", "tidal-ledger", "copper-circuit"] {
+            assert!(reg.get(key).is_some_and(|entry| entry.builtin));
+        }
+    }
+
     /// An unknown key falls back to the default colour set, never panics.
     #[test]
     fn unknown_key_falls_back_to_default() {
-        let reg = ThemeRegistry { entries: builtins() };
+        let reg = ThemeRegistry {
+            entries: builtins(),
+        };
         assert_eq!(reg.resolve_key("does-not-exist"), DEFAULT_KEY);
         // theme_of returns the default's colours (compare a token).
         assert_eq!(

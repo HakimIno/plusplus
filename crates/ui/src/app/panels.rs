@@ -1,7 +1,7 @@
 use super::{
     result_status, schema_table_key, Action, ActiveConnection, Busy, ConnField, ConnTestState,
     DbGuiApp, PageNav, ProductionGuardContinuation, QueryEditorPlacement, QueryTab,
-    SchemaTableDrag, SidebarTab, TabView,
+    SchemaTableDrag, SettingsSection, SidebarTab, TabView,
 };
 use crate::components;
 use crate::filter::{self, FilterEvent};
@@ -409,7 +409,7 @@ impl DbGuiApp {
                                 let mut rects = Vec::with_capacity(self.tabs.len());
                                 let pointer_x = ui.ctx().pointer_interact_pos().map(|p| p.x);
                                 for idx in 0..self.tabs.len() {
-                                    let selected = idx == self.active_query_tab;
+                                    let selected = !self.settings_open && idx == self.active_query_tab;
                                     let label = self.tab_label(idx);
                                     let kind = self.tab_kind(idx);
                                     let db_kind = (kind == crate::components::QueryTabKind::Query)
@@ -502,6 +502,13 @@ impl DbGuiApp {
                                     ui.add_space(2.0);
                                 }
                                 self.handle_tab_drag(ui, &rects, actions);
+                                if self.settings_open {
+                                    let resp = components::settings_tab_item(ui);
+                                    if resp.close {
+                                        actions.push(Action::CloseSettings);
+                                    }
+                                    ui.add_space(2.0);
+                                }
                                 if components::toolbar_icon_button(
                                     ui,
                                     icons::plus(),
@@ -2890,163 +2897,299 @@ impl DbGuiApp {
 
     /// Full-page first-run welcome screen. Replaces the entire window; no title bar.
     /// Called from `draw()` with an early return so no other panels render simultaneously.
+    ///
+    /// One full-bleed scene: an accent-tinted wash over the theme base, a layered landscape
+    /// anchored to the bottom edge, and a centred speech-bubble card stack. Everything is
+    /// derived from theme tokens — the illustration is a white SVG tinted to the accent, so
+    /// depth comes from opacity tiers, never a second hue.
     pub(super) fn draw_welcome_page(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
         let ctx = root.ctx().clone();
 
-        // Left: decorative illustration panel.
-        egui::Panel::left("welcome_illus")
-            .exact_size(320.0)
-            .resizable(false)
-            .frame(
-                egui::Frame::new()
-                    .fill(palette::PANEL())
-                    .inner_margin(egui::Margin::same(0)),
-            )
-            .show_inside(root, |ui| {
-                let rect = ui.max_rect();
-                let center = rect.center();
-                let p = ui.painter();
+        // Enter is the keyboard path to the single CTA.
+        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            actions.push(Action::DismissWelcome);
+        }
 
-                // Concentric accent rings (fading outward).
-                for (r, alpha) in [(52.0f32, 80u8), (88.0, 50), (130.0, 25)] {
-                    let c = palette::ACCENT().linear_multiply(alpha as f32 / 255.0);
-                    p.circle_stroke(center, r, egui::Stroke::new(1.0, c));
-                }
+        // Snapshot the picker data up front: rendering swatches must not hold a borrow on
+        // `self.themes` while a click calls `set_theme(&mut self, …)`.
+        let theme_options: Vec<(String, String, egui::Color32, egui::Color32)> = self
+            .themes
+            .entries()
+            .iter()
+            .map(|e| (e.key.clone(), e.name.clone(), e.theme.base, e.theme.accent))
+            .collect();
 
-                // Floating dots orbiting at various angles & distances.
-                for &(angle_deg, dist, r, alpha) in &[
-                    (20.0f32, 68.0f32, 5.0f32, 0.70f32),
-                    (100.0, 95.0, 3.5, 0.45),
-                    (190.0, 72.0, 4.5, 0.60),
-                    (270.0, 105.0, 5.5, 0.75),
-                    (55.0, 120.0, 3.0, 0.35),
-                    (155.0, 115.0, 4.0, 0.50),
-                ] {
-                    let a = angle_deg.to_radians();
-                    let pos = center + egui::vec2(a.cos() * dist, a.sin() * dist);
-                    p.circle_filled(pos, r, palette::ACCENT().linear_multiply(alpha));
-                }
-
-                // Small sparkle crosses.
-                for &(angle_deg, dist) in &[(42.0f32, 92.0f32), (215.0, 98.0)] {
-                    let a = angle_deg.to_radians();
-                    let pos = center + egui::vec2(a.cos() * dist, a.sin() * dist);
-                    let stroke = egui::Stroke::new(1.5, palette::ACCENT().linear_multiply(0.45));
-                    let s = 5.0_f32;
-                    p.line_segment([pos - egui::vec2(s, 0.0), pos + egui::vec2(s, 0.0)], stroke);
-                    p.line_segment([pos - egui::vec2(0.0, s), pos + egui::vec2(0.0, s)], stroke);
-                }
-
-                // Large database icon at centre.
-                let sz = 52.0;
-                ui.scope_builder(
-                    egui::UiBuilder::new()
-                        .max_rect(egui::Rect::from_center_size(center, egui::vec2(sz, sz))),
-                    |ui| {
-                        icons::show_colored(ui, icons::database(), sz, palette::ACCENT());
-                    },
-                );
-
-                // Small table icon — upper-right orbit.
-                let tbl = center + egui::vec2(56.0, -54.0);
-                ui.scope_builder(
-                    egui::UiBuilder::new()
-                        .max_rect(egui::Rect::from_center_size(tbl, egui::vec2(22.0, 22.0))),
-                    |ui| {
-                        icons::show_colored(
-                            ui,
-                            icons::table(),
-                            22.0,
-                            palette::ACCENT().linear_multiply(0.7),
-                        );
-                    },
-                );
-
-                // Small key icon — lower-left orbit.
-                let key = center + egui::vec2(-56.0, 52.0);
-                ui.scope_builder(
-                    egui::UiBuilder::new()
-                        .max_rect(egui::Rect::from_center_size(key, egui::vec2(20.0, 20.0))),
-                    |ui| {
-                        icons::show_colored(
-                            ui,
-                            icons::key(),
-                            20.0,
-                            palette::ACCENT().linear_multiply(0.55),
-                        );
-                    },
-                );
-            });
-
-        // Right: text content, theme picker, CTA.
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(palette::BASE())
-                    .inner_margin(egui::Margin::symmetric(52, 0)),
-            )
+            .frame(egui::Frame::new().fill(style::mix(palette::BASE(), palette::ACCENT(), 0.06)))
             .show_inside(root, |ui| {
-                // Vertically centre the content block.
-                let avail_h = ui.available_height();
-                ui.add_space((avail_h - 370.0_f32).max(24.0) / 2.0);
+                let full = ui.max_rect();
 
-                // --- App name ---
-                ui.label(
-                    egui::RichText::new("plusplus")
-                        .size(44.0)
-                        .strong()
-                        .color(palette::ACCENT()),
+                // --- Landscape backdrop, anchored to the bottom edge ---
+                // Scale by width; on short-and-wide windows the band is capped to ~42% of the
+                // height by widening past the window instead (sides crop, the bottom always
+                // reads as ground).
+                let aspect = 1440.0 / 360.0;
+                let img_w = full.width().max(full.height() * 0.42 * aspect);
+                let img_h = img_w / aspect;
+                let img_rect = egui::Rect::from_min_max(
+                    egui::pos2(full.center().x - img_w / 2.0, full.bottom() - img_h),
+                    egui::pos2(full.center().x + img_w / 2.0, full.bottom()),
                 );
-                ui.add_space(6.0);
-                ui.label(
-                    egui::RichText::new("Your fast, native database client")
-                        .size(14.0)
-                        .color(palette::TEXT_WEAK()),
+                // Rasterize at a fixed size and stretch to the rect. Letting the texture
+                // follow the painted size (Image::paint_at) requests rect × pixels_per_point
+                // texels, which blows past GPU limits on unbounded headless max_rects and
+                // very large displays. 2048 stays under every backend's minimum max side;
+                // LINEAR filtering hides the upscale on the soft shapes.
+                let hills = egui::include_image!("../../assets/illus/welcome-hills.svg").load(
+                    &ctx,
+                    egui::TextureOptions::LINEAR,
+                    egui::SizeHint::Size {
+                        width: 2048,
+                        height: 512,
+                        maintain_aspect_ratio: false,
+                    },
+                );
+                if let Ok(egui::load::TexturePoll::Ready { texture }) = hills {
+                    ui.painter().image(
+                        texture.id,
+                        img_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        palette::ACCENT().linear_multiply(0.5),
+                    );
+                }
+
+                // The welcome page suppresses the title-bar chrome, so give the window a drag
+                // handle: the strip where the titlebar would be starts a native window move.
+                let strip = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), 44.0));
+                let drag = ui.interact(
+                    strip,
+                    ui.id().with("welcome_drag"),
+                    egui::Sense::click_and_drag(),
+                );
+                title_bar::handle_chrome_response(ui, &drag);
+
+                // Undecorated Linux/Windows windows have no native buttons, so the self-drawn
+                // close/maximize/minimize cluster must survive onto the welcome page too.
+                // Drawn after the drag strip so the buttons win pointer priority over it.
+                #[cfg(not(target_os = "macos"))]
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(strip.shrink2(egui::vec2(10.0, 0.0)))
+                        .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                    |ui| {
+                        title_bar::window_controls(ui);
+                    },
                 );
 
-                ui.add_space(30.0);
+                // --- Centred card stack ---
+                let card_w = 400.0_f32;
+                let stack_h = 420.0_f32;
+                let top = ((full.height() - stack_h) * 0.40).max(48.0) + full.top();
+                let content = egui::Rect::from_min_size(
+                    egui::pos2(full.center().x - card_w / 2.0, top),
+                    egui::vec2(card_w, stack_h),
+                );
 
-                // --- Feature bullets ---
-                for txt in [
-                    "Connect to Postgres, MySQL, MSSQL & SQLite",
-                    "Browse schemas, tables & columns",
-                    "Inline cell editing with safe transactions",
-                    "SQL editor with syntax highlighting",
-                ] {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("·  ").color(palette::ACCENT()));
-                        ui.label(egui::RichText::new(txt).color(palette::TEXT_WEAK()));
+                let mut card_rect = content; // updated below; used to seat the mascot
+                ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
+                    // Speech-bubble header card.
+                    let bubble = egui::Frame::new()
+                        .fill(palette::SURFACE())
+                        .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                        .corner_radius(egui::CornerRadius::same(16))
+                        .inner_margin(egui::Margin::symmetric(24, 20))
+                        .show(ui, |ui| {
+                            ui.set_width(card_w - 48.0);
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                ui.label(
+                                    egui::RichText::new("Welcome to ")
+                                        .size(22.0)
+                                        .strong()
+                                        .color(palette::TEXT()),
+                                );
+                                ui.label(
+                                    egui::RichText::new("plusplus")
+                                        .size(22.0)
+                                        .strong()
+                                        .color(palette::ACCENT()),
+                                );
+                            });
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(
+                                    "A fast, native database client. Everything stays on this machine.",
+                                )
+                                .size(12.5)
+                                .color(palette::TEXT_WEAK()),
+                            );
+                        });
+
+                    // Bubble tail, pointing down toward the content card.
+                    let br = bubble.response.rect;
+                    let tail = vec![
+                        egui::pos2(br.right() - 58.0, br.bottom() - 1.0),
+                        egui::pos2(br.right() - 34.0, br.bottom() - 1.0),
+                        egui::pos2(br.right() - 42.0, br.bottom() + 12.0),
+                    ];
+                    ui.painter().add(egui::Shape::convex_polygon(
+                        tail.clone(),
+                        palette::SURFACE(),
+                        egui::Stroke::NONE,
+                    ));
+                    let tail_stroke = egui::Stroke::new(1.0, palette::BORDER());
+                    ui.painter().line_segment([tail[0], tail[2]], tail_stroke);
+                    ui.painter().line_segment([tail[1], tail[2]], tail_stroke);
+
+                    ui.add_space(18.0);
+
+                    // Content card: feature rows, theme swatches, CTA.
+                    let card = egui::Frame::new()
+                        .fill(palette::SURFACE())
+                        .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                        .corner_radius(egui::CornerRadius::same(16))
+                        .inner_margin(egui::Margin::symmetric(24, 20))
+                        .show(ui, |ui| {
+                            ui.set_width(card_w - 48.0);
+
+                            for (icon, txt) in [
+                                (icons::database(), "Connect to Postgres, MySQL, MSSQL & SQLite"),
+                                (icons::table(), "Browse schemas, edit cells in safe transactions"),
+                                (icons::code(), "SQL editor with completion and highlighting"),
+                                (icons::diagram(), "ER diagrams of your schema"),
+                            ] {
+                                ui.horizontal(|ui| {
+                                    let (chip, _) = ui.allocate_exact_size(
+                                        egui::Vec2::splat(28.0),
+                                        egui::Sense::hover(),
+                                    );
+                                    ui.painter().rect_filled(
+                                        chip,
+                                        egui::CornerRadius::same(8),
+                                        palette::ACCENT().linear_multiply(0.14),
+                                    );
+                                    egui::Image::new(icon)
+                                        .tint(palette::ACCENT())
+                                        .paint_at(
+                                            ui,
+                                            egui::Rect::from_center_size(
+                                                chip.center(),
+                                                egui::Vec2::splat(15.0),
+                                            ),
+                                        );
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        egui::RichText::new(txt)
+                                            .size(12.5)
+                                            .color(palette::TEXT()),
+                                    );
+                                });
+                                ui.add_space(8.0);
+                            }
+
+                            ui.add_space(4.0);
+                            let sep_y = ui.cursor().top();
+                            ui.painter().hline(
+                                ui.max_rect().x_range(),
+                                sep_y,
+                                egui::Stroke::new(1.0, palette::BORDER()),
+                            );
+                            ui.add_space(12.0);
+
+                            // Theme picker: one swatch per theme (base disc, accent dot),
+                            // selected = accent ring. Hover shows the theme's name.
+                            ui.label(
+                                egui::RichText::new("Theme")
+                                    .size(style::font::CAPTION)
+                                    .color(palette::TEXT_FAINT()),
+                            );
+                            ui.add_space(6.0);
+                            let mut chosen: Option<String> = None;
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+                                for (key, name, base, accent) in &theme_options {
+                                    let (rect, resp) = ui.allocate_exact_size(
+                                        egui::Vec2::splat(24.0),
+                                        egui::Sense::click(),
+                                    );
+                                    let c = rect.center();
+                                    let p = ui.painter();
+                                    p.circle_filled(c, 10.0, *base);
+                                    p.circle_filled(c, 3.5, *accent);
+                                    if *key == self.theme {
+                                        p.circle_stroke(
+                                            c,
+                                            11.5,
+                                            egui::Stroke::new(1.5, palette::ACCENT()),
+                                        );
+                                    } else {
+                                        p.circle_stroke(
+                                            c,
+                                            10.0,
+                                            egui::Stroke::new(1.0, palette::BORDER_STRONG()),
+                                        );
+                                    }
+                                    let resp = resp
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                        .on_hover_text(name);
+                                    if resp.clicked() {
+                                        chosen = Some(key.clone());
+                                    }
+                                }
+                            });
+                            if let Some(key) = chosen {
+                                if key != self.theme {
+                                    self.set_theme(&ctx, key);
+                                }
+                            }
+
+                            ui.add_space(16.0);
+
+                            // CTA: full-width accent pill.
+                            let (rect, resp) = ui.allocate_exact_size(
+                                egui::vec2(ui.available_width(), 38.0),
+                                egui::Sense::click(),
+                            );
+                            resp.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    true,
+                                    "Get Started",
+                                )
+                            });
+                            let fill = if resp.hovered() || resp.is_pointer_button_down_on() {
+                                palette::ACCENT_HOVER()
+                            } else {
+                                palette::ACCENT()
+                            };
+                            ui.painter().rect_filled(rect, egui::CornerRadius::same(10), fill);
+                            ui.painter().text(
+                                rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "Get Started",
+                                egui::FontId::proportional(13.5),
+                                palette::ON_ACCENT(),
+                            );
+                            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                            if resp.clicked() {
+                                actions.push(Action::DismissWelcome);
+                            }
+
+                            ui.add_space(2.0);
+                        });
+                    card_rect = card.response.rect;
+                });
+
+                // Mascot on the ground beside the card stack (skipped when the window is too
+                // narrow for it to sit clear of the cards).
+                let sheep = egui::Rect::from_min_size(
+                    egui::pos2(card_rect.right() + 24.0, full.bottom() - 142.0),
+                    egui::vec2(150.0, 150.0),
+                );
+                if sheep.right() < full.right() - 8.0 {
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(sheep), |ui| {
+                        crate::pet::show(ui);
                     });
-                    ui.add_space(3.0);
-                }
-
-                ui.add_space(30.0);
-
-                // --- Theme picker ---
-                components::section_header(ui, "Choose a theme");
-                ui.add_space(10.0);
-                // Snapshot (key, label) so the picker holds no borrow on `self` while we may
-                // call `set_theme(&mut self, …)` right after.
-                let options: Vec<(String, String)> = self
-                    .themes
-                    .entries()
-                    .iter()
-                    .map(|e| (e.key.clone(), e.name.clone()))
-                    .collect();
-                let mut chosen = self.theme.clone();
-                for (key, label) in &options {
-                    ui.radio_value(&mut chosen, key.clone(), label.as_str());
-                    ui.add_space(3.0);
-                }
-                if chosen != self.theme {
-                    self.set_theme(&ctx, chosen);
-                }
-
-                ui.add_space(30.0);
-
-                // --- CTA ---
-                if components::primary_button(ui, icons::play(), "Get Started", true).clicked() {
-                    actions.push(Action::DismissWelcome);
                 }
             });
     }
@@ -3225,126 +3368,450 @@ impl DbGuiApp {
         }
     }
 
-    pub(super) fn settings_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
-        if !self.settings_open {
-            return;
+    /// Settings workspace shown behind a selected utility tab. A fixed category rail keeps
+    /// preferences navigable as the list grows, while the right side owns the active section.
+    pub(super) fn draw_settings_page(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let ctx = root.ctx().clone();
+        if ctx.input(|i| {
+            i.key_pressed(egui::Key::Escape) || (i.modifiers.command && i.key_pressed(egui::Key::W))
+        }) {
+            actions.push(Action::CloseSettings);
         }
 
-        let mut open = true;
-        let mut close = false;
         let mut reload_themes = false;
         let mut chosen = self.theme.clone();
-        // Snapshot (key, label, builtin, author) so the picker holds no borrow on `self`.
-        let options: Vec<(String, String, bool, Option<String>)> = self
+        let mut section = self.settings_section;
+        let mut history_enabled = self.history_enabled;
+        let mut audit_enabled = self.audit_enabled;
+        let mut update_check_enabled = self.update_check_enabled;
+        // Snapshot the display data so rendering a choice never holds a borrow on `self`.
+        let options: Vec<(
+            String,
+            String,
+            bool,
+            Option<String>,
+            egui::Color32,
+            egui::Color32,
+            egui::Color32,
+        )> = self
             .themes
             .entries()
             .iter()
-            .map(|e| (e.key.clone(), e.name.clone(), e.builtin, e.author.clone()))
+            .map(|e| {
+                (
+                    e.key.clone(),
+                    e.name.clone(),
+                    e.builtin,
+                    e.author.clone(),
+                    e.theme.base,
+                    e.theme.surface,
+                    e.theme.accent,
+                )
+            })
             .collect();
         let themes_dir = dbcore::config::themes_dir()
             .ok()
             .map(|p| p.display().to_string());
 
-        components::dialog_window("Settings")
-            .open(&mut open)
+        egui::Panel::left("settings_category_rail")
             .resizable(false)
-            .frame(components::dialog_frame(ctx))
-            .show(ctx, |ui| {
-                ui.set_min_width(260.0);
-                components::section_header(ui, "Appearance");
-                ui.label(egui::RichText::new("Theme").color(palette::TEXT_WEAK()));
-                ui.add_space(6.0);
+            .exact_size(210.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(palette::PANEL())
+                    .inner_margin(egui::Margin::symmetric(14, 18)),
+            )
+            .show_inside(root, |ui| {
+                ui.label(
+                    egui::RichText::new("Settings")
+                        .size(18.0)
+                        .strong()
+                        .color(palette::TEXT()),
+                );
+                ui.add_space(3.0);
+                ui.label(
+                    egui::RichText::new("Workspace preferences")
+                        .size(11.5)
+                        .color(palette::TEXT_FAINT()),
+                );
+                ui.add_space(22.0);
 
-                for (key, label, builtin, author) in &options {
-                    let resp = ui.radio_value(&mut chosen, key.clone(), label.as_str());
-                    let tooltip = if *builtin {
-                        "Built-in theme".to_string()
-                    } else {
-                        match author {
-                            Some(author) => format!("Custom theme · by {author}"),
-                            None => "Custom theme".to_string(),
-                        }
-                    };
-                    resp.on_hover_text(tooltip);
+                ui.spacing_mut().item_spacing.y = 6.0;
+                for (candidate, label) in [
+                    (SettingsSection::General, "General"),
+                    (SettingsSection::Appearance, "Appearance"),
+                    (SettingsSection::Privacy, "Privacy"),
+                ] {
+                    ui.selectable_value(&mut section, candidate, label);
                 }
-
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if components::Btn::new("Reload themes")
-                        .show(ui)
-                        .on_hover_text(
-                            themes_dir
-                                .as_deref()
-                                .map(|d| format!("Drop *.json theme files in:\n{d}"))
-                                .unwrap_or_else(|| "Re-scan the themes folder".to_string()),
-                        )
-                        .clicked()
-                    {
-                        reload_themes = true;
-                    }
-                });
-
-                ui.add_space(10.0);
-                components::section_header(ui, "Privacy");
-                if ui
-                    .checkbox(&mut self.history_enabled, "Record query history")
-                    .on_hover_text(
-                        "Append every executed statement (with its outcome) to a local \
-                         log file. SQL may contain data values — turn this off for \
-                         sensitive work.",
-                    )
-                    .changed()
-                {
-                    self.persist_settings();
-                }
-                if ui
-                    .checkbox(&mut self.audit_enabled, "Record audit trail")
-                    .on_hover_text(
-                        "Append connections and executed statements to an append-only \
-                         monthly log the app never rewrites or clears — a local record \
-                         of what touched which database. SQL may contain data values. \
-                         Production Guardian decisions are always recorded.",
-                    )
-                    .changed()
-                {
-                    self.persist_settings();
-                }
-                if ui
-                    .checkbox(
-                        &mut self.update_check_enabled,
-                        "Check for updates at launch",
-                    )
-                    .on_hover_text(
-                        "Ask GitHub for the latest release when the app starts. This is \
-                         the app's only network request besides your own database \
-                         connections; it sends no telemetry. Takes effect next launch.",
-                    )
-                    .changed()
-                {
-                    self.persist_settings();
-                }
-
-                components::dialog_footer(ui, |ui| {
-                    if components::button(ui, icons::close(), "Close", true).clicked() {
-                        close = true;
-                    }
-                });
             });
 
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(palette::BASE())
+                    .inner_margin(egui::Margin::same(0)),
+            )
+            .show_inside(root, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("settings_page_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add_space(38.0);
+                        let available = ui.available_width();
+                        let content_w = (available - 64.0).min(780.0).max(320.0);
+                        let inset = ((available - content_w) / 2.0).max(0.0);
+
+                        ui.horizontal(|ui| {
+                            ui.add_space(inset);
+                            ui.vertical(|ui| {
+                                ui.set_width(content_w);
+                                let (page_title, page_description) = match section {
+                                    SettingsSection::General => (
+                                        "General",
+                                        "Control how plusplus behaves when the application starts.",
+                                    ),
+                                    SettingsSection::Appearance => (
+                                        "Appearance",
+                                        "Choose how your workspace and SQL tools look.",
+                                    ),
+                                    SettingsSection::Privacy => (
+                                        "Privacy",
+                                        "Control which activity records stay on this machine.",
+                                    ),
+                                };
+                                ui.label(
+                                    egui::RichText::new(page_title)
+                                        .size(28.0)
+                                        .strong()
+                                        .color(palette::TEXT()),
+                                );
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new(page_description)
+                                        .size(13.0)
+                                        .color(palette::TEXT_WEAK()),
+                                );
+
+                                match section {
+                                    SettingsSection::General => {
+                                        ui.add_space(30.0);
+                                        ui.label(
+                                            egui::RichText::new("Startup")
+                                                .size(13.0)
+                                                .strong()
+                                                .color(palette::TEXT_WEAK()),
+                                        );
+                                        ui.add_space(10.0);
+                                        egui::Frame::new()
+                                            .fill(palette::PANEL())
+                                            .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                                            .corner_radius(egui::CornerRadius::same(14))
+                                            .inner_margin(egui::Margin::symmetric(18, 14))
+                                            .show(ui, |ui| {
+                                                ui.set_width(content_w - 36.0);
+                                                ui.horizontal(|ui| {
+                                                    ui.checkbox(&mut update_check_enabled, "");
+                                                    ui.add_space(6.0);
+                                                    ui.vertical(|ui| {
+                                                        ui.label(
+                                                            egui::RichText::new(
+                                                                "Check for updates at launch",
+                                                            )
+                                                            .size(13.0)
+                                                            .color(palette::TEXT()),
+                                                        );
+                                                        ui.add_space(2.0);
+                                                        ui.label(
+                                                            egui::RichText::new(
+                                                                "Ask GitHub for the latest release when plusplus starts. No telemetry is sent.",
+                                                            )
+                                                            .size(11.5)
+                                                            .color(palette::TEXT_WEAK()),
+                                                        );
+                                                    });
+                                                });
+                                            });
+                                    }
+                                    SettingsSection::Appearance => {
+                                ui.add_space(30.0);
+                                ui.label(
+                                    egui::RichText::new("Theme")
+                                        .size(13.0)
+                                        .strong()
+                                        .color(palette::TEXT_WEAK()),
+                                );
+                                ui.add_space(3.0);
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Choose a palette for the workspace and SQL editor. Changes apply immediately.",
+                                    )
+                                    .size(12.0)
+                                    .color(palette::TEXT_WEAK()),
+                                );
+                                ui.add_space(12.0);
+
+                                egui::Frame::new()
+                                    .fill(palette::PANEL())
+                                    .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                                    .corner_radius(egui::CornerRadius::same(14))
+                                    .inner_margin(egui::Margin::same(16))
+                                    .show(ui, |ui| {
+                                        ui.set_width(content_w - 32.0);
+                                        let columns: usize = if ui.available_width() >= 560.0 {
+                                            2
+                                        } else {
+                                            1
+                                        };
+                                        let gap = 10.0;
+                                        let card_w = (ui.available_width()
+                                            - gap * (columns.saturating_sub(1) as f32))
+                                            / columns as f32;
+
+                                        for row in options.chunks(columns) {
+                                            ui.horizontal(|ui| {
+                                                ui.spacing_mut().item_spacing.x = gap;
+                                                for (
+                                                    key,
+                                                    label,
+                                                    builtin,
+                                                    author,
+                                                    base,
+                                                    surface,
+                                                    accent,
+                                                ) in row
+                                                {
+                                                    let (rect, resp) = ui.allocate_exact_size(
+                                                        egui::vec2(card_w, 66.0),
+                                                        egui::Sense::click(),
+                                                    );
+                                                    let selected = *key == chosen;
+                                                    let activate = resp.clicked()
+                                                        || (resp.has_focus()
+                                                            && ui.input(|i| {
+                                                                i.key_pressed(egui::Key::Enter)
+                                                            }));
+                                                    if activate {
+                                                        chosen = key.clone();
+                                                    }
+
+                                                    resp.widget_info(|| {
+                                                        egui::WidgetInfo::selected(
+                                                            egui::WidgetType::RadioButton,
+                                                            true,
+                                                            selected,
+                                                            label,
+                                                        )
+                                                    });
+                                                    let fill = if selected {
+                                                        palette::SELECTION()
+                                                    } else if resp.hovered() {
+                                                        palette::SURFACE_HOVER()
+                                                    } else {
+                                                        palette::SURFACE()
+                                                    };
+                                                    let stroke = if selected {
+                                                        egui::Stroke::new(
+                                                            1.5,
+                                                            palette::ACCENT(),
+                                                        )
+                                                    } else {
+                                                        egui::Stroke::new(
+                                                            1.0,
+                                                            palette::BORDER(),
+                                                        )
+                                                    };
+                                                    ui.painter().rect(
+                                                        rect,
+                                                        egui::CornerRadius::same(10),
+                                                        fill,
+                                                        stroke,
+                                                        egui::StrokeKind::Inside,
+                                                    );
+
+                                                    let preview = egui::Rect::from_min_size(
+                                                        rect.min + egui::vec2(12.0, 12.0),
+                                                        egui::vec2(42.0, 42.0),
+                                                    );
+                                                    ui.painter().rect_filled(
+                                                        preview,
+                                                        egui::CornerRadius::same(8),
+                                                        *base,
+                                                    );
+                                                    ui.painter().rect_filled(
+                                                        egui::Rect::from_min_max(
+                                                            egui::pos2(
+                                                                preview.left() + 6.0,
+                                                                preview.center().y,
+                                                            ),
+                                                            egui::pos2(
+                                                                preview.right() - 6.0,
+                                                                preview.bottom() - 6.0,
+                                                            ),
+                                                        ),
+                                                        egui::CornerRadius::same(4),
+                                                        *surface,
+                                                    );
+                                                    ui.painter().circle_filled(
+                                                        preview.right_top()
+                                                            + egui::vec2(-9.0, 9.0),
+                                                        4.0,
+                                                        *accent,
+                                                    );
+
+                                                    let text_x = preview.right() + 12.0;
+                                                    ui.painter().text(
+                                                        egui::pos2(text_x, rect.top() + 22.0),
+                                                        egui::Align2::LEFT_CENTER,
+                                                        label,
+                                                        egui::FontId::proportional(13.0),
+                                                        palette::TEXT(),
+                                                    );
+                                                    let detail = if *builtin {
+                                                        "Built in".to_string()
+                                                    } else if let Some(author) = author {
+                                                        format!("Custom · {author}")
+                                                    } else {
+                                                        "Custom".to_string()
+                                                    };
+                                                    ui.painter().text(
+                                                        egui::pos2(text_x, rect.top() + 44.0),
+                                                        egui::Align2::LEFT_CENTER,
+                                                        detail,
+                                                        egui::FontId::proportional(11.0),
+                                                        palette::TEXT_FAINT(),
+                                                    );
+                                                }
+                                            });
+                                            ui.add_space(gap);
+                                        }
+
+                                        ui.add_space(2.0);
+                                        ui.horizontal(|ui| {
+                                            if components::Btn::new("Reload themes")
+                                                .icon(icons::refresh())
+                                                .show(ui)
+                                                .on_hover_text(
+                                                    themes_dir
+                                                        .as_deref()
+                                                        .map(|d| {
+                                                            format!(
+                                                                "Drop *.json theme files in:\n{d}"
+                                                            )
+                                                        })
+                                                        .unwrap_or_else(|| {
+                                                            "Re-scan the themes folder".to_string()
+                                                        }),
+                                                )
+                                                .clicked()
+                                            {
+                                                reload_themes = true;
+                                            }
+                                            ui.add_space(4.0);
+                                            ui.label(
+                                                egui::RichText::new(
+                                                    "Custom themes appear here after reloading.",
+                                                )
+                                                .size(11.0)
+                                                .color(palette::TEXT_FAINT()),
+                                            );
+                                        });
+                                    });
+
+                                    }
+                                    SettingsSection::Privacy => {
+                                ui.add_space(30.0);
+                                ui.label(
+                                    egui::RichText::new("Local records")
+                                        .size(13.0)
+                                        .strong()
+                                        .color(palette::TEXT_WEAK()),
+                                );
+                                ui.add_space(3.0);
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Executed SQL may contain sensitive values. These records never leave this machine.",
+                                    )
+                                    .size(12.0)
+                                    .color(palette::TEXT_WEAK()),
+                                );
+                                ui.add_space(12.0);
+
+                                egui::Frame::new()
+                                    .fill(palette::PANEL())
+                                    .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                                    .corner_radius(egui::CornerRadius::same(14))
+                                    .inner_margin(egui::Margin::symmetric(18, 10))
+                                    .show(ui, |ui| {
+                                        ui.set_width(content_w - 36.0);
+                                        for (enabled, title, description) in [
+                                            (
+                                                &mut history_enabled,
+                                                "Record query history",
+                                                "Keep executed SQL and its outcome in a local history file.",
+                                            ),
+                                            (
+                                                &mut audit_enabled,
+                                                "Record audit trail",
+                                                "Append connections and statements to a monthly local compliance log.",
+                                            ),
+                                        ] {
+                                            ui.horizontal(|ui| {
+                                                ui.add_space(2.0);
+                                                ui.checkbox(enabled, "");
+                                                ui.add_space(6.0);
+                                                ui.vertical(|ui| {
+                                                    ui.label(
+                                                        egui::RichText::new(title)
+                                                            .size(13.0)
+                                                            .color(palette::TEXT()),
+                                                    );
+                                                    ui.add_space(2.0);
+                                                    ui.label(
+                                                        egui::RichText::new(description)
+                                                            .size(11.5)
+                                                            .color(palette::TEXT_WEAK()),
+                                                    );
+                                                });
+                                            });
+                                            ui.add_space(10.0);
+                                            if title != "Record audit trail" {
+                                                ui.separator();
+                                                ui.add_space(10.0);
+                                            }
+                                        }
+                                    });
+                                    }
+                                }
+
+                                ui.add_space(40.0);
+                            });
+                        });
+                    });
+            });
+
+        self.settings_section = section;
         if reload_themes {
             self.themes.reload();
             // A previously-selected custom theme may have been removed; re-resolve so the
             // active colours and the persisted key stay valid.
             let resolved = self.themes.resolve_key(&self.theme);
             if resolved != self.theme {
-                self.set_theme(ctx, resolved);
+                self.set_theme(&ctx, resolved);
             }
         }
         if chosen != self.theme {
-            self.set_theme(ctx, chosen);
+            self.set_theme(&ctx, chosen);
         }
-        if !open || close {
-            actions.push(Action::CloseSettings);
+
+        let preferences_changed = history_enabled != self.history_enabled
+            || audit_enabled != self.audit_enabled
+            || update_check_enabled != self.update_check_enabled;
+        if preferences_changed {
+            self.history_enabled = history_enabled;
+            self.audit_enabled = audit_enabled;
+            self.update_check_enabled = update_check_enabled;
+            self.persist_settings();
         }
     }
 

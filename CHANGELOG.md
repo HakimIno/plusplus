@@ -5,6 +5,21 @@ while pre-1.0 releases may still change workflows and configuration formats.
 
 ## Unreleased
 
+## 0.2.21 — 2026-07-21
+
+- Redesigned the first-run welcome screen as a full-window scene: an accent-tinted layered
+  landscape, a speech-bubble intro with the feature list, one-click theme swatches, the
+  mascot, and a full-width Get Started action (Enter works too). The window can be dragged
+  from the top strip, and Linux/Windows keep their close/maximize/minimize buttons.
+- Moved Settings out of a dialog into a full workspace tab with General, Appearance, and
+  Privacy sections, sharing the query-tab strip.
+- Added three built-in themes — Lotus Dusk, Tidal Ledger, and Copper Circuit — with their
+  JSON sources in `examples/themes/` as authoring references.
+- Fixed a potential crash on very large or high-DPI displays: the welcome backdrop now
+  rasterizes at a fixed size instead of scaling with the window.
+- Made the UI test suite hermetic: tests run against an isolated config directory and can no
+  longer overwrite the machine's real settings, workspace tabs, or connections.
+
 ## 0.2.20 — 2026-07-21
 
 - Added Production Guardian for destructive SQL on production connections, with dialect-aware

@@ -440,3 +440,91 @@ pub(crate) fn query_tab_item(
         response: resp,
     }
 }
+
+/// Selected utility tab used by Settings. It deliberately stays outside the persisted query
+/// tab model while matching the same strip geometry and close affordance.
+pub(crate) fn settings_tab_item(ui: &mut egui::Ui) -> QueryTabResponse {
+    let title = "Settings";
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(title.to_string(), font, palette::TEXT());
+    let pad = 9.0;
+    let close_w = 16.0;
+    let size = egui::vec2(
+        pad + 16.0 + TAB_ICON_GAP + galley.size().x + 8.0 + close_w + pad,
+        29.0,
+    );
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let close_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.right() - pad - close_w * 0.5, rect.center().y),
+        egui::vec2(close_w, close_w),
+    );
+    let close_resp = ui.interact(close_rect, resp.id.with("close"), egui::Sense::click());
+
+    if ui.is_rect_visible(rect) {
+        let rounding = egui::CornerRadius {
+            nw: 4,
+            ne: 4,
+            sw: 0,
+            se: 0,
+        };
+        ui.painter().rect_filled(rect, rounding, palette::SURFACE());
+        ui.painter().hline(
+            rect.x_range(),
+            rect.top(),
+            egui::Stroke::new(1.0, palette::ACCENT()),
+        );
+
+        let badge = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + pad + 7.0, rect.center().y),
+            egui::vec2(16.0, 16.0),
+        );
+        ui.painter().rect_filled(
+            badge,
+            egui::CornerRadius::same(4),
+            translucent(palette::ACCENT(), 34),
+        );
+        egui::Image::new(icons::settings())
+            .fit_to_exact_size(egui::Vec2::splat(TAB_ICON_SIZE))
+            .tint(palette::ACCENT())
+            .paint_at(
+                ui,
+                egui::Rect::from_center_size(badge.center(), egui::Vec2::splat(TAB_ICON_SIZE)),
+            );
+        ui.painter().galley(
+            egui::pos2(
+                badge.right() + TAB_ICON_GAP,
+                rect.center().y - galley.size().y * 0.5,
+            ),
+            galley,
+            palette::TEXT(),
+        );
+
+        let c = close_rect.center();
+        if close_resp.hovered() {
+            ui.painter()
+                .circle_filled(c, 7.0, translucent(palette::DANGER(), 28));
+        }
+        let color = if close_resp.hovered() {
+            palette::DANGER()
+        } else {
+            palette::TEXT_WEAK()
+        };
+        let r = 3.25;
+        let stroke = egui::Stroke::new(1.4, color);
+        ui.painter()
+            .line_segment([c + egui::vec2(-r, -r), c + egui::vec2(r, r)], stroke);
+        ui.painter()
+            .line_segment([c + egui::vec2(r, -r), c + egui::vec2(-r, r)], stroke);
+    }
+
+    QueryTabResponse {
+        clicked: resp.clicked() && !close_resp.hovered(),
+        pinned: false,
+        close: close_resp.clicked(),
+        drag_started: false,
+        rect,
+        response: resp,
+    }
+}

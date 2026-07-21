@@ -408,6 +408,15 @@ enum SidebarTab {
     History,
 }
 
+/// Category selected in the Settings workspace tab.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum SettingsSection {
+    #[default]
+    General,
+    Appearance,
+    Privacy,
+}
+
 /// A live connection plus its introspected schema.
 struct ActiveConnection {
     /// Id of the originating config; kept for reconnect/refresh in later phases.
@@ -1165,6 +1174,7 @@ pub struct DbGuiApp {
     /// the value box's actions menu.
     details_date_pick: Option<(usize, usize)>,
     settings_open: bool,
+    settings_section: SettingsSection,
     schema_filter: String,
     /// Queries tab: live name/SQL filter over the saved-query list.
     favorites_filter: String,
@@ -1304,11 +1314,29 @@ impl DbGuiApp {
         app
     }
 
+    /// Point `dbcore::config` at a per-process temp dir for the whole test run, so tests
+    /// never read this machine's real config — or write test state back into it
+    /// (`persist_settings` flips `welcomed`, `maybe_save_workspace` commits fake tabs into
+    /// the developer's real workspace.json). Every construct-based test funnels through
+    /// here; `Once` makes the first caller set the var before any config file is touched.
+    #[cfg(test)]
+    fn isolate_test_config() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let dir = std::env::temp_dir().join(format!("plusplus-test-config-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            std::env::set_var("XDG_CONFIG_HOME", &dir);
+        });
+    }
+
     /// Build the app state without touching an egui context (used by `new` and tests).
     ///
     /// Side effect: activates the saved theme via [`crate::theme::set_current`] so a later
     /// [`crate::style::apply`] renders in it. This is a thread-local, no context needed.
     fn construct() -> Self {
+        #[cfg(test)]
+        Self::isolate_test_config();
+
         let (tx, rx) = std::sync::mpsc::channel();
         let connections = dbcore::config::load_connections().unwrap_or_default();
 
@@ -1375,6 +1403,7 @@ impl DbGuiApp {
             details_filter: String::new(),
             details_date_pick: None,
             settings_open: false,
+            settings_section: SettingsSection::default(),
             schema_filter: String::new(),
             favorites_filter: String::new(),
             autocomplete: crate::autocomplete::State::default(),

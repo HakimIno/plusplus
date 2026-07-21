@@ -1,0 +1,23 @@
+{
+  "name": "Lotus Dusk",
+  "author": "plusplus",
+  "is_dark": true,
+  "base": "#15131c",
+  "panel": "#1c1926",
+  "surface": "#292335",
+  "surface_hover": "#382f46",
+  "code_bg": "#100e16",
+  "stripe": "#211c2a",
+  "selection": "#493552",
+  "border": "#30293b",
+  "border_strong": "#4b4059",
+  "text": "#f1eaf4",
+  "text_weak": "#b8aabd",
+  "text_faint": "#897b91",
+  "accent": "#e18bb7",
+  "accent_hover": "#efa4cb",
+  "on_accent": "#25121d",
+  "success": "#65c99a",
+  "danger": "#ff7f8e",
+  "warning": "#e3b86f"
+}

@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 360" fill="none">
+  <!--
+    Welcome-screen landscape. Drawn white-on-transparent so the renderer can .tint() it to
+    the active theme's accent; depth comes from per-layer fill-opacity, not extra hues.
+  -->
+  <!-- far ridge -->
+  <path fill="#ffffff" fill-opacity="0.16"
+    d="M0 224 C 130 152, 310 148, 465 206 C 615 262, 760 128, 925 166 C 1085 202, 1225 138, 1440 198 L 1440 360 L 0 360 Z"/>
+  <!-- mid ridge -->
+  <path fill="#ffffff" fill-opacity="0.30"
+    d="M0 284 C 175 222, 350 234, 520 278 C 690 320, 855 212, 1035 252 C 1195 287, 1325 242, 1440 268 L 1440 360 L 0 360 Z"/>
+  <!-- near ground -->
+  <path fill="#ffffff" fill-opacity="0.52"
+    d="M0 332 C 215 294, 430 308, 640 330 C 850 351, 1055 302, 1265 322 C 1330 328, 1390 332, 1440 330 L 1440 360 L 0 360 Z"/>
+  <!-- speckles: sparse texture dots drifting up off the ridges -->
+  <g fill="#ffffff" fill-opacity="0.40">
+    <circle cx="140" cy="248" r="2.5"/>
+    <circle cx="248" cy="200" r="1.8"/>
+    <circle cx="392" cy="256" r="2.2"/>
+    <circle cx="536" cy="216" r="1.6"/>
+    <circle cx="668" cy="252" r="2.6"/>
+    <circle cx="812" cy="192" r="1.8"/>
+    <circle cx="948" cy="236" r="2.2"/>
+    <circle cx="1082" cy="200" r="1.6"/>
+    <circle cx="1204" cy="246" r="2.4"/>
+    <circle cx="1330" cy="212" r="1.8"/>
+  </g>
+  <!-- grass tufts rooted on the near-ground surface -->
+  <g stroke="#ffffff" stroke-opacity="0.45" stroke-width="3" stroke-linecap="round" fill="none">
+    <path d="M236 305 q 2 -14 0 -24"/>
+    <path d="M236 291 q -9 -4 -13 -12"/>
+    <path d="M236 291 q 9 -4 13 -12"/>
+    <path d="M604 327 q 2 -13 0 -22"/>
+    <path d="M604 315 q -8 -4 -12 -11"/>
+    <path d="M604 315 q 8 -4 12 -11"/>
+    <path d="M1108 310 q 2 -14 0 -24"/>
+    <path d="M1108 296 q -9 -4 -13 -12"/>
+    <path d="M1108 296 q 9 -4 13 -12"/>
+  </g>
+</svg>

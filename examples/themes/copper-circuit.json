@@ -1,0 +1,23 @@
+{
+  "name": "Copper Circuit",
+  "author": "plusplus",
+  "is_dark": true,
+  "base": "#10161b",
+  "panel": "#151e24",
+  "surface": "#202b32",
+  "surface_hover": "#2c3941",
+  "code_bg": "#0b1014",
+  "stripe": "#192229",
+  "selection": "#493525",
+  "border": "#29363d",
+  "border_strong": "#42535b",
+  "text": "#edf1ef",
+  "text_weak": "#aebbb8",
+  "text_faint": "#71827f",
+  "accent": "#d98a48",
+  "accent_hover": "#eba261",
+  "on_accent": "#21150c",
+  "success": "#55c49a",
+  "danger": "#ef737b",
+  "warning": "#e0bd5b"
+}

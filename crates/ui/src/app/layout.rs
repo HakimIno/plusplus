@@ -33,6 +33,20 @@ impl DbGuiApp {
             return;
         }
 
+        // Settings behaves like a utility tab: keep the app chrome and query-tab strip, then
+        // let the settings surface own the remaining workspace until another tab is selected.
+        if self.settings_open {
+            let mut actions = Vec::new();
+            self.top_bar(ui_root, frame, &mut actions);
+            self.query_tab_bar(ui_root, &mut actions);
+            self.status_bar(ui_root, &mut actions);
+            self.draw_settings_page(ui_root, &mut actions);
+            for action in actions {
+                self.apply_action(action);
+            }
+            return;
+        }
+
         let mut actions: Vec<Action> = Vec::new();
 
         // A workspace may intentionally have no tabs. Keep only the global chrome and the
@@ -53,7 +67,6 @@ impl DbGuiApp {
 
             // Global dialogs remain available from the title bar even before a query tab exists.
             self.connection_dialog(&ctx, &mut actions);
-            self.settings_dialog(&ctx, &mut actions);
             self.update_dialog(&ctx, &mut actions);
             self.whats_new_dialog(&ctx, &mut actions);
 
@@ -342,7 +355,6 @@ impl DbGuiApp {
         }
         self.central_panel(ui_root, &mut actions);
         self.connection_dialog(&ctx, &mut actions);
-        self.settings_dialog(&ctx, &mut actions);
         self.commit_preview_dialog(&ctx, &mut actions);
         self.favorite_name_dialog(&ctx, &mut actions);
         self.danger_confirm_dialog(&ctx, &mut actions);

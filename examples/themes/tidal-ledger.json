@@ -1,0 +1,23 @@
+{
+  "name": "Tidal Ledger",
+  "author": "plusplus",
+  "is_dark": false,
+  "base": "#f7fbfc",
+  "panel": "#eaf2f4",
+  "surface": "#dce9ec",
+  "surface_hover": "#cddfe3",
+  "code_bg": "#fcfeff",
+  "stripe": "#e7f1f3",
+  "selection": "#b9dce2",
+  "border": "#c9dade",
+  "border_strong": "#9fb8be",
+  "text": "#16343a",
+  "text_weak": "#3f5f65",
+  "text_faint": "#5b777c",
+  "accent": "#087f8c",
+  "accent_hover": "#056c77",
+  "on_accent": "#ffffff",
+  "success": "#147a55",
+  "danger": "#c43f4d",
+  "warning": "#986300"
+}

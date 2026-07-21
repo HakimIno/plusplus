@@ -1,7 +1,8 @@
 # Custom themes
 
-plusplus ships three built-in themes (Carbon, Midnight, Daylight). You can also install
-your own — a theme is just a small JSON file of colours, no recompile required. This is the
+plusplus ships seven built-in themes: Midnight Conversational IDE, Carbon, Midnight, Daylight,
+Lotus Dusk, Tidal Ledger, and Copper Circuit. You can also install your own — a theme is just
+a small JSON file of colours, no recompile required. This is the
 first plugin "contribution point": more contribution types (snippets, keybindings, WASM
 plugins) will follow the same drop-a-file model.
 
@@ -15,18 +16,20 @@ plugins) will follow the same drop-a-file model.
    | Linux (XDG) | `$XDG_CONFIG_HOME/plusplus/themes/` |
    | Windows | `%APPDATA%\plusplus\themes\` |
 
-2. Copy a `*.json` theme file into it. A ready-made example lives at
-   [`examples/themes/dracula.json`](../examples/themes/dracula.json).
+2. Copy a `*.json` theme file into it. A ready-made custom example lives at
+   [Dracula](../examples/themes/dracula.json). The JSON sources for the three newer built-in
+   palettes are also available in `examples/themes/` as authoring references.
 
 3. In plusplus, open **Settings → Appearance** and click **Reload themes** (or restart).
    Your theme appears in the picker next to the built-ins.
 
 The file name (without `.json`) is the theme's stable id, persisted to `settings.json`.
-If you later delete a selected theme file, plusplus falls back to the default (Carbon).
+If you later delete a selected theme file, plusplus falls back to the default
+(Midnight Conversational IDE).
 
 ## Authoring a theme
 
-Copy `examples/themes/dracula.json` and edit the colours. Every field is required and is an
+Copy any file in `examples/themes/` and edit the colours. Every field is required and is an
 opaque `#rrggbb` (or shorthand `#rgb`) hex string, except `name` (display name), the optional
 `author`, and `is_dark` (a boolean that selects egui's dark/light base).
 
@@ -74,5 +77,4 @@ opaque `#rrggbb` (or shorthand `#rgb`) hex string, except `name` (display name),
 | `success` / `danger` / `warning` | Semantic status colours |
 
 A malformed or unreadable theme file is skipped silently — it never blocks startup. A file
-whose name collides with a built-in key (`carbon`, `midnight`, `daylight`) is ignored so the
-defaults are always available.
+whose name collides with any built-in key is ignored so the defaults are always available.
