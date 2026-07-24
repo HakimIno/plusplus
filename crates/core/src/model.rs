@@ -13,6 +13,10 @@ pub enum DbKind {
     MariaDb,
     SqlServer,
     Sqlite,
+    /// Apache Cassandra, spoken over the CQL native protocol.
+    Cassandra,
+    /// ScyllaDB — wire-compatible with Cassandra; both share the CQL backend.
+    ScyllaDb,
 }
 
 impl DbKind {
@@ -23,16 +27,22 @@ impl DbKind {
             DbKind::MariaDb => "MariaDB",
             DbKind::SqlServer => "SQL Server",
             DbKind::Sqlite => "SQLite",
+            DbKind::Cassandra => "Cassandra",
+            DbKind::ScyllaDb => "ScyllaDB",
         }
+    }
+
+    /// Whether this backend speaks CQL (Cassandra / ScyllaDB) rather than SQL. CQL looks
+    /// like SQL but has no joins, no transactions, and single-row `INSERT` only, so a few
+    /// SQL-generic paths branch on this.
+    pub fn is_cql(self) -> bool {
+        matches!(self, DbKind::Cassandra | DbKind::ScyllaDb)
     }
 
     /// Whether this backend authenticates with a server (host/port/user/password)
     /// versus a local file path.
     pub fn is_server(self) -> bool {
-        matches!(
-            self,
-            DbKind::Postgres | DbKind::MySql | DbKind::MariaDb | DbKind::SqlServer
-        )
+        !matches!(self, DbKind::Sqlite)
     }
 
     /// Whether this backend can present a client certificate (mutual TLS).
@@ -47,6 +57,7 @@ impl DbKind {
             DbKind::MySql | DbKind::MariaDb => 3306,
             DbKind::SqlServer => 1433,
             DbKind::Sqlite => 0,
+            DbKind::Cassandra | DbKind::ScyllaDb => 9042,
         }
     }
 
@@ -69,11 +80,13 @@ impl DbKind {
     }
 
     /// How many row tuples one `INSERT ... VALUES` may carry. SQL Server rejects more than
-    /// 1000 outright; the others have no fixed row limit, so the cap there is a conservative
+    /// 1000 outright; CQL has no multi-row `VALUES` at all, so each statement holds exactly
+    /// one row there; the others have no fixed row limit, so the cap is a conservative
     /// batch size that keeps a statement well inside MySQL's `max_allowed_packet`.
     pub fn max_insert_rows(self) -> usize {
         match self {
             DbKind::SqlServer => 1000,
+            DbKind::Cassandra | DbKind::ScyllaDb => 1,
             _ => 500,
         }
     }
@@ -87,8 +100,11 @@ fn value_to_literal(value: &Value, kind: DbKind) -> Option<String> {
         Value::Int(i) => i.to_string(),
         Value::Float(f) => f.to_string(),
         Value::Bool(b) => match kind {
-            // Postgres has a real boolean type; the others store it as an integer/bit.
-            DbKind::Postgres => if *b { "TRUE" } else { "FALSE" }.to_string(),
+            // Postgres and CQL have a real boolean type; the others store it as an
+            // integer/bit (CQL additionally rejects 0/1 as boolean literals).
+            DbKind::Postgres | DbKind::Cassandra | DbKind::ScyllaDb => {
+                if *b { "TRUE" } else { "FALSE" }.to_string()
+            }
             _ => if *b { "1" } else { "0" }.to_string(),
         },
         Value::Text(s) => {
@@ -891,13 +907,11 @@ impl ConnectionConfig {
     /// A short subtitle describing the target, shown in the connection list.
     pub fn target_summary(&self) -> String {
         match self.kind {
-            DbKind::Postgres | DbKind::MySql | DbKind::MariaDb | DbKind::SqlServer => {
-                format!(
-                    "{}@{}:{}/{}",
-                    self.user, self.host, self.port, self.database
-                )
-            }
             DbKind::Sqlite => self.sqlite_path.clone(),
+            _ => format!(
+                "{}@{}:{}/{}",
+                self.user, self.host, self.port, self.database
+            ),
         }
     }
 }
@@ -1472,13 +1486,18 @@ fn ddl_table_ref(kind: DbKind, schema: Option<&str>, table: &str) -> String {
 /// (which use a trailing table-level `PRIMARY KEY (a, b)` clause instead).
 fn col_def_sql(kind: DbKind, col: &ColumnDef, inline_pk: bool) -> String {
     let mut parts = vec![kind.quote_ident(&col.name), col.data_type.clone()];
-    if !col.nullable {
-        parts.push("NOT NULL".into());
-    }
-    if let Some(def) = &col.default {
-        let d = def.trim();
-        if !d.is_empty() {
-            parts.push(format!("DEFAULT {d}"));
+    // CQL columns have no nullability and no per-column DEFAULT — every non-key column is
+    // implicitly nullable and unset means null. Emitting NOT NULL/DEFAULT produces a
+    // statement the server rejects, so those clauses are skipped entirely for CQL.
+    if !kind.is_cql() {
+        if !col.nullable {
+            parts.push("NOT NULL".into());
+        }
+        if let Some(def) = &col.default {
+            let d = def.trim();
+            if !d.is_empty() {
+                parts.push(format!("DEFAULT {d}"));
+            }
         }
     }
     if col.primary_key && inline_pk {
@@ -1573,6 +1592,8 @@ pub fn build_truncate_table_sql(kind: DbKind, schema: Option<&str>, table: &str)
 ///   constraints and indexes are preserved.
 /// - SQLite (`CREATE TABLE … AS SELECT`) and SQL Server (`SELECT … INTO`) copy columns and
 ///   data only — indexes, keys, and constraints are not carried over.
+/// - CQL has neither `CREATE TABLE … LIKE` nor `INSERT … SELECT`, so cloning is not
+///   possible as a statement sequence; returns an empty vec (callers hide the action).
 pub fn build_clone_table_sql(
     kind: DbKind,
     schema: Option<&str>,
@@ -1592,6 +1613,7 @@ pub fn build_clone_table_sql(
         ],
         DbKind::SqlServer => vec![format!("SELECT * INTO {dst} FROM {src};")],
         DbKind::Sqlite => vec![format!("CREATE TABLE {dst} AS SELECT * FROM {src};")],
+        DbKind::Cassandra | DbKind::ScyllaDb => Vec::new(),
     }
 }
 
@@ -1716,8 +1738,9 @@ pub fn build_alter_column_sql(
             }
             out
         }
-        // SQLite has no in-place column alter; the caller refuses this before reaching here.
-        DbKind::Sqlite => Vec::new(),
+        // SQLite has no in-place column alter; Cassandra/ScyllaDB dropped ALTER TYPE and
+        // have no nullability or defaults. The caller refuses these before reaching here.
+        DbKind::Sqlite | DbKind::Cassandra | DbKind::ScyllaDb => Vec::new(),
     }
 }
 
@@ -1734,6 +1757,14 @@ pub fn build_rename_column_sql(
             let qualified = format!("{}.{}.{}", schema.unwrap_or("dbo"), table, old_name);
             format!("EXEC sp_rename '{qualified}', '{new_name}', 'COLUMN';")
         }
+        // CQL spells it without the COLUMN keyword (and only allows renaming key columns —
+        // the server rejects the rest with a clear error).
+        DbKind::Cassandra | DbKind::ScyllaDb => format!(
+            "ALTER TABLE {} RENAME {} TO {};",
+            ddl_table_ref(kind, schema, table),
+            kind.quote_ident(old_name),
+            kind.quote_ident(new_name)
+        ),
         _ => format!(
             "ALTER TABLE {} RENAME COLUMN {} TO {};",
             ddl_table_ref(kind, schema, table),
@@ -1757,9 +1788,12 @@ pub fn build_create_index_sql(
         .map(|c| kind.quote_ident(c))
         .collect::<Vec<_>>()
         .join(", ");
-    // MySQL/MariaDB don't support schema-qualified index names in CREATE INDEX.
+    // MySQL/MariaDB don't support schema-qualified index names in CREATE INDEX; CQL
+    // likewise names the index bare (it lands in the table's keyspace).
     let idx_ref = match kind {
-        DbKind::MySql | DbKind::MariaDb => kind.quote_ident(&idx.name),
+        DbKind::MySql | DbKind::MariaDb | DbKind::Cassandra | DbKind::ScyllaDb => {
+            kind.quote_ident(&idx.name)
+        }
         _ => match schema {
             Some(s) => format!("{}.{}", kind.quote_ident(s), kind.quote_ident(&idx.name)),
             None => kind.quote_ident(&idx.name),
@@ -1783,6 +1817,12 @@ pub fn build_drop_index_sql(
         DbKind::MySql | DbKind::MariaDb | DbKind::SqlServer => {
             format!("DROP INDEX {q} ON {};", ddl_table_ref(kind, schema, table))
         }
+        // CQL: qualify with the keyspace (the schema slot), since the connection may not
+        // have a keyspace USEd while browsing across keyspaces.
+        DbKind::Cassandra | DbKind::ScyllaDb => match schema {
+            Some(s) => format!("DROP INDEX {}.{q};", kind.quote_ident(s)),
+            None => format!("DROP INDEX {q};"),
+        },
         _ => format!("DROP INDEX {q};"),
     }
 }
@@ -1800,7 +1840,9 @@ fn view_replace_kw(kind: DbKind, materialized: bool) -> &'static str {
     match kind {
         DbKind::Postgres | DbKind::MySql | DbKind::MariaDb => "OR REPLACE ",
         DbKind::SqlServer => "OR ALTER ",
-        DbKind::Sqlite => "",
+        // SQLite: no such form. CQL: plain views don't exist at all (materialized views
+        // have their own syntax); the view editor is not offered there.
+        DbKind::Sqlite | DbKind::Cassandra | DbKind::ScyllaDb => "",
     }
 }
 
@@ -1988,6 +2030,9 @@ pub fn build_create_trigger_sql(kind: DbKind, t: &TriggerBuild) -> Result<Vec<St
                 t.timing.label(),
             )])
         }
+        DbKind::Cassandra | DbKind::ScyllaDb => {
+            Err("Cassandra/ScyllaDB have no triggers in CQL.".into())
+        }
     }
 }
 
@@ -2009,7 +2054,9 @@ pub fn build_drop_trigger_sql(
             Some(s) => format!("DROP TRIGGER {}.{nm};", kind.quote_ident(s)),
             None => format!("DROP TRIGGER {nm};"),
         },
-        DbKind::Sqlite => format!("DROP TRIGGER {nm};"),
+        // CQL has no CREATE TRIGGER, but DROP TRIGGER exists for Java triggers loaded
+        // server-side; emit the plain form should one ever appear in the tree.
+        DbKind::Sqlite | DbKind::Cassandra | DbKind::ScyllaDb => format!("DROP TRIGGER {nm};"),
     }
 }
 
@@ -2074,7 +2121,7 @@ fn routine_params_sql(kind: DbKind, is_function: bool, params: &[RoutineParam]) 
                     };
                     format!("{at} {ty}{def}{out}")
                 }
-                DbKind::Sqlite => String::new(),
+                DbKind::Sqlite | DbKind::Cassandra | DbKind::ScyllaDb => String::new(),
             }
         })
         .filter(|s| !s.trim().is_empty())
@@ -2092,6 +2139,11 @@ pub fn build_create_routine_sql(
 ) -> Result<Vec<String>, String> {
     if kind == DbKind::Sqlite {
         return Err("SQLite has no stored functions or procedures.".into());
+    }
+    if kind.is_cql() {
+        // CQL UDFs exist but are Java/JS snippets, disabled by default server-side, and
+        // shaped nothing like this editor; introspection shows them read-only instead.
+        return Err("Creating Cassandra/ScyllaDB user-defined functions is not supported.".into());
     }
     let name = r.name.trim();
     if name.is_empty() {
@@ -2153,7 +2205,7 @@ pub fn build_create_routine_sql(
                 format!("CREATE {repl}PROCEDURE {rref}{params}\nAS\n{body};")
             }
         }
-        DbKind::Sqlite => unreachable!("guarded above"),
+        DbKind::Sqlite | DbKind::Cassandra | DbKind::ScyllaDb => unreachable!("guarded above"),
     };
     Ok(vec![sql])
 }
@@ -2195,6 +2247,157 @@ mod tests {
 
     fn target(sql: &str) -> Option<(Option<String>, String)> {
         simple_select_target(sql)
+    }
+
+    #[test]
+    fn cql_create_table_omits_not_null_and_default() {
+        // A CQL table: partition key `id`, a regular nullable `name`, no NOT NULL/DEFAULT,
+        // no ENGINE clause. Single-column key renders inline as PRIMARY KEY.
+        let cols = vec![
+            ColumnDef {
+                name: "id".into(),
+                data_type: "uuid".into(),
+                nullable: false,
+                primary_key: true,
+                default: None,
+            },
+            ColumnDef {
+                // A UI-provided default and NOT NULL must both be dropped for CQL.
+                name: "name".into(),
+                data_type: "text".into(),
+                nullable: false,
+                primary_key: false,
+                default: Some("'anon'".into()),
+            },
+        ];
+        let sql = build_create_table_sql(DbKind::ScyllaDb, Some("ks"), "users", &cols, &[]);
+        assert_eq!(
+            sql,
+            "CREATE TABLE \"ks\".\"users\" (\n    \
+             \"id\" uuid PRIMARY KEY,\n    \"name\" text\n);"
+        );
+        assert!(!sql.contains("NOT NULL"));
+        assert!(!sql.contains("DEFAULT"));
+        assert!(!sql.contains("ENGINE"));
+    }
+
+    #[test]
+    fn cql_composite_primary_key_uses_trailing_clause() {
+        let cols = vec![
+            ColumnDef {
+                name: "pk".into(),
+                data_type: "text".into(),
+                nullable: false,
+                primary_key: true,
+                default: None,
+            },
+            ColumnDef {
+                name: "ck".into(),
+                data_type: "int".into(),
+                nullable: false,
+                primary_key: true,
+                default: None,
+            },
+            ColumnDef {
+                name: "val".into(),
+                data_type: "text".into(),
+                nullable: true,
+                primary_key: false,
+                default: None,
+            },
+        ];
+        let sql = build_create_table_sql(DbKind::Cassandra, None, "t", &cols, &[]);
+        assert!(sql.contains("PRIMARY KEY (\"pk\", \"ck\")"), "{sql}");
+        assert!(!sql.contains("NOT NULL"));
+    }
+
+    #[test]
+    fn cql_add_column_and_index_and_drop() {
+        // ADD COLUMN carries no NOT NULL/DEFAULT for CQL.
+        let col = ColumnDef {
+            name: "age".into(),
+            data_type: "int".into(),
+            nullable: false,
+            primary_key: false,
+            default: Some("0".into()),
+        };
+        assert_eq!(
+            build_add_column_sql(DbKind::ScyllaDb, Some("ks"), "t", &col),
+            "ALTER TABLE \"ks\".\"t\" ADD COLUMN \"age\" int;"
+        );
+
+        // Secondary index: the name is bare (no keyspace prefix) in CREATE INDEX.
+        let idx = IndexDef {
+            name: "by_email".into(),
+            columns: vec!["email".into()],
+            unique: false,
+        };
+        assert_eq!(
+            build_create_index_sql(DbKind::Cassandra, Some("ks"), "t", &idx),
+            "CREATE INDEX \"by_email\" ON \"ks\".\"t\" (\"email\");"
+        );
+
+        // DROP INDEX qualifies with the keyspace.
+        assert_eq!(
+            build_drop_index_sql(DbKind::Cassandra, Some("ks"), "t", "by_email"),
+            "DROP INDEX \"ks\".\"by_email\";"
+        );
+
+        // TRUNCATE uses the standard TABLE form (not SQLite's DELETE fallback).
+        assert_eq!(
+            build_truncate_table_sql(DbKind::ScyllaDb, Some("ks"), "t"),
+            "TRUNCATE TABLE \"ks\".\"t\";"
+        );
+    }
+
+    #[test]
+    fn cql_rename_column_omits_column_keyword() {
+        assert_eq!(
+            build_rename_column_sql(DbKind::Cassandra, Some("ks"), "t", "old", "new"),
+            "ALTER TABLE \"ks\".\"t\" RENAME \"old\" TO \"new\";"
+        );
+    }
+
+    #[test]
+    fn cql_unsupported_ddl_is_refused_or_empty() {
+        // Clone: no CREATE TABLE LIKE / INSERT SELECT in CQL — returns no statements.
+        assert!(build_clone_table_sql(DbKind::Cassandra, Some("ks"), "t", "t_copy").is_empty());
+        // ALTER column type: CQL dropped it — no statements.
+        let col = ColumnDef {
+            name: "c".into(),
+            data_type: "text".into(),
+            nullable: true,
+            primary_key: false,
+            default: None,
+        };
+        assert!(build_alter_column_sql(DbKind::ScyllaDb, None, "t", &col).is_empty());
+        // Routines and triggers are refused with a clear message.
+        let rb = RoutineBuild {
+            schema: None,
+            name: "f".into(),
+            kind: RoutineKind::Function,
+            params: &[],
+            return_type: Some("int"),
+            language: "",
+            body: "return 1;",
+        };
+        assert!(build_create_routine_sql(DbKind::Cassandra, &rb, false).is_err());
+    }
+
+    #[test]
+    fn cql_bool_literal_uses_true_false() {
+        // Copy-as-INSERT path renders booleans as TRUE/FALSE for CQL, not 1/0.
+        let sql = build_insert_sql(
+            DbKind::ScyllaDb,
+            Some("ks"),
+            "t",
+            &[("id", &Value::Int(1)), ("active", &Value::Bool(true))],
+        )
+        .unwrap();
+        assert_eq!(
+            sql,
+            "INSERT INTO \"ks\".\"t\" (\"id\", \"active\") VALUES (1, TRUE);"
+        );
     }
 
     #[test]

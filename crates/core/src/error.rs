@@ -14,6 +14,12 @@ pub enum CoreError {
     #[error("sql server error: {0}")]
     Tiberius(#[from] tiberius::error::Error),
 
+    /// The `scylla` Cassandra/ScyllaDB (CQL) driver returned an error. Carried as the
+    /// driver's rendered message: scylla's error tree is deep and versioned, so we keep
+    /// the string rather than binding its types into our public error enum.
+    #[error("cassandra error: {0}")]
+    Cql(String),
+
     /// A connection pool failed to hand out a connection (timeout, manager error, ...).
     #[error("connection pool error: {0}")]
     Pool(String),

@@ -46,6 +46,8 @@ impl DbGuiApp {
                     Some(dbcore::DbKind::MariaDb) => "MariaDB ",
                     Some(dbcore::DbKind::SqlServer) => "MS ",
                     Some(dbcore::DbKind::Sqlite) => "SQLite ",
+                    Some(dbcore::DbKind::Cassandra) => "Cassandra ",
+                    Some(dbcore::DbKind::ScyllaDb) => "Scylla ",
                     None => "",
                 };
                 format!("{provider}Query {}", idx + 1)

@@ -1617,7 +1617,11 @@ impl DbGuiApp {
                                             components::menu_button(
                                                 ui,
                                                 icons::database(),
-                                                "Switch Database",
+                                                if conn.kind.is_cql() {
+                                                    "Switch Keyspace"
+                                                } else {
+                                                    "Switch Database"
+                                                },
                                                 |ui| {
                                                     ui.set_min_width(160.0);
                                                     egui::ScrollArea::vertical()
@@ -1755,29 +1759,48 @@ impl DbGuiApp {
             .max_size(360.0)
             .show_separator_line(true)
             .show_inside(root, |ui| {
-                ui.add_space(8.0);
-                // TablePlus-style sidebar: one strip of tabs picks which list fills
-                // the panel — schema objects, saved queries, or query history.
+                ui.add_space(4.0);
+                // A quiet, unboxed tab rail keeps navigation visible without spending a
+                // second surface layer at the top of the narrow sidebar.
                 let tabs = [SidebarTab::Items, SidebarTab::Queries, SidebarTab::History];
                 let selected = tabs
                     .iter()
                     .position(|t| *t == self.sidebar_tab)
                     .unwrap_or(0);
-                let choice = components::segmented_sized(
-                    ui,
-                    &[
-                        (icons::table(), "Items"),
-                        (icons::star(), "Queries"),
-                        (icons::history(), "History"),
-                    ],
-                    selected,
-                    ui.available_width(),
-                    false,
-                );
+                let labels = ["Items", "Queries", "History"];
+                let mut choice = selected;
+                let tab_width = ui.available_width() / tabs.len() as f32;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    for (index, label) in labels.iter().enumerate() {
+                        let active = index == selected;
+                        let color = if active {
+                            palette::TEXT()
+                        } else {
+                            palette::TEXT_WEAK()
+                        };
+                        let button =
+                            egui::Button::new(egui::RichText::new(*label).size(12.0).color(color))
+                                .frame(true)
+                                .frame_when_inactive(false)
+                                .corner_radius(egui::CornerRadius::same(4));
+                        let response = ui.add_sized(egui::vec2(tab_width, 24.0), button);
+                        if active && ui.is_rect_visible(response.rect) {
+                            ui.painter().hline(
+                                response.rect.center().x - 12.0..=response.rect.center().x + 12.0,
+                                response.rect.bottom() - 1.0,
+                                egui::Stroke::new(2.0, palette::ACCENT()),
+                            );
+                        }
+                        if response.clicked() {
+                            choice = index;
+                        }
+                    }
+                });
                 if choice != selected {
                     actions.push(Action::SetSidebarTab(tabs[choice]));
                 }
-                ui.add_space(6.0);
+                ui.add_space(4.0);
                 match self.sidebar_tab {
                     SidebarTab::Items => self.sidebar_items(ui, actions),
                     SidebarTab::Queries => self.favorites_tab(ui, actions),
@@ -1789,13 +1812,23 @@ impl DbGuiApp {
     /// The Items tab: create-object menu, table filter, and the schema tree.
     fn sidebar_items(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         ui.horizontal(|ui| {
-            components::section_header(ui, "Schema");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Keep the two secondary actions visually subordinate to the filter. Their
+                // menus and enabled states stay exactly as before; only the resting chrome is
+                // removed so the whole toolbar fits on one 24-point row.
+                ui.spacing_mut().button_padding = egui::vec2(4.0, 2.0);
+                let inactive_button = ui.visuals().widgets.inactive;
+                let inactive = &mut ui.visuals_mut().widgets.inactive;
+                inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+                inactive.bg_stroke = egui::Stroke::NONE;
                 let connected = self.active().is_some();
+                let active_kind = self.active().map(|a| a.db.kind());
                 // SQLite has no stored functions or procedures.
-                let supports_routines = self
-                    .active()
-                    .is_some_and(|a| a.db.kind() != dbcore::DbKind::Sqlite);
+                let supports_routines =
+                    active_kind.is_some_and(|k| k != dbcore::DbKind::Sqlite && !k.is_cql());
+                // CQL has no plain views or triggers (materialized views have a bespoke
+                // syntax not covered by these editors).
+                let supports_views_triggers = active_kind.is_some_and(|k| !k.is_cql());
                 let menu = ui.add_enabled_ui(connected, |ui| {
                     let plus = egui::Image::new(icons::plus())
                         .fit_to_exact_size(egui::vec2(icons::SIZE, icons::SIZE))
@@ -1806,11 +1839,16 @@ impl DbGuiApp {
                             actions.push(Action::OpenNewTable);
                             ui.close();
                         }
-                        if components::button(ui, icons::view(), "New View…", true).clicked() {
+                        if supports_views_triggers
+                            && components::button(ui, icons::view(), "New View…", true).clicked()
+                        {
                             actions.push(Action::OpenNewView);
                             ui.close();
                         }
-                        if components::button(ui, icons::play(), "New Trigger…", true).clicked() {
+                        if supports_views_triggers
+                            && components::button(ui, icons::play(), "New Trigger…", true)
+                                .clicked()
+                        {
                             actions.push(Action::OpenNewTrigger);
                             ui.close();
                         }
@@ -1859,15 +1897,18 @@ impl DbGuiApp {
                 })
                 .response
                 .on_hover_text("ER designer and portable designs");
+
+                // The filter remains a visible input well; only the icon actions are ghosted.
+                ui.visuals_mut().widgets.inactive = inactive_button;
+                components::icon_text_input(
+                    ui,
+                    &mut self.schema_filter,
+                    "Filter tables…",
+                    icons::search(),
+                    ui.available_width(),
+                );
             });
         });
-        components::icon_text_input(
-            ui,
-            &mut self.schema_filter,
-            "filter tables…",
-            icons::filter(),
-            ui.available_width(),
-        );
         ui.add_space(4.0);
 
         if self.active().is_some() {
@@ -2181,7 +2222,8 @@ impl DbGuiApp {
         );
 
         // Right-click anywhere on the row opens the full table actions menu.
-        row_resp.context_menu(|ui| table_actions_menu(ui, table, pinned, actions));
+        let kind = active.db.kind();
+        row_resp.context_menu(|ui| table_actions_menu(ui, table, pinned, kind, actions));
 
         // Single-click previews (reuses the italic preview tab); double-click pins a tab.
         let open_pin = row_resp.double_clicked();
@@ -4985,7 +5027,13 @@ impl DbGuiApp {
                             .changed();
                             ui.end_row();
 
-                            ui.label("Database");
+                            // CQL groups tables into keyspaces, not databases; label the
+                            // field with the term the user expects to type there.
+                            ui.label(if editor.config.kind.is_cql() {
+                                "Keyspace"
+                            } else {
+                                "Database"
+                            });
                             form_changed |= status_text_input(
                                 ui,
                                 &mut editor.config.database,
@@ -5391,23 +5439,35 @@ fn table_editor_view(
     ui.add_space(10.0);
 
     // Tab selector: Columns | Indexes | Foreign Keys — the same segmented switch used
-    // by the result-mode bars, so the designer reads as part of the app.
-    let tabs = [SchemaTab::Columns, SchemaTab::Indexes, SchemaTab::ForeignKeys];
+    // by the result-mode bars, so the designer reads as part of the app. CQL has no
+    // foreign keys, so that tab is dropped for Cassandra/ScyllaDB.
+    let (tabs, tab_labels, tab_width): (&[SchemaTab], &[(_, _)], f32) = if editor.db_kind.is_cql() {
+        (
+            &[SchemaTab::Columns, SchemaTab::Indexes],
+            &[(icons::column(), "Columns"), (icons::index(), "Indexes")],
+            240.0,
+        )
+    } else {
+        (
+            &[
+                SchemaTab::Columns,
+                SchemaTab::Indexes,
+                SchemaTab::ForeignKeys,
+            ],
+            &[
+                (icons::column(), "Columns"),
+                (icons::index(), "Indexes"),
+                (icons::key(), "Foreign Keys"),
+            ],
+            340.0,
+        )
+    };
+    // A tab remembered from another connection (e.g. ForeignKeys) may not exist here.
     let selected = tabs
         .iter()
         .position(|t| *t == editor.active_tab)
         .unwrap_or(0);
-    let choice = components::segmented_sized(
-        ui,
-        &[
-            (icons::column(), "Columns"),
-            (icons::index(), "Indexes"),
-            (icons::key(), "Foreign Keys"),
-        ],
-        selected,
-        340.0,
-        false,
-    );
+    let choice = components::segmented_sized(ui, tab_labels, selected, tab_width, false);
     editor.active_tab = tabs[choice];
     ui.add_space(8.0);
 
@@ -5836,6 +5896,7 @@ fn table_actions_menu(
     ui: &mut egui::Ui,
     table: &dbcore::TableInfo,
     pinned: bool,
+    kind: dbcore::DbKind,
     actions: &mut Vec<Action>,
 ) {
     ui.set_min_width(180.0);
@@ -5866,9 +5927,12 @@ fn table_actions_menu(
         actions.push(Action::OpenEditTable(table.clone()));
         ui.close();
     }
-    if components::button(ui, icons::table(), "Clone Table…", true)
-        .on_hover_text("Copy this table's structure and rows into a new table")
-        .clicked()
+    // CQL has no `CREATE TABLE … LIKE` / `INSERT … SELECT`, so a table can't be cloned as
+    // a statement sequence; hide the action rather than offer one that produces no SQL.
+    if !kind.is_cql()
+        && components::button(ui, icons::table(), "Clone Table…", true)
+            .on_hover_text("Copy this table's structure and rows into a new table")
+            .clicked()
     {
         actions.push(Action::CloneTable(table.clone()));
         ui.close();
@@ -7136,6 +7200,30 @@ fn db_type_options(kind: dbcore::DbKind) -> &'static [&'static str] {
         ],
         DbKind::Sqlite => &[
             "TEXT", "INTEGER", "REAL", "NUMERIC", "BLOB", "BOOLEAN", "DATE", "DATETIME",
+        ],
+        DbKind::Cassandra | DbKind::ScyllaDb => &[
+            "text",
+            "int",
+            "bigint",
+            "smallint",
+            "tinyint",
+            "varint",
+            "decimal",
+            "float",
+            "double",
+            "boolean",
+            "uuid",
+            "timeuuid",
+            "timestamp",
+            "date",
+            "time",
+            "duration",
+            "inet",
+            "blob",
+            "counter",
+            "list<text>",
+            "set<text>",
+            "map<text, text>",
         ],
     }
 }

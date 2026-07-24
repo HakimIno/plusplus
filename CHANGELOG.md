@@ -3,6 +3,23 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
+## 0.2.23 — 2026-07-24
+
+- Added Cassandra and ScyllaDB support: one CQL backend serves both wire-compatible engines,
+  connecting over the native protocol with TLS (encrypt-only through full verification) and,
+  where needed, through an SSH bastion — peer discovery is pinned to the tunnel so it can't
+  leak around it.
+- Introspects keyspaces, tables, columns (with partition/clustering keys flagged as primary),
+  secondary indexes, materialized views, and user-defined functions; keyspaces appear in the
+  database switcher and the connection form labels the field "Keyspace".
+- Reads stream page by page and stop at the row cap, queries are cancellable, and every CQL
+  type decodes — including collections, tuples, UDTs, decimals, varints, and durations, shown
+  as read-only CQL literals in the grid.
+- Adapted schema editing to CQL's shape: `CREATE TABLE`/`ALTER`/index/`TRUNCATE`/rename emit
+  valid CQL, single-row `INSERT` and `TRUE`/`FALSE` booleans are used, and operations CQL
+  lacks (foreign keys, joins, views, triggers, routines, table cloning, transactions) are
+  hidden or refused rather than generating statements the server rejects.
+
 ## 0.2.22 — 2026-07-21
 
 - Fixed intermittent query failures caused by concurrent runs racing each other: starting a

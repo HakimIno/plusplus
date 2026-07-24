@@ -35,7 +35,15 @@ fn dialect(kind: Option<DbKind>) -> Dialect {
     match kind {
         Some(DbKind::Postgres) => Dialect::PostgreSql,
         Some(DbKind::SqlServer) => Dialect::SQLServer,
-        Some(DbKind::MySql | DbKind::MariaDb | DbKind::Sqlite) | None => Dialect::Generic,
+        // CQL keywords are a rough subset of SQL's; Generic formats it acceptably.
+        Some(
+            DbKind::MySql
+            | DbKind::MariaDb
+            | DbKind::Sqlite
+            | DbKind::Cassandra
+            | DbKind::ScyllaDb,
+        )
+        | None => Dialect::Generic,
     }
 }
 

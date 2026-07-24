@@ -23,6 +23,12 @@ futures-util.workspace = true
 tiberius.workspace = true
 bb8.workspace = true
 bb8-tiberius.workspace = true
+# Cassandra / ScyllaDB: the CQL native-protocol driver (its Session is itself a pool).
+scylla.workspace = true
+# TLS config for the scylla session (ring provider + CA loading), matching the app's stack.
+rustls.workspace = true
+rustls-pki-types.workspace = true
+rustls-native-certs.workspace = true
 # SSH tunnel for connecting through a bastion host.
 russh.workspace = true
 serde.workspace = true

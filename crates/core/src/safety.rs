@@ -4,7 +4,9 @@
 use std::ops::ControlFlow;
 
 use sqlparser::ast::{Expr, FromTable, ObjectName, Query, Statement, TableFactor, Visit, Visitor};
-use sqlparser::dialect::{Dialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
+use sqlparser::dialect::{
+    Dialect, GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
+};
 use sqlparser::parser::Parser;
 
 use crate::database::{skip_leading_noise, split_statements};
@@ -143,7 +145,8 @@ impl DangerousStatement {
             DbKind::Sqlite => format!("EXPLAIN QUERY PLAN {}", self.sql),
             // SQL Server SHOWPLAN is connection-scoped. It needs a dedicated connection
             // lifecycle so a failed OFF cannot poison a pooled session; fail closed for now.
-            DbKind::SqlServer => return None,
+            // CQL has no EXPLAIN at all (tracing is a different, stateful mechanism).
+            DbKind::SqlServer | DbKind::Cassandra | DbKind::ScyllaDb => return None,
         })
     }
 }
@@ -165,6 +168,11 @@ fn parse_statements(kind: DbKind, sql: &str) -> Result<Vec<Statement>, String> {
         DbKind::MySql | DbKind::MariaDb => Box::new(MySqlDialect {}),
         DbKind::SqlServer => Box::new(MsSqlDialect {}),
         DbKind::Sqlite => Box::new(SQLiteDialect {}),
+        // sqlparser has no CQL dialect. Generic parses the SQL-shaped core of CQL
+        // (UPDATE/DELETE/DROP/TRUNCATE/ALTER); CQL-only clauses (USING TTL, ALLOW
+        // FILTERING, IF EXISTS updates) fail to parse and fall back to the conservative
+        // lexical scan, which can only over-flag, never under-flag.
+        DbKind::Cassandra | DbKind::ScyllaDb => Box::new(GenericDialect {}),
     };
     Parser::new(dialect.as_ref())
         .with_recursion_limit(128)
@@ -460,7 +468,7 @@ pub(crate) fn summarize_plan(kind: DbKind, result: &QueryResult) -> Option<Query
                 && !upper.contains("USING COVERING INDEX");
             summary.index = extract_sqlite_index(&text);
         }
-        DbKind::SqlServer => return None,
+        DbKind::SqlServer | DbKind::Cassandra | DbKind::ScyllaDb => return None,
     }
     Some(summary)
 }

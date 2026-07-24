@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.22"
+version = "0.2.23"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 rust-version = "1.80"
@@ -58,6 +58,18 @@ sqlx = { version = "0.9", default-features = false, features = [
 tiberius = { version = "0.12", default-features = false, features = ["tds73", "rustls", "chrono"] }
 bb8 = "0.9"
 bb8-tiberius = "0.16"
+
+# --- Cassandra / ScyllaDB (CQL native protocol; one driver speaks to both) ---
+# rustls-023 puts the driver's TLS on rustls; we hand it a ring-provider ClientConfig at
+# runtime. NB: scylla's tokio-rustls dependency also compiles (but never uses) aws-lc-rs,
+# which needs `cmake` at build time — the one exception to the pure-ring/pure-Rust tree.
+scylla = { version = "1.7", default-features = false, features = ["rustls-023"] }
+# Direct rustls dep to build the ClientConfig handed to scylla (ring provider, so the
+# session's TLS runs on the same crypto stack as sqlx/tiberius/russh).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# Load the user's CA / system trust store into that ClientConfig.
+rustls-pki-types = { version = "1", features = ["std"] }
+rustls-native-certs = "0.8"
 
 # --- SSH tunnel (connect to a database through a bastion host) ---
 # Pure-Rust SSH on tokio. The `ring` backend (instead of the default aws-lc-rs) keeps the

@@ -54,7 +54,9 @@ pub use model::{
 };
 pub use value::Value;
 
-use backends::{mssql::MsSqlDb, mysql::MySqlDb, postgres::PostgresDb, sqlite::SqliteDb};
+use backends::{
+    cassandra::CassandraDb, mssql::MsSqlDb, mysql::MySqlDb, postgres::PostgresDb, sqlite::SqliteDb,
+};
 
 /// Connect to the database described by `cfg`, returning a shareable handle.
 ///
@@ -76,24 +78,30 @@ pub async fn connect(
         let mut local = cfg.clone();
         local.host = "127.0.0.1".to_string();
         local.port = tun.local_port;
-        let inner = connect_direct(&local, password).await?;
+        let inner = connect_direct(&local, password, true).await?;
         return Ok(Arc::new(Tunneled {
             inner,
             _tunnel: tun,
         }));
     }
-    connect_direct(cfg, password).await
+    connect_direct(cfg, password, false).await
 }
 
 /// Connect straight to `cfg.host:cfg.port` (or the SQLite file) with no tunnel.
+/// `via_tunnel` tells cluster-discovering backends (Cassandra/ScyllaDB) that the host is
+/// a tunnel endpoint, so peer addresses the cluster broadcasts must not be dialed directly.
 async fn connect_direct(
     cfg: &ConnectionConfig,
     password: Option<String>,
+    via_tunnel: bool,
 ) -> Result<Arc<dyn Database>> {
     match cfg.kind {
         DbKind::Postgres => Ok(Arc::new(PostgresDb::connect(cfg, password).await?)),
         DbKind::MySql | DbKind::MariaDb => Ok(Arc::new(MySqlDb::connect(cfg, password).await?)),
         DbKind::SqlServer => Ok(Arc::new(MsSqlDb::connect(cfg, password).await?)),
+        DbKind::Cassandra | DbKind::ScyllaDb => Ok(Arc::new(
+            CassandraDb::connect(cfg, password, via_tunnel).await?,
+        )),
         DbKind::Sqlite => {
             if cfg.sqlite_path.trim().is_empty() {
                 return Err(CoreError::InvalidConfig("SQLite path is empty".into()));

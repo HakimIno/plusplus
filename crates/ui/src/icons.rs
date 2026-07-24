@@ -69,6 +69,8 @@ icon_fns! {
     db_mariadb => "../assets/icondb/simple-icons--mariadb.svg",
     db_sqlserver => "../assets/icondb/devicon-plain--microsoftsqlserver-wordmark.svg",
     db_sqlite => "../assets/icondb/skill-icons--sqlite.svg",
+    db_cassandra => "../assets/icondb/simple-icons--apachecassandra.svg",
+    db_scylladb => "../assets/icondb/simple-icons--scylladb.svg",
 }
 
 /// Embedded logo for a database backend; picks light/dark Postgres/MySQL variants from the theme.
@@ -92,13 +94,19 @@ pub fn db_kind_icon(kind: DbKind) -> ImageSource<'static> {
         DbKind::MariaDb => db_mariadb(),
         DbKind::SqlServer => db_sqlserver(),
         DbKind::Sqlite => db_sqlite(),
+        DbKind::Cassandra => db_cassandra(),
+        DbKind::ScyllaDb => db_scylladb(),
     }
 }
 
-/// Provider assets carry their final colours. White tint preserves those embedded colours.
+/// Provider assets carry their final colours, so a white tint preserves them. The two
+/// `simple-icons` monochrome marks (Cassandra/ScyllaDB) are `currentColor` glyphs instead,
+/// so they take the theme's text colour like any other single-colour icon.
 pub fn db_kind_icon_tint(kind: DbKind) -> egui::Color32 {
-    let _ = kind;
-    egui::Color32::WHITE
+    match kind {
+        DbKind::Cassandra | DbKind::ScyllaDb => crate::style::palette::TEXT(),
+        _ => egui::Color32::WHITE,
+    }
 }
 
 /// Build a themed image widget for an icon at the given size.

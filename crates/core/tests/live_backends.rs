@@ -10,6 +10,8 @@ fn live_config() -> Option<(ConnectionConfig, String)> {
         "postgres" => DbKind::Postgres,
         "mysql" => DbKind::MySql,
         "sqlserver" => DbKind::SqlServer,
+        "cassandra" => DbKind::Cassandra,
+        "scylladb" => DbKind::ScyllaDb,
         other => panic!("unsupported PLUSPLUS_LIVE_KIND: {other}"),
     };
     let mut cfg = ConnectionConfig::new(kind);
@@ -32,6 +34,10 @@ async fn connect_query_mutate_and_introspect() {
         eprintln!("skipped: PLUSPLUS_LIVE_KIND is not configured");
         return;
     };
+    if cfg.kind.is_cql() {
+        eprintln!("skipped: CQL backends use cql_connect_query_mutate_and_introspect");
+        return;
+    }
     let attempts = std::env::var("PLUSPLUS_LIVE_CONNECT_ATTEMPTS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -64,6 +70,9 @@ async fn connect_query_mutate_and_introspect() {
             "CREATE TABLE plusplus_ci_smoke_child (id INT PRIMARY KEY, parent_id INT NOT NULL, CONSTRAINT plusplus_ci_smoke_child_fk FOREIGN KEY (parent_id) REFERENCES plusplus_ci_smoke(id))",
         ),
         DbKind::Sqlite => unreachable!("SQLite has its own always-on test suite"),
+        DbKind::Cassandra | DbKind::ScyllaDb => {
+            unreachable!("CQL uses cql_connect_query_mutate_and_introspect")
+        }
     };
 
     db.execute(drop_child_sql)
@@ -104,6 +113,7 @@ async fn connect_query_mutate_and_introspect() {
             assert!(preflight.plan.is_none(), "SHOWPLAN is deliberately skipped");
         }
         DbKind::Sqlite => unreachable!(),
+        DbKind::Cassandra | DbKind::ScyllaDb => unreachable!("CQL skipped above"),
     }
     let unchanged = db
         .execute("SELECT label FROM plusplus_ci_smoke WHERE id = 1")
@@ -137,4 +147,135 @@ async fn connect_query_mutate_and_introspect() {
 
     db.execute(drop_child_sql).await.expect("drop smoke child table");
     db.execute(drop_sql).await.expect("drop smoke table");
+}
+
+/// CQL smoke test for Cassandra / ScyllaDB. CQL has no joins, foreign keys, or transactions,
+/// so this exercises the CQL-appropriate surface: connect, DDL, an upsert, a capped read
+/// that decodes several native types, a secondary index, and introspection. The connection's
+/// keyspace (`PLUSPLUS_LIVE_DATABASE`) must already exist — CQL keyspaces carry a replication
+/// strategy the test shouldn't presume, so CI creates it.
+#[tokio::test]
+#[ignore = "requires PLUSPLUS_LIVE_* and a real Cassandra/ScyllaDB server"]
+async fn cql_connect_query_mutate_and_introspect() {
+    let Some((cfg, password)) = live_config() else {
+        eprintln!("skipped: PLUSPLUS_LIVE_KIND is not configured");
+        return;
+    };
+    if !cfg.kind.is_cql() {
+        eprintln!("skipped: not a CQL backend");
+        return;
+    }
+    let attempts = std::env::var("PLUSPLUS_LIVE_CONNECT_ATTEMPTS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1);
+    let mut attempt = 0;
+    let db = loop {
+        attempt += 1;
+        match connect(&cfg, Some(password.clone()), None).await {
+            Ok(db) => break db,
+            Err(error) if attempt < attempts => {
+                eprintln!("database not ready ({attempt}/{attempts}): {error}");
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+            Err(error) => panic!("connect to live database after {attempt} attempt(s): {error}"),
+        }
+    };
+
+    db.execute("DROP TABLE IF EXISTS plusplus_ci_smoke")
+        .await
+        .expect("clean stale smoke table");
+    // Types chosen to cover every decode branch that matters: text, int, bigint, boolean,
+    // uuid, timestamp, and a collection.
+    db.execute(
+        "CREATE TABLE plusplus_ci_smoke (\
+             id int PRIMARY KEY, \
+             label text, \
+             big bigint, \
+             active boolean, \
+             ident uuid, \
+             created timestamp, \
+             tags list<text>\
+         )",
+    )
+    .await
+    .expect("create smoke table");
+
+    // A secondary index — introspection must surface it, targeting `label`.
+    db.execute("CREATE INDEX plusplus_ci_smoke_label ON plusplus_ci_smoke (label)")
+        .await
+        .expect("create secondary index");
+
+    db.execute(
+        "INSERT INTO plusplus_ci_smoke (id, label, big, active, ident, created, tags) \
+         VALUES (1, 'hello', 9000000000, true, \
+                 11111111-1111-1111-1111-111111111111, '2026-07-23T00:00:00Z', ['a', 'b'])",
+    )
+    .await
+    .expect("insert smoke row");
+
+    // A capped read stops materializing at the cap and decodes the native types.
+    let result = db
+        .execute_capped("SELECT id, label, big, active, tags FROM plusplus_ci_smoke", 10)
+        .await
+        .expect("read smoke row");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.columns.len(), 5);
+    assert_eq!(result.rows[0][0], Value::Int(1));
+    assert_eq!(result.rows[0][1], Value::Text("hello".into()));
+    assert_eq!(result.rows[0][2], Value::Int(9_000_000_000));
+    assert_eq!(result.rows[0][3], Value::Bool(true));
+    // A CQL list renders as a bracketed CQL literal.
+    assert_eq!(result.rows[0][4], Value::Text("['a', 'b']".into()));
+
+    // CQL reports no affected-row count, so DML leaves rows_affected as None (never a lie of 0).
+    let upsert = db
+        .execute("UPDATE plusplus_ci_smoke SET label = 'changed' WHERE id = 1")
+        .await
+        .expect("update smoke row");
+    assert_eq!(upsert.stats.rows_affected, None);
+    assert!(upsert.rows.is_empty());
+
+    let after = db
+        .execute("SELECT label FROM plusplus_ci_smoke WHERE id = 1")
+        .await
+        .expect("read row after update");
+    assert_eq!(after.rows, vec![vec![Value::Text("changed".into())]]);
+
+    // Introspection: the table, its primary key, and the secondary index must all appear
+    // under the connection's keyspace.
+    let schema = db.introspect().await.expect("introspect live keyspace");
+    let table = schema
+        .tables
+        .iter()
+        .find(|t| t.name.eq_ignore_ascii_case("plusplus_ci_smoke"))
+        .expect("smoke table missing from schema");
+    let id_col = table
+        .columns
+        .iter()
+        .find(|c| c.name.eq_ignore_ascii_case("id"))
+        .expect("id column missing");
+    assert!(id_col.primary_key, "partition key must be flagged as PK");
+    assert!(
+        table
+            .indexes
+            .iter()
+            .any(|i| i.name.eq_ignore_ascii_case("plusplus_ci_smoke_label")),
+        "secondary index missing from schema: {table:?}"
+    );
+
+    // list_databases surfaces the connection's keyspace (a "database" in the switcher).
+    let keyspaces = db.list_databases().await.expect("list keyspaces");
+    assert!(
+        keyspaces
+            .iter()
+            .any(|k| k.eq_ignore_ascii_case(&cfg.database)),
+        "connected keyspace {} not in {keyspaces:?}",
+        cfg.database
+    );
+
+    db.execute("DROP TABLE IF EXISTS plusplus_ci_smoke")
+        .await
+        .expect("drop smoke table");
 }
