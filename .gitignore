@@ -38,3 +38,8 @@ examples/*.sqlite-shm
 **/tests/snapshots/*.old.png
 **/tests/snapshots/*.new.png
 **/tests/snapshots/*.diff.png
+
+# Website build and local deployment state
+website/node_modules/
+website/.next/
+website/.vercel/
