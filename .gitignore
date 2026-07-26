@@ -43,3 +43,14 @@ examples/*.sqlite-shm
 website/node_modules/
 website/.next/
 website/.vercel/
+website/out/
+website/coverage/
+website/.turbo/
+website/.eslintcache
+website/*.tsbuildinfo
+website/next-env.d.ts
+website/npm-debug.log*
+website/yarn-debug.log*
+website/yarn-error.log*
+website/pnpm-debug.log*
+website/bun-debug.log*
