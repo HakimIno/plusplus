@@ -10,6 +10,19 @@ use crate::icons;
 use crate::style::{self, palette};
 use crate::title_bar;
 
+/// One theme card in the appearance picker, snapshotted before rendering so drawing a
+/// choice never holds a borrow on `self`:
+/// `(key, display name, builtin, author, base, surface, accent)`.
+type ThemeOption = (
+    String,
+    String,
+    bool,
+    Option<String>,
+    egui::Color32,
+    egui::Color32,
+    egui::Color32,
+);
+
 /// Byte offset of the `char_idx`-th character in `s` (its length when out of range), for
 /// turning the editor's char-based caret indices into `str` slice bounds.
 fn char_to_byte(s: &str, char_idx: usize) -> usize {
@@ -17,6 +30,14 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(b, _)| b)
         .unwrap_or(s.len())
+}
+
+/// Whether a syntax error covers the caret — the token the user is in the middle of typing,
+/// which is half-written by definition and must not be flagged yet. The range is inclusive at
+/// both ends: a caret sitting immediately after the token is still "inside" the word being
+/// typed, and one sitting immediately before it is about to extend it.
+pub(super) fn error_under_caret(range: &std::ops::Range<usize>, caret: Option<usize>) -> bool {
+    caret.is_some_and(|caret| range.start <= caret && caret <= range.end)
 }
 
 /// Pure core of the Cmd/Ctrl+/ comment toggle. Given the buffer and a sorted **char** range,
@@ -409,7 +430,8 @@ impl DbGuiApp {
                                 let mut rects = Vec::with_capacity(self.tabs.len());
                                 let pointer_x = ui.ctx().pointer_interact_pos().map(|p| p.x);
                                 for idx in 0..self.tabs.len() {
-                                    let selected = !self.settings_open && idx == self.active_query_tab;
+                                    let selected =
+                                        !self.settings_open && idx == self.active_query_tab;
                                     let label = self.tab_label(idx);
                                     let kind = self.tab_kind(idx);
                                     let db_kind = (kind == crate::components::QueryTabKind::Query)
@@ -824,12 +846,8 @@ impl DbGuiApp {
                             actions.push(Action::RunQuery);
                         }
                     }
-                    let resp = components::beautify_button(
-                        ui,
-                        &mut self.beautify,
-                        has_sql,
-                        dialect_label,
-                    );
+                    let resp =
+                        components::beautify_button(ui, &mut self.beautify, has_sql, dialect_label);
                     if resp.clicked {
                         actions.push(Action::BeautifySql);
                     }
@@ -1115,6 +1133,14 @@ impl DbGuiApp {
                                         accept_ghost,
                                     );
                                 }
+
+                                self.update_diagnostics(
+                                    ui,
+                                    &output.galley,
+                                    output.galley_pos,
+                                    text_changed,
+                                    cursor_char,
+                                );
                             });
                     });
             });
@@ -1220,6 +1246,119 @@ impl DbGuiApp {
             palette::TEXT_FAINT(),
         );
         self.ghost_suggestion = Some(remainder);
+    }
+
+    /// Re-check the editor's SQL for syntax errors and mark the first one: a red squiggle
+    /// under the offending token, explained in a tooltip on hover.
+    ///
+    /// Two rules keep it from nagging while the query is still being written. The parse runs
+    /// only after a short pause in typing (every half-typed keyword is a "syntax error", and
+    /// a squiggle that flickers on every keystroke is noise), and an error covering the caret
+    /// is never drawn — that token is the one the user is in the middle of typing.
+    fn update_diagnostics(
+        &mut self,
+        ui: &egui::Ui,
+        galley: &egui::Galley,
+        galley_pos: egui::Pos2,
+        text_changed: bool,
+        cursor_char: Option<usize>,
+    ) {
+        /// Pause in typing before the buffer is re-parsed.
+        const DEBOUNCE: f64 = 0.35;
+        /// Height and half-period of the squiggle, in points.
+        const WAVE: f32 = 1.7;
+
+        let now = ui.input(|i| i.time);
+        let stale = self.tabs[self.active_query_tab].sql != self.syntax_checked;
+        if text_changed || (stale && self.syntax_dirty_at.is_none()) {
+            self.syntax_dirty_at = Some(now);
+        }
+        if let Some(since) = self.syntax_dirty_at {
+            let waited = now - since;
+            if waited >= DEBOUNCE {
+                let kind = self.active().map(|c| c.db.kind());
+                let sql = self.tabs[self.active_query_tab].sql.clone();
+                self.syntax_error = dbcore::check_syntax(kind, &sql);
+                self.syntax_checked = sql;
+                self.syntax_dirty_at = None;
+            } else {
+                // Nothing else would repaint an idle editor, so ask for the frame that runs
+                // the check once the pause is long enough.
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_secs_f64(DEBOUNCE - waited));
+                return;
+            }
+        }
+
+        let Some(error) = self.syntax_error.as_ref() else {
+            return;
+        };
+        // The check ran against this exact text (the debounce above guarantees it), so the
+        // range still indexes the buffer on screen.
+        let sql = &self.tabs[self.active_query_tab].sql;
+        if error_under_caret(&error.range, cursor_char) {
+            return;
+        }
+
+        // Keep the mark on one row: a range that runs past a newline (an unterminated string
+        // swallowing the rest of the query) is clipped to the line it starts on.
+        let line_end = sql
+            .chars()
+            .skip(error.range.start)
+            .position(|c| c == '\n')
+            .map_or(usize::MAX, |n| error.range.start + n);
+        let end = error
+            .range
+            .end
+            .min(line_end)
+            .max(error.range.start.saturating_add(1));
+        let offset = galley_pos.to_vec2();
+        let from = galley
+            .pos_from_cursor(egui::text::CCursor::new(error.range.start))
+            .translate(offset);
+        let to = galley
+            .pos_from_cursor(egui::text::CCursor::new(end))
+            .translate(offset);
+        let x0 = from.left();
+        let x1 = to.left().max(x0 + 2.0 * WAVE);
+        let y = from.bottom() - WAVE;
+
+        // A hand-drawn wave rather than a straight rule: it reads as "this is wrong" without
+        // competing with the caret or the selection, exactly like every code editor's.
+        let mut points = Vec::new();
+        let mut x = x0;
+        let mut down = false;
+        while x < x1 {
+            points.push(egui::pos2(x, if down { y + WAVE } else { y }));
+            x += WAVE;
+            down = !down;
+        }
+        points.push(egui::pos2(x1, if down { y + WAVE } else { y }));
+        ui.painter().add(egui::Shape::line(
+            points,
+            egui::Stroke::new(1.0, palette::DANGER()),
+        ));
+
+        // Hover the *token*, not just the two pixels of squiggle under it. Registered after
+        // the editor so it wins the hover, and hover-only so clicks and drags still reach the
+        // text beneath.
+        let hover =
+            egui::Rect::from_min_max(egui::pos2(x0, from.top()), egui::pos2(x1, y + WAVE + 1.0));
+        let message = error.message.clone();
+        ui.interact(
+            hover,
+            ui.id().with("sql_syntax_error"),
+            egui::Sense::hover(),
+        )
+        .on_hover_ui(|ui| {
+            ui.set_max_width(340.0);
+            ui.label(
+                egui::RichText::new("Syntax error")
+                    .size(crate::style::font::CAPTION)
+                    .color(palette::DANGER()),
+            );
+            ui.label(message);
+        });
     }
 
     /// Append an accepted ghost suggestion at the caret (the end of the buffer) and move
@@ -1347,6 +1486,7 @@ impl DbGuiApp {
                 Some(c) => {
                     self.autocomplete.items = c.items;
                     self.autocomplete.replace_start = c.replace_start;
+                    self.autocomplete.prefix = c.prefix;
                     self.autocomplete.open = true;
                     self.autocomplete.selected = self
                         .autocomplete
@@ -1846,8 +1986,7 @@ impl DbGuiApp {
                             ui.close();
                         }
                         if supports_views_triggers
-                            && components::button(ui, icons::play(), "New Trigger…", true)
-                                .clicked()
+                            && components::button(ui, icons::play(), "New Trigger…", true).clicked()
                         {
                             actions.push(Action::OpenNewTrigger);
                             ui.close();
@@ -2121,15 +2260,24 @@ impl DbGuiApp {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
 
-                    // Disclosure chevron — rotates from ▸ to ▾ as the body opens.
+                    // Disclosure chevron follows the shared Hugeicons stroke language.
                     let (chev_rect, chev_resp) =
                         ui.allocate_exact_size(egui::vec2(12.0, ROW_H), egui::Sense::click());
-                    paint_chevron(
-                        ui.painter(),
-                        chev_rect.center(),
-                        state.openness(ui.ctx()),
-                        palette::TEXT_FAINT(),
-                    );
+                    let chevron = if state.openness(ui.ctx()) < 0.5 {
+                        icons::arrow_right()
+                    } else {
+                        icons::chevron_down()
+                    };
+                    egui::Image::new(chevron)
+                        .fit_to_exact_size(egui::Vec2::splat(12.0))
+                        .tint(palette::TEXT_FAINT())
+                        .paint_at(
+                            ui,
+                            egui::Rect::from_center_size(
+                                chev_rect.center(),
+                                egui::Vec2::splat(12.0),
+                            ),
+                        );
                     if chev_resp.clicked() {
                         toggle_open = true;
                     }
@@ -3447,15 +3595,7 @@ impl DbGuiApp {
         let mut audit_enabled = self.audit_enabled;
         let mut update_check_enabled = self.update_check_enabled;
         // Snapshot the display data so rendering a choice never holds a borrow on `self`.
-        let options: Vec<(
-            String,
-            String,
-            bool,
-            Option<String>,
-            egui::Color32,
-            egui::Color32,
-            egui::Color32,
-        )> = self
+        let options: Vec<ThemeOption> = self
             .themes
             .entries()
             .iter()
@@ -3521,7 +3661,7 @@ impl DbGuiApp {
                     .show(ui, |ui| {
                         ui.add_space(38.0);
                         let available = ui.available_width();
-                        let content_w = (available - 64.0).min(780.0).max(320.0);
+                        let content_w = (available - 64.0).clamp(320.0, 780.0);
                         let inset = ((available - content_w) / 2.0).max(0.0);
 
                         ui.horizontal(|ui| {
@@ -5064,11 +5204,19 @@ impl DbGuiApp {
                             // weaker choices read as a deliberate trade-off rather than a default.
                             if let Some(warning) = editor.config.ssl_mode.security_warning() {
                                 ui.label("");
-                                ui.label(
-                                    egui::RichText::new(format!("⚠ {warning}"))
-                                        .size(11.0)
-                                        .color(palette::WARNING()),
-                                );
+                                ui.horizontal_wrapped(|ui| {
+                                    icons::show_colored(
+                                        ui,
+                                        icons::warning(),
+                                        12.0,
+                                        palette::WARNING(),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(warning)
+                                            .size(11.0)
+                                            .color(palette::WARNING()),
+                                    );
+                                });
                                 ui.end_row();
                             }
 
@@ -5386,14 +5534,14 @@ fn table_editor_view(
 ) {
     use crate::schema::{SchemaEditorMode, SchemaTab};
     let title = match editor.mode {
-        SchemaEditorMode::NewTable => "Create Table".to_string(),
-        SchemaEditorMode::EditTable => format!("Edit Table — {}", editor.table_name),
-        SchemaEditorMode::DesignNewTable => "Add Table to ER Design".to_string(),
-        SchemaEditorMode::DesignEditTable => format!("Edit ER Table — {}", editor.table_name),
+        SchemaEditorMode::New => "Create Table".to_string(),
+        SchemaEditorMode::Edit => format!("Edit Table — {}", editor.table_name),
+        SchemaEditorMode::DesignNew => "Add Table to ER Design".to_string(),
+        SchemaEditorMode::DesignEdit => format!("Edit ER Table — {}", editor.table_name),
     };
     let design_mode = matches!(
         editor.mode,
-        SchemaEditorMode::DesignNewTable | SchemaEditorMode::DesignEditTable
+        SchemaEditorMode::DesignNew | SchemaEditorMode::DesignEdit
     );
     if design_mode {
         ui.add_space(10.0);
@@ -5426,12 +5574,12 @@ fn table_editor_view(
         ui.label("Table name:");
         components::text_input_enabled(
             ui,
-            editor.mode != SchemaEditorMode::EditTable,
+            editor.mode != SchemaEditorMode::Edit,
             &mut editor.table_name,
             "my_table",
             200.0,
         );
-        if !editor.schema_name.is_empty() || editor.mode != SchemaEditorMode::EditTable {
+        if !editor.schema_name.is_empty() || editor.mode != SchemaEditorMode::Edit {
             ui.label("Schema:");
             components::text_input(ui, &mut editor.schema_name, "public", 120.0);
         }
@@ -5824,22 +5972,6 @@ fn routine_editor_view(
                     .hint_text(routine_body_hint(kind, is_fn)),
             );
         });
-}
-
-/// Paint a small disclosure triangle centred at `center`, rotating from right-pointing
-/// (`openness == 0`) to down-pointing (`openness == 1`) so it animates with the body.
-fn paint_chevron(painter: &egui::Painter, center: egui::Pos2, openness: f32, color: egui::Color32) {
-    let a = openness * std::f32::consts::FRAC_PI_2;
-    let (s, c) = a.sin_cos();
-    let rot = |p: egui::Vec2| egui::vec2(p.x * c - p.y * s, p.x * s + p.y * c);
-    const R: f32 = 3.5;
-    let pts = [
-        egui::vec2(-R * 0.5, -R),
-        egui::vec2(R * 0.9, 0.0),
-        egui::vec2(-R * 0.5, R),
-    ];
-    let poly: Vec<egui::Pos2> = pts.iter().map(|p| center + rot(*p)).collect();
-    painter.add(egui::Shape::convex_polygon(poly, color, egui::Stroke::NONE));
 }
 
 /// The expandable body of a table row in the explorer: its columns (PK marked), then any
@@ -6403,16 +6535,15 @@ impl DbGuiApp {
                 ui.colored_label(palette::TEXT_FAINT(), format!("Target: {target}"));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if erd.tracks_schema {
-                    if components::pill_icon_button(
+                if erd.tracks_schema
+                    && components::pill_icon_button(
                         ui,
                         icons::refresh(),
                         "Rebuild from the current schema",
                     )
                     .clicked()
-                    {
-                        actions.push(Action::RefreshErd);
-                    }
+                {
+                    actions.push(Action::RefreshErd);
                 }
                 if components::pill_icon_button(
                     ui,
@@ -6461,12 +6592,8 @@ impl DbGuiApp {
                         {
                             actions.push(Action::EditErdTable(selected));
                         }
-                        if components::pill_icon_button(
-                            ui,
-                            icons::trash(),
-                            "Remove selected table",
-                        )
-                        .clicked()
+                        if components::pill_icon_button(ui, icons::trash(), "Remove selected table")
+                            .clicked()
                         {
                             actions.push(Action::DeleteErdTable(selected));
                         }
@@ -7311,7 +7438,7 @@ fn schema_columns_tab(
                 });
 
                 let removable =
-                    (col.is_existing || mode == SchemaEditorMode::EditTable || i > 0) && !col.drop;
+                    (col.is_existing || mode == SchemaEditorMode::Edit || i > 0) && !col.drop;
                 let remove_hover = if col.is_existing {
                     "Mark column for deletion"
                 } else {
@@ -7441,9 +7568,9 @@ fn schema_indexes_tab(ui: &mut egui::Ui, indexes: &mut Vec<crate::schema::IndexD
                     {
                         idx.drop = !idx.drop;
                     }
-                } else if components::Btn::new("✕")
+                } else if components::Btn::ghost_icon(icons::close())
+                    .tooltip("Remove index")
                     .show(ui)
-                    .on_hover_text("Remove index")
                     .clicked()
                 {
                     to_remove = Some(i);
@@ -7457,7 +7584,11 @@ fn schema_indexes_tab(ui: &mut egui::Ui, indexes: &mut Vec<crate::schema::IndexD
     }
 
     ui.add_space(4.0);
-    if components::Btn::new("+ Add Index").show(ui).clicked() {
+    if components::Btn::new("Add Index")
+        .icon(icons::plus())
+        .show(ui)
+        .clicked()
+    {
         indexes.push(crate::schema::IndexDraft::new_empty());
     }
 }
@@ -7506,7 +7637,7 @@ fn schema_fk_tab(ui: &mut egui::Ui, fks: &mut Vec<crate::schema::FkDraft>) {
                         "col1, col2",
                         130.0,
                     );
-                    ui.label("→");
+                    icons::show_weak(ui, icons::arrow_right(), 14.0);
                     components::text_input_enabled(
                         ui,
                         !fk.drop,
@@ -7548,9 +7679,9 @@ fn schema_fk_tab(ui: &mut egui::Ui, fks: &mut Vec<crate::schema::FkDraft>) {
                             {
                                 fk.drop = !fk.drop;
                             }
-                        } else if components::Btn::new("✕")
+                        } else if components::Btn::ghost_icon(icons::close())
+                            .tooltip("Remove FK")
                             .show(ui)
-                            .on_hover_text("Remove FK")
                             .clicked()
                         {
                             to_remove = Some(i);
@@ -7568,7 +7699,11 @@ fn schema_fk_tab(ui: &mut egui::Ui, fks: &mut Vec<crate::schema::FkDraft>) {
     }
 
     ui.add_space(4.0);
-    if components::Btn::new("+ Add Foreign Key").show(ui).clicked() {
+    if components::Btn::new("Add Foreign Key")
+        .icon(icons::plus())
+        .show(ui)
+        .clicked()
+    {
         fks.push(crate::schema::FkDraft::new_empty());
     }
 }

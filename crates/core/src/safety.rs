@@ -4,9 +4,6 @@
 use std::ops::ControlFlow;
 
 use sqlparser::ast::{Expr, FromTable, ObjectName, Query, Statement, TableFactor, Visit, Visitor};
-use sqlparser::dialect::{
-    Dialect, GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
-};
 use sqlparser::parser::Parser;
 
 use crate::database::{skip_leading_noise, split_statements};
@@ -163,17 +160,8 @@ pub fn dangerous_statements(kind: DbKind, sql: &str) -> Vec<DangerousStatement> 
 }
 
 fn parse_statements(kind: DbKind, sql: &str) -> Result<Vec<Statement>, String> {
-    let dialect: Box<dyn Dialect> = match kind {
-        DbKind::Postgres => Box::new(PostgreSqlDialect {}),
-        DbKind::MySql | DbKind::MariaDb => Box::new(MySqlDialect {}),
-        DbKind::SqlServer => Box::new(MsSqlDialect {}),
-        DbKind::Sqlite => Box::new(SQLiteDialect {}),
-        // sqlparser has no CQL dialect. Generic parses the SQL-shaped core of CQL
-        // (UPDATE/DELETE/DROP/TRUNCATE/ALTER); CQL-only clauses (USING TTL, ALLOW
-        // FILTERING, IF EXISTS updates) fail to parse and fall back to the conservative
-        // lexical scan, which can only over-flag, never under-flag.
-        DbKind::Cassandra | DbKind::ScyllaDb => Box::new(GenericDialect {}),
-    };
+    // Shared with the editor's live syntax check, so both read the same SQL the same way.
+    let dialect = crate::syntax::dialect_for(Some(kind));
     Parser::new(dialect.as_ref())
         .with_recursion_limit(128)
         .try_with_sql(sql)

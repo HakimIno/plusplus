@@ -338,8 +338,7 @@ pub(crate) fn db_kind_combo(
     width: f32,
 ) -> egui::Response {
     let btn = egui::Button::image_and_text(db_kind_button_image(*current), current.label())
-        // Reserve the trailing chevron zone without relying on a font glyph. Some bundled
-        // fonts do not contain U+25BE and render it as a missing-glyph square.
+        // Reserve the trailing chevron zone for the shared SVG icon.
         .right_text("   ")
         .min_size(egui::vec2(width, 0.0));
     let button_response = ui.add(btn);
@@ -348,22 +347,13 @@ pub(crate) fn db_kind_combo(
             button_response.rect.right() - 13.0,
             button_response.rect.center().y,
         );
-        let radius = 3.25;
-        let stroke = egui::Stroke::new(1.4, crate::style::palette::TEXT_WEAK());
-        ui.painter().line_segment(
-            [
-                center + egui::vec2(-radius, -radius * 0.45),
-                center + egui::vec2(0.0, radius * 0.55),
-            ],
-            stroke,
-        );
-        ui.painter().line_segment(
-            [
-                center + egui::vec2(0.0, radius * 0.55),
-                center + egui::vec2(radius, -radius * 0.45),
-            ],
-            stroke,
-        );
+        egui::Image::new(crate::icons::chevron_down())
+            .fit_to_exact_size(egui::Vec2::splat(12.0))
+            .tint(crate::style::palette::TEXT_WEAK())
+            .paint_at(
+                ui,
+                egui::Rect::from_center_size(center, egui::Vec2::splat(12.0)),
+            );
     }
 
     egui::Popup::menu(&button_response)

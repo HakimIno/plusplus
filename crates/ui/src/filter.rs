@@ -394,20 +394,35 @@ pub fn ui(ui: &mut egui::Ui, state: &mut FilterState, columns: &[String]) -> Opt
                     }
                 });
 
-            // The + / − controls are laid out from the right; the value box then fills the
+            // The add/remove controls are laid out from the right; the value box then fills the
             // gap between the operator dropdown and the buttons. Putting them in one
             // right-to-left scope is what lets the value stretch.
             let btn = egui::vec2(28.0, crate::style::CONTROL_H);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .add(egui::Button::new("+").min_size(btn))
+                    .add(
+                        egui::Button::image(
+                            egui::Image::new(crate::icons::plus())
+                                .fit_to_exact_size(egui::Vec2::splat(14.0))
+                                .tint(crate::style::palette::TEXT()),
+                        )
+                        .min_size(btn),
+                    )
                     .on_hover_text("Add condition")
                     .clicked()
                 {
                     add_after = Some(i);
                 }
                 if ui
-                    .add_enabled(n > 1, egui::Button::new("−").min_size(btn))
+                    .add_enabled(
+                        n > 1,
+                        egui::Button::image(
+                            egui::Image::new(crate::icons::minus())
+                                .fit_to_exact_size(egui::Vec2::splat(14.0))
+                                .tint(crate::style::palette::TEXT()),
+                        )
+                        .min_size(btn),
+                    )
                     .on_hover_text("Remove condition")
                     .clicked()
                 {

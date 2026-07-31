@@ -273,10 +273,10 @@ fn paint_tab_chip(
     if close_hovered {
         painter.circle_filled(c, 7.0, translucent(palette::DANGER(), 28));
     }
-    let r = 3.25;
-    let s = egui::Stroke::new(1.4, close_color);
-    painter.line_segment([c + egui::vec2(-r, -r), c + egui::vec2(r, r)], s);
-    painter.line_segment([c + egui::vec2(r, -r), c + egui::vec2(-r, r)], s);
+    egui::Image::new(icons::close())
+        .fit_to_exact_size(egui::Vec2::splat(12.0))
+        .tint(close_color)
+        .paint_at(ui, egui::Rect::from_center_size(c, egui::Vec2::splat(12.0)));
 }
 
 /// A horizontal query-tab chip: title + a × close button. Mirrors the visual language of
@@ -511,12 +511,10 @@ pub(crate) fn settings_tab_item(ui: &mut egui::Ui) -> QueryTabResponse {
         } else {
             palette::TEXT_WEAK()
         };
-        let r = 3.25;
-        let stroke = egui::Stroke::new(1.4, color);
-        ui.painter()
-            .line_segment([c + egui::vec2(-r, -r), c + egui::vec2(r, r)], stroke);
-        ui.painter()
-            .line_segment([c + egui::vec2(r, -r), c + egui::vec2(-r, r)], stroke);
+        egui::Image::new(icons::close())
+            .fit_to_exact_size(egui::Vec2::splat(12.0))
+            .tint(color)
+            .paint_at(ui, egui::Rect::from_center_size(c, egui::Vec2::splat(12.0)));
     }
 
     QueryTabResponse {

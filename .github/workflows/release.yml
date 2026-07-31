@@ -9,7 +9,40 @@ permissions:
   contents: write
 
 jobs:
+  # Nothing is built for users until the suite that guards `main` passes on this exact
+  # tag. The updater installs what this workflow publishes, so a tag that skips the tests
+  # ships a regression to every install on its next update check.
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  # A tag whose name disagrees with Cargo.toml breaks auto-update permanently and
+  # silently: the packaging scripts name assets from Cargo.toml, while every client asks
+  # GitHub for `plusplus-<tag version>.dmg` and gets "no such asset" forever after. The
+  # happy path (`scripts/release.sh --tag`) derives the tag from Cargo.toml, but this
+  # workflow fires on any pushed `v*` tag — including a hand-typed one. Fail before building.
+  verify-version:
+    name: Verify tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare tag against workspace version
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/version.sh
+          source scripts/version.sh
+          version="$(plusplus_read_version "$PWD")"
+          tag="${GITHUB_REF_NAME}"
+          if [ "$tag" != "v${version}" ]; then
+            echo "::error::tag ${tag} does not match Cargo.toml version ${version} — assets would be published as plusplus-${version}.* while clients look for plusplus-${tag#v}.*, permanently breaking auto-update"
+            exit 1
+          fi
+          echo "✓ ${tag} matches Cargo.toml ${version}"
+
   macos:
+    needs: [ci, verify-version]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -107,6 +140,7 @@ jobs:
           if-no-files-found: error
 
   linux:
+    needs: [ci, verify-version]
     runs-on: ubuntu-latest
     container: debian:12
     # Container jobs default to `sh`, which rejects `set -o pipefail` — force bash.
@@ -163,6 +197,7 @@ jobs:
           if-no-files-found: error
 
   windows:
+    needs: [ci, verify-version]
     runs-on: windows-latest
     defaults:
       run:

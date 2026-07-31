@@ -50,6 +50,10 @@ pub struct Suggestion {
 pub struct Completion {
     pub replace_start: usize,
     pub items: Vec<Suggestion>,
+    /// The bare identifier prefix that was typed (no quotes). The popup paints the run of
+    /// each suggestion that matched it in the accent colour, so the reader can see *why*
+    /// each row is on the list.
+    pub prefix: String,
 }
 
 /// Popup state kept on the app across frames (immediate mode: keys accepted this frame
@@ -59,6 +63,9 @@ pub struct State {
     pub selected: usize,
     pub items: Vec<Suggestion>,
     pub replace_start: usize,
+    /// The identifier prefix the list was computed for; painted in the accent colour inside
+    /// each row (see [`matched_len`]).
+    pub prefix: String,
     /// Last-known caret char index, cached so a click on the popup — which strips the
     /// editor's focus (and thus its live cursor) the same frame — can still resolve where
     /// to insert.
@@ -75,6 +82,7 @@ impl Default for State {
             selected: 0,
             items: Vec::new(),
             replace_start: 0,
+            prefix: String::new(),
             caret_char: 0,
             // `egui::Rect` has no `Default`; a zero rect is never read before the editor
             // has reported a caret (the popup only opens while focused).
@@ -268,8 +276,34 @@ pub fn complete(
         Some(Completion {
             replace_start,
             items,
+            prefix,
         })
     }
+}
+
+/// Byte length of the leading run of `insert` that the typed `prefix` matched — what the
+/// popup paints in the accent colour. `0` when nothing matched (a forced, empty-prefix
+/// listing, or a suggestion that got on the list some other way).
+///
+/// Suggestions arrive quoted for the dialect while the typed prefix is bare, so an opening
+/// quote is counted into the run: highlighting `co` but not the `"` in front of it would
+/// leave the quote stranded in body colour mid-word.
+fn matched_len(insert: &str, prefix: &str) -> usize {
+    if prefix.is_empty() {
+        return 0;
+    }
+    let mut matched = match insert.chars().next() {
+        Some(quote @ ('"' | '`' | '[')) => quote.len_utf8(),
+        _ => 0,
+    };
+    let mut rest = insert[matched..].chars();
+    for p in prefix.chars() {
+        match rest.next() {
+            Some(c) if c.eq_ignore_ascii_case(&p) => matched += c.len_utf8(),
+            _ => return 0,
+        }
+    }
+    matched
 }
 
 fn matches_prefix(candidate: &str, prefix: &str) -> bool {
@@ -461,11 +495,25 @@ pub fn show_popup(
                                     .tint(kind_color(item.kind))
                                     .paint_at(ui, icon_rect);
 
-                                let label_pos = egui::pos2(rect.left() + 24.0, rect.center().y);
+                                // The label, with the run the typed prefix matched in the
+                                // accent colour: the reader sees at a glance which part of
+                                // each row they have already typed, and how it lines up.
+                                let mut label_pos = egui::pos2(rect.left() + 24.0, rect.center().y);
+                                let matched = matched_len(&item.insert, &state.prefix);
+                                if matched > 0 {
+                                    let painted = ui.painter().text(
+                                        label_pos,
+                                        egui::Align2::LEFT_CENTER,
+                                        &item.insert[..matched],
+                                        mono.clone(),
+                                        palette::ACCENT(),
+                                    );
+                                    label_pos.x = painted.right();
+                                }
                                 ui.painter().text(
                                     label_pos,
                                     egui::Align2::LEFT_CENTER,
-                                    &item.insert,
+                                    &item.insert[matched..],
                                     mono.clone(),
                                     palette::TEXT(),
                                 );
@@ -617,6 +665,37 @@ mod tests {
         assert_eq!(maybe_quote("MyCol", Some(DbKind::MySql)), "MyCol");
         assert_eq!(maybe_quote("plain", Some(DbKind::Postgres)), "plain");
         assert_eq!(maybe_quote("has space", None), "\"has space\"");
+    }
+
+    #[test]
+    fn the_matched_prefix_run_is_what_gets_accented() {
+        // Case-insensitive, so a lowercase prefix still highlights an uppercase keyword.
+        assert_eq!(matched_len("SELECT", "sel"), 3);
+        assert_eq!(matched_len("country", "co"), 2);
+        // A quoted suggestion counts its opening quote into the run.
+        assert_eq!(matched_len("\"MyCol\"", "my"), 3);
+        assert_eq!(matched_len("`order`", "or"), 3);
+        // Nothing typed, or nothing matching, accents nothing.
+        assert_eq!(matched_len("country", ""), 0);
+        assert_eq!(matched_len("country", "zz"), 0);
+        // Multi-byte prefixes measure in bytes (the caller slices the string with it) and
+        // must land on a char boundary.
+        let quoted = "\"ลูกค้า\"";
+        let matched = matched_len(quoted, "ลูก");
+        assert!(quoted.is_char_boundary(matched));
+        assert_eq!(&quoted[..matched], "\"ลูก");
+    }
+
+    #[test]
+    fn the_completion_reports_the_prefix_it_matched() {
+        let s = schema();
+        let sql = "SELECT * FROM us";
+        let c = complete(sql, sql.chars().count(), Some(&s), None, false).unwrap();
+        assert_eq!(c.prefix, "us");
+        // A typed quote is not part of the prefix — schema names are matched unquoted.
+        let sql = "SELECT * FROM \"us";
+        let c = complete(sql, sql.chars().count(), Some(&s), None, false).unwrap();
+        assert_eq!(c.prefix, "us");
     }
 
     #[test]
@@ -796,6 +875,9 @@ mod tests {
                 item("ORDER BY", "keyword", SuggestionKind::Keyword),
             ],
             replace_start: 0,
+            // Mixed on purpose: `or…` matches some rows and not others, so the snapshot
+            // shows both the accented prefix run and a plain label.
+            prefix: "or".to_string(),
             caret_char: 0,
             anchor: egui::Rect::ZERO,
         };

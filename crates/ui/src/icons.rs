@@ -1,9 +1,7 @@
-//! Fluent UI System Icons (https://github.com/microsoft/fluentui-system-icons), pulled as
-//! SVG from the Iconify API (`api.iconify.design/fluent/<name>.svg?color=%23ffffff`) and
-//! embedded into the binary. Each is downloaded white-filled so the SVG loader's texture can
-//! be `.tint()`-ed to the current theme colour — they stay crisp at any size and adapt to
-//! light/dark themes. The database-vendor logos in `assets/icondb/` are brand marks, not part
-//! of this set, and keep their own colours.
+//! Hugeicons free Stroke Rounded icons (https://hugeicons.com/icons/stroke-rounded), embedded
+//! as white-stroked SVG so the loaded texture can be `.tint()`-ed to the current theme colour.
+//! The database-vendor logos in `assets/icondb/` are brand marks rather than interface icons,
+//! so they keep their own shapes and colours.
 
 use dbcore::{ConnectionIcon, DbKind};
 use egui::{include_image, ImageSource};
@@ -31,6 +29,7 @@ icon_fns! {
     connect    => "../assets/icons/connect.svg",
     disconnect => "../assets/icons/disconnect.svg",
     plus       => "../assets/icons/plus.svg",
+    minus      => "../assets/icons/minus.svg",
     edit       => "../assets/icons/edit.svg",
     trash      => "../assets/icons/trash.svg",
     database   => "../assets/icons/database.svg",
@@ -62,6 +61,15 @@ icon_fns! {
     star       => "../assets/icons/star.svg",
     star_filled => "../assets/icons/star-filled.svg",
     settings   => "../assets/icons/settings.svg",
+    arrow_up   => "../assets/icons/arrow-up.svg",
+    arrow_down => "../assets/icons/arrow-down.svg",
+    chevron_down => "../assets/icons/chevron-down.svg",
+    arrow_right => "../assets/icons/arrow-right.svg",
+    arrow_up_right => "../assets/icons/arrow-up-right.svg",
+    layout_connections => "../assets/icons/layout-connections.svg",
+    layout_schema => "../assets/icons/layout-schema.svg",
+    layout_details => "../assets/icons/layout-details.svg",
+    layout_query => "../assets/icons/layout-query.svg",
     db_postgres_dark => "../assets/icondb/skill-icons--postgresql-dark.svg",
     db_postgres_light => "../assets/icondb/skill-icons--postgresql-light.svg",
     db_mysql_dark => "../assets/icondb/skill-icons--mysql-dark.svg",
@@ -134,7 +142,7 @@ pub fn connection_icon(icon: ConnectionIcon) -> ImageSource<'static> {
     }
 }
 
-/// Paint a connection sidebar icon at `rect`, tinted to `tint` (Fluent glyphs are
+/// Paint a connection sidebar icon at `rect`, tinted to `tint` (Hugeicons glyphs are
 /// single-colour and adopt the theme like every other icon).
 pub fn paint_connection_icon(
     ui: &egui::Ui,

@@ -22,7 +22,7 @@ const HEADER_H: f32 = 26.0;
 struct GridColumnView {
     hidden: std::collections::BTreeSet<usize>,
     widths: Vec<Option<f32>>,
-    fit_content_next_frame: bool,
+    fit_content_next_frame: Option<usize>,
     reset_widths_next_frame: bool,
 }
 
@@ -30,14 +30,20 @@ fn column_view_id(grid_id: u64) -> egui::Id {
     egui::Id::new(("results_grid_columns", grid_id))
 }
 
-fn fitted_column_widths(ui: &egui::Ui, result: &QueryResult) -> Vec<Option<f32>> {
+fn fitted_column_width(ui: &egui::Ui, result: &QueryResult, col: usize) -> Option<f32> {
     const MIN_WIDTH: f32 = 56.0;
     const MAX_WIDTH: f32 = 480.0;
     const HEADER_CHROME: f32 = 64.0;
     const CELL_PADDING: f32 = 18.0;
+    // Font layout is considerably more expensive than iterating the result set. Keep the
+    // explicit "Fit this column" action responsive for large results by measuring an
+    // evenly distributed sample instead of every cell.
+    const MAX_SAMPLED_ROWS: usize = 1_024;
 
+    let meta = result.columns.get(col)?;
     let body_font = egui::TextStyle::Body.resolve(ui.style());
     let mono_font = egui::TextStyle::Monospace.resolve(ui.style());
+    let sample_step = result.rows.len().div_ceil(MAX_SAMPLED_ROWS).max(1);
     let measure = |text: &str, font: &egui::FontId| {
         ui.ctx().fonts_mut(|fonts| {
             fonts
@@ -47,33 +53,29 @@ fn fitted_column_widths(ui: &egui::Ui, result: &QueryResult) -> Vec<Option<f32>>
         })
     };
 
-    result
-        .columns
-        .iter()
-        .enumerate()
-        .map(|(col, meta)| {
-            let mut width = measure(&meta.name, &body_font) + HEADER_CHROME;
-            for row in &result.rows {
-                let Some(value) = row.get(col) else {
-                    continue;
-                };
-                let text = match value {
-                    Value::Null => "NULL".to_string(),
-                    Value::Bool(value) => value.to_string(),
-                    Value::Int(_) | Value::Float(_) => value.display(),
-                    Value::Text(value) => value.clone(),
-                    Value::Bytes(value) => format!("[{} bytes]", value.len()),
-                };
-                let font = if matches!(value, Value::Int(_) | Value::Float(_)) {
-                    &mono_font
-                } else {
-                    &body_font
-                };
-                width = width.max(measure(&text, font) + CELL_PADDING);
-            }
-            Some(width.clamp(MIN_WIDTH, MAX_WIDTH))
-        })
-        .collect()
+    let mut width = measure(&meta.name, &body_font) + HEADER_CHROME;
+    for row in result.rows.iter().step_by(sample_step) {
+        let Some(value) = row.get(col) else {
+            continue;
+        };
+        let text = match value {
+            Value::Null => "NULL".to_string(),
+            Value::Bool(value) => value.to_string(),
+            Value::Int(_) | Value::Float(_) => value.display(),
+            Value::Text(value) => value.clone(),
+            Value::Bytes(value) => format!("[{} bytes]", value.len()),
+        };
+        let font = if matches!(value, Value::Int(_) | Value::Float(_)) {
+            &mono_font
+        } else {
+            &body_font
+        };
+        width = width.max(measure(&text, font) + CELL_PADDING);
+        if width >= MAX_WIDTH {
+            break;
+        }
+    }
+    Some(width.clamp(MIN_WIDTH, MAX_WIDTH))
 }
 
 /// A sort request from a column header (click or the header menu).
@@ -401,9 +403,10 @@ pub fn results_grid(
     if column_view.hidden.len() >= ncols {
         column_view.hidden.clear();
     }
-    if std::mem::take(&mut column_view.fit_content_next_frame) {
-        column_view.widths = fitted_column_widths(ui, result);
-        column_view.reset_widths_next_frame = true;
+    let fit_content_col =
+        std::mem::take(&mut column_view.fit_content_next_frame).filter(|&col| col < ncols);
+    if let Some(col) = fit_content_col {
+        column_view.widths[col] = fitted_column_width(ui, result, col);
     }
     let reset_widths = std::mem::take(&mut column_view.reset_widths_next_frame);
     let visible_cols: Vec<usize> = (0..ncols)
@@ -453,6 +456,7 @@ pub fn results_grid(
                     &visible_cols,
                     &column_widths,
                     reset_widths,
+                    fit_content_col,
                 );
                 // Horizontal keep-visible for keyboard cursor moves. This request must
                 // be issued *here* — inside this horizontal ScrollArea but outside the
@@ -548,6 +552,7 @@ fn build_grid(
     visible_cols: &[usize],
     column_widths: &[Option<f32>],
     reset_widths: bool,
+    fit_content_col: Option<usize>,
 ) {
     let fill_id = egui::Id::new(("results_grid_fill_handle", grid_id));
     let mut fill_drag = ui.data_mut(|d| d.get_temp::<FillDrag>(fill_id));
@@ -576,12 +581,15 @@ fn build_grid(
         .auto_shrink([false, false])
         .column(Column::exact(gutter_w)); // gutter (not resizable)
     for &col in visible_cols {
-        builder = builder.column(
-            Column::initial(column_widths[col].unwrap_or(COL_W))
-                .at_least(40.0)
-                .clip(true)
-                .resizable(true),
-        );
+        let width = column_widths[col].unwrap_or(COL_W);
+        let mut column = Column::initial(width)
+            .at_least(40.0)
+            .clip(true)
+            .resizable(true);
+        if fit_content_col == Some(col) {
+            column = column.range(egui::Rangef::new(width, width));
+        }
+        builder = builder.column(column);
     }
     if reset_widths {
         builder.reset();
@@ -859,7 +867,14 @@ fn build_grid(
                     // row when it was right-clicked while unselected (TablePlus-style).
                     col_resp.context_menu(|ui| {
                         if let (Some(raw), Some(ref_t)) = (fk_raw, fk_ref) {
-                            if ui.button(format!("↗  Follow → {ref_t}")).clicked() {
+                            if components::button(
+                                ui,
+                                crate::icons::arrow_up_right(),
+                                &format!("Follow {ref_t}"),
+                                true,
+                            )
+                            .clicked()
+                            {
                                 out.follow_fk = Some((raw, c));
                                 ui.close();
                             }
@@ -1005,15 +1020,18 @@ fn header_cell(
     );
 
     if let Some(ascending) = sorted_dir {
-        let arrow = if ascending { "↑" } else { "↓" };
-        ui.scope_builder(
-            egui::UiBuilder::new().max_rect(sort_rect).layout(
-                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-            ),
-            |ui| {
-                ui.label(egui::RichText::new(arrow).strong().color(palette::ACCENT()));
-            },
-        );
+        let src = if ascending {
+            crate::icons::arrow_up()
+        } else {
+            crate::icons::arrow_down()
+        };
+        egui::Image::new(src)
+            .fit_to_exact_size(egui::Vec2::splat(12.0))
+            .tint(palette::ACCENT())
+            .paint_at(
+                ui,
+                egui::Rect::from_center_size(sort_rect.center(), egui::Vec2::splat(12.0)),
+            );
     }
 
     ui.scope_builder(
@@ -1061,7 +1079,7 @@ fn header_menu(
         "Copy column type",
         "Filter with column",
         "Hide this column",
-        "Fit columns to content",
+        "Fit this column",
         "Reset columns",
         "Sort ascending",
         "Sort descending",
@@ -1133,8 +1151,10 @@ fn header_menu(
         ui.close();
     }
     ui.separator();
-    if header_menu_item(ui, crate::icons::table(), "Fit columns to content", true).clicked() {
-        update_column_view(ui, grid_id, |view| view.fit_content_next_frame = true);
+    if header_menu_item(ui, crate::icons::table(), "Fit this column", true).clicked() {
+        update_column_view(ui, grid_id, |view| {
+            view.fit_content_next_frame = Some(col);
+        });
         ui.close();
     }
     if header_menu_item(ui, crate::icons::undo(), "Reset columns", true).clicked() {
@@ -1449,9 +1469,12 @@ mod tests {
             stats: QueryStats::default(),
             truncated: false,
         };
-        let mut widths = Vec::new();
+        let mut widths = [None; 2];
         let _ = ctx.run_ui(Default::default(), |ui| {
-            widths = fitted_column_widths(ui, &result);
+            widths = [
+                fitted_column_width(ui, &result, 0),
+                fitted_column_width(ui, &result, 1),
+            ];
         });
 
         assert!(widths[1].unwrap() > widths[0].unwrap());
@@ -1887,12 +1910,10 @@ fn cell(
         Value::Text(text) => label(ui, egui::RichText::new(text)),
         Value::Bytes(bytes) => label(ui, egui::RichText::new(format!("[{} bytes]", bytes.len()))),
     };
-    // A Shift-hovered, followable FK value: append a small ↗ after the text so the cell reads as
+    // A Shift-hovered, followable FK value: append a small arrow after the text so the cell reads as
     // a navigable link. Purely a marker — the whole cell is the click target (Shift+click follows).
     if underline {
-        ui.add(
-            egui::Label::new(egui::RichText::new(" ↗").color(palette::ACCENT())).selectable(false),
-        );
+        crate::icons::show_colored(ui, crate::icons::arrow_up_right(), 11.0, palette::ACCENT());
     }
     resp
 }

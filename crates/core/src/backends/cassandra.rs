@@ -420,8 +420,10 @@ impl Database for CassandraDb {
         // `kind` is partition_key / clustering / static / regular; primary-key parts are
         // ordered by `position`, the rest come back alphabetical from the server.
         #[allow(clippy::type_complexity)]
-        let mut cols: std::collections::HashMap<(String, String), Vec<(i8, i32, ColumnInfo)>> =
-            std::collections::HashMap::new();
+        let mut cols: std::collections::HashMap<
+            (String, String),
+            Vec<(i8, i32, ColumnInfo)>,
+        > = std::collections::HashMap::new();
         for row in self
             .fetch(
                 "SELECT keyspace_name, table_name, column_name, kind, position, type \
@@ -672,10 +674,9 @@ fn row_str(row: &Row, idx: usize) -> Option<String> {
 /// Read column `idx` as a list/frozen-list of text values (empty when null/other).
 fn row_str_list(row: &Row, idx: usize) -> Vec<String> {
     match row.columns.get(idx).and_then(|c| c.as_ref()) {
-        Some(CqlValue::List(items)) | Some(CqlValue::Set(items)) => items
-            .iter()
-            .filter_map(|v| v.as_text().cloned())
-            .collect(),
+        Some(CqlValue::List(items)) | Some(CqlValue::Set(items)) => {
+            items.iter().filter_map(|v| v.as_text().cloned()).collect()
+        }
         _ => Vec::new(),
     }
 }
@@ -982,8 +983,7 @@ fn tls_config_verify(ca_path: &str) -> Result<Arc<rustls::ClientConfig>> {
             .map_err(|e| CoreError::Pool(format!("reading CA certificate {ca_path}: {e}")))?;
         let mut added = 0usize;
         for cert in certs {
-            let cert =
-                cert.map_err(|e| CoreError::Pool(format!("parsing CA certificate: {e}")))?;
+            let cert = cert.map_err(|e| CoreError::Pool(format!("parsing CA certificate: {e}")))?;
             roots
                 .add(cert)
                 .map_err(|e| CoreError::Pool(format!("loading CA certificate: {e}")))?;
@@ -1051,9 +1051,7 @@ impl rustls::client::danger::ServerCertVerifier for NoCertVerification {
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.0
-            .signature_verification_algorithms
-            .supported_schemes()
+        self.0.signature_verification_algorithms.supported_schemes()
     }
 }
 
@@ -1126,7 +1124,7 @@ mod tests {
             i128::MAX.to_string()
         );
         // Wider than i128: hex fallback, never silent truncation.
-        assert_eq!(format_varint(&[1u8; 17]).starts_with("0x"), true);
+        assert!(format_varint(&[1u8; 17]).starts_with("0x"));
     }
 
     #[test]

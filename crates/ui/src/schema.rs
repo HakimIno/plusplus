@@ -205,10 +205,10 @@ impl FkDraft {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchemaEditorMode {
-    NewTable,
-    EditTable,
-    DesignNewTable,
-    DesignEditTable,
+    New,
+    Edit,
+    DesignNew,
+    DesignEdit,
 }
 
 // ─── Tab ─────────────────────────────────────────────────────────────────────
@@ -241,7 +241,7 @@ pub struct SchemaEditor {
 impl SchemaEditor {
     pub fn new_table(db_kind: DbKind, default_schema: Option<&str>) -> Self {
         Self {
-            mode: SchemaEditorMode::NewTable,
+            mode: SchemaEditorMode::New,
             table_name: String::new(),
             schema_name: default_schema.unwrap_or("").to_string(),
             db_kind,
@@ -268,7 +268,7 @@ impl SchemaEditor {
             .collect();
         let fks = table.foreign_keys.iter().map(FkDraft::from_existing).collect();
         Self {
-            mode: SchemaEditorMode::EditTable,
+            mode: SchemaEditorMode::Edit,
             table_name: table.name.clone(),
             schema_name: table.schema.clone().unwrap_or_default(),
             db_kind,
@@ -287,7 +287,7 @@ impl SchemaEditor {
     ) -> Self {
         let Some(table) = table else {
             let mut editor = Self::new_table(db_kind, default_schema);
-            editor.mode = SchemaEditorMode::DesignNewTable;
+            editor.mode = SchemaEditorMode::DesignNew;
             return editor;
         };
         let columns = table
@@ -324,7 +324,7 @@ impl SchemaEditor {
             })
             .collect();
         Self {
-            mode: SchemaEditorMode::DesignEditTable,
+            mode: SchemaEditorMode::DesignEdit,
             table_name: table.name.clone(),
             schema_name: table.schema.clone().unwrap_or_default(),
             db_kind,
@@ -414,7 +414,7 @@ impl SchemaEditor {
         let mut stmts = Vec::new();
 
         match self.mode {
-            SchemaEditorMode::NewTable => {
+            SchemaEditorMode::New => {
                 let active_cols: Vec<ColumnDef> = self
                     .columns
                     .iter()
@@ -460,7 +460,7 @@ impl SchemaEditor {
                 }
             }
 
-            SchemaEditorMode::EditTable => {
+            SchemaEditorMode::Edit => {
                 // Dropped columns
                 for col in self.columns.iter().filter(|c| c.is_existing && c.drop) {
                     let orig = col.original_name.as_deref().unwrap_or(&col.name);
@@ -585,7 +585,7 @@ impl SchemaEditor {
                     stmts.push(build_add_fk_sql(self.db_kind, self.schema(), table, &def));
                 }
             }
-            SchemaEditorMode::DesignNewTable | SchemaEditorMode::DesignEditTable => {
+            SchemaEditorMode::DesignNew | SchemaEditorMode::DesignEdit => {
                 return Err("Save ER table changes from the diagram editor.".into());
             }
         }

@@ -243,11 +243,7 @@ impl ProductionGuardPending {
                     })
                     .map(|rows| rows.to_string())
                     .unwrap_or_else(|| "unknown".to_string());
-                format!(
-                    "{}:{}:rows={rows}",
-                    statement.kind.label(),
-                    risk.label()
-                )
+                format!("{}:{}:rows={rows}", statement.kind.label(), risk.label())
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -1218,6 +1214,16 @@ pub struct DbGuiApp {
     /// `(sql char-length, caret char index)` the cached `ghost_suggestion` was computed for;
     /// a mismatch is what triggers a recompute.
     ghost_key: Option<(usize, usize)>,
+    /// First syntax error in the active editor's SQL — the red squiggle and its tooltip —
+    /// or `None` when the buffer parses. Recomputed on a short pause after typing, never
+    /// per keystroke: parsing a half-written statement only ever reports the obvious.
+    syntax_error: Option<dbcore::SyntaxError>,
+    /// The exact SQL `syntax_error` describes. A mismatch means the buffer moved on (edited,
+    /// or another tab is showing), so nothing is drawn until the check catches up.
+    syntax_checked: String,
+    /// When the SQL last changed, in `input.time` seconds; `None` once the check has caught
+    /// up. This is the debounce clock.
+    syntax_dirty_at: Option<f64>,
     status_msg: String,
     error: Option<String>,
     /// Text staged for the OS clipboard this frame (e.g. copied result rows). Flushed to the
@@ -1260,7 +1266,6 @@ pub struct DbGuiApp {
     favorite_pending: Option<FavoriteDraft>,
     /// Open ER diagram (takes over the central panel, like the schema editor).
     /// A snapshot of the schema it was built from; not persisted.
-
     // --- layout ---
     show_connection_tabs: bool,
     show_schema_panel: bool,
@@ -1325,7 +1330,7 @@ impl DbGuiApp {
             app.start_update_check();
         }
 
-        // Theme + SVG icon loader (Iconoir icons are embedded SVGs).
+        // Theme + SVG icon loader (Hugeicons are embedded SVGs).
         crate::style::apply(&cc.egui_ctx);
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
@@ -1348,7 +1353,8 @@ impl DbGuiApp {
     fn isolate_test_config() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            let dir = std::env::temp_dir().join(format!("plusplus-test-config-{}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("plusplus-test-config-{}", std::process::id()));
             let _ = std::fs::create_dir_all(&dir);
             std::env::set_var("XDG_CONFIG_HOME", &dir);
         });
@@ -1436,6 +1442,9 @@ impl DbGuiApp {
             suggest_pool: Vec::new(),
             ghost_suggestion: None,
             ghost_key: None,
+            syntax_error: None,
+            syntax_checked: String::new(),
+            syntax_dirty_at: None,
             status_msg: "Ready".to_string(),
             error: None,
             copy_buffer: None,
@@ -1584,7 +1593,9 @@ impl DbGuiApp {
         // Scope = the root table (or the whole schema), regardless of hop depth: a
         // re-opened table should land in its existing tab even after widening it.
         let root = |d: &crate::erd::ErDiagram| {
-            d.focus.as_ref().map(|f| (f.schema.clone(), f.table.clone()))
+            d.focus
+                .as_ref()
+                .map(|f| (f.schema.clone(), f.table.clone()))
         };
         let same_scope = |t: &QueryTab| {
             t.kind == crate::components::QueryTabKind::Diagram

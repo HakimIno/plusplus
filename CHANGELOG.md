@@ -3,6 +3,19 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
+## 0.2.24 — 2026-07-31
+
+- Added dialect-aware live SQL syntax diagnostics: after a short typing pause the editor
+  underlines the first invalid token, explains it on hover, follows the active connection's
+  dialect, and stays out of the way while the user is still editing that token.
+- Refreshed interface controls with a consistent Hugeicons set, highlighted matched
+  autocomplete prefixes, sped up fit-column measurements on large result sets, and fixed
+  Cassandra/ScyllaDB logos so they remain visible in dark themes.
+- Refined the landing page with database-vendor cards, platform and feature icons, and clearer
+  visual grouping while keeping the existing release-download flow.
+- Hardened releases by running the full cross-platform CI suite before packaging, rejecting
+  tags that disagree with `Cargo.toml`, and documenting the actual Rust 1.94 minimum.
+
 ## 0.2.23 — 2026-07-24
 
 - Added Cassandra and ScyllaDB support: one CQL backend serves both wire-compatible engines,

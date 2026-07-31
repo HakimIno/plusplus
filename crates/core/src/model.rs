@@ -2374,7 +2374,7 @@ mod tests {
         // Routines and triggers are refused with a clear message.
         let rb = RoutineBuild {
             schema: None,
-            name: "f".into(),
+            name: "f",
             kind: RoutineKind::Function,
             params: &[],
             return_type: Some("int"),

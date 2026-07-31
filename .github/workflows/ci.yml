@@ -1,0 +1,98 @@
+name: CI
+
+# The gate between a commit and users' machines. The in-app updater installs whatever
+# `release.yml` publishes, so anything that reaches a tag reaches every install on the
+# next update check — this workflow is what makes that safe. `release.yml` calls it via
+# `workflow_call` and refuses to build until it passes.
+#
+# Website-only changes skip it; those are covered by website-ci.yml. The path filters
+# apply to the `pull_request`/`push` triggers only — a `workflow_call` from a release
+# always runs the full suite regardless of what the tagged commit touched.
+on:
+  pull_request:
+    paths-ignore:
+      - "website/**"
+      - "docs/**"
+      - "**.md"
+      - ".github/workflows/website-*.yml"
+  push:
+    branches: [main]
+    paths-ignore:
+      - "website/**"
+      - "docs/**"
+      - "**.md"
+      - ".github/workflows/website-*.yml"
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # Superseded pull-request runs are disposable; a release run is not.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      - name: Install native build dependencies
+        if: runner.os == 'Linux'
+        run: scripts/linux-deps.sh
+
+      # egui_kittest links wgpu, so the UI crate's tests expect a display server to exist
+      # even though the snapshot tests that actually render are #[ignore]d. xvfb satisfies
+      # that on a headless runner without having to weaken the suite.
+      - name: Run tests
+        if: runner.os == 'Linux'
+        run: xvfb-run -a cargo test --workspace --locked
+
+      # --locked keeps CI honest about Cargo.lock: the tested dependency graph is exactly
+      # the committed one, not whatever resolved fresh on the runner today.
+      - name: Run tests
+        if: runner.os != 'Linux'
+        run: cargo test --workspace --locked
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Reports but does not block yet: the tree currently has 10 clippy warnings (dead code
+    # in grid.rs, a type_complexity in panels.rs, an incompatible_msrv, and some style
+    # nits). Clear those, then delete this line to make `-D warnings` a real gate. Left
+    # non-blocking rather than removed so the count is visible on every run and can only
+    # go down. `test` is the blocking gate.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy
+
+      - name: Install native build dependencies
+        run: scripts/linux-deps.sh
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings

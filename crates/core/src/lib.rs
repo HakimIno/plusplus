@@ -15,8 +15,8 @@ pub mod clipboard;
 pub mod coerce;
 pub mod config;
 pub mod database;
-pub mod error;
 pub mod erd;
+pub mod error;
 pub mod export;
 pub mod favorites;
 pub mod history;
@@ -24,6 +24,7 @@ pub mod import;
 pub mod model;
 pub mod safety;
 pub mod secrets;
+pub mod syntax;
 pub mod tunnel;
 pub mod value;
 
@@ -33,8 +34,8 @@ pub use bookmarks::Bookmark;
 pub use clipboard::{copy_rows, CopyFormat};
 pub use coerce::{CoerceError, EditorKind};
 pub use database::Database;
-pub use error::{CoreError, Result};
 pub use erd::{DesignColumn, DesignForeignKey, DesignIndex, DesignTable, ErDesign};
+pub use error::{CoreError, Result};
 pub use export::{ExportFormat, RowSink};
 pub use favorites::Favorite;
 pub use import::{ImportFormat, Preview, Record, Target};
@@ -52,6 +53,7 @@ pub use model::{
     RoutineKind, RoutineParam, SchemaTree, SslMode, TableInfo, TriggerBuild, TriggerEvent,
     TriggerInfo, TriggerLevel, TriggerTiming, ViewInfo,
 };
+pub use syntax::{check_syntax, SyntaxError};
 pub use value::Value;
 
 use backends::{

@@ -2017,7 +2017,10 @@ fn run_query_is_refused_while_busy() {
     app.tab_mut().sql = "SELECT 1".into();
     app.busy = Busy::Querying;
     app.apply_action(Action::RunQuery);
-    assert_eq!(app.query_seq, 0, "no new run may start while one is in flight");
+    assert_eq!(
+        app.query_seq, 0,
+        "no new run may start while one is in flight"
+    );
     assert!(app.status_msg.contains("already running"));
 }
 
@@ -2748,7 +2751,8 @@ fn snapshot_settings_appearance_page() {
 #[test]
 #[ignore = "screenshot generator; run manually with --ignored"]
 fn snapshot_object_browser() {
-    let (app, dir) = demo_app_with_objects();
+    let (mut app, dir) = demo_app_with_objects();
+    app.show_welcome = false;
     render_and_snapshot(app, "object_browser", true);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2831,6 +2835,23 @@ fn snapshot_query_error_state() {
         Some("SQLite error: no such column: customer_nam\nat line 1, column 8".into());
     app.status_msg = "Ready".into();
     render_and_snapshot(app, "query_error_state", false);
+}
+
+/// Screenshot generator (ignored): the live syntax check — a red squiggle under the token
+/// the parser tripped on, before the query is ever run.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_sql_syntax_error() {
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    app.tab_mut().kind = crate::components::QueryTabKind::Query;
+    app.tab_mut().sql =
+        "SELECT id, email\nFROM customers\nWHERE created_at > '2026-01-01'\nORDR BY created_at DESC"
+            .into();
+    render_and_snapshot(app, "sql_syntax_error", false);
 }
 
 /// Screenshot generator (ignored): the dialect-adaptive visual Trigger editor, opened on
@@ -3364,7 +3385,10 @@ fn edit_mode_arrows_move_only_within_the_column() {
         Some((2, 1)),
         "ArrowDown advances one row without changing the column"
     );
-    assert!(app.tab().edits.is_active(2, 1), "editor continues on the next row");
+    assert!(
+        app.tab().edits.is_active(2, 1),
+        "editor continues on the next row"
+    );
     assert!(
         app.tab().edits.staged(1, 1).is_some(),
         "the previous value is committed before advancing"
@@ -3583,13 +3607,24 @@ fn full_erd_can_be_edited_and_forward_engineered() {
     };
     editor.table_name = "table_1".into();
     app.apply_action(Action::SaveErdTable);
-    assert!(app.error.as_deref().is_some_and(|error| error.contains("Duplicate table")));
+    assert!(app
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("Duplicate table")));
     app.apply_action(Action::CancelSchema);
-    assert_eq!(app.tab().diagram.as_ref().unwrap().design.tables[0].name, "accounts");
+    assert_eq!(
+        app.tab().diagram.as_ref().unwrap().design.tables[0].name,
+        "accounts"
+    );
 
     app.apply_action(Action::ForwardEngineerErd);
-    let ddl = app.schema_pending.as_ref().expect("DDL preview was not staged");
-    assert!(ddl.iter().any(|statement| statement.contains("CREATE TABLE \"accounts\"")));
+    let ddl = app
+        .schema_pending
+        .as_ref()
+        .expect("DDL preview was not staged");
+    assert!(ddl
+        .iter()
+        .any(|statement| statement.contains("CREATE TABLE \"accounts\"")));
     assert!(ddl
         .iter()
         .any(|statement| statement.contains("REFERENCES \"accounts\"")));
@@ -3724,7 +3759,11 @@ fn show_table_diagram_opens_scoped_erd_and_widens() {
 
     // Refresh (after DDL / re-introspection) must keep the focus scope.
     app.apply_action(Action::RefreshErd);
-    let erd = app.tab().diagram.as_ref().expect("diagram survives refresh");
+    let erd = app
+        .tab()
+        .diagram
+        .as_ref()
+        .expect("diagram survives refresh");
     assert_eq!(erd.nodes.len(), 2);
     assert!(erd.focus.is_some());
 
@@ -3803,57 +3842,109 @@ fn snapshot_erd_views() {
         tables: vec![
             table(
                 "users",
-                vec![col("id", "INTEGER", true), col("email", "TEXT", false), col("name", "TEXT", false)],
+                vec![
+                    col("id", "INTEGER", true),
+                    col("email", "TEXT", false),
+                    col("name", "TEXT", false),
+                ],
                 vec![],
             ),
             table(
                 "addresses",
-                vec![col("id", "INTEGER", true), col("user_id", "INTEGER", false), col("street", "TEXT", false), col("city", "TEXT", false)],
+                vec![
+                    col("id", "INTEGER", true),
+                    col("user_id", "INTEGER", false),
+                    col("street", "TEXT", false),
+                    col("city", "TEXT", false),
+                ],
                 vec![fk(&["user_id"], "users")],
             ),
             table(
                 "categories",
-                vec![col("id", "INTEGER", true), col("parent_id", "INTEGER", false), col("name", "TEXT", false)],
+                vec![
+                    col("id", "INTEGER", true),
+                    col("parent_id", "INTEGER", false),
+                    col("name", "TEXT", false),
+                ],
                 vec![fk(&["parent_id"], "categories")],
             ),
             table(
                 "products",
-                vec![col("id", "INTEGER", true), col("category_id", "INTEGER", false), col("name", "TEXT", false), col("price", "NUMERIC", false)],
+                vec![
+                    col("id", "INTEGER", true),
+                    col("category_id", "INTEGER", false),
+                    col("name", "TEXT", false),
+                    col("price", "NUMERIC", false),
+                ],
                 vec![fk(&["category_id"], "categories")],
             ),
             table(
                 "orders",
-                vec![col("id", "INTEGER", true), col("user_id", "INTEGER", false), col("address_id", "INTEGER", false), col("status", "TEXT", false), col("total", "NUMERIC", false)],
+                vec![
+                    col("id", "INTEGER", true),
+                    col("user_id", "INTEGER", false),
+                    col("address_id", "INTEGER", false),
+                    col("status", "TEXT", false),
+                    col("total", "NUMERIC", false),
+                ],
                 vec![fk(&["user_id"], "users"), fk(&["address_id"], "addresses")],
             ),
             table(
                 "order_items",
-                vec![col("id", "INTEGER", true), col("order_id", "INTEGER", false), col("product_id", "INTEGER", false), col("qty", "INTEGER", false)],
+                vec![
+                    col("id", "INTEGER", true),
+                    col("order_id", "INTEGER", false),
+                    col("product_id", "INTEGER", false),
+                    col("qty", "INTEGER", false),
+                ],
                 vec![fk(&["order_id"], "orders"), fk(&["product_id"], "products")],
             ),
             table(
                 "payments",
-                vec![col("id", "INTEGER", true), col("order_id", "INTEGER", false), col("method", "TEXT", false), col("amount", "NUMERIC", false)],
+                vec![
+                    col("id", "INTEGER", true),
+                    col("order_id", "INTEGER", false),
+                    col("method", "TEXT", false),
+                    col("amount", "NUMERIC", false),
+                ],
                 vec![fk(&["order_id"], "orders")],
             ),
             table(
                 "shipments",
-                vec![col("id", "INTEGER", true), col("order_id", "INTEGER", false), col("carrier", "TEXT", false), col("tracking", "TEXT", false)],
+                vec![
+                    col("id", "INTEGER", true),
+                    col("order_id", "INTEGER", false),
+                    col("carrier", "TEXT", false),
+                    col("tracking", "TEXT", false),
+                ],
                 vec![fk(&["order_id"], "orders")],
             ),
             table(
                 "reviews",
-                vec![col("id", "INTEGER", true), col("user_id", "INTEGER", false), col("product_id", "INTEGER", false), col("rating", "INTEGER", false)],
+                vec![
+                    col("id", "INTEGER", true),
+                    col("user_id", "INTEGER", false),
+                    col("product_id", "INTEGER", false),
+                    col("rating", "INTEGER", false),
+                ],
                 vec![fk(&["user_id"], "users"), fk(&["product_id"], "products")],
             ),
             table(
                 "app_settings",
-                vec![col("id", "INTEGER", true), col("key", "TEXT", false), col("value", "TEXT", false)],
+                vec![
+                    col("id", "INTEGER", true),
+                    col("key", "TEXT", false),
+                    col("value", "TEXT", false),
+                ],
                 vec![],
             ),
             table(
                 "audit_log",
-                vec![col("id", "INTEGER", true), col("action", "TEXT", false), col("at", "TIMESTAMP", false)],
+                vec![
+                    col("id", "INTEGER", true),
+                    col("action", "TEXT", false),
+                    col("at", "TIMESTAMP", false),
+                ],
                 vec![],
             ),
         ],
@@ -3868,13 +3959,20 @@ fn snapshot_erd_views() {
         tables: (0..400)
             .map(|i| {
                 let fks = if i % 5 != 0 {
-                    vec![fk(&["parent_id"], Box::leak(format!("t{}", i / 5 * 5).into_boxed_str()))]
+                    vec![fk(
+                        &["parent_id"],
+                        Box::leak(format!("t{}", i / 5 * 5).into_boxed_str()),
+                    )]
                 } else {
                     vec![]
                 };
                 table(
                     Box::leak(format!("t{i}").into_boxed_str()),
-                    vec![col("id", "INTEGER", true), col("parent_id", "INTEGER", false), col("payload", "TEXT", false)],
+                    vec![
+                        col("id", "INTEGER", true),
+                        col("parent_id", "INTEGER", false),
+                        col("payload", "TEXT", false),
+                    ],
                     fks,
                 )
             })
@@ -4104,7 +4202,10 @@ fn erd_refresh_keeps_positions_and_disconnect_keeps_snapshot() {
     // Disconnecting keeps the snapshot on screen; a refresh without the connection
     // is a no-op rather than a wipe.
     app.disconnect_conn("c1");
-    assert!(app.tab().diagram.is_some(), "the snapshot outlives the connection");
+    assert!(
+        app.tab().diagram.is_some(),
+        "the snapshot outlives the connection"
+    );
     app.apply_action(Action::RefreshErd);
     assert_eq!(app.tab().diagram.as_ref().unwrap().nodes.len(), 4);
 }
@@ -4309,4 +4410,141 @@ fn comment_toggle_is_multibyte_safe() {
     let out = toggle(src, 0..src.chars().count());
     assert_eq!(out, "-- café\n-- SELECT 1");
     assert_eq!(toggle(&out, 0..out.chars().count()), src);
+}
+
+// ─── live SQL syntax check (red squiggle) ────────────────────────────────────
+
+/// A typo has to light up on its own, without running the query — but only after the user
+/// pauses, and it has to clear itself once the SQL parses again.
+#[test]
+fn sql_typos_are_flagged_after_a_pause_and_clear_when_fixed() {
+    use std::sync::{Arc, Mutex};
+
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    app.tab_mut().kind = crate::components::QueryTabKind::Query;
+    app.tab_mut().sql = "SELCT * FROM users".into();
+
+    // The app lives inside the harness closure, so the test reads its diagnostic through a
+    // probe and edits the SQL through a slot the closure drains.
+    let seen: Arc<Mutex<Option<dbcore::SyntaxError>>> = Arc::new(Mutex::new(None));
+    let next_sql: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let (probe, edit) = (seen.clone(), next_sql.clone());
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            if let Some(sql) = edit.lock().unwrap().take() {
+                app.tab_mut().sql = sql;
+            }
+            app.draw(ui, None);
+            probe.lock().unwrap().clone_from(&app.syntax_error);
+        });
+
+    // The harness steps 0.25s at a time, so a couple of frames covers the debounce.
+    harness.run_steps(4);
+    let error = seen.lock().unwrap().clone().expect("typo must be flagged");
+    let marked: String = "SELCT * FROM users"
+        .chars()
+        .skip(error.range.start)
+        .take(error.range.end - error.range.start)
+        .collect();
+    assert_eq!(
+        marked, "SELCT",
+        "the misspelled keyword is what gets marked"
+    );
+    assert!(
+        !error.message.is_empty(),
+        "the tooltip needs something to say"
+    );
+
+    *next_sql.lock().unwrap() = Some("SELECT * FROM users".to_string());
+    harness.run_steps(4);
+    assert!(
+        seen.lock().unwrap().is_none(),
+        "fixing the SQL must clear the mark"
+    );
+}
+
+#[test]
+fn the_token_being_typed_is_never_marked() {
+    use super::panels::error_under_caret;
+
+    // `SELE` is flagged at 0..4. While the caret is inside it — or parked just past its last
+    // char, which is where typing leaves it — the word is still being written.
+    for caret in 0..=4 {
+        assert!(
+            error_under_caret(&(0..4), Some(caret)),
+            "caret {caret} is inside the word being typed"
+        );
+    }
+    // Once the caret has moved on (or the editor lost focus), the mark is fair game.
+    assert!(!error_under_caret(&(0..4), Some(5)));
+    assert!(!error_under_caret(&(2..4), Some(1)));
+    assert!(!error_under_caret(&(0..4), None));
+}
+
+/// Hovering the marked token must explain it. The squiggle alone says "wrong"; the tooltip
+/// is where the reason lives — and it has to win the hover against the `TextEdit` under it.
+#[test]
+fn hovering_a_marked_token_explains_the_error() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    app.tab_mut().kind = crate::components::QueryTabKind::Query;
+    app.tab_mut().sql = "SELCT * FROM users".into();
+
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+        });
+    harness.run_steps(4);
+
+    // The line-number gutter sits flush against the text, so a few points to its right and
+    // down is inside the first token — which is the one that failed to parse.
+    let gutter = harness.get_by_label("SQL line numbers").rect();
+    let over_token = egui::pos2(gutter.right() + 10.0, gutter.top() + 7.0);
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(over_token));
+    harness.run_steps(6);
+
+    assert!(
+        harness.query_by_label("Syntax error").is_some(),
+        "hovering the squiggle must open the explanation"
+    );
+
+    // Control: the rest of the editor is just text. Hovering it says nothing.
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(egui::pos2(
+            gutter.right() + 400.0,
+            gutter.top() + 7.0,
+        )));
+    harness.run_steps(6);
+    assert!(
+        harness.query_by_label("Syntax error").is_none(),
+        "the tooltip belongs to the marked token, not the whole editor"
+    );
 }

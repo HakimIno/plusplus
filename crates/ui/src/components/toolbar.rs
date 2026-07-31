@@ -23,10 +23,7 @@ pub(crate) fn layout_toggle(
                 .rect_filled(rect, egui::CornerRadius::same(5), palette::SURFACE_HOVER());
         }
 
-        // VS Code-style layout glyph: thin outer frame + filled bar on one edge.
-        let icon = rect.shrink(6.0);
-        let bar_w = 2.5;
-        let gap = 1.0;
+        let icon = rect.shrink(5.0);
         let color = if active {
             palette::ACCENT()
         } else if resp.hovered() {
@@ -34,48 +31,16 @@ pub(crate) fn layout_toggle(
         } else {
             palette::TEXT_WEAK()
         };
-        let frame = egui::Stroke::new(1.0, color);
-        ui.painter().rect_stroke(
-            icon,
-            egui::CornerRadius::same(2),
-            frame,
-            egui::StrokeKind::Inside,
-        );
-
-        match side {
-            LayoutSide::Connections => {
-                let left = egui::Rect::from_min_size(icon.min, egui::vec2(bar_w, icon.height()));
-                ui.painter()
-                    .rect_filled(left, egui::CornerRadius::ZERO, color);
-            }
-            LayoutSide::Schema => {
-                let left = egui::Rect::from_min_size(icon.min, egui::vec2(bar_w, icon.height()));
-                let mid = egui::Rect::from_min_size(
-                    egui::pos2(icon.min.x + bar_w + gap, icon.min.y),
-                    egui::vec2(icon.width() - bar_w - gap, icon.height()),
-                );
-                ui.painter()
-                    .rect_filled(left, egui::CornerRadius::ZERO, color);
-                ui.painter()
-                    .rect_filled(mid, egui::CornerRadius::ZERO, color);
-            }
-            LayoutSide::Details => {
-                let right = egui::Rect::from_min_size(
-                    egui::pos2(icon.max.x - bar_w, icon.min.y),
-                    egui::vec2(bar_w, icon.height()),
-                );
-                ui.painter()
-                    .rect_filled(right, egui::CornerRadius::ZERO, color);
-            }
-            LayoutSide::Query => {
-                let bottom = egui::Rect::from_min_size(
-                    egui::pos2(icon.min.x, icon.max.y - bar_w),
-                    egui::vec2(icon.width(), bar_w),
-                );
-                ui.painter()
-                    .rect_filled(bottom, egui::CornerRadius::ZERO, color);
-            }
-        }
+        let src = match side {
+            LayoutSide::Connections => icons::layout_connections(),
+            LayoutSide::Schema => icons::layout_schema(),
+            LayoutSide::Details => icons::layout_details(),
+            LayoutSide::Query => icons::layout_query(),
+        };
+        egui::Image::new(src)
+            .fit_to_exact_size(icon.size())
+            .tint(color)
+            .paint_at(ui, icon);
     }
 
     ui.add_space(TOOLBAR_ICON_GAP);
@@ -255,18 +220,13 @@ pub(crate) fn beautify_button(
             main_rect.center().y - galley.size().y * 0.5,
         );
         ui.painter().galley(text_pos, galley, text_color);
-        // Chevron glyph: a small "v".
-        let c = chev_rect.center();
-        let r = 3.0;
-        let stroke = egui::Stroke::new(1.3, palette::TEXT_WEAK());
-        ui.painter().line_segment(
-            [c + egui::vec2(-r, -r * 0.5), c + egui::vec2(0.0, r * 0.5)],
-            stroke,
-        );
-        ui.painter().line_segment(
-            [c + egui::vec2(0.0, r * 0.5), c + egui::vec2(r, -r * 0.5)],
-            stroke,
-        );
+        egui::Image::new(icons::chevron_down())
+            .fit_to_exact_size(egui::Vec2::splat(12.0))
+            .tint(palette::TEXT_WEAK())
+            .paint_at(
+                ui,
+                egui::Rect::from_center_size(chev_rect.center(), egui::Vec2::splat(12.0)),
+            );
     }
 
     if enabled {

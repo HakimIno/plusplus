@@ -1,27 +1,62 @@
 import Image from "next/image";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  ArrowDown,
-  ArrowRight,
-  Check,
-  ChevronRight,
-  CircleAlert,
-  Database,
-  Download,
-  ExternalLink,
-  FileOutput,
-  Github,
-  KeyRound,
-  Laptop,
-  LockKeyhole,
-  Palette,
-  Rows3,
-  ShieldCheck,
-  TerminalSquare,
-} from "lucide-react";
+  AlertCircleIcon,
+  AppleIcon,
+  ArrowDown02Icon,
+  ArrowRight01Icon,
+  ArrowRight02Icon,
+  ComputerTerminal01Icon,
+  DatabaseIcon,
+  Download04Icon,
+  ExternalLinkIcon,
+  FileExportIcon,
+  GithubIcon,
+  GridTableIcon,
+  Key01Icon,
+  PaintBrush01Icon,
+  SecurityCheckIcon,
+  SecurityLockIcon,
+  Tick02Icon,
+  WindowsNewIcon,
+} from "@hugeicons/core-free-icons";
 
 const sourceUrl = "https://github.com/HakimIno/plusplus";
 
-const databases = ["PostgreSQL", "MySQL / MariaDB", "SQL Server", "SQLite"];
+const databases = [
+  {
+    name: "PostgreSQL",
+    detail: "Server database",
+    protocol: "Native protocol",
+    icon: "/databases/postgresql.svg",
+    color: "#4169E1",
+    iconBackground: "#E9EEFF",
+  },
+  {
+    name: "MySQL / MariaDB",
+    detail: "Shared connection flow",
+    protocol: "MySQL protocol",
+    icon: "/databases/mysql.svg",
+    color: "#4479A1",
+    iconBackground: "#E7F2F5",
+  },
+  {
+    name: "SQL Server",
+    detail: "Microsoft databases",
+    protocol: "TDS protocol",
+    icon: "/databases/microsoftsqlserver.svg",
+    color: "#CC2927",
+    iconBackground: "#FBE9E6",
+  },
+  {
+    name: "SQLite",
+    detail: "Open a local file",
+    protocol: "Embedded",
+    icon: "/databases/sqlite.svg",
+    color: "#0F80CC",
+    iconBackground: "#E5F3F8",
+  },
+];
 
 const platforms = [
   {
@@ -29,7 +64,7 @@ const platforms = [
     name: "macOS",
     format: "Universal DMG",
     detail: "Apple Silicon + Intel",
-    icon: Laptop,
+    icon: AppleIcon,
     color: "#D2F36A",
   },
   {
@@ -37,7 +72,7 @@ const platforms = [
     name: "Windows",
     format: "Portable ZIP",
     detail: "Windows x86_64",
-    icon: Rows3,
+    icon: WindowsNewIcon,
     color: "#FF8F78",
   },
   {
@@ -45,14 +80,14 @@ const platforms = [
     name: "Linux",
     format: "AppImage",
     detail: "Linux x86_64",
-    icon: TerminalSquare,
+    icon: ComputerTerminal01Icon,
     color: "#B8A6FF",
   },
 ];
 
 const features = [
   {
-    icon: Database,
+    icon: DatabaseIcon,
     label: "SCHEMA",
     title: "See the whole schema",
     text: "Tables, columns, keys, indexes, views, routines, and triggers stay within reach.",
@@ -60,7 +95,7 @@ const features = [
     accent: "#087F8C",
   },
   {
-    icon: TerminalSquare,
+    icon: ComputerTerminal01Icon,
     label: "SQL",
     title: "Write SQL without friction",
     text: "One focused editor and the same keyboard shortcuts across every connection.",
@@ -68,7 +103,7 @@ const features = [
     accent: "#624CF2",
   },
   {
-    icon: Rows3,
+    icon: GridTableIcon,
     label: "DATA",
     title: "Change data deliberately",
     text: "Stage cell edits, inserted rows, and deletions before saving them together.",
@@ -76,7 +111,7 @@ const features = [
     accent: "#C94933",
   },
   {
-    icon: FileOutput,
+    icon: FileExportIcon,
     label: "EXPORT",
     title: "Export every row",
     text: "Stream full tables to CSV or JSON without holding the whole dataset in memory.",
@@ -87,17 +122,17 @@ const features = [
 
 const safeguards = [
   {
-    icon: ShieldCheck,
+    icon: SecurityCheckIcon,
     title: "Risk checks before execution",
     text: "Destructive SQL and UPDATE or DELETE without a WHERE clause are flagged before they run.",
   },
   {
-    icon: LockKeyhole,
+    icon: SecurityLockIcon,
     title: "Read-only that blocks writes",
     text: "Read-only mode is enforced in the app and, where supported, in the database session.",
   },
   {
-    icon: KeyRound,
+    icon: Key01Icon,
     title: "Credentials stay on your device",
     text: "Passwords live in the OS keychain. Query history and optional audit logs remain local.",
   },
@@ -313,7 +348,7 @@ export default async function Home({
             className="inline-flex h-10 items-center gap-2 rounded-full border-2 border-[#16232A] bg-[#16232A] px-4 text-[13px] font-semibold text-white transition-transform hover:-translate-y-0.5"
           >
             Download
-            <ArrowDown aria-hidden="true" className="h-3.5 w-3.5" />
+            <HugeiconsIcon icon={ArrowDown02Icon} size={14} aria-hidden="true" />
           </a>
         </nav>
       </header>
@@ -350,7 +385,7 @@ export default async function Home({
                   className="inline-flex h-12 items-center justify-center gap-2 rounded-full bg-[#16232A] px-6 text-[14px] font-semibold text-white transition-transform hover:-translate-y-0.5"
                 >
                   Download plusplus
-                  <Download aria-hidden="true" className="h-4 w-4" />
+                  <HugeiconsIcon icon={Download04Icon} size={16} aria-hidden="true" />
                 </a>
                 <a
                   href={sourceUrl}
@@ -358,15 +393,15 @@ export default async function Home({
                   rel="noreferrer"
                   className="inline-flex h-12 items-center justify-center gap-2 rounded-full border-2 border-[#16232A] bg-[#F7F1E8] px-6 text-[14px] font-semibold transition-transform hover:-translate-y-0.5"
                 >
-                  <Github aria-hidden="true" className="h-4 w-4" />
+                  <HugeiconsIcon icon={GithubIcon} size={16} aria-hidden="true" />
                   View source
-                  <ExternalLink aria-hidden="true" className="h-3.5 w-3.5" />
+                  <HugeiconsIcon icon={ExternalLinkIcon} size={14} aria-hidden="true" />
                 </a>
               </div>
               <div className="mt-8 flex flex-wrap gap-x-5 gap-y-2 text-[11px] font-semibold">
                 {["No account", "No Electron", "No telemetry"].map((item) => (
                   <span key={item} className="flex items-center gap-1.5">
-                    <Check aria-hidden="true" className="h-3.5 w-3.5" />
+                    <HugeiconsIcon icon={Tick02Icon} size={14} aria-hidden="true" />
                     {item}
                   </span>
                 ))}
@@ -397,21 +432,72 @@ export default async function Home({
         </div>
       </section>
 
-      <section className="border-b border-[#16232A]/20">
-        <div className="mx-auto flex max-w-[1240px] flex-col gap-5 px-5 py-8 sm:px-8 md:flex-row md:items-center md:justify-between">
-          <p className="font-mono text-[10px] tracking-[0.1em] text-[#657276]">
-            ONE WORKFLOW ACROSS
-          </p>
-          <div className="grid grid-cols-2 gap-x-8 gap-y-3 text-[13px] font-semibold sm:grid-cols-4">
-            {databases.map((database, index) => (
-              <span key={database} className="flex items-center gap-2">
-                <span
-                  className="h-2.5 w-2.5 rounded-full border border-[#16232A]"
-                  style={{ backgroundColor: ["#4968F2", "#FF8F78", "#D2F36A", "#B8A6FF"][index] }}
-                />
-                {database}
-              </span>
-            ))}
+      <section
+        aria-labelledby="databases-heading"
+        className="database-stage border-y-2 border-[#16232A] bg-[#16232A] text-[#F7F1E8]"
+      >
+        <div className="relative mx-auto max-w-[1240px] px-5 py-20 sm:px-8 sm:py-24">
+          <div className="grid gap-7 lg:grid-cols-[0.95fr_1.05fr] lg:items-end">
+            <div>
+              <p className="font-mono text-[10px] tracking-[0.12em] text-[#B8A6FF]">
+                SUPPORTED CONNECTIONS
+              </p>
+              <h2
+                id="databases-heading"
+                className="mt-4 max-w-[680px] text-[38px] leading-[1.02] font-semibold tracking-[-0.05em] sm:text-[54px]"
+              >
+                Four engines.
+                <br />
+                One familiar workflow.
+              </h2>
+            </div>
+            <p className="max-w-[570px] text-[15px] leading-7 text-[#B6C0C3] lg:justify-self-end">
+              Move between production servers and local files without relearning
+              the schema browser, query editor, or result grid.
+            </p>
+          </div>
+
+          <div className="mt-12 grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
+            {databases.map(
+              ({ name, detail, protocol, icon, color, iconBackground }) => (
+                <article
+                  key={name}
+                  className="group relative flex min-h-[238px] flex-col overflow-hidden rounded-[20px] border-2 border-[#F7F1E8]/70 border-t-[5px] bg-[#F7F1E8] p-4 text-[#16232A] transition-[transform,box-shadow] duration-300 hover:-translate-y-1.5 hover:shadow-[0_8px_0_rgba(247,241,232,0.16)] sm:min-h-[270px] sm:p-6"
+                  style={{ borderTopColor: color }}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <span
+                      className="flex h-[70px] w-[70px] items-center justify-center rounded-[16px] border border-[#16232A]/15 sm:h-[84px] sm:w-[84px]"
+                      style={{ backgroundColor: iconBackground }}
+                    >
+                      <Image
+                        src={icon}
+                        alt=""
+                        width={58}
+                        height={58}
+                        className="h-[46px] w-[46px] object-contain sm:h-[58px] sm:w-[58px]"
+                      />
+                    </span>
+                    <span className="mt-1 hidden items-center gap-1.5 font-mono text-[8px] tracking-[0.1em] text-[#526166] sm:flex">
+                      <span className="h-2 w-2 rounded-full bg-[#5F8E2F]" />
+                      SUPPORTED
+                    </span>
+                  </div>
+
+                  <div className="mt-auto pt-8">
+                    <h3 className="text-[16px] leading-tight font-semibold tracking-[-0.02em] sm:text-[19px]">
+                      {name}
+                    </h3>
+                    <p className="mt-2 text-[11px] leading-5 text-[#526166] sm:text-[13px]">
+                      {detail}
+                    </p>
+                    <p className="mt-3 border-t border-[#16232A]/15 pt-3 font-mono text-[8px] tracking-[0.08em] text-[#657276] sm:text-[9px]">
+                      {protocol}
+                    </p>
+                  </div>
+                </article>
+              ),
+            )}
           </div>
         </div>
       </section>
@@ -449,7 +535,7 @@ export default async function Home({
                     className="flex h-11 w-11 items-center justify-center rounded-full text-white"
                     style={{ backgroundColor: accent }}
                   >
-                    <Icon aria-hidden="true" className="h-5 w-5" />
+                    <HugeiconsIcon icon={Icon} size={20} aria-hidden="true" />
                   </span>
                   <span className="font-mono text-[9px] tracking-[0.12em] opacity-55">{label}</span>
                 </div>
@@ -473,7 +559,12 @@ export default async function Home({
             <div className="grid gap-10 lg:grid-cols-[1fr_0.8fr] lg:items-end">
               <div>
                 <p className="flex items-center gap-2 font-mono text-[10px] tracking-[0.12em] text-[#AAB4B7]">
-                  <Palette aria-hidden="true" className="h-4 w-4 text-[#B8A6FF]" />
+                  <HugeiconsIcon
+                    icon={PaintBrush01Icon}
+                    size={16}
+                    aria-hidden="true"
+                    className="text-[#B8A6FF]"
+                  />
                   WORK YOUR WAY
                 </p>
                 <h2 className="mt-5 max-w-[760px] text-[45px] leading-[0.98] font-semibold tracking-[-0.055em] sm:text-[66px]">
@@ -503,7 +594,7 @@ export default async function Home({
                 className="inline-flex items-center gap-2 font-semibold text-white"
               >
                 Create a custom theme
-                <ArrowRight aria-hidden="true" className="h-4 w-4" />
+                <HugeiconsIcon icon={ArrowRight02Icon} size={16} aria-hidden="true" />
               </a>
             </div>
           </div>
@@ -528,7 +619,7 @@ export default async function Home({
               className="mt-8 inline-flex items-center gap-2 text-[14px] font-semibold underline decoration-[#70823A] underline-offset-6"
             >
               Read the security model
-              <ArrowRight aria-hidden="true" className="h-4 w-4" />
+              <HugeiconsIcon icon={ArrowRight02Icon} size={16} aria-hidden="true" />
             </a>
           </div>
 
@@ -541,7 +632,7 @@ export default async function Home({
                 }`}
               >
                 <span className="flex h-11 w-11 items-center justify-center rounded-full bg-[#16232A] text-[#D2F36A]">
-                  <Icon aria-hidden="true" className="h-5 w-5" />
+                  <HugeiconsIcon icon={Icon} size={20} aria-hidden="true" />
                 </span>
                 <div>
                   <h3 className="text-[17px] font-semibold">{title}</h3>
@@ -594,7 +685,7 @@ export default async function Home({
               {["OS keychain", "Server paging", "Local history"].map((item) => (
                 <span key={item} className="flex items-center gap-2">
                   <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#D2F36A]">
-                    <Check aria-hidden="true" className="h-3 w-3" />
+                    <HugeiconsIcon icon={Tick02Icon} size={12} aria-hidden="true" />
                   </span>
                   {item}
                 </span>
@@ -634,11 +725,13 @@ export default async function Home({
                     className="flex h-11 w-11 items-center justify-center rounded-full border border-[#16232A]"
                     style={{ backgroundColor: color }}
                   >
-                    <Icon aria-hidden="true" className="h-[18px] w-[18px]" />
+                    <HugeiconsIcon icon={Icon} size={18} aria-hidden="true" />
                   </span>
-                  <Download
+                  <HugeiconsIcon
+                    icon={Download04Icon}
+                    size={16}
                     aria-hidden="true"
-                    className="h-4 w-4 transition-transform group-hover:translate-y-1"
+                    className="transition-transform group-hover:translate-y-1"
                   />
                 </div>
                 <div>
@@ -653,7 +746,12 @@ export default async function Home({
 
           {download === "unavailable" && (
             <div className="mt-5 flex items-start gap-3 rounded-xl border-2 border-[#16232A] bg-[#F7F1E8] p-4 text-[13px]">
-              <CircleAlert aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
+              <HugeiconsIcon
+                icon={AlertCircleIcon}
+                size={16}
+                aria-hidden="true"
+                className="mt-0.5 shrink-0"
+              />
               The latest package could not be located. Please try again in a moment.
             </div>
           )}
@@ -667,7 +765,7 @@ export default async function Home({
               className="inline-flex items-center gap-1.5 font-semibold underline underline-offset-4"
             >
               Verify a release
-              <ChevronRight aria-hidden="true" className="h-3.5 w-3.5" />
+              <HugeiconsIcon icon={ArrowRight01Icon} size={14} aria-hidden="true" />
             </a>
           </div>
         </div>

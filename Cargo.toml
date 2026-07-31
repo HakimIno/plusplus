@@ -11,10 +11,14 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.23"
+version = "0.2.24"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-rust-version = "1.80"
+# Must stay truthful: the tree does not build on anything older. `1.80` was stale — the UI
+# uses `Option::is_none_or` (stable 1.82), and the sqlx 0.9 / egui stack needs the version
+# rust-toolchain.toml documents. A too-low claim here sends packagers into a confusing
+# compile failure instead of a clear "toolchain too old".
+rust-version = "1.94"
 
 # Shared, version-pinned dependencies. Individual crates opt in via `*.workspace = true`.
 [workspace.dependencies]
