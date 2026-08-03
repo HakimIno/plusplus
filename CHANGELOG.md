@@ -3,6 +3,17 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
+## 0.2.25 — 2026-08-03
+
+- Added code folding to the SQL editor: chevrons in the line-number gutter collapse whole
+  statements, bracketed groups, `BEGIN`/`CASE` blocks and comment runs into a `⋯ N lines`
+  marker, which opens again on a click. The query itself is never rewritten — editing,
+  completion and diagnostics keep working against the full text while a region is collapsed.
+- Added a subtle water animation behind the active query tab.
+- Added per-connection Safety Profiles: Development allows normal work, Staging enables
+  Production Guardian, Production enforces hard read-only access, and Custom preserves the
+  independent Guardian/read-only controls. Existing saved connections keep their behavior.
+
 ## 0.2.24 — 2026-07-31
 
 - Added dialect-aware live SQL syntax diagnostics: after a short typing pause the editor

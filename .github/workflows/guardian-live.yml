@@ -1,13 +1,29 @@
 name: Guardian Live Backends
 
+# Same path filters as ci.yml — website/docs/markdown-only changes do not need live
+# DB containers. Concurrency cancels superseded PR runs so rapid pushes do not pile up.
 on:
   pull_request:
+    paths-ignore:
+      - "website/**"
+      - "docs/**"
+      - "**.md"
+      - ".github/workflows/website-*.yml"
   push:
     branches: [main]
+    paths-ignore:
+      - "website/**"
+      - "docs/**"
+      - "**.md"
+      - ".github/workflows/website-*.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: guardian-live-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   production-preflight:

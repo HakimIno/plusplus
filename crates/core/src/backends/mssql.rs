@@ -71,7 +71,7 @@ impl MsSqlDb {
         // Best effort only: ApplicationIntent=ReadOnly is enforced by readable secondaries
         // in an availability group, but a primary ignores it. On SQL Server the UI's
         // lexical guard is the effective read-only layer.
-        if cfg.read_only {
+        if cfg.is_read_only() {
             config.readonly(true);
         }
         // TDS negotiates encryption up front, so "prefer" can't fall back to plaintext

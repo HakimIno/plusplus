@@ -5,18 +5,13 @@ name: CI
 # next update check — this workflow is what makes that safe. `release.yml` calls it via
 # `workflow_call` and refuses to build until it passes.
 #
-# Website-only changes skip it; those are covered by website-ci.yml. The path filters
-# apply to the `pull_request`/`push` triggers only — a `workflow_call` from a release
-# always runs the full suite regardless of what the tagged commit touched.
+# Website-only changes skip it; those are covered by website-ci.yml. No `push: main`
+# trigger — PRs already gate merges, and tags re-run this suite via `workflow_call`
+# from release.yml, so a main+tag push would otherwise double the test matrix. The
+# path filters apply to `pull_request` only; a `workflow_call` from a release always
+# runs the full suite regardless of what the tagged commit touched.
 on:
   pull_request:
-    paths-ignore:
-      - "website/**"
-      - "docs/**"
-      - "**.md"
-      - ".github/workflows/website-*.yml"
-  push:
-    branches: [main]
     paths-ignore:
       - "website/**"
       - "docs/**"

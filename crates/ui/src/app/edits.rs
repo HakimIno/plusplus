@@ -16,7 +16,7 @@ impl DbGuiApp {
             .and_then(|id| self.active_connections.iter().find(|c| c.config_id == id))?;
         let mut matches = conn.schema.tables.iter().filter(|t| {
             t.name.eq_ignore_ascii_case(&table)
-                && schema.as_deref().map_or(true, |s| {
+                && schema.as_deref().is_none_or(|s| {
                     t.schema
                         .as_deref()
                         .is_some_and(|ts| ts.eq_ignore_ascii_case(s))
@@ -77,7 +77,7 @@ impl DbGuiApp {
             .connections
             .iter()
             .find(|config| config.id == conn_id)
-            .is_some_and(|config| config.read_only);
+            .is_some_and(|config| config.is_read_only());
 
         for tab in self
             .tabs
@@ -91,7 +91,7 @@ impl DbGuiApp {
             {
                 let mut matches = schema.tables.iter().filter(|table| {
                     table.name.eq_ignore_ascii_case(&source.table)
-                        && source.schema.as_deref().map_or(true, |wanted| {
+                        && source.schema.as_deref().is_none_or(|wanted| {
                             table
                                 .schema
                                 .as_deref()

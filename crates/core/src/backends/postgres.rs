@@ -57,7 +57,7 @@ impl PostgresDb {
         // Read-only connections pin every transaction read-only at the session level, so
         // even a write the lexical guard can't see (a side-effecting function, setval, …)
         // is rejected by the server itself.
-        if cfg.read_only {
+        if cfg.is_read_only() {
             opts = opts.options([("default_transaction_read_only", "on")]);
         }
         // Quieten sqlx's statement logging; the UI surfaces errors itself.

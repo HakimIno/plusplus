@@ -218,7 +218,7 @@ impl ProductionGuardPending {
             return false;
         }
         self.confirmation_phrase()
-            .map_or(true, |phrase| self.confirmation.trim() == phrase)
+            .is_none_or(|phrase| self.confirmation.trim() == phrase)
     }
 
     fn audit_details(&self, decision: &str) -> String {
@@ -464,6 +464,12 @@ struct QueryTab {
     /// Saved-connection id this tab runs against (`None` ⇒ unbound).
     conn_id: Option<String>,
     sql: String,
+    /// Collapsed regions of `sql`, held by the char offset of the folded region's first line
+    /// (see [`crate::fold`]). Edits move these along with the text; a region that stops being
+    /// foldable drops out. Deliberately not part of the saved workspace: a fold is a way of
+    /// looking at a query right now, not something to restore days later against text that
+    /// may have moved on.
+    folds: std::collections::BTreeSet<usize>,
     /// Last splitter-selected SQL editor height in egui points. `None` uses the contextual
     /// default; once the user drags the splitter this is persisted with the workspace.
     editor_size: Option<f32>,
@@ -508,6 +514,7 @@ impl QueryTab {
             preview: false,
             conn_id: None,
             sql: String::new(),
+            folds: std::collections::BTreeSet::new(),
             editor_size: None,
             query_error: None,
             result: None,
@@ -702,7 +709,7 @@ async fn run_import(
             dbcore::import::coerce_row(&record, targets, format, i + 1)
                 .map_err(|e| e.to_string())?,
         );
-        if rows.len() % IMPORT_PROGRESS_EVERY == 0 {
+        if rows.len().is_multiple_of(IMPORT_PROGRESS_EVERY) {
             let _ = tx.send(AppMessage::ImportProgress { rows: rows.len() });
         }
     }

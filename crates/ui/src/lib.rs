@@ -10,6 +10,7 @@ mod edit;
 mod emoji;
 mod erd;
 mod filter;
+mod fold;
 mod format;
 mod ghost;
 mod grid;

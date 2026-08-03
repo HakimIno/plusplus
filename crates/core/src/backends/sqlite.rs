@@ -31,8 +31,8 @@ impl SqliteDb {
             // Read-only connections open the file read-only at the engine level (and
             // must not create it); otherwise create the file if absent so users can
             // spin up a scratch database.
-            .read_only(cfg.read_only)
-            .create_if_missing(!cfg.read_only)
+            .read_only(cfg.is_read_only())
+            .create_if_missing(!cfg.is_read_only())
             .disable_statement_logging();
         let pool = SqlitePoolOptions::new()
             .max_connections(5)

@@ -38,8 +38,10 @@ impl DbGuiApp {
             Action::MoveTab { from, to } => self.move_tab(from, to),
             Action::MoveConnection { from, to } => self.move_connection(from, to),
             Action::NewConnection => {
+                let mut config = ConnectionConfig::new(DbKind::Postgres);
+                config.set_safety_profile(dbcore::SafetyProfile::Development);
                 self.editor = Some(ConnEditor {
-                    config: ConnectionConfig::new(DbKind::Postgres),
+                    config,
                     password: String::new(),
                     ssh_password: String::new(),
                     is_new: true,
@@ -186,7 +188,8 @@ impl DbGuiApp {
             }
             Action::ImportErd => {
                 let Some(conn_id) = self.active().map(|active| active.config_id.clone()) else {
-                    self.error = Some("Connect to a target database before importing an ER design.".into());
+                    self.error =
+                        Some("Connect to a target database before importing an ER design.".into());
                     return;
                 };
                 let Some(path) = rfd::FileDialog::new()
@@ -224,7 +227,13 @@ impl DbGuiApp {
                     design
                         .name
                         .chars()
-                        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '_' })
+                        .map(
+                            |ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                                ch
+                            } else {
+                                '_'
+                            }
+                        )
                         .collect::<String>()
                 );
                 let Some(path) = rfd::FileDialog::new()
@@ -263,12 +272,13 @@ impl DbGuiApp {
                         _ => None,
                     });
                 let design = self.tab().diagram.as_ref().map(|erd| erd.design.clone());
-                match design.expect("diagram action requires a diagram").forward_ddl(
-                    kind,
-                    target_schema.as_deref(),
-                ) {
+                match design
+                    .expect("diagram action requires a diagram")
+                    .forward_ddl(kind, target_schema.as_deref())
+                {
                     Ok(statements) if statements.is_empty() => {
-                        self.error = Some("Add at least one table before forward engineering.".into());
+                        self.error =
+                            Some("Add at least one table before forward engineering.".into());
                     }
                     Ok(statements) => {
                         self.schema_pending = Some(statements);
@@ -278,7 +288,10 @@ impl DbGuiApp {
                 }
             }
             Action::AddErdTable => {
-                let kind = self.active().map(|active| active.db.kind()).unwrap_or(DbKind::Sqlite);
+                let kind = self
+                    .active()
+                    .map(|active| active.db.kind())
+                    .unwrap_or(DbKind::Sqlite);
                 let default_schema = self
                     .tab()
                     .diagram
@@ -291,7 +304,10 @@ impl DbGuiApp {
                 self.tab_mut().design_edit_index = Some(None);
             }
             Action::EditErdTable(table_index) => {
-                let kind = self.active().map(|active| active.db.kind()).unwrap_or(DbKind::Sqlite);
+                let kind = self
+                    .active()
+                    .map(|active| active.db.kind())
+                    .unwrap_or(DbKind::Sqlite);
                 let table = self
                     .tab()
                     .diagram
@@ -314,7 +330,9 @@ impl DbGuiApp {
                     self.error = table.err();
                     return;
                 };
-                let Some(old) = self.tab_mut().diagram.take() else { return };
+                let Some(old) = self.tab_mut().diagram.take() else {
+                    return;
+                };
                 let mut next_design = old.design.clone();
                 if let Some(index) = edit_index {
                     if let Some(node) = old.nodes.get(index) {
@@ -356,7 +374,11 @@ impl DbGuiApp {
                 let mut fresh = crate::erd::ErDiagram::build_design(&old.conn_id, next_design);
                 fresh.scene_rect = old.scene_rect;
                 for node in &mut fresh.nodes {
-                    if let Some(previous) = old.nodes.iter().find(|old_node| old_node.title == node.title) {
+                    if let Some(previous) = old
+                        .nodes
+                        .iter()
+                        .find(|old_node| old_node.title == node.title)
+                    {
                         node.pos = previous.pos;
                     }
                 }
@@ -367,7 +389,9 @@ impl DbGuiApp {
                 self.error = None;
             }
             Action::DeleteErdTable(table_index) => {
-                let Some(mut old) = self.tab_mut().diagram.take() else { return };
+                let Some(mut old) = self.tab_mut().diagram.take() else {
+                    return;
+                };
                 if table_index >= old.design.tables.len() {
                     self.tab_mut().diagram = Some(old);
                     return;

@@ -201,6 +201,43 @@ fn translucent(color: egui::Color32, alpha: u8) -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
 }
 
+/// Water-like motion behind the active tab: two sine layers of different wavelength drift in
+/// opposite directions and are filled from their crest down to the chip's bottom edge. Drawn
+/// as a triangle strip because a wave outline is not convex, so `convex_polygon` would tear.
+/// `t` is `input.time`; the caller drives the repaint.
+fn paint_tab_waves(painter: &egui::Painter, rect: egui::Rect, accent: egui::Color32, t: f32) {
+    // (amplitude, wavelength, drift px/s, baseline above the bottom edge, alpha)
+    const LAYERS: [(f32, f32, f32, f32, u8); 2] =
+        [(2.4, 44.0, 17.0, 9.0, 30), (3.0, 29.0, -11.0, 5.5, 22)];
+    let steps = ((rect.width() / 3.0).ceil() as usize).clamp(8, 96);
+    for (amp, wavelength, speed, base, alpha) in LAYERS {
+        let color = translucent(accent, alpha);
+        let baseline = rect.bottom() - base;
+        let mut mesh = egui::Mesh::default();
+        for i in 0..=steps {
+            let x = rect.left() + rect.width() * i as f32 / steps as f32;
+            let phase = (x + t * speed) / wavelength * std::f32::consts::TAU;
+            let idx = mesh.vertices.len() as u32;
+            mesh.colored_vertex(egui::pos2(x, baseline + phase.sin() * amp), color);
+            mesh.colored_vertex(egui::pos2(x, rect.bottom()), color);
+            if i > 0 {
+                mesh.add_triangle(idx - 2, idx - 1, idx);
+                mesh.add_triangle(idx - 1, idx + 1, idx);
+            }
+        }
+        painter.add(egui::Shape::mesh(mesh));
+    }
+}
+
+/// ~30 fps is plenty for a background drift and keeps the window from repainting at the
+/// display's full rate just to move two sine curves. A backgrounded window stops asking
+/// altogether — the waves simply hold their phase until it is focused again.
+fn request_wave_repaint(ctx: &egui::Context) {
+    if ctx.input(|i| i.focused) {
+        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+    }
+}
+
 /// Paint one tab chip (background pill, kind icon, title, × glyph). Shared by the in-strip
 /// chip and its pointer-following twin during drag-to-reorder.
 #[allow(clippy::too_many_arguments)]
@@ -231,6 +268,13 @@ fn paint_tab_chip(
         painter.hline(rect.x_range(), rect.top(), stroke);
     }
     if selected {
+        paint_tab_waves(
+            painter,
+            rect,
+            palette::ACCENT(),
+            ui.input(|i| i.time) as f32,
+        );
+        request_wave_repaint(ui.ctx());
         painter.hline(
             rect.x_range(),
             rect.top(),
@@ -470,6 +514,13 @@ pub(crate) fn settings_tab_item(ui: &mut egui::Ui) -> QueryTabResponse {
             se: 0,
         };
         ui.painter().rect_filled(rect, rounding, palette::SURFACE());
+        paint_tab_waves(
+            ui.painter(),
+            rect,
+            palette::ACCENT(),
+            ui.input(|i| i.time) as f32,
+        );
+        request_wave_repaint(ui.ctx());
         ui.painter().hline(
             rect.x_range(),
             rect.top(),

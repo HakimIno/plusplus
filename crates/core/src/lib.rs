@@ -50,8 +50,8 @@ pub use model::{
     view_supports_replace, with_page_window, ColumnDef, ColumnInfo, ColumnMeta, ConnectionColor,
     ConnectionConfig, ConnectionIcon, DbKind, FkAction, ForeignKeyDef, ForeignKeyInfo, IndexDef,
     IndexInfo, PageWindow, ParamMode, QueryResult, QueryStats, RoutineBuild, RoutineInfo,
-    RoutineKind, RoutineParam, SchemaTree, SslMode, TableInfo, TriggerBuild, TriggerEvent,
-    TriggerInfo, TriggerLevel, TriggerTiming, ViewInfo,
+    RoutineKind, RoutineParam, SafetyProfile, SchemaTree, SslMode, TableInfo, TriggerBuild,
+    TriggerEvent, TriggerInfo, TriggerLevel, TriggerTiming, ViewInfo,
 };
 pub use syntax::{check_syntax, SyntaxError};
 pub use value::Value;

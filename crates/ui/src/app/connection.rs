@@ -142,7 +142,11 @@ impl DbGuiApp {
         self.tabs
             .get(idx)
             .and_then(|tab| tab.conn_id.as_deref())
-            .is_some_and(|id| self.connections.iter().any(|c| c.id == id && c.production))
+            .is_some_and(|id| {
+                self.connections
+                    .iter()
+                    .any(|c| c.id == id && c.is_production())
+            })
     }
     /// Is the tab at `idx` bound to a connection whose saved config is marked read-only?
     pub(super) fn tab_connection_is_read_only(&self, idx: usize) -> bool {
@@ -156,7 +160,7 @@ impl DbGuiApp {
     pub(super) fn connection_is_read_only(&self, conn_id: &str) -> bool {
         self.connections
             .iter()
-            .any(|c| c.id == conn_id && c.read_only)
+            .any(|c| c.id == conn_id && c.is_read_only())
     }
     /// Refuse an action on a read-only connection with a consistent error + status pair.
     /// `what` completes the sentence "This connection is read-only — {what}".
@@ -186,7 +190,8 @@ impl DbGuiApp {
         let Some(editor) = &mut self.editor else {
             return;
         };
-        let cfg = editor.config.clone();
+        let mut cfg = editor.config.clone();
+        cfg.apply_safety_profile();
         let password = if cfg.kind.is_server() {
             Some(editor.password.clone())
         } else {
@@ -225,7 +230,8 @@ impl DbGuiApp {
     }
     pub(super) fn save_connection(&mut self) {
         let Some(ed) = self.editor.take() else { return };
-        let cfg = ed.config;
+        let mut cfg = ed.config;
+        cfg.apply_safety_profile();
         self.schema_cache.remove(&cfg.id);
         // Persist the password to the keychain (server backends only); never to JSON.
         if cfg.kind.is_server() && !ed.password.is_empty() {

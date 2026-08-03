@@ -738,6 +738,55 @@ impl ConnectionIcon {
     }
 }
 
+/// A named safety policy for a saved connection. `Custom` is the backward-compatible
+/// default: connections saved before profiles existed keep their independent production
+/// and read-only flags exactly as they were.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SafetyProfile {
+    Development,
+    Staging,
+    Production,
+    #[default]
+    Custom,
+}
+
+impl SafetyProfile {
+    pub const ALL: [SafetyProfile; 4] = [
+        SafetyProfile::Development,
+        SafetyProfile::Staging,
+        SafetyProfile::Production,
+        SafetyProfile::Custom,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SafetyProfile::Development => "Development",
+            SafetyProfile::Staging => "Staging",
+            SafetyProfile::Production => "Production",
+            SafetyProfile::Custom => "Custom",
+        }
+    }
+
+    /// Concise user-facing explanation of the protections this profile applies.
+    pub fn description(self) -> &'static str {
+        match self {
+            SafetyProfile::Development => {
+                "Writes are allowed without Production Guardian confirmation."
+            }
+            SafetyProfile::Staging => {
+                "Writes are allowed; destructive changes require Production Guardian review."
+            }
+            SafetyProfile::Production => {
+                "All writes are blocked and the database session is read-only where supported."
+            }
+            SafetyProfile::Custom => {
+                "Configure Production Guardian and read-only protection independently."
+            }
+        }
+    }
+}
+
 /// How strictly a server connection should use TLS, mirroring Postgres' `sslmode`
 /// vocabulary so it translates cleanly to every backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -858,6 +907,10 @@ pub struct ConnectionConfig {
     /// Sidebar icon for this connection.
     #[serde(default)]
     pub icon: ConnectionIcon,
+    /// Named policy controlling the safety flags below. `Custom` preserves the flags as-is;
+    /// the managed profiles enforce their policy even if a config file is hand-edited.
+    #[serde(default)]
+    pub safety_profile: SafetyProfile,
     /// Marks a production database: destructive queries (UPDATE/DELETE/DROP/TRUNCATE/ALTER)
     /// must be confirmed in a dialog before they run.
     #[serde(default)]
@@ -899,8 +952,53 @@ impl ConnectionConfig {
             sqlite_path: String::new(),
             title_bar_color: None,
             icon: ConnectionIcon::default(),
+            safety_profile: SafetyProfile::Custom,
             production: false,
             read_only: false,
+        }
+    }
+
+    /// Select a named safety policy and immediately materialize its enforced flags.
+    pub fn set_safety_profile(&mut self, profile: SafetyProfile) {
+        self.safety_profile = profile;
+        self.apply_safety_profile();
+    }
+
+    /// Apply the managed profile to the legacy flags used throughout the execution paths.
+    /// `Custom` deliberately leaves both flags untouched.
+    pub fn apply_safety_profile(&mut self) {
+        match self.safety_profile {
+            SafetyProfile::Development => {
+                self.production = false;
+                self.read_only = false;
+            }
+            SafetyProfile::Staging => {
+                self.production = true;
+                self.read_only = false;
+            }
+            SafetyProfile::Production => {
+                self.production = true;
+                self.read_only = true;
+            }
+            SafetyProfile::Custom => {}
+        }
+    }
+
+    /// Effective Production Guardian state, including an unmaterialized managed profile.
+    pub fn is_production(&self) -> bool {
+        match self.safety_profile {
+            SafetyProfile::Development => false,
+            SafetyProfile::Staging | SafetyProfile::Production => true,
+            SafetyProfile::Custom => self.production,
+        }
+    }
+
+    /// Effective hard read-only state, including an unmaterialized managed profile.
+    pub fn is_read_only(&self) -> bool {
+        match self.safety_profile {
+            SafetyProfile::Production => true,
+            SafetyProfile::Development | SafetyProfile::Staging => false,
+            SafetyProfile::Custom => self.read_only,
         }
     }
 
@@ -2756,6 +2854,39 @@ mod tests {
         assert!(SslMode::Prefer.security_warning().is_some());
         assert!(SslMode::Require.security_warning().is_some());
         assert!(SslMode::VerifyFull.security_warning().is_none());
+    }
+
+    #[test]
+    fn safety_profiles_enforce_their_policy() {
+        let mut cfg = ConnectionConfig::new(DbKind::Postgres);
+        assert_eq!(cfg.safety_profile, SafetyProfile::Custom);
+
+        cfg.set_safety_profile(SafetyProfile::Development);
+        assert!(!cfg.is_production());
+        assert!(!cfg.is_read_only());
+
+        cfg.set_safety_profile(SafetyProfile::Staging);
+        assert!(cfg.is_production());
+        assert!(!cfg.is_read_only());
+
+        cfg.set_safety_profile(SafetyProfile::Production);
+        assert!(cfg.is_production());
+        assert!(cfg.is_read_only());
+
+        // Effective checks fail closed even before normalization if persisted legacy flags
+        // are stale or the config was hand-edited.
+        cfg.production = false;
+        cfg.read_only = false;
+        assert!(cfg.is_production());
+        assert!(cfg.is_read_only());
+        cfg.apply_safety_profile();
+        assert!(cfg.production);
+        assert!(cfg.read_only);
+
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(json["safety_profile"], "production");
+        assert_eq!(json["production"], true);
+        assert_eq!(json["read_only"], true);
     }
 
     #[test]

@@ -323,6 +323,38 @@ fn duplicate_connect_is_rejected_before_opening_another_pool() {
     assert!(app.status_msg.contains("already connecting"));
 }
 
+#[test]
+fn new_connection_starts_with_an_explicit_development_profile() {
+    let mut app = DbGuiApp::construct();
+    app.apply_action(Action::NewConnection);
+
+    let editor = app.editor.as_ref().expect("connection editor");
+    assert_eq!(
+        editor.config.safety_profile,
+        dbcore::SafetyProfile::Development
+    );
+    assert!(!editor.config.is_production());
+    assert!(!editor.config.is_read_only());
+}
+
+#[test]
+fn production_safety_profile_is_fail_closed_before_normalization() {
+    let mut app = DbGuiApp::construct();
+    app.connections.clear();
+    let mut cfg = ConnectionConfig::new(DbKind::Sqlite);
+    cfg.id = "c1".into();
+    cfg.safety_profile = dbcore::SafetyProfile::Production;
+    // Simulate a hand-edited config with stale legacy flags. The profile must still win.
+    cfg.production = false;
+    cfg.read_only = false;
+    app.connections.push(cfg);
+    app.tab_mut().conn_id = Some("c1".into());
+
+    assert!(app.tab_connection_is_production(0));
+    assert!(app.tab_connection_is_read_only(0));
+    assert!(app.connection_is_read_only("c1"));
+}
+
 /// Destructive SQL on a production connection is held for confirmation; cancelling
 /// drops it, confirming runs it. Safe SQL runs straight through.
 #[test]
@@ -4547,4 +4579,204 @@ fn hovering_a_marked_token_explains_the_error() {
         harness.query_by_label("Syntax error").is_none(),
         "the tooltip belongs to the marked token, not the whole editor"
     );
+}
+
+/// The fold chevrons in the SQL gutter collapse a region and open it again — and the query
+/// itself must come through untouched, because the editor is writing through a folded view of
+/// it the whole time.
+#[test]
+fn clicking_a_gutter_chevron_folds_a_statement_without_touching_the_sql() {
+    use egui_kittest::kittest::Queryable;
+    use std::sync::{Arc, Mutex};
+
+    const SCRIPT: &str = "SELECT a,\n       b\nFROM users;\n\nSELECT 2;\n";
+
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    app.tab_mut().kind = crate::components::QueryTabKind::Query;
+    app.tab_mut().sql = SCRIPT.into();
+
+    // (SQL, folded anchors) as of the last frame.
+    let state: Arc<Mutex<(String, Vec<usize>)>> = Arc::new(Mutex::new((String::new(), Vec::new())));
+    let probe = state.clone();
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+            let tab = app.tab();
+            *probe.lock().unwrap() = (tab.sql.clone(), tab.folds.iter().copied().collect());
+        });
+    harness.run_steps(4);
+
+    let regions = crate::fold::regions(SCRIPT);
+    let first = regions
+        .iter()
+        .find(|r| r.header_line == 0)
+        .expect("the opening statement spans three lines");
+
+    // The chevron column sits at the right edge of the gutter, against the code, on the first
+    // line's row.
+    let gutter = harness.get_by_label("SQL line numbers").rect();
+    let chevron = egui::pos2(gutter.right() - 7.0, gutter.top() + 7.0);
+    let click = |harness: &mut egui_kittest::Harness<'_>| {
+        harness
+            .input_mut()
+            .events
+            .push(egui::Event::PointerMoved(chevron));
+        for pressed in [true, false] {
+            harness.input_mut().events.push(egui::Event::PointerButton {
+                pos: chevron,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        harness.run_steps(4);
+    };
+
+    click(&mut harness);
+    let (sql, folds) = state.lock().unwrap().clone();
+    assert_eq!(
+        folds,
+        vec![first.anchor],
+        "the chevron folds its own region"
+    );
+    assert_eq!(sql, SCRIPT, "folding must not rewrite the query");
+
+    click(&mut harness);
+    let (sql, folds) = state.lock().unwrap().clone();
+    assert!(folds.is_empty(), "clicking again opens it back up");
+    assert_eq!(sql, SCRIPT, "unfolding must not rewrite the query either");
+}
+
+/// Everything the editor does downstream of the caret — completion, ghost text, diagnostics,
+/// and the keystrokes themselves — indexes the real SQL, not the folded view. Typing below a
+/// collapsed region must therefore land where the user is pointing, not `N lines` earlier.
+#[test]
+fn typing_below_a_fold_lands_in_the_real_sql() {
+    use egui_kittest::kittest::Queryable;
+    use std::sync::{Arc, Mutex};
+
+    const SCRIPT: &str = "SELECT a,\n       b\nFROM users;\n\nSELECT 2;\n";
+
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    app.tab_mut().kind = crate::components::QueryTabKind::Query;
+    app.tab_mut().sql = SCRIPT.into();
+    let anchor = crate::fold::regions(SCRIPT)
+        .into_iter()
+        .find(|r| r.header_line == 0)
+        .expect("the first statement folds")
+        .anchor;
+    app.tab_mut().folds.insert(anchor);
+
+    let seen: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let probe = seen.clone();
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+            probe.lock().unwrap().clone_from(&app.tab().sql);
+        });
+    harness.run_steps(4);
+
+    // With the first statement collapsed the third visible row is `SELECT 2;`. Click past its
+    // end (the click clamps to the end of the line) and type there.
+    let gutter = harness.get_by_label("SQL line numbers").rect();
+    let at = egui::pos2(gutter.right() + 300.0, gutter.top() + 2.0 * 14.0 + 7.0);
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(at));
+    for pressed in [true, false] {
+        harness.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    harness.run_steps(3);
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::Text("!".to_string()));
+    harness.run_steps(3);
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        "SELECT a,\n       b\nFROM users;\n\nSELECT 2;!\n",
+        "the keystroke belongs after the visible line, not inside the folded one"
+    );
+}
+
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn shot_fold() {
+    use egui_kittest::kittest::Queryable;
+    use std::sync::{Arc, Mutex};
+    const SCRIPT: &str = "-- Monthly revenue by plan.\n-- Excludes trials.\nWITH paid AS (\n    SELECT customer_id,\n           amount\n    FROM invoices\n    WHERE status = 'paid'\n)\nSELECT p.name,\n       SUM(paid.amount) AS revenue,\n       CASE\n         WHEN SUM(paid.amount) > 1000 THEN 'high'\n         ELSE 'low'\n       END AS band\nFROM paid\nJOIN plans p ON p.id = paid.plan_id\nGROUP BY p.name\nORDER BY revenue DESC;\n\nSELECT count(*)\nFROM invoices;\n";
+    let mut app = DbGuiApp::construct();
+    app.connections.clear();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    app.tab_mut().kind = crate::components::QueryTabKind::Query;
+    app.tab_mut().sql = SCRIPT.into();
+    app.tab_mut().editor_size = Some(420.0);
+    let want: Arc<Mutex<Option<Vec<usize>>>> = Arc::new(Mutex::new(None));
+    let slot = want.clone();
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(900.0, 560.0))
+        .with_pixels_per_point(2.0)
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            if let Some(folds) = slot.lock().unwrap().take() {
+                app.tab_mut().folds = folds.into_iter().collect();
+            }
+            app.draw(ui, None);
+        });
+    harness.run_steps(4);
+    // Park the pointer over the gutter so the open regions show their chevrons.
+    let gutter = harness.get_by_label("SQL line numbers").rect();
+    harness.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(
+        gutter.right() / 2.0,
+        gutter.center().y / 2.0,
+    )));
+    harness.run_steps(3);
+    harness.snapshot("sql_fold_open");
+
+    let regions = crate::fold::regions(SCRIPT);
+    let anchors: Vec<usize> = regions
+        .iter()
+        .filter(|r| matches!(r.header_line, 0 | 10))
+        .map(|r| r.anchor)
+        .collect();
+    *want.lock().unwrap() = Some(anchors);
+    harness.run_steps(4);
+    harness.snapshot("sql_fold_closed");
 }

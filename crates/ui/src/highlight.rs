@@ -31,8 +31,67 @@ use crate::style::mix;
 
 /// Build a coloured layout job for `text`, using `font` for every run.
 pub fn highlight_sql(text: &str, font: FontId) -> LayoutJob {
+    highlight_runs(text, font, &[])
+}
+
+/// Highlight `text`, rendering the char ranges in `placeholders` as inert markers rather than
+/// as SQL. The editor uses this for the `⋯ N lines` stand-ins that [`crate::fold`] splices in
+/// for collapsed regions: they are not part of the query, so they must not read like code.
+///
+/// `placeholders` must be sorted and non-overlapping, which is how a folded view builds them.
+pub fn highlight_sql_folded(
+    text: &str,
+    font: FontId,
+    placeholders: &[std::ops::Range<usize>],
+) -> LayoutJob {
+    highlight_runs(text, font, placeholders)
+}
+
+fn highlight_runs(text: &str, font: FontId, placeholders: &[std::ops::Range<usize>]) -> LayoutJob {
     let colors = sql_colors();
     let mut job = LayoutJob::default();
+    if placeholders.is_empty() {
+        append_sql(&mut job, text, &font, &colors);
+        return job;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut at = 0usize;
+    for range in placeholders {
+        let start = range.start.min(chars.len());
+        let end = range.end.min(chars.len());
+        if at < start {
+            append_sql(
+                &mut job,
+                &chars[at..start].iter().collect::<String>(),
+                &font,
+                &colors,
+            );
+        }
+        job.append(
+            &chars[start..end].iter().collect::<String>(),
+            0.0,
+            TextFormat {
+                font_id: font.clone(),
+                color: colors.comment,
+                italics: true,
+                ..Default::default()
+            },
+        );
+        at = end;
+    }
+    if at < chars.len() {
+        append_sql(
+            &mut job,
+            &chars[at..].iter().collect::<String>(),
+            &font,
+            &colors,
+        );
+    }
+    job
+}
+
+/// Lex `text` as SQL and append its coloured runs to `job`.
+fn append_sql(job: &mut LayoutJob, text: &str, font: &FontId, colors: &SqlColors) {
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
     let mut i = 0;
@@ -59,7 +118,7 @@ pub fn highlight_sql(text: &str, font: FontId) -> LayoutJob {
                 i += 1;
             }
             push(
-                &mut job,
+                job,
                 &chars[start..i].iter().collect::<String>(),
                 colors.comment,
             );
@@ -75,7 +134,7 @@ pub fn highlight_sql(text: &str, font: FontId) -> LayoutJob {
             }
             i = (i + 2).min(n);
             push(
-                &mut job,
+                job,
                 &chars[start..i].iter().collect::<String>(),
                 colors.comment,
             );
@@ -98,7 +157,7 @@ pub fn highlight_sql(text: &str, font: FontId) -> LayoutJob {
                 i += 1;
             }
             push(
-                &mut job,
+                job,
                 &chars[start..i].iter().collect::<String>(),
                 colors.string,
             );
@@ -117,7 +176,7 @@ pub fn highlight_sql(text: &str, font: FontId) -> LayoutJob {
             } else {
                 colors.ident
             };
-            push(&mut job, &word, color);
+            push(job, &word, color);
             continue;
         }
 
@@ -128,7 +187,7 @@ pub fn highlight_sql(text: &str, font: FontId) -> LayoutJob {
                 i += 1;
             }
             push(
-                &mut job,
+                job,
                 &chars[start..i].iter().collect::<String>(),
                 colors.number,
             );
@@ -137,7 +196,7 @@ pub fn highlight_sql(text: &str, font: FontId) -> LayoutJob {
 
         // Punctuation / operators.
         if "(),;*=<>!+-/%|.".contains(c) {
-            push(&mut job, &c.to_string(), colors.punct);
+            push(job, &c.to_string(), colors.punct);
             i += 1;
             continue;
         }
@@ -146,13 +205,11 @@ pub fn highlight_sql(text: &str, font: FontId) -> LayoutJob {
         let start = i;
         i += 1;
         push(
-            &mut job,
+            job,
             &chars[start..i].iter().collect::<String>(),
             colors.ident,
         );
     }
-
-    job
 }
 
 fn is_keyword(word: &str) -> bool {

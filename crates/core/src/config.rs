@@ -43,7 +43,13 @@ pub fn themes_dir() -> Result<PathBuf> {
 pub fn load_connections() -> Result<Vec<ConnectionConfig>> {
     let path = connections_path()?;
     match std::fs::read(&path) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Ok(bytes) => {
+            let mut connections: Vec<ConnectionConfig> = serde_json::from_slice(&bytes)?;
+            for connection in &mut connections {
+                connection.apply_safety_profile();
+            }
+            Ok(connections)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(CoreError::Config(format!(
             "reading {}: {e}",
@@ -54,7 +60,11 @@ pub fn load_connections() -> Result<Vec<ConnectionConfig>> {
 
 /// Atomically persist the connection list (write to a temp file, then rename).
 pub fn save_connections(conns: &[ConnectionConfig]) -> Result<()> {
-    write_json_atomic(&connections_path()?, conns)
+    let mut normalized = conns.to_vec();
+    for connection in &mut normalized {
+        connection.apply_safety_profile();
+    }
+    write_json_atomic(&connections_path()?, &normalized)
 }
 
 /// Path to the JSON file holding misc app settings (theme, …).
@@ -266,7 +276,9 @@ mod tests {
             "host": "localhost",
             "port": 5432,
             "user": "me",
-            "database": "db"
+            "database": "db",
+            "production": true,
+            "read_only": false
         }"#;
         let cfg: crate::model::ConnectionConfig = serde_json::from_slice(json).unwrap();
         assert_eq!(cfg.ssl_mode, crate::model::SslMode::Prefer);
@@ -276,6 +288,13 @@ mod tests {
         assert!(!cfg.ssh_enabled);
         assert_eq!(cfg.ssh_port, 22);
         assert!(cfg.ssh_host.is_empty() && cfg.ssh_user.is_empty() && cfg.ssh_key_path.is_empty());
+        assert_eq!(
+            cfg.safety_profile,
+            crate::model::SafetyProfile::Custom,
+            "old connections must keep their independent safety flags"
+        );
+        assert!(cfg.production);
+        assert!(!cfg.read_only);
     }
 
     /// Missing/empty fields fall back to defaults (forward-compatible with older files).

@@ -34,6 +34,7 @@ queries or results to a third party.
 
 | What matters | What plusplus does |
 | --- | --- |
+| Safety profiles | Development, Staging, Production, and Custom profiles turn the existing safeguards into clear connection policies. |
 | Safer production access | Warns about destructive SQL and missing `WHERE` clauses; production connections require confirmation. |
 | Read-only that actually blocks writes | Enforces read-only mode in the application and, where supported, in the database session itself. |
 | Responsive work on large tables | Uses a virtualized, server-paged grid and caps materialized query results at 100,000 rows. |

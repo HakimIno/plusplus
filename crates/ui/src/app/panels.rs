@@ -32,6 +32,9 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
+/// Width of the SQL gutter's fold chevron column, in points.
+const FOLD_CHEVRON_W: f32 = 12.0;
+
 /// Whether a syntax error covers the caret — the token the user is in the middle of typing,
 /// which is half-written by definition and must not be flagged yet. The range is inclusive at
 /// both ends: a caret sitting immediately after the token is still "inside" the word being
@@ -124,7 +127,7 @@ fn group_digits(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -953,11 +956,6 @@ impl DbGuiApp {
                     footer(self, ui, QueryEditorPlacement::Top, actions);
                 }
                 let font = egui::TextStyle::Monospace.resolve(ui.style());
-                let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
-                    let mut job = crate::highlight::highlight_sql(buf.as_str(), font.clone());
-                    job.wrap.max_width = wrap_width;
-                    ui.ctx().fonts_mut(|f| f.layout_job(job))
-                };
 
                 // Autocomplete: while the popup is open, steal its navigation keys before the
                 // editor renders so arrows/Enter/Tab drive the suggestion list instead of the
@@ -1010,19 +1008,47 @@ impl DbGuiApp {
                                 // overflow the viewport by a few pixels and trigger a permanent scrollbar.
                                 let avail = ui.available_height();
                                 let rows = (avail / row_height).floor().max(5.0) as usize;
-                                let line_count =
-                                    self.tabs[self.active_query_tab].sql.lines().count().max(1);
-                                let digits = line_count.to_string().len();
+
+                                // What can fold in the live text, and the collapsed view the editor
+                                // actually works on. Both are rebuilt every frame, so they can never
+                                // drift from the SQL. Folds whose region no longer exists (the text
+                                // was edited out from under them) drop here.
+                                let idx = self.active_query_tab;
+                                let regions = crate::fold::regions(&self.tabs[idx].sql);
+                                self.tabs[idx]
+                                    .folds
+                                    .retain(|anchor| regions.iter().any(|r| r.anchor == *anchor));
+                                let view = crate::fold::View::build(
+                                    &self.tabs[idx].sql,
+                                    &regions,
+                                    &self.tabs[idx].folds,
+                                );
+                                let markers = view.markers();
+                                let mut layouter =
+                                    |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+                                        let mut job = crate::highlight::highlight_sql_folded(
+                                            buf.as_str(),
+                                            font.clone(),
+                                            &markers,
+                                        );
+                                        job.wrap.max_width = wrap_width;
+                                        ui.ctx().fonts_mut(|f| f.layout_job(job))
+                                    };
+
+                                let line_count = view.source_lines.len();
+                                let digits =
+                                    self.tabs[idx].sql.lines().count().max(1).to_string().len();
                                 let digit_width = ui.fonts_mut(|fonts| {
                                     fonts.glyph_width(
                                         &egui::TextStyle::Monospace.resolve(ui.style()),
                                         '0',
                                     )
                                 });
-                                let gutter_width = digits as f32 * digit_width + 14.0;
+                                let gutter_width =
+                                    digits as f32 * digit_width + 14.0 + FOLD_CHEVRON_W;
                                 // `.show()` (not `ui.add`) exposes the galley + cursor so the popup can
                                 // anchor under the caret and we can move the caret after an insertion.
-                                let output = ui
+                                let (gutter_rect, output, shifts, refused_undo) = ui
                                     .horizontal_top(|ui| {
                                         ui.spacing_mut().item_spacing.x = 0.0;
                                         let gutter_height =
@@ -1038,45 +1064,80 @@ impl DbGuiApp {
                                                 "SQL line numbers",
                                             )
                                         });
-                                        if ui.is_rect_visible(gutter_rect) {
-                                            ui.painter().vline(
-                                                gutter_rect.right(),
-                                                gutter_rect.y_range(),
-                                                egui::Stroke::new(1.0, palette::BORDER()),
-                                            );
-                                            for line in 1..=line_count {
-                                                ui.painter().text(
-                                                    egui::pos2(
-                                                        gutter_rect.right() - 7.0,
-                                                        gutter_rect.top()
-                                                            + (line - 1) as f32 * row_height,
-                                                    ),
-                                                    egui::Align2::RIGHT_TOP,
-                                                    line,
-                                                    font.clone(),
-                                                    palette::TEXT_FAINT(),
-                                                );
-                                            }
-                                        }
 
-                                        egui::TextEdit::multiline(
-                                            &mut self.tabs[self.active_query_tab].sql,
-                                        )
-                                        .code_editor()
-                                        .frame(egui::Frame::NONE)
-                                        .margin(egui::Margin::ZERO)
-                                        .desired_rows(rows)
-                                        .desired_width(f32::INFINITY)
-                                        .layouter(&mut layouter)
-                                        .hint_text("SELECT ...")
-                                        .show(ui)
+                                        // The editor edits the folded view; the buffer maps every
+                                        // keystroke back onto the tab's real SQL.
+                                        let mut buffer = crate::fold::Buffer::new(
+                                            &mut self.tabs[idx].sql,
+                                            &view,
+                                        );
+                                        let output = egui::TextEdit::multiline(&mut buffer)
+                                            .code_editor()
+                                            .frame(egui::Frame::NONE)
+                                            .margin(egui::Margin::ZERO)
+                                            .desired_rows(rows)
+                                            .desired_width(f32::INFINITY)
+                                            .layouter(&mut layouter)
+                                            .hint_text("SELECT ...")
+                                            .show(ui);
+                                        let (shifts, refused_undo) = buffer.finish();
+                                        (gutter_rect, output, shifts, refused_undo)
                                     })
                                     .inner;
+
+                                // Keep the collapsed regions over the same text after an edit. An
+                                // undo that could not be mapped back opens every fold instead, so
+                                // pressing it again undoes against the whole query.
+                                for (at, delta) in shifts {
+                                    self.tabs[idx].folds = self.tabs[idx]
+                                        .folds
+                                        .iter()
+                                        .map(|anchor| {
+                                            if *anchor > at {
+                                                anchor.saturating_add_signed(delta)
+                                            } else {
+                                                *anchor
+                                            }
+                                        })
+                                        .collect();
+                                }
+                                if refused_undo {
+                                    self.tabs[idx].folds.clear();
+                                }
+
+                                // Line numbers and fold chevrons, painted after the editor so they
+                                // can follow the galley's own rows (and stay aligned when a long
+                                // line wraps).
+                                self.fold_gutter(
+                                    ui,
+                                    gutter_rect,
+                                    &view,
+                                    &regions,
+                                    &output.galley,
+                                    output.galley_pos,
+                                    &font,
+                                    row_height,
+                                );
 
                                 let resp = &output.response.response;
                                 let editor_id = resp.id;
                                 let focused = resp.has_focus();
                                 let text_changed = resp.changed();
+
+                                // Clicking the `⋯ N lines` stand-in opens what it hides — the
+                                // caret lands inside the marker, which is answer enough.
+                                if resp.clicked() {
+                                    let hidden = output
+                                        .cursor_range
+                                        .and_then(|r| view.marker_hiding(r.primary.index));
+                                    if let Some(at) = hidden {
+                                        if let Some(region) =
+                                            regions.iter().find(|r| r.hide.start == at)
+                                        {
+                                            self.tabs[idx].folds.remove(&region.anchor);
+                                        }
+                                    }
+                                }
                                 if text_changed {
                                     // Editing the SQL means the rows currently on screen may no longer
                                     // map back to one table, so they turn read-only; the next Run
@@ -1089,8 +1150,11 @@ impl DbGuiApp {
                                 }
 
                                 // Caret position (char index + on-screen rect) drives the popup.
+                                // Everything downstream — completion, ghost text, diagnostics —
+                                // reasons about the real SQL, so the caret is mapped out of the
+                                // folded view first. The rect stays on screen, where it belongs.
                                 let cursor = output.cursor_range.map(|r| r.primary);
-                                let cursor_char = cursor.map(|c| c.index);
+                                let cursor_char = cursor.map(|c| view.to_source(c.index));
                                 let cursor_rect = cursor.map(|c| {
                                     output
                                         .galley
@@ -1106,7 +1170,13 @@ impl DbGuiApp {
                                 // when the editor reported one (i.e. it is focused).
                                 let toggled = toggle_comment
                                     && output.cursor_range.is_some_and(|range| {
-                                        self.toggle_line_comment(&ctx, editor_id, range);
+                                        let chars = range.as_sorted_char_range();
+                                        self.toggle_line_comment(
+                                            &ctx,
+                                            editor_id,
+                                            view.to_source(chars.start)
+                                                ..view.to_source_end(chars.end),
+                                        );
                                         true
                                     });
 
@@ -1140,6 +1210,7 @@ impl DbGuiApp {
                                     output.galley_pos,
                                     text_changed,
                                     cursor_char,
+                                    &view,
                                 );
                             });
                     });
@@ -1163,6 +1234,104 @@ impl DbGuiApp {
                 self.workspace_dirty = true;
             }
             Some(_) => {}
+        }
+    }
+
+    /// Paint the SQL editor's gutter — line numbers and fold chevrons — and apply a click on
+    /// one of them.
+    ///
+    /// Runs after the editor so it can place every row from the galley itself: a line that
+    /// wrapped is two rows tall, and its number must sit beside the first of them rather than
+    /// where a fixed row-height count would put it.
+    #[allow(clippy::too_many_arguments)]
+    fn fold_gutter(
+        &mut self,
+        ui: &egui::Ui,
+        rect: egui::Rect,
+        view: &crate::fold::View,
+        regions: &[crate::fold::Region],
+        galley: &egui::Galley,
+        galley_pos: egui::Pos2,
+        font: &egui::FontId,
+        row_height: f32,
+    ) {
+        let painter = ui.painter();
+        painter.vline(
+            rect.right(),
+            rect.y_range(),
+            egui::Stroke::new(1.0, palette::BORDER()),
+        );
+
+        // Open regions only show their chevron while the pointer is over the gutter, the way
+        // every editor does it: the numbers stay quiet until you go looking for a fold.
+        let gutter_hovered = ui.rect_contains_pointer(rect);
+        let clip = ui.clip_rect();
+        let idx = self.active_query_tab;
+        let mut toggle = None;
+
+        for (display_line, &source_line) in view.source_lines.iter().enumerate() {
+            let start = view.line_starts[display_line];
+            let top = galley
+                .pos_from_cursor(egui::text::CCursor::new(start))
+                .translate(galley_pos.to_vec2())
+                .top();
+            if top + row_height < clip.top() || top > clip.bottom() {
+                continue;
+            }
+            // Number first, then the chevron column hard against the code — the fold marker
+            // belongs beside the line it opens, not out at the far edge of the gutter.
+            painter.text(
+                egui::pos2(rect.right() - FOLD_CHEVRON_W - 6.0, top),
+                egui::Align2::RIGHT_TOP,
+                source_line + 1,
+                font.clone(),
+                palette::TEXT_FAINT(),
+            );
+
+            let Some(region) = regions.iter().find(|r| r.header_line == source_line) else {
+                continue;
+            };
+            let folded = self.tabs[idx].folds.contains(&region.anchor);
+            let chevron_rect = egui::Rect::from_min_size(
+                egui::pos2(rect.right() - FOLD_CHEVRON_W - 1.0, top),
+                egui::vec2(FOLD_CHEVRON_W, row_height),
+            );
+            let resp = ui.interact(
+                chevron_rect,
+                ui.id().with(("sql_fold", region.anchor)),
+                egui::Sense::click(),
+            );
+            if resp.clicked() {
+                toggle = Some(region.anchor);
+            }
+            if folded || gutter_hovered {
+                let icon = if folded {
+                    icons::arrow_right()
+                } else {
+                    icons::chevron_down()
+                };
+                let tint = if folded || resp.hovered() {
+                    palette::TEXT_WEAK()
+                } else {
+                    palette::TEXT_FAINT()
+                };
+                egui::Image::new(icon)
+                    .fit_to_exact_size(egui::Vec2::splat(FOLD_CHEVRON_W))
+                    .tint(tint)
+                    .paint_at(
+                        ui,
+                        egui::Rect::from_center_size(
+                            chevron_rect.center(),
+                            egui::Vec2::splat(FOLD_CHEVRON_W),
+                        ),
+                    );
+            }
+        }
+
+        if let Some(anchor) = toggle {
+            if !self.tabs[idx].folds.remove(&anchor) {
+                self.tabs[idx].folds.insert(anchor);
+            }
         }
     }
 
@@ -1262,6 +1431,7 @@ impl DbGuiApp {
         galley_pos: egui::Pos2,
         text_changed: bool,
         cursor_char: Option<usize>,
+        view: &crate::fold::View,
     ) {
         /// Pause in typing before the buffer is re-parsed.
         const DEBOUNCE: f64 = 0.35;
@@ -1312,9 +1482,15 @@ impl DbGuiApp {
             .end
             .min(line_end)
             .max(error.range.start.saturating_add(1));
+        // Nothing to mark when the offending token is inside a collapsed region: the galley
+        // has no position for text it isn't showing.
+        let (Some(start), Some(end)) = (view.to_display(error.range.start), view.to_display(end))
+        else {
+            return;
+        };
         let offset = galley_pos.to_vec2();
         let from = galley
-            .pos_from_cursor(egui::text::CCursor::new(error.range.start))
+            .pos_from_cursor(egui::text::CCursor::new(start))
             .translate(offset);
         let to = galley
             .pos_from_cursor(egui::text::CCursor::new(end))
@@ -1370,7 +1546,7 @@ impl DbGuiApp {
         tab.preview = false;
         self.workspace_dirty = true;
 
-        let new_cursor = self.tabs[self.active_query_tab].sql.chars().count();
+        let new_cursor = self.editor_caret(self.tabs[self.active_query_tab].sql.chars().count());
         if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, editor_id) {
             state
                 .cursor
@@ -1385,14 +1561,16 @@ impl DbGuiApp {
     /// Toggle `-- ` line comments over the selected lines (Cmd/Ctrl+/), VS Code style, then
     /// restore a caret/selection over the same text. The buffer rewrite itself lives in the
     /// pure [`toggle_comment_edit`] so it can be unit-tested without an egui context.
+    ///
+    /// `chars` is a sorted char range into the tab's real SQL (the caller maps it out of the
+    /// folded view first).
     fn toggle_line_comment(
         &mut self,
         ctx: &egui::Context,
         editor_id: egui::Id,
-        range: egui::text::CCursorRange,
+        chars: std::ops::Range<usize>,
     ) {
         let idx = self.active_query_tab;
-        let chars = range.as_sorted_char_range();
         let Some((byte_range, out)) = toggle_comment_edit(&self.tabs[idx].sql, chars.clone())
         else {
             return;
@@ -1403,16 +1581,14 @@ impl DbGuiApp {
         // through the shift); for a real selection, re-cover the rewritten lines.
         let sql = &self.tabs[idx].sql;
         let first_line_start_char = sql[..byte_range.start].chars().count();
+        let old_chars = sql[byte_range.clone()].chars().count();
+        let new_chars = out.chars().count();
         let new_range = if chars.start == chars.end {
-            let old_chars = sql[byte_range.clone()].chars().count();
             let tail = old_chars.saturating_sub(chars.start - first_line_start_char);
-            let offset = out.chars().count().saturating_sub(tail);
-            egui::text::CCursorRange::one(egui::text::CCursor::new(first_line_start_char + offset))
+            let offset = new_chars.saturating_sub(tail);
+            [first_line_start_char + offset; 2]
         } else {
-            egui::text::CCursorRange::two(
-                egui::text::CCursor::new(first_line_start_char),
-                egui::text::CCursor::new(first_line_start_char + out.chars().count()),
-            )
+            [first_line_start_char, first_line_start_char + new_chars]
         };
 
         let tab = &mut self.tabs[idx];
@@ -1420,12 +1596,54 @@ impl DbGuiApp {
         tab.edits.source = None;
         tab.preview = false;
         self.workspace_dirty = true;
+        self.shift_folds(
+            idx,
+            first_line_start_char,
+            new_chars as isize - old_chars as isize,
+        );
 
+        let [from, to] = new_range.map(|at| self.editor_caret(at));
         if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, editor_id) {
-            state.cursor.set_char_range(Some(new_range));
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(from),
+                    egui::text::CCursor::new(to),
+                )));
             state.store(ctx, editor_id);
         }
         ctx.memory_mut(|m| m.request_focus(editor_id));
+    }
+
+    /// Where the editor's caret must go to sit at char index `at` of the active tab's SQL.
+    /// The two differ only while something is folded, when the visible text is shorter than
+    /// the query it stands for.
+    fn editor_caret(&self, at: usize) -> usize {
+        let tab = &self.tabs[self.active_query_tab];
+        if tab.folds.is_empty() {
+            return at;
+        }
+        let regions = crate::fold::regions(&tab.sql);
+        crate::fold::View::build(&tab.sql, &regions, &tab.folds).to_display_clamped(at)
+    }
+
+    /// Replay an edit made outside the editor — a completion, a comment toggle — onto the
+    /// tab's fold anchors, so collapsed regions keep covering the same lines.
+    fn shift_folds(&mut self, idx: usize, at: usize, delta: isize) {
+        if delta == 0 || self.tabs[idx].folds.is_empty() {
+            return;
+        }
+        self.tabs[idx].folds = self.tabs[idx]
+            .folds
+            .iter()
+            .map(|anchor| {
+                if *anchor > at {
+                    anchor.saturating_add_signed(delta)
+                } else {
+                    *anchor
+                }
+            })
+            .collect();
     }
 
     /// Drive the SQL editor's autocomplete popup for one frame: recompute suggestions from
@@ -1571,9 +1789,14 @@ impl DbGuiApp {
         tab.edits.source = None;
         tab.preview = false;
         self.workspace_dirty = true;
+        self.shift_folds(
+            self.active_query_tab,
+            start,
+            suggestion.chars().count() as isize - (cursor_char - start) as isize,
+        );
 
         // Move the editor's caret to just after the inserted text.
-        let new_cursor = start + suggestion.chars().count();
+        let new_cursor = self.editor_caret(start + suggestion.chars().count());
         if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, editor_id) {
             state
                 .cursor
@@ -1719,7 +1942,12 @@ impl DbGuiApp {
                                         live,
                                         drag_float_y,
                                     )
-                                    .on_hover_text(conn.target_summary());
+                                    .on_hover_text(format!(
+                                        "{}\nSafety: {} — {}",
+                                        conn.target_summary(),
+                                        conn.safety_profile.label(),
+                                        conn.safety_profile.description()
+                                    ));
                                     if resp.drag_started() {
                                         self.connection_drag = Some(super::ConnectionDrag {
                                             id: conn.id.clone(),
@@ -5090,29 +5318,101 @@ impl DbGuiApp {
                         });
                         ui.end_row();
 
-                        ui.label("Production");
-                        form_changed |= ui
-                            .checkbox(&mut editor.config.production, "Confirm destructive queries")
-                            .on_hover_text(
-                                "UPDATE, DELETE, DROP, TRUNCATE, ALTER, and MERGE must \
-                                 be confirmed in a dialog before they run",
-                            )
-                            .changed();
+                        ui.label("Safety profile");
+                        let previous_profile = editor.config.safety_profile;
+                        egui::ComboBox::from_id_salt("safety_profile")
+                            .selected_text(editor.config.safety_profile.label())
+                            .width(field_w)
+                            .show_ui(ui, |ui| {
+                                for profile in dbcore::SafetyProfile::ALL {
+                                    ui.selectable_value(
+                                        &mut editor.config.safety_profile,
+                                        profile,
+                                        profile.label(),
+                                    )
+                                    .on_hover_text(profile.description());
+                                }
+                            });
+                        if editor.config.safety_profile != previous_profile {
+                            editor
+                                .config
+                                .set_safety_profile(editor.config.safety_profile);
+                            form_changed = true;
+                        }
                         ui.end_row();
 
-                        ui.label("Read-only");
-                        form_changed |= ui
-                            .checkbox(&mut editor.config.read_only, "Block all writes")
-                            .on_hover_text(
-                                "Only reads (SELECT, SHOW, EXPLAIN, …) are allowed to \
-                                 run; in-grid editing and schema changes are refused. \
-                                 Where the database supports it the session itself is \
-                                 opened read-only, so even writes hidden inside \
-                                 functions are rejected by the server. Takes effect on \
-                                 the next connect.",
-                            )
-                            .changed();
+                        ui.label("");
+                        ui.vertical(|ui| {
+                            ui.set_max_width(field_w);
+                            ui.label(
+                                egui::RichText::new(editor.config.safety_profile.description())
+                                    .size(11.0)
+                                    .color(palette::TEXT_WEAK()),
+                            );
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                ui.label(egui::RichText::new("Protection").size(11.0));
+                                let guardian_on = editor.config.is_production();
+                                ui.label(
+                                    egui::RichText::new(if guardian_on {
+                                        "Guardian: On"
+                                    } else {
+                                        "Guardian: Off"
+                                    })
+                                    .size(11.0)
+                                    .color(if guardian_on {
+                                        palette::SUCCESS()
+                                    } else {
+                                        palette::TEXT_FAINT()
+                                    }),
+                                );
+                                ui.label(egui::RichText::new("·").color(palette::TEXT_FAINT()));
+                                let read_only_on = editor.config.is_read_only();
+                                ui.label(
+                                    egui::RichText::new(if read_only_on {
+                                        "Read-only: On"
+                                    } else {
+                                        "Read-only: Off"
+                                    })
+                                    .size(11.0)
+                                    .color(if read_only_on {
+                                        palette::SUCCESS()
+                                    } else {
+                                        palette::TEXT_FAINT()
+                                    }),
+                                );
+                            });
+                        });
                         ui.end_row();
+
+                        if editor.config.safety_profile == dbcore::SafetyProfile::Custom {
+                            ui.label("Production");
+                            form_changed |= ui
+                                .checkbox(
+                                    &mut editor.config.production,
+                                    "Confirm destructive queries",
+                                )
+                                .on_hover_text(
+                                    "UPDATE, DELETE, DROP, TRUNCATE, ALTER, and MERGE must \
+                                     be confirmed in a dialog before they run",
+                                )
+                                .changed();
+                            ui.end_row();
+
+                            ui.label("Read-only");
+                            form_changed |= ui
+                                .checkbox(&mut editor.config.read_only, "Block all writes")
+                                .on_hover_text(
+                                    "Only reads (SELECT, SHOW, EXPLAIN, …) are allowed to \
+                                     run; in-grid editing and schema changes are refused. \
+                                     Where the database supports it the session itself is \
+                                     opened read-only, so even writes hidden inside \
+                                     functions are rejected by the server. Takes effect on \
+                                     the next connect.",
+                                )
+                                .changed();
+                            ui.end_row();
+                        }
 
                         if editor.config.kind.is_server() {
                             ui.label("Host");
@@ -7052,7 +7352,7 @@ fn details_value_box(
         let valid = edits
             .active
             .as_ref()
-            .map_or(true, |a| a.kind.is_valid(&a.buf));
+            .is_none_or(|a| a.kind.is_valid(&a.buf));
         let border = if valid {
             palette::ACCENT()
         } else {
