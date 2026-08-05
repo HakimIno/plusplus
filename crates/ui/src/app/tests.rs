@@ -1018,6 +1018,11 @@ fn pager_rewrites_sql_and_respects_total() {
 
     go(&mut app, Action::Page(PageNav::Next));
     assert_eq!(app.tab().sql, "SELECT * FROM table_0 LIMIT 100 OFFSET 100;");
+    assert_eq!(app.tab().total_rows, Some(250));
+    assert!(
+        !app.pending_page_counts.contains(&app.tab().id),
+        "paging with a known total must not issue another COUNT(*)"
+    );
     go(&mut app, Action::Page(PageNav::Last));
     assert_eq!(app.tab().sql, "SELECT * FROM table_0 LIMIT 100 OFFSET 200;");
     // Past the known end → no-op.

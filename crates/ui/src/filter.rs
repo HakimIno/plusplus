@@ -339,6 +339,9 @@ fn cell_matches(cell: Option<&Value>, c: &Condition) -> bool {
 /// Compute the display order for `result`: the indices of rows passing the filter. The
 /// caller applies any active sort on top of this.
 pub fn passing_rows(result: &QueryResult, state: &FilterState) -> Vec<usize> {
+    if !state.is_active() {
+        return (0..result.rows.len()).collect();
+    }
     (0..result.rows.len())
         .filter(|&r| matches_row(&result.rows[r], &state.conditions, state.conjunction))
         .collect()

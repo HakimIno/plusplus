@@ -534,7 +534,8 @@ impl Database for MsSqlDb {
             // to abandon it mid-result without poisoning the pooled connection — but rows
             // past the cap (and any later result sets, as before) are dropped on the floor.
             let mut columns: Vec<ColumnMeta> = Vec::new();
-            let mut data: Vec<Vec<Value>> = Vec::new();
+            let mut data: Vec<Vec<Value>> =
+                Vec::with_capacity(super::initial_row_capacity(max_rows));
             let mut truncated = false;
             let mut result_sets = 0usize;
             while let Some(item) = stream.try_next().await? {
@@ -618,7 +619,8 @@ impl Database for MsSqlDb {
         if mssql_returns_rows(sql) {
             let mut stream = conn.simple_query(sql.to_string()).await?;
             let mut columns: Vec<ColumnMeta> = Vec::new();
-            let mut data: Vec<Vec<Value>> = Vec::new();
+            let mut data: Vec<Vec<Value>> =
+                Vec::with_capacity(super::initial_row_capacity(max_rows));
             let mut truncated = false;
             let mut result_sets = 0usize;
             loop {

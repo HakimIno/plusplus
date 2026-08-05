@@ -60,12 +60,22 @@ pub struct CassandraDb {
 }
 
 /// Maps every peer the cluster broadcasts to the single address we can actually reach —
-/// the local end of the SSH tunnel. Peer discovery would otherwise make the driver dial
-/// nodes' private addresses directly, bypassing (and defeating) the tunnel. With every
-/// node translated to the tunnel, all connections land on the one bastion-reachable node;
-/// token-aware routing degrades gracefully while queries stay correct.
+/// the local end of the SSH tunnel or a Docker/Podman port forward. Peer discovery would
+/// otherwise make the driver dial nodes' private addresses directly, bypassing (and
+/// defeating) the tunnel or published port. With every node translated to the reachable
+/// endpoint, all connections land on the one host-side node; token-aware routing degrades
+/// gracefully while queries stay correct.
 #[derive(Debug)]
 struct FixedAddress(SocketAddr);
+
+/// Whether the client reaches the database through a host-local endpoint rather than the
+/// cluster's internal addresses (SSH tunnel, Docker `127.0.0.1:9042`, etc.).
+fn host_is_local_endpoint(host: &str) -> bool {
+    matches!(
+        host.trim().to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "::1"
+    )
+}
 
 #[async_trait]
 impl AddressTranslator for FixedAddress {
@@ -153,10 +163,10 @@ impl CassandraDb {
         if !cfg.user.trim().is_empty() {
             builder = builder.user(cfg.user.clone(), password.unwrap_or_default());
         }
-        if via_tunnel {
+        if via_tunnel || host_is_local_endpoint(&cfg.host) {
             let local: SocketAddr = format!("{}:{}", cfg.host, cfg.port)
                 .parse()
-                .map_err(|e| CoreError::Pool(format!("bad tunnel address: {e}")))?;
+                .map_err(|e| CoreError::Pool(format!("bad local endpoint address: {e}")))?;
             builder = builder.address_translator(Arc::new(FixedAddress(local)));
         }
         let keyspace = Some(cfg.database.trim())
@@ -252,7 +262,8 @@ impl CassandraDb {
             let mut stream = pager
                 .rows_stream::<Row>()
                 .map_err(|e| CoreError::Cql(e.to_string()))?;
-            let mut rows: Vec<Vec<Value>> = Vec::new();
+            let mut rows: Vec<Vec<Value>> =
+                Vec::with_capacity(super::initial_row_capacity(max_rows));
             let mut truncated = false;
             loop {
                 let next = match &cancel {
@@ -310,7 +321,8 @@ impl CassandraDb {
                         type_name: type_name(spec.typ()),
                     })
                     .collect();
-                let mut rows: Vec<Vec<Value>> = Vec::new();
+                let mut rows: Vec<Vec<Value>> =
+                    Vec::with_capacity(super::initial_row_capacity(max_rows));
                 let mut truncated = false;
                 for row in rows_result
                     .rows::<Row>()
@@ -1149,5 +1161,15 @@ mod tests {
         );
         let tuple = CqlValue::Tuple(vec![Some(CqlValue::Int(1)), None]);
         assert_eq!(decode(&Some(tuple)), Value::Text("(1, null)".into()));
+    }
+
+    #[test]
+    fn local_endpoint_hosts_need_address_translation() {
+        assert!(host_is_local_endpoint("127.0.0.1"));
+        assert!(host_is_local_endpoint("localhost"));
+        assert!(host_is_local_endpoint("::1"));
+        assert!(host_is_local_endpoint("  LOCALHOST  "));
+        assert!(!host_is_local_endpoint("10.89.4.2"));
+        assert!(!host_is_local_endpoint("db.example.com"));
     }
 }

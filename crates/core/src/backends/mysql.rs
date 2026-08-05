@@ -109,7 +109,7 @@ impl MySqlDb {
         use futures_util::TryStreamExt;
         let start = Instant::now();
         let mut columns: Vec<ColumnMeta> = Vec::new();
-        let mut rows: Vec<Vec<Value>> = Vec::new();
+        let mut rows: Vec<Vec<Value>> = Vec::with_capacity(super::initial_row_capacity(max_rows));
         let mut truncated = false;
         let mut affected: u64 = 0;
         let mut saw_dml = false;
@@ -121,7 +121,8 @@ impl MySqlDb {
             if returns_rows(stmt) {
                 let mut stmt_columns: Vec<ColumnMeta> = Vec::new();
                 let mut types: Vec<String> = Vec::new();
-                let mut stmt_rows: Vec<Vec<Value>> = Vec::new();
+                let mut stmt_rows: Vec<Vec<Value>> =
+                    Vec::with_capacity(super::initial_row_capacity(max_rows));
                 let mut stmt_truncated = false;
                 let mut stream = (&mut **conn).fetch(AssertSqlSafe(stmt.to_string()));
                 loop {
@@ -524,7 +525,8 @@ impl Database for MySqlDb {
             // Upper-cased type names resolved once per result; `decode` dispatches on
             // these instead of re-uppercasing the type name for every cell.
             let mut types: Vec<String> = Vec::new();
-            let mut data: Vec<Vec<Value>> = Vec::new();
+            let mut data: Vec<Vec<Value>> =
+                Vec::with_capacity(super::initial_row_capacity(max_rows));
             let mut truncated = false;
             while let Some(row) = stream.try_next().await? {
                 if columns.is_empty() {
@@ -598,7 +600,8 @@ impl Database for MySqlDb {
             let mut stream = (&mut *conn).fetch(AssertSqlSafe(sql.to_string()));
             let mut columns: Vec<ColumnMeta> = Vec::new();
             let mut types: Vec<String> = Vec::new();
-            let mut data: Vec<Vec<Value>> = Vec::new();
+            let mut data: Vec<Vec<Value>> =
+                Vec::with_capacity(super::initial_row_capacity(max_rows));
             let mut truncated = false;
             loop {
                 tokio::select! {

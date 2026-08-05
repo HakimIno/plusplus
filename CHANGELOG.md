@@ -3,6 +3,15 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
+## 0.2.26 — 2026-08-05
+
+- Improved result-grid readability with content-aware initial column widths, centered headers,
+  and type-aware cell alignment while avoiding unnecessary filter and row-buffer work.
+- Made paged table results appear before their potentially expensive row count, and reuse a
+  known total while navigating instead of issuing the same `COUNT(*)` for every page.
+- Fixed Cassandra and ScyllaDB connections through localhost port forwarding by translating
+  advertised peer addresses to the reachable endpoint, with a local ScyllaDB example stack.
+
 ## 0.2.25 — 2026-08-03
 
 - Added code folding to the SQL editor: chevrons in the line-number gutter collapse whole

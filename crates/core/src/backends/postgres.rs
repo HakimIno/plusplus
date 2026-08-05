@@ -438,7 +438,8 @@ impl Database for PostgresDb {
             // Upper-cased type names resolved once per result; `decode` dispatches on
             // these instead of re-uppercasing the type name for every cell.
             let mut types: Vec<String> = Vec::new();
-            let mut data: Vec<Vec<Value>> = Vec::new();
+            let mut data: Vec<Vec<Value>> =
+                Vec::with_capacity(super::initial_row_capacity(max_rows));
             let mut truncated = false;
             while let Some(row) = stream.try_next().await? {
                 if columns.is_empty() {
@@ -503,7 +504,8 @@ impl Database for PostgresDb {
             let mut stream = (&mut *conn).fetch(AssertSqlSafe(sql.to_string()));
             let mut columns: Vec<ColumnMeta> = Vec::new();
             let mut types: Vec<String> = Vec::new();
-            let mut data: Vec<Vec<Value>> = Vec::new();
+            let mut data: Vec<Vec<Value>> =
+                Vec::with_capacity(super::initial_row_capacity(max_rows));
             let mut truncated = false;
             loop {
                 tokio::select! {

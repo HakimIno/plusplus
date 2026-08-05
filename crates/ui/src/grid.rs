@@ -10,9 +10,8 @@ use crate::style::palette;
 use dbcore::{QueryResult, Value};
 use egui_extras::{Column, TableBuilder};
 
-/// Natural per-column width: columns expand past this to fill spare space, but never shrink
-/// below it — once the total exceeds the panel the grid scrolls horizontally instead.
-const COL_W: f32 = 160.0;
+/// Fallback used only when a result column cannot be measured.
+const FALLBACK_COL_W: f32 = 120.0;
 
 /// Header row height. Used both by the `TableBuilder` header and by the empty-table
 /// double-click zone, which measures down from the header — they must agree.
@@ -35,12 +34,13 @@ fn fitted_column_width(ui: &egui::Ui, result: &QueryResult, col: usize) -> Optio
     const MAX_WIDTH: f32 = 480.0;
     const HEADER_CHROME: f32 = 64.0;
     const CELL_PADDING: f32 = 18.0;
-    // Font layout is considerably more expensive than iterating the result set. Keep the
-    // explicit "Fit this column" action responsive for large results by measuring an
-    // evenly distributed sample instead of every cell.
+    // Font layout is considerably more expensive than iterating the result set. Keep initial
+    // auto-fit and the explicit "Fit this column" action responsive for large results by
+    // measuring an evenly distributed sample instead of every cell.
     const MAX_SAMPLED_ROWS: usize = 1_024;
 
     let meta = result.columns.get(col)?;
+    let kind = EditorKind::classify(&meta.type_name);
     let body_font = egui::TextStyle::Body.resolve(ui.style());
     let mono_font = egui::TextStyle::Monospace.resolve(ui.style());
     let sample_step = result.rows.len().div_ceil(MAX_SAMPLED_ROWS).max(1);
@@ -65,7 +65,7 @@ fn fitted_column_width(ui: &egui::Ui, result: &QueryResult, col: usize) -> Optio
             Value::Text(value) => value.clone(),
             Value::Bytes(value) => format!("[{} bytes]", value.len()),
         };
-        let font = if matches!(value, Value::Int(_) | Value::Float(_)) {
+        let font = if matches!(value, Value::Int(_) | Value::Float(_)) || kind.monospace_value() {
             &mono_font
         } else {
             &body_font
@@ -409,6 +409,14 @@ pub fn results_grid(
         column_view.widths[col] = fitted_column_width(ui, result, col);
     }
     let reset_widths = std::mem::take(&mut column_view.reset_widths_next_frame);
+    // New/reset grids start at their natural widths instead of giving every column the same
+    // arbitrary width. This is cached in the per-grid view so measuring text is a one-frame
+    // cost; manual resizing remains owned by egui_extras' table state afterwards.
+    for col in 0..ncols {
+        if column_view.widths[col].is_none() {
+            column_view.widths[col] = fitted_column_width(ui, result, col);
+        }
+    }
     let visible_cols: Vec<usize> = (0..ncols)
         .filter(|col| !column_view.hidden.contains(col))
         .collect();
@@ -419,7 +427,7 @@ pub fn results_grid(
     let desired_total = gutter_w
         + visible_cols
             .iter()
-            .map(|&col| column_widths[col].unwrap_or(COL_W) + spacing)
+            .map(|&col| column_widths[col].unwrap_or(FALLBACK_COL_W) + spacing)
             .sum::<f32>();
     let table_rect = ui.available_rect_before_wrap();
     let rendered_rows = order.len() + edits.new_rows;
@@ -581,7 +589,7 @@ fn build_grid(
         .auto_shrink([false, false])
         .column(Column::exact(gutter_w)); // gutter (not resizable)
     for &col in visible_cols {
-        let width = column_widths[col].unwrap_or(COL_W);
+        let width = column_widths[col].unwrap_or(FALLBACK_COL_W);
         let mut column = Column::initial(width)
             .at_least(40.0)
             .clip(true)
@@ -795,10 +803,17 @@ fn build_grid(
                             let staged = edits.staged(r, c);
                             let value = staged.unwrap_or(stored);
                             let link = fk_ref.is_some() && !value.is_null();
-                            cell(ui, value, staged.is_some(), link, shift_hover, emoji);
+                            cell(
+                                ui,
+                                value,
+                                edits.col_kind(c),
+                                staged.is_some(),
+                                link,
+                                shift_hover,
+                                emoji,
+                            );
                         }
                     });
-
                     // Entering cell-edit (binary cells aren't editable; deleted rows are on
                     // their way out). Booleans toggle in place; everything else opens the inline
                     // editor. `col_resp` is the egui_extras cell `Ui` response, which senses
@@ -956,8 +971,8 @@ fn in_fill_range(from: usize, to: usize, row: usize) -> bool {
     row >= from.min(to) && row <= from.max(to)
 }
 
-/// One column header: a left-aligned name with right-aligned sort state and a single `⋮`
-/// menu trigger. The rest of the header is deliberately non-interactive.
+/// One column header: a centered name with right-aligned sort/menu chrome. The name's center is
+/// always the column's center, so resizing a column never leaves the header at its old position.
 fn header_cell(
     ui: &mut egui::Ui,
     i: usize,
@@ -982,18 +997,18 @@ fn header_cell(
         );
     }
     let cell_rect = ui.max_rect();
-    // Keep the data label visually anchored while the sort state changes: the right edge always
-    // reserves separate slots for the sort indicator and the column menu. Narrow columns scale
-    // these slots down rather than allowing their rectangles to overlap the label.
-    let menu_slot = (cell_rect.width() * 0.35).min(24.0);
-    let sort_slot = (cell_rect.width() * 0.25).min(20.0);
-    let label_inset = (cell_rect.width() * 0.08).min(10.0);
+    // Reserve the same total chrome width on both sides. The left slot is intentionally empty:
+    // it balances the sort/menu controls on the right, keeping the name centered in the column.
+    let menu_slot = (cell_rect.width() * 0.25).min(22.0);
+    let sort_slot = if sorted_dir.is_some() {
+        (cell_rect.width() * 0.18).min(18.0)
+    } else {
+        0.0
+    };
+    let side_slot = menu_slot + sort_slot;
     let label_rect = egui::Rect::from_min_max(
-        egui::pos2(cell_rect.left() + label_inset, cell_rect.top()),
-        egui::pos2(
-            cell_rect.right() - menu_slot - sort_slot,
-            cell_rect.bottom(),
-        ),
+        egui::pos2(cell_rect.left() + side_slot, cell_rect.top()),
+        egui::pos2(cell_rect.right() - side_slot, cell_rect.bottom()),
     );
     let sort_rect = egui::Rect::from_min_max(
         egui::pos2(cell_rect.right() - menu_slot - sort_slot, cell_rect.top()),
@@ -1010,15 +1025,13 @@ fn header_cell(
         palette::TEXT()
     };
     let text = egui::RichText::new(&col.name).strong().color(color);
-    ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(label_rect)
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-        |ui| {
-            ui.add(egui::Label::new(text).truncate().selectable(false));
-        },
+    ui.put(
+        label_rect,
+        egui::Label::new(text)
+            .truncate()
+            .halign(egui::Align::Center)
+            .selectable(false),
     );
-
     if let Some(ascending) = sorted_dir {
         let src = if ascending {
             crate::icons::arrow_up()
@@ -1637,6 +1650,53 @@ mod tests {
         shapes.iter().find_map(|cs| walk(&cs.shape, needle))
     }
 
+    fn find_text_rect(shapes: &[egui::epaint::ClippedShape], needle: &str) -> Option<egui::Rect> {
+        fn walk(shape: &egui::epaint::Shape, needle: &str) -> Option<egui::Rect> {
+            match shape {
+                egui::epaint::Shape::Text(t) if t.galley.text() == needle => {
+                    Some(t.galley.rect.translate(t.pos.to_vec2()))
+                }
+                egui::epaint::Shape::Vec(v) => v.iter().find_map(|s| walk(s, needle)),
+                _ => None,
+            }
+        }
+        shapes.iter().find_map(|cs| walk(&cs.shape, needle))
+    }
+
+    #[test]
+    fn header_name_stays_centered_when_column_width_changes() {
+        let ctx = egui::Context::default();
+        let meta = ColumnMeta {
+            name: "customer_name".into(),
+            type_name: "TEXT".into(),
+        };
+
+        for (width, sort) in [(120.0, None), (300.0, Some((0, true)))] {
+            let cell_rect =
+                egui::Rect::from_min_size(egui::pos2(24.0, 20.0), egui::vec2(width, HEADER_H));
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 100.0),
+                )),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(raw, |ui| {
+                ui.scope_builder(egui::UiBuilder::new().max_rect(cell_rect), |ui| {
+                    header_cell(ui, 0, &meta, sort, &mut GridResponse::default(), 99, 1);
+                });
+            });
+            let text_rect =
+                find_text_rect(&output.shapes, &meta.name).expect("header name must be painted");
+            assert!(
+                (text_rect.center().x - cell_rect.center().x).abs() <= 0.5,
+                "header center {:?} did not follow column center {:?}",
+                text_rect.center(),
+                cell_rect.center()
+            );
+        }
+    }
+
     /// Two slowish clicks landing ~20pt apart in the *same cell* must still begin an edit.
     /// egui's own `double_clicked()` (same widget id + ≤6pt pointer distance) is defeated by
     /// exactly this — which is what made double-click-to-edit feel unreliable — so the grid
@@ -1686,7 +1746,7 @@ mod tests {
 
         // Find cell (row 1, col 1) — its value is 1*3+1 = 4 — and click twice, drifting
         // 20pt right between the clicks, well past egui's 6pt same-click tolerance but
-        // still inside the ≥160pt-wide cell, within the double-click delay (0.3s).
+        // still inside the auto-fitted numeric cell, within the double-click delay (0.3s).
         let out = run(vec![], 0.0, &mut edits, &mut begin);
         let text = find_text_pos(&out.shapes, "4").expect("cell text painted");
         let p1 = text + egui::vec2(2.0, 4.0);
@@ -1868,12 +1928,15 @@ mod tests {
     }
 }
 
-/// Render a single cell, dimming NULLs and monospacing numbers. A `staged` value (an edit
-/// not yet saved) is drawn in the success colour so it stands out from stored data. Free-text
-/// values that contain emoji are drawn through [`emoji_cell`] so the emoji show in colour.
+/// Render a single cell with database-grid alignment: text starts left, numbers end right,
+/// and compact sentinel values are centered. NULLs are dimmed and numbers are monospaced. A
+/// `staged` value (an edit not yet saved) is drawn in the success colour so it stands out from
+/// stored data. Free-text values that contain emoji are drawn through [`emoji_cell`] so the
+/// emoji show in colour.
 fn cell(
     ui: &mut egui::Ui,
     value: &Value,
+    kind: EditorKind,
     staged: bool,
     link: bool,
     underline: bool,
@@ -1900,22 +1963,57 @@ fn cell(
         let text = if underline { text.underline() } else { text };
         ui.add(egui::Label::new(text).selectable(false))
     };
-    let resp = match value {
-        Value::Null => label(ui, egui::RichText::new("NULL").italics()),
-        Value::Bool(v) => label(ui, egui::RichText::new(if *v { "true" } else { "false" })),
-        Value::Int(_) | Value::Float(_) => {
-            label(ui, egui::RichText::new(value.display()).monospace())
+    let main_align = match (value, kind) {
+        (Value::Int(_) | Value::Float(_), _)
+        | (Value::Text(_), EditorKind::Int | EditorKind::Float | EditorKind::Decimal) => {
+            egui::Align::Max
         }
-        Value::Text(text) if emoji::contains_emoji(text) => emoji_cell(ui, text, color, emoji),
-        Value::Text(text) => label(ui, egui::RichText::new(text)),
-        Value::Bytes(bytes) => label(ui, egui::RichText::new(format!("[{} bytes]", bytes.len()))),
+        (Value::Null | Value::Bool(_) | Value::Bytes(_), _) => egui::Align::Center,
+        (Value::Text(_), _) => egui::Align::Min,
     };
-    // A Shift-hovered, followable FK value: append a small arrow after the text so the cell reads as
-    // a navigable link. Purely a marker — the whole cell is the click target (Shift+click follows).
-    if underline {
-        crate::icons::show_colored(ui, crate::icons::arrow_up_right(), 11.0, palette::ACCENT());
-    }
-    resp
+    ui.with_layout(
+        egui::Layout::left_to_right(egui::Align::Center).with_main_align(main_align),
+        |ui| {
+            let resp = match value {
+                Value::Null => label(ui, egui::RichText::new("NULL").italics().monospace()),
+                Value::Bool(v) => label(
+                    ui,
+                    egui::RichText::new(if *v { "true" } else { "false" }).monospace(),
+                ),
+                Value::Int(_) | Value::Float(_) => {
+                    label(ui, egui::RichText::new(value.display()).monospace())
+                }
+                Value::Text(text) if emoji::contains_emoji(text) => {
+                    emoji_cell(ui, text, color, emoji)
+                }
+                Value::Text(text) => {
+                    let text = egui::RichText::new(text);
+                    let text = if kind.monospace_value() {
+                        text.monospace()
+                    } else {
+                        text
+                    };
+                    label(ui, text)
+                }
+                Value::Bytes(bytes) => label(
+                    ui,
+                    egui::RichText::new(format!("[{} bytes]", bytes.len())).monospace(),
+                ),
+            };
+            // A Shift-hovered, followable FK value: append a small arrow after the text so the
+            // cell reads as a navigable link. Purely a marker — the whole cell is the click target.
+            if underline {
+                crate::icons::show_colored(
+                    ui,
+                    crate::icons::arrow_up_right(),
+                    11.0,
+                    palette::ACCENT(),
+                );
+            }
+            resp
+        },
+    )
+    .inner
 }
 
 /// Render a text value that contains emoji: plain runs as labels, each emoji grapheme as an

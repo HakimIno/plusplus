@@ -95,6 +95,12 @@ impl DbGuiApp {
 
     /// Run the SQL of the tab at `idx` against its bound connection.
     pub(super) fn start_query_for(&mut self, idx: usize) {
+        self.start_query_for_inner(idx, true);
+    }
+
+    /// Run a query, optionally refreshing the total used by the table pager. Page-only
+    /// rewrites preserve an already-known total instead of issuing the same COUNT(*) again.
+    fn start_query_for_inner(&mut self, idx: usize, refresh_page_count: bool) {
         let Some(tab) = self.tabs.get(idx) else {
             return;
         };
@@ -108,7 +114,9 @@ impl DbGuiApp {
         let paged_table = (tab.edits.source.is_some() || tab.edits.pending_source.is_some())
             && dbcore::parse_page_window(&sql)
                 .is_some_and(|window| window.limit.is_some_and(|limit| limit > 0));
-        let count_sql = paged_table.then(|| dbcore::build_count_sql(&sql)).flatten();
+        let count_sql = (paged_table && refresh_page_count)
+            .then(|| dbcore::build_count_sql(&sql))
+            .flatten();
         // A new execution always returns to the primary result surface, so fresh data and
         // query errors cannot remain hidden behind Message or the Chart placeholder.
         self.tabs[idx].view = TabView::Data;
@@ -140,43 +148,25 @@ impl DbGuiApp {
         self.busy = Busy::Querying;
         self.querying_tab_id = Some(tab_id);
         self.tabs[idx].query_error = None;
-        self.tabs[idx].total_rows = None;
+        if refresh_page_count {
+            self.tabs[idx].total_rows = None;
+        }
         self.error = None;
         self.status_msg = "Loading...".to_string();
-        if let Some(count_sql) = count_sql {
+        if count_sql.is_some() {
             self.pending_page_counts.insert(tab_id);
-            let count_db = db.clone();
-            let count_tx = tx.clone();
-            let count_cancel = cancel.clone();
-            let count_query_sql = sql.clone();
-            self.rt.spawn(async move {
-                let total = count_db
-                    .execute_capped_cancellable(&count_sql, 1, count_cancel)
-                    .await
-                    .ok()
-                    .and_then(|result| match result.rows.first()?.first()? {
-                        dbcore::Value::Int(value) => u64::try_from(*value).ok(),
-                        dbcore::Value::Float(value) if *value >= 0.0 => Some(*value as u64),
-                        dbcore::Value::Text(value) => value.parse().ok(),
-                        _ => None,
-                    });
-                let _ = count_tx.send(AppMessage::PageCounted {
-                    tab_id,
-                    sql: count_query_sql,
-                    total,
-                    seq,
-                });
-            });
         } else {
             self.pending_page_counts.remove(&tab_id);
         }
         self.rt.spawn(async move {
             let res = db
-                .execute_capped_cancellable(&sql, MAX_FETCH_ROWS, cancel)
+                .execute_capped_cancellable(&sql, MAX_FETCH_ROWS, cancel.clone())
                 .await;
+            let query_succeeded = res.is_ok();
             // Distinguish a user cancel from a real failure before flattening to a string.
             let canceled = matches!(res, Err(dbcore::CoreError::Canceled));
             let result = res.map_err(|e| e.to_string());
+            let count_query_sql = count_sql.as_ref().map(|_| sql.clone());
             let _ = tx.send(AppMessage::Queried {
                 tab_id,
                 conn_id,
@@ -185,6 +175,30 @@ impl DbGuiApp {
                 canceled,
                 seq,
             });
+
+            // Let the grid appear before running the potentially expensive COUNT(*). Running
+            // both at once makes a large count compete with the page fetch for server I/O.
+            if let (Some(count_sql), Some(query_sql)) = (count_sql, count_query_sql) {
+                let total = if query_succeeded {
+                    db.execute_capped_cancellable(&count_sql, 1, cancel)
+                        .await
+                        .ok()
+                        .and_then(|result| match result.rows.first()?.first()? {
+                            dbcore::Value::Int(value) => u64::try_from(*value).ok(),
+                            dbcore::Value::Float(value) if *value >= 0.0 => Some(*value as u64),
+                            dbcore::Value::Text(value) => value.parse().ok(),
+                            _ => None,
+                        })
+                } else {
+                    None
+                };
+                let _ = tx.send(AppMessage::PageCounted {
+                    tab_id,
+                    sql: query_sql,
+                    total,
+                    seq,
+                });
+            }
         });
     }
     /// Rewrite the active tab's paging window to `(limit, offset)` in its connection's
@@ -202,10 +216,9 @@ impl DbGuiApp {
         // The rewrite preserves the simple-select shape, so the result stays editable.
         self.tabs[idx].edits.pending_source = self.derive_edit_source(idx);
         self.workspace_dirty = true;
-        self.start_query_for(idx);
-        // Paging changes only LIMIT/OFFSET, so the previous total remains valid while the
-        // fresh background count runs. This keeps Last-page navigation and the label stable.
-        self.tabs[idx].total_rows = known_total;
+        // Paging changes only LIMIT/OFFSET. Reuse a known total; if the first count has not
+        // arrived yet, start one after this page is visible.
+        self.start_query_for_inner(idx, known_total.is_none());
     }
     /// Pager navigation for the active (paged) table tab.
     pub(super) fn page_nav(&mut self, nav: PageNav) {

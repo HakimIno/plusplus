@@ -1,0 +1,46 @@
+services:
+  scylla:
+    image: scylladb/scylla:6.2
+    container_name: plusplus-scylla
+    command: >
+      --smp 1 --memory 750M --overprovisioned 1 --developer-mode 1
+      --authenticator PasswordAuthenticator
+      --authorizer CassandraAuthorizer
+    ports:
+      - "9042:9042"
+    volumes:
+      - scylla-data:/var/lib/scylla
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "cqlsh -u $$SCYLLA_ADMIN_USER -p $$SCYLLA_ADMIN_PASSWORD -e 'SELECT now() FROM system.local' || exit 1",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 90s
+    environment:
+      SCYLLA_ADMIN_USER: ${SCYLLA_ADMIN_USER:-cassandra}
+      SCYLLA_ADMIN_PASSWORD: ${SCYLLA_ADMIN_PASSWORD:-cassandra}
+
+  init:
+    image: scylladb/scylla:6.2
+    depends_on:
+      scylla:
+        condition: service_healthy
+    volumes:
+      - ./init.cql:/init.cql:ro
+    environment:
+      SCYLLA_ADMIN_USER: ${SCYLLA_ADMIN_USER:-cassandra}
+      SCYLLA_ADMIN_PASSWORD: ${SCYLLA_ADMIN_PASSWORD:-cassandra}
+    entrypoint:
+      [
+        "sh",
+        "-c",
+        "cqlsh scylla -u \"$$SCYLLA_ADMIN_USER\" -p \"$$SCYLLA_ADMIN_PASSWORD\" -f /init.cql",
+      ]
+    restart: "no"
+
+volumes:
+  scylla-data:

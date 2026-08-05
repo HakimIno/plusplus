@@ -168,7 +168,8 @@ impl Database for SqliteDb {
             // most `max_rows` rows; dropping the stream early cancels the rest of the fetch.
             let mut stream = sqlx::query(AssertSqlSafe(sql.to_string())).fetch(&self.pool);
             let mut columns: Vec<ColumnMeta> = Vec::new();
-            let mut data: Vec<Vec<Value>> = Vec::new();
+            let mut data: Vec<Vec<Value>> =
+                Vec::with_capacity(super::initial_row_capacity(max_rows));
             let mut truncated = false;
             while let Some(row) = stream.try_next().await? {
                 if columns.is_empty() {
@@ -218,7 +219,8 @@ impl Database for SqliteDb {
         if returns_rows(sql) {
             let mut stream = sqlx::query(AssertSqlSafe(sql.to_string())).fetch(&self.pool);
             let mut columns: Vec<ColumnMeta> = Vec::new();
-            let mut data: Vec<Vec<Value>> = Vec::new();
+            let mut data: Vec<Vec<Value>> =
+                Vec::with_capacity(super::initial_row_capacity(max_rows));
             let mut truncated = false;
             loop {
                 tokio::select! {
