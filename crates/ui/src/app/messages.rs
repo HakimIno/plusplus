@@ -4,6 +4,7 @@ use super::*;
 
 impl DbGuiApp {
     pub(super) fn poll_messages(&mut self, ctx: &egui::Context) {
+        let mut streamed_batches = 0usize;
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 AppMessage::Connected {
@@ -289,40 +290,263 @@ impl DbGuiApp {
                     match result {
                         Ok(res) => {
                             // Promote the in-flight source and start from a clean edit slate.
+                            tab.stream = None;
                             tab.query_error = None;
                             tab.edits.source = tab.edits.pending_source.take();
                             tab.edits.clear();
                             let status = result_status(&res);
-                            let fetched = res.row_count() as u64;
-                            let truncated = res.truncated;
                             tab.set_result(res);
-                            // A short page proves the exact total immediately. Full pages keep
-                            // the independently computed background COUNT(*) when it arrives.
-                            if tab.edits.source.is_some() {
-                                let window = dbcore::parse_page_window(&tab.sql);
-                                if let Some(limit) =
-                                    window.and_then(|w| w.limit.map(|l| (w.offset, l)))
-                                {
-                                    let (offset, limit) = limit;
-                                    if fetched < limit && !truncated {
-                                        tab.total_rows = Some(offset + fetched);
-                                    }
-                                }
-                            }
                             if is_active {
                                 self.status_msg = status;
                                 self.error = None;
                             }
                         }
                         Err(e) => {
+                            tab.stream = None;
                             tab.view = TabView::Data;
                             tab.query_error = Some(e.clone());
-                            tab.total_rows = None;
                             if is_active {
                                 // Query failures already own the result surface. Keep the global
                                 // status strip quiet so the same error is not shown twice.
                                 self.error = None;
                                 self.status_msg = "Ready".to_string();
+                            }
+                        }
+                    }
+                }
+                AppMessage::QueryStreamStarted {
+                    tab_id,
+                    columns,
+                    append,
+                    seq,
+                } => {
+                    if seq != self.query_seq {
+                        continue;
+                    }
+                    let disconnected = self
+                        .tabs
+                        .iter()
+                        .find(|tab| tab.id == tab_id)
+                        .and_then(|tab| tab.conn_id.as_deref())
+                        .is_some_and(|id| {
+                            !self
+                                .active_connections
+                                .iter()
+                                .any(|connection| connection.config_id == id)
+                        });
+                    if disconnected {
+                        continue;
+                    }
+                    let is_active = self
+                        .tabs
+                        .get(self.active_query_tab)
+                        .is_some_and(|tab| tab.id == tab_id);
+                    let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+                        continue;
+                    };
+                    tab.query_error = None;
+                    tab.stream = Some(QueryStreamUi {
+                        seq,
+                        append,
+                        columns,
+                        pending_rows: Vec::new(),
+                        received_rows: 0,
+                    });
+                    if is_active {
+                        self.error = None;
+                    }
+                    ctx.request_repaint();
+                }
+                AppMessage::QueryRows { tab_id, rows, seq } => {
+                    if seq != self.query_seq {
+                        continue;
+                    }
+                    let disconnected = self
+                        .tabs
+                        .iter()
+                        .find(|tab| tab.id == tab_id)
+                        .and_then(|tab| tab.conn_id.as_deref())
+                        .is_some_and(|id| {
+                            !self
+                                .active_connections
+                                .iter()
+                                .any(|connection| connection.config_id == id)
+                        });
+                    if disconnected {
+                        continue;
+                    }
+                    let is_active = self
+                        .tabs
+                        .get(self.active_query_tab)
+                        .is_some_and(|tab| tab.id == tab_id);
+                    let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+                        continue;
+                    };
+                    let Some(stream) = tab.stream.as_ref().filter(|stream| stream.seq == seq)
+                    else {
+                        continue;
+                    };
+                    let append = stream.append;
+                    let columns = stream.columns.clone();
+                    let batch_len = rows.len();
+                    if append {
+                        let result = tab.result.get_or_insert_with(|| QueryResult {
+                            columns,
+                            ..QueryResult::default()
+                        });
+                        result.rows.extend(rows);
+                        tab.recompute_view();
+                        if let Some(stream) = tab.stream.as_mut() {
+                            stream.received_rows += batch_len;
+                        }
+                        streamed_batches += 1;
+                        ctx.request_repaint();
+                        // Do not drain an appended continuation in one egui frame. Replacement
+                        // batches stay hidden and are cheap to drain before their atomic swap.
+                        if streamed_batches >= 2 {
+                            return;
+                        }
+                    } else if let Some(stream) = tab.stream.as_mut() {
+                        stream.pending_rows.extend(rows);
+                        stream.received_rows += batch_len;
+                    }
+                    if is_active {
+                        self.error = None;
+                    }
+                }
+                AppMessage::QueryStreamFinished {
+                    tab_id,
+                    conn_id,
+                    sql,
+                    elapsed_ms,
+                    rows_loaded,
+                    page,
+                    result_limit,
+                    append,
+                    result,
+                    canceled,
+                    seq,
+                } => {
+                    let stale = seq != self.query_seq;
+                    if !stale {
+                        self.busy = Busy::Idle;
+                        self.querying_tab_id = None;
+                        self.query_cancel = None;
+                    }
+                    if canceled {
+                        if !stale {
+                            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                                tab.stream = None;
+                                tab.page_exhausted = false;
+                            }
+                            self.status_msg = if !append || rows_loaded == 0 {
+                                "Query cancelled".to_string()
+                            } else {
+                                format!("Query cancelled — {rows_loaded} rows loaded")
+                            };
+                            self.error = None;
+                        }
+                        continue;
+                    }
+                    match &result {
+                        Ok(rows) => self.record_history(
+                            dbcore::audit::AuditAction::Query,
+                            &conn_id,
+                            &sql,
+                            true,
+                            None,
+                            Some(*rows),
+                            elapsed_ms,
+                        ),
+                        Err(error) => self.record_history(
+                            dbcore::audit::AuditAction::Query,
+                            &conn_id,
+                            &sql,
+                            false,
+                            Some(error.clone()),
+                            None,
+                            elapsed_ms,
+                        ),
+                    }
+                    if stale {
+                        continue;
+                    }
+                    let is_active = self
+                        .tabs
+                        .get(self.active_query_tab)
+                        .is_some_and(|tab| tab.id == tab_id);
+                    let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+                        continue;
+                    };
+                    if tab.conn_id.as_deref().is_some_and(|id| {
+                        !self
+                            .active_connections
+                            .iter()
+                            .any(|connection| connection.config_id == id)
+                    }) {
+                        continue;
+                    }
+                    match result {
+                        Ok(_) => {
+                            let stream = tab.stream.take();
+                            // Replacement chunks are deliberately hidden while loading. Install
+                            // their complete result once, so Go never exposes a one-row interim
+                            // grid. Continuations were already appended chunk by chunk above.
+                            if !append {
+                                let mut stream = stream.unwrap_or(QueryStreamUi {
+                                    seq,
+                                    append: false,
+                                    columns: Vec::new(),
+                                    pending_rows: Vec::new(),
+                                    received_rows: 0,
+                                });
+                                let columns = Some(std::mem::take(&mut stream.columns))
+                                    .filter(|columns| !columns.is_empty())
+                                    .or_else(|| {
+                                        tab.result.as_ref().map(|result| result.columns.clone())
+                                    })
+                                    .unwrap_or_default();
+                                tab.edits.source = tab.edits.pending_source.take();
+                                tab.edits.clear();
+                                tab.set_result(QueryResult {
+                                    columns,
+                                    rows: stream.pending_rows,
+                                    ..QueryResult::default()
+                                });
+                            }
+                            let result = tab.result.get_or_insert_with(QueryResult::default);
+                            result.stats.elapsed_ms = elapsed_ms;
+                            result.stats.rows_affected = None;
+                            result.truncated = false;
+                            let total_rows = result.row_count() as u64;
+                            tab.page_exhausted = total_rows >= result_limit
+                                || page.limit.is_some_and(|limit| rows_loaded < limit);
+                            let status = result_status(result);
+                            tab.query_error = None;
+                            tab.recompute_view();
+                            if is_active {
+                                self.status_msg = status;
+                                self.error = None;
+                            }
+                        }
+                        Err(error) => {
+                            tab.stream = None;
+                            tab.page_exhausted = false;
+                            tab.view = TabView::Data;
+                            // A continuation/replacement failure should not cover useful rows
+                            // already on screen with an error page.
+                            if tab.result.is_some() {
+                                tab.query_error = None;
+                                if is_active {
+                                    self.status_msg = "Couldn’t load rows".to_string();
+                                    self.error = Some(error);
+                                }
+                            } else {
+                                tab.query_error = Some(error);
+                            }
+                            if is_active && tab.result.is_none() {
+                                self.status_msg = "Ready".to_string();
+                                self.error = None;
                             }
                         }
                     }
@@ -392,29 +616,6 @@ impl DbGuiApp {
                             // The transaction rolled back: nothing was written.
                             self.error = Some(format!("Import into {table} failed: {e}"));
                             self.status_msg = "Import failed".to_string();
-                        }
-                    }
-                }
-                AppMessage::PageCounted {
-                    tab_id,
-                    sql,
-                    total,
-                    seq,
-                } => {
-                    // A count from a superseded run must not clear the pending flag (a fresh
-                    // count for the same tab may still be in flight) or attach its total.
-                    if seq != self.query_seq {
-                        continue;
-                    }
-                    self.pending_page_counts.remove(&tab_id);
-                    let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
-                        continue;
-                    };
-                    // Ignore a count belonging to SQL that the user has since edited or
-                    // re-paged, and never attach a successful count to a failed query.
-                    if tab.sql.trim() == sql && tab.query_error.is_none() {
-                        if let Some(total) = total {
-                            tab.total_rows = Some(total);
                         }
                     }
                 }
@@ -535,6 +736,9 @@ impl DbGuiApp {
                             let source_tab = self.tabs.iter_mut().find(|t| t.id == tab_id);
                             let conn_id = source_tab.map(|tab| {
                                 tab.schema_editor = None;
+                                if matches!(tab.view, TabView::Structure | TabView::Indexes) {
+                                    tab.view = TabView::Data;
+                                }
                                 tab.conn_id.clone()
                             });
                             // Re-introspect that tab's connection to refresh the sidebar tree.

@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "@heroui/styles";
 
 @font-face {
   font-family: "JetBrains Mono";
@@ -8,101 +9,56 @@
   font-display: swap;
 }
 
-@font-face {
-  font-family: "Anuphan";
-  src: url("/fonts/anuphan-regular.ttf") format("truetype");
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Anuphan";
-  src: url("/fonts/anuphan-semibold.ttf") format("truetype");
-  font-weight: 600;
-  font-style: normal;
-  font-display: swap;
-}
-
 :root {
-  --background: #f7f1e8;
-  --foreground: #16232a;
-}
-
-* {
-  box-sizing: border-box;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
 }
 
 html {
   scroll-behavior: smooth;
-  background: var(--background);
 }
 
 body {
   margin: 0;
-  background: var(--background);
-  color: var(--foreground);
-  font-family: "Anuphan", ui-sans-serif, -apple-system, BlinkMacSystemFont,
-    "Segoe UI", sans-serif;
-  font-feature-settings: "kern" 1, "liga" 1;
+  font-family: var(--font-body), ui-sans-serif, system-ui, sans-serif;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
 }
 
-a,
-button {
-  -webkit-tap-highlight-color: transparent;
-}
-
-a:focus-visible,
-button:focus-visible {
-  outline: 3px solid #4968f2;
-  outline-offset: 4px;
-}
-
-::selection {
-  background: #d2f36a;
-  color: #16232a;
+h1,
+h2,
+h3,
+.font-display {
+  font-family: var(--font-display), var(--font-body), ui-sans-serif, system-ui,
+    sans-serif;
+  letter-spacing: -0.035em;
 }
 
 .font-mono {
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--font-mono);
 }
 
-.hero-window {
-  animation: hero-window-in 700ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+.hero-glow {
+  background:
+    radial-gradient(
+      60% 50% at 70% 0%,
+      color-mix(in oklab, var(--accent) 22%, transparent),
+      transparent 70%
+    ),
+    radial-gradient(
+      45% 40% at 15% 20%,
+      color-mix(in oklab, var(--accent) 12%, transparent),
+      transparent 65%
+    );
+}
+
+.product-frame {
+  animation: product-in 900ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .theme-track {
-  scrollbar-color: #657276 transparent;
   scrollbar-width: thin;
-}
-
-.theme-track::-webkit-scrollbar {
-  height: 5px;
-}
-
-.theme-track::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: #657276;
-}
-
-.database-stage {
-  background-image:
-    linear-gradient(rgba(247, 241, 232, 0.07) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(247, 241, 232, 0.07) 1px, transparent 1px);
-  background-size: 72px 72px;
-}
-
-@keyframes hero-window-in {
-  from {
-    opacity: 0;
-    transform: translateY(28px) rotate(-2deg);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) rotate(-2deg);
-  }
+  scrollbar-color: color-mix(in oklab, var(--foreground) 20%, transparent)
+    transparent;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -110,7 +66,18 @@ button:focus-visible {
     scroll-behavior: auto;
   }
 
-  .hero-window {
+  .product-frame {
     animation: none;
+  }
+}
+
+@keyframes product-in {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }

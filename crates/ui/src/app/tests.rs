@@ -13,8 +13,8 @@ impl dbcore::Database for DummyDb {
         unreachable!()
     }
     async fn execute_capped(&self, _sql: &str, _max_rows: usize) -> dbcore::Result<QueryResult> {
-        // Background tasks (queries, pager counts) may legitimately land here in tests
-        // that only assert on the UI-side state; an empty result keeps them quiet.
+        // Background queries may legitimately land here in tests that only assert on the
+        // UI-side state; an empty result keeps them quiet.
         Ok(QueryResult::default())
     }
     async fn execute_transaction(&self, stmts: &[String]) -> dbcore::Result<usize> {
@@ -88,6 +88,9 @@ fn fake_schema(tables: usize, cols: usize) -> SchemaTree {
                         data_type: "TEXT".into(),
                         nullable: c % 2 == 0,
                         primary_key: c == 0,
+                        default: None,
+                        check: None,
+                        comment: None,
                     })
                     .collect(),
                 indexes: vec![IndexInfo {
@@ -673,6 +676,9 @@ fn col(name: &str, ty: &str, nullable: bool, pk: bool) -> ColumnInfo {
         data_type: ty.into(),
         nullable,
         primary_key: pk,
+        default: None,
+        check: None,
+        comment: None,
     }
 }
 
@@ -988,9 +994,9 @@ fn import_toggling_header_rereads_the_file_and_remaps() {
     std::fs::remove_file(&path).ok();
 }
 
-/// The pager rewrites the tab's LIMIT/OFFSET in place and never runs past a known end.
+/// The pager rewrites the tab's LIMIT/OFFSET exactly and keeps navigation server-side.
 #[test]
-fn pager_rewrites_sql_and_respects_total() {
+fn pager_rewrites_sql_for_navigation_and_custom_window() {
     let mut app = DbGuiApp::construct();
     app.active_connections.push(ActiveConnection {
         config_id: "c1".into(),
@@ -1002,13 +1008,13 @@ fn pager_rewrites_sql_and_respects_total() {
     {
         let tab = app.tab_mut();
         tab.conn_id = Some("c1".into());
+        tab.kind = crate::components::QueryTabKind::Table;
         tab.sql = "SELECT * FROM table_0 LIMIT 100;".into();
         tab.edits.source = Some(EditSource {
             schema: None,
             table: "table_0".into(),
             pk_cols: vec!["field_0".into()],
         });
-        tab.total_rows = Some(250);
     }
 
     let go = |app: &mut DbGuiApp, action: Action| {
@@ -1018,61 +1024,32 @@ fn pager_rewrites_sql_and_respects_total() {
 
     go(&mut app, Action::Page(PageNav::Next));
     assert_eq!(app.tab().sql, "SELECT * FROM table_0 LIMIT 100 OFFSET 100;");
-    assert_eq!(app.tab().total_rows, Some(250));
-    assert!(
-        !app.pending_page_counts.contains(&app.tab().id),
-        "paging with a known total must not issue another COUNT(*)"
-    );
-    go(&mut app, Action::Page(PageNav::Last));
-    assert_eq!(app.tab().sql, "SELECT * FROM table_0 LIMIT 100 OFFSET 200;");
-    // Past the known end → no-op.
-    go(&mut app, Action::Page(PageNav::Next));
-    assert_eq!(app.tab().sql, "SELECT * FROM table_0 LIMIT 100 OFFSET 200;");
     go(&mut app, Action::Page(PageNav::Prev));
-    assert_eq!(app.tab().sql, "SELECT * FROM table_0 LIMIT 100 OFFSET 100;");
-    go(&mut app, Action::Page(PageNav::First));
     assert_eq!(app.tab().sql, "SELECT * FROM table_0 LIMIT 100;");
-    // Changing the page size snaps the offset onto the new grid.
-    go(&mut app, Action::Page(PageNav::Last));
-    go(&mut app, Action::SetPageSize(500));
-    assert_eq!(app.tab().sql, "SELECT * FROM table_0 LIMIT 500;");
+    go(
+        &mut app,
+        Action::SetPageWindow {
+            limit: 75_000,
+            offset: 1_250,
+        },
+    );
+    assert_eq!(
+        app.tab().sql,
+        "SELECT * FROM table_0 LIMIT 75000 OFFSET 1250;"
+    );
     // The rewrite keeps the tab editable (a fresh pending source is derived).
     assert!(app.tab().edits.pending_source.is_some());
-}
-
-#[test]
-fn background_page_count_updates_only_the_matching_query() {
-    let mut app = DbGuiApp::construct();
-    let tab_id = app.tab().id;
-    app.tab_mut().sql = "SELECT * FROM table_0 LIMIT 100;".into();
-    app.pending_page_counts.insert(tab_id);
-
-    app.tx
-        .send(AppMessage::PageCounted {
-            tab_id,
-            sql: "SELECT * FROM table_0 LIMIT 100;".into(),
-            total: Some(12_345),
-            seq: app.query_seq,
-        })
-        .unwrap();
-    app.poll_messages(&egui::Context::default());
-    assert_eq!(app.tab().total_rows, Some(12_345));
-    assert!(!app.pending_page_counts.contains(&tab_id));
-
-    app.tab_mut().sql = "SELECT * FROM table_0 WHERE active = 1 LIMIT 100;".into();
-    app.tx
-        .send(AppMessage::PageCounted {
-            tab_id,
-            sql: "SELECT * FROM table_0 LIMIT 100;".into(),
-            total: Some(99_999),
-            seq: app.query_seq,
-        })
-        .unwrap();
-    app.poll_messages(&egui::Context::default());
+    go(
+        &mut app,
+        Action::SetPageWindow {
+            limit: MAX_FETCH_ROWS as u64 + 1,
+            offset: 0,
+        },
+    );
     assert_eq!(
-        app.tab().total_rows,
-        Some(12_345),
-        "a late count from the previous SQL must be ignored"
+        app.tab().sql,
+        "SELECT * FROM table_0 LIMIT 75000 OFFSET 1250;",
+        "the materialization cap must reject an oversized page"
     );
 }
 
@@ -1105,7 +1082,6 @@ fn pager_survives_on_pk_less_table() {
             table: "table_0".into(),
             pk_cols: Vec::new(),
         });
-        tab.total_rows = Some(250);
     }
     assert!(
         !app.tab().edits.editable(),
@@ -1797,11 +1773,18 @@ fn adaptive_editor_renders_on_the_expected_side_of_results() {
     );
     assert!(
         query.get_by_label("SQL workspace").rect().center().y
-            < query.get_by_label("Empty state mascot").rect().center().y
+            < query.get_by_label("Empty state mark").rect().center().y
     );
     assert!(
         query.query_by_label("SQL line numbers").is_some(),
         "the query editor must expose its line-number gutter"
+    );
+    assert!(
+        query.get_by_label("SQL line numbers").rect().center().y
+            < query.get_by_label("Empty state mark").rect().center().y
+            && query.get_by_label("Empty state mark").rect().center().y
+                < query.get_by_label("Live log").rect().center().y,
+        "the live log must dock below the query result, not inside the SQL editor"
     );
     assert!(
         query.get_by_label("SQL line numbers").rect().left()
@@ -1821,16 +1804,17 @@ fn adaptive_editor_renders_on_the_expected_side_of_results() {
         Some(fake_result(2, 2)),
         egui::vec2(1000.0, 700.0),
     );
+    table.get_by_label("col0");
     assert!(
-        table.get_by_label("col0").rect().center().y
-            < table.get_by_label("SQL workspace").rect().center().y
+        table.query_by_label("SQL workspace").is_none()
+            && table.query_by_label("SQL line numbers").is_none()
+            && table.query_by_label("Save query").is_none(),
+        "table tabs must reserve SQL authoring for Query tabs"
     );
     assert!(
-        (table.get_by_label("Save query").rect().center().y
-            - table.get_by_label("SQL workspace").rect().center().y)
-            .abs()
-            < 0.1,
-        "table-query tabs and actions must share one footer row"
+        table.get_by_label("col0").rect().center().y
+            < table.get_by_label("Live log").rect().center().y,
+        "table tabs must keep a standalone Live log below the grid"
     );
 
     let compact = build(
@@ -1839,13 +1823,107 @@ fn adaptive_editor_renders_on_the_expected_side_of_results() {
         egui::vec2(800.0, 500.0),
     );
     let editor_y = compact.get_by_label("SQL workspace").rect().center().y;
-    let result_y = compact.get_by_label("Empty state mascot").rect().center().y;
+    let result_y = compact.get_by_label("Empty state mark").rect().center().y;
     assert!(editor_y < result_y);
     assert!(result_y - editor_y > 80.0, "compact result area collapsed");
 }
 
 #[test]
-fn table_editor_stack_starts_with_the_result_mode_bar() {
+fn live_log_is_session_only_and_independent_of_history_preferences() {
+    let mut app = DbGuiApp::construct();
+    app.history_enabled = false;
+
+    app.record_history(
+        dbcore::audit::AuditAction::Query,
+        "sqlite-workspace",
+        "SELECT * FROM categories LIMIT 100",
+        true,
+        None,
+        Some(12),
+        4.2,
+    );
+
+    assert_eq!(app.live_log.len(), 1);
+    assert_eq!(app.live_log[0].sql, "SELECT * FROM categories LIMIT 100");
+    assert_eq!(app.live_log[0].rows, Some(12));
+}
+
+#[test]
+fn live_log_can_expand_beyond_the_old_fixed_height_cap() {
+    assert!(super::panels::live_log_max_size(900.0) > 700.0);
+    assert_eq!(super::panels::live_log_max_size(100.0), 32.0);
+}
+
+#[test]
+fn postgres_type_picker_covers_native_and_alias_types() {
+    let types = super::panels::db_type_options(dbcore::DbKind::Postgres);
+    for expected in [
+        "bool",
+        "bytea",
+        "char",
+        "date",
+        "float4",
+        "float8",
+        "int2",
+        "int4",
+        "int8",
+        "interval",
+        "json",
+        "jsonb",
+        "numeric",
+        "text",
+        "time",
+        "timestamp",
+        "timestamptz",
+        "timetz",
+        "uuid",
+        "varchar",
+        "xml",
+    ] {
+        assert!(
+            types.contains(&expected),
+            "missing PostgreSQL type {expected}"
+        );
+    }
+    assert!(
+        types.len() >= 50,
+        "the PostgreSQL picker regressed to a short preset list"
+    );
+}
+
+#[test]
+fn live_log_can_close_from_its_header_and_reopen_from_the_title_bar() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+        });
+    harness.run_steps(4);
+
+    harness.get_by_label("Close Live log").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Live log").is_none());
+
+    harness.get_by_label("Live log panel").click();
+    harness.run_steps(2);
+    harness.get_by_label("Live log");
+}
+
+#[test]
+fn table_tab_keeps_data_controls_without_a_query_console() {
     use egui_kittest::kittest::Queryable;
 
     let mut app = DbGuiApp::construct();
@@ -1878,17 +1956,22 @@ fn table_editor_stack_starts_with_the_result_mode_bar() {
 
     let grid_y = harness.get_by_label("col0").rect().center().y;
     let modes_y = harness.get_by_label("Data").rect().center().y;
-    let actions_y = harness.get_by_label("Save query").rect().center().y;
-    let editor_y = harness.get_by_label("SQL line numbers").rect().center().y;
+    let log_y = harness.get_by_label("Live log").rect().center().y;
     assert!(
-        grid_y < modes_y && modes_y < actions_y && actions_y < editor_y,
-        "the resizable bottom stack must begin with result modes, followed by query actions and SQL"
+        grid_y < modes_y && modes_y < log_y,
+        "the table layout must be Grid, Data / Structure / Indexes, then Live log"
+    );
+    assert!(
+        harness.query_by_label("SQL workspace").is_none()
+            && harness.query_by_label("SQL line numbers").is_none()
+            && harness.query_by_label("Run").is_none(),
+        "table tabs must not render query-console controls"
     );
 }
 
 /// Regression: an open object designer owns the whole tab — the SQL console and the
-/// Data/Message/Chart switch must not render around it. On a Table tab the
-/// Data/Structure/Edit Table bar stays as the way back out.
+/// Data/Message/Chart switch must not render around it. Existing tables edit their schema
+/// directly through the persistent Data/Structure/Indexes bar.
 #[test]
 fn open_designer_owns_the_tab() {
     use egui_kittest::kittest::Queryable;
@@ -1909,6 +1992,9 @@ fn open_designer_owns_the_tab() {
             });
             let info = app.structure_table(0).cloned().expect("table resolves");
             app.apply_action(Action::OpenEditTable(info));
+            // Reproduce a persisted/one-frame-stale Data selection. Existing tables must still
+            // use the Structure grid and never fall back to the retired form editor.
+            app.tab_mut().view = TabView::Data;
         } else {
             app.apply_action(Action::OpenNewTable);
         }
@@ -1942,11 +2028,39 @@ fn open_designer_owns_the_tab() {
         "the result-mode switch is meaningless while designing"
     );
 
-    let table = build(crate::components::QueryTabKind::Table);
+    let mut table = build(crate::components::QueryTabKind::Table);
     table.get_by_label("Structure");
+    table.get_by_label("Indexes");
+    table.get_by_label("Column");
+    for header in [
+        "column_name",
+        "data_type",
+        "is_nullable",
+        "check",
+        "column_default",
+        "foreign_key",
+        "comment",
+    ] {
+        table.get_by_label(header);
+    }
+    assert!(table.query_by_label("Foreign Keys").is_none());
+    assert!(table.query_by_label("Columns").is_none());
+    assert!(table.query_by_label("Table name:").is_none());
+    assert!(table.query_by_label("Add Column").is_none());
+    assert!(table.query_by_label("Edit Table").is_none());
+    assert!(table.query_by_label("Preview SQL").is_none());
+    assert!(table.query_by_label("Discard").is_none());
     assert!(
         table.query_by_label("SQL line numbers").is_none(),
         "the SQL editor must hide while designing a table"
+    );
+    table.get_by_label("Indexes").click();
+    table.run_steps(4);
+    table.get_by_label("Index");
+    table.get_by_label("Live log");
+    assert!(
+        table.query_by_label("Column").is_none(),
+        "Indexes must be a separate surface from Structure columns"
     );
 }
 
@@ -2046,19 +2160,330 @@ fn superseded_query_result_never_touches_ui_state() {
     );
 }
 
-/// Cmd+Enter / Cmd+R land in `RunQuery` unconditionally; while any operation is in flight
-/// they must refuse (with a status hint) instead of racing a second run against the first.
+/// Replacement chunks stay off-screen until the terminal message installs the complete page.
+#[test]
+fn replacement_stream_stays_hidden_until_finished() {
+    let mut app = DbGuiApp::construct();
+    let tab_id = app.tab().id;
+    app.query_seq = 7;
+    app.busy = Busy::Querying;
+    app.querying_tab_id = Some(tab_id);
+    app.tx
+        .send(AppMessage::QueryStreamStarted {
+            tab_id,
+            columns: vec![ColumnMeta {
+                name: "id".into(),
+                type_name: "INTEGER".into(),
+            }],
+            append: false,
+            seq: 7,
+        })
+        .unwrap();
+    for id in 1..=3 {
+        app.tx
+            .send(AppMessage::QueryRows {
+                tab_id,
+                rows: vec![vec![Value::Int(id)]],
+                seq: 7,
+            })
+            .unwrap();
+    }
+    app.poll_messages(&egui::Context::default());
+    assert!(app.tab().result.is_none());
+    assert_eq!(app.busy, Busy::Querying);
+
+    app.tx
+        .send(AppMessage::QueryStreamFinished {
+            tab_id,
+            conn_id: String::new(),
+            sql: "SELECT * FROM items LIMIT 3 OFFSET 0".into(),
+            elapsed_ms: 12.5,
+            rows_loaded: 3,
+            page: dbcore::PageWindow {
+                limit: Some(3),
+                offset: 0,
+            },
+            result_limit: 3,
+            append: false,
+            result: Ok(3),
+            canceled: false,
+            seq: 7,
+        })
+        .unwrap();
+
+    app.poll_messages(&egui::Context::default());
+    let result = app.tab().result.as_ref().unwrap();
+    assert_eq!(result.row_count(), 3);
+    assert_eq!(result.stats.elapsed_ms, 12.5);
+    assert_eq!(app.busy, Busy::Idle);
+    assert_eq!(app.querying_tab_id, None);
+}
+
+#[test]
+fn canceled_replacement_keeps_the_previous_result() {
+    let mut app = DbGuiApp::construct();
+    let tab_id = app.tab().id;
+    app.tab_mut().set_result(QueryResult {
+        columns: vec![ColumnMeta {
+            name: "id".into(),
+            type_name: "INTEGER".into(),
+        }],
+        rows: vec![vec![Value::Int(7)]],
+        ..QueryResult::default()
+    });
+    app.query_seq = 2;
+    app.busy = Busy::Querying;
+    app.querying_tab_id = Some(tab_id);
+    app.tx
+        .send(AppMessage::QueryStreamStarted {
+            tab_id,
+            columns: vec![ColumnMeta {
+                name: "id".into(),
+                type_name: "INTEGER".into(),
+            }],
+            append: false,
+            seq: 2,
+        })
+        .unwrap();
+    app.tx
+        .send(AppMessage::QueryRows {
+            tab_id,
+            rows: vec![vec![Value::Int(1)]],
+            seq: 2,
+        })
+        .unwrap();
+    app.tx
+        .send(AppMessage::QueryStreamFinished {
+            tab_id,
+            conn_id: String::new(),
+            sql: "SELECT * FROM items LIMIT 1000 OFFSET 0".into(),
+            elapsed_ms: 4.0,
+            rows_loaded: 1,
+            page: dbcore::PageWindow {
+                limit: Some(1000),
+                offset: 0,
+            },
+            result_limit: 1000,
+            append: false,
+            result: Err("query cancelled".into()),
+            canceled: true,
+            seq: 2,
+        })
+        .unwrap();
+
+    app.poll_messages(&egui::Context::default());
+    assert_eq!(
+        app.tab().result.as_ref().unwrap().rows,
+        vec![vec![Value::Int(7)]]
+    );
+    assert_eq!(app.status_msg, "Query cancelled");
+    assert!(app.tab().query_error.is_none());
+    assert_eq!(app.busy, Busy::Idle);
+}
+
+#[test]
+fn replacement_stream_keeps_previous_rows_until_completion() {
+    let mut app = DbGuiApp::construct();
+    let tab_id = app.tab().id;
+    app.tab_mut().set_result(QueryResult {
+        columns: vec![ColumnMeta {
+            name: "id".into(),
+            type_name: "INTEGER".into(),
+        }],
+        rows: vec![vec![Value::Int(1)], vec![Value::Int(2)]],
+        ..QueryResult::default()
+    });
+    app.query_seq = 4;
+    app.busy = Busy::Querying;
+    app.querying_tab_id = Some(tab_id);
+    app.tx
+        .send(AppMessage::QueryStreamStarted {
+            tab_id,
+            columns: vec![ColumnMeta {
+                name: "id".into(),
+                type_name: "INTEGER".into(),
+            }],
+            append: false,
+            seq: 4,
+        })
+        .unwrap();
+    app.poll_messages(&egui::Context::default());
+    assert_eq!(
+        app.tab().result.as_ref().unwrap().row_count(),
+        2,
+        "starting a replacement must not flash an empty table"
+    );
+
+    app.tx
+        .send(AppMessage::QueryRows {
+            tab_id,
+            rows: vec![vec![Value::Int(9)]],
+            seq: 4,
+        })
+        .unwrap();
+    app.poll_messages(&egui::Context::default());
+    assert_eq!(
+        app.tab().result.as_ref().unwrap().rows,
+        vec![vec![Value::Int(1)], vec![Value::Int(2)]],
+        "partial replacement batches must remain hidden"
+    );
+    app.tx
+        .send(AppMessage::QueryStreamFinished {
+            tab_id,
+            conn_id: String::new(),
+            sql: "SELECT * FROM items LIMIT 1".into(),
+            elapsed_ms: 1.0,
+            rows_loaded: 1,
+            page: dbcore::PageWindow {
+                limit: Some(1),
+                offset: 0,
+            },
+            result_limit: 1,
+            append: false,
+            result: Ok(1),
+            canceled: false,
+            seq: 4,
+        })
+        .unwrap();
+    app.poll_messages(&egui::Context::default());
+    assert_eq!(
+        app.tab().result.as_ref().unwrap().rows,
+        vec![vec![Value::Int(9)]],
+        "the completed page replaces the grid once"
+    );
+}
+
+#[test]
+fn load_more_appends_without_rewriting_visible_sql() {
+    let mut app = DbGuiApp::construct();
+    app.active_connections.push(ActiveConnection {
+        config_id: "c1".into(),
+        name: "test".into(),
+        db: Arc::new(DummyDb),
+        schema: fake_schema(1, 1),
+        databases: Vec::new(),
+    });
+    {
+        let tab = app.tab_mut();
+        tab.conn_id = Some("c1".into());
+        tab.kind = crate::components::QueryTabKind::Table;
+        tab.sql = "SELECT * FROM table_0 LIMIT 1000;".into();
+        tab.edits.source = Some(EditSource {
+            schema: None,
+            table: "table_0".into(),
+            pk_cols: vec!["field_0".into()],
+        });
+        tab.set_result(fake_result(100, 1));
+    }
+
+    app.status_msg = "100 rows".into();
+    app.load_more_rows();
+    assert_eq!(app.tab().sql, "SELECT * FROM table_0 LIMIT 1000;");
+    assert!(app
+        .tab()
+        .stream
+        .as_ref()
+        .is_some_and(|stream| stream.append));
+    assert_eq!(app.busy, Busy::Querying);
+    assert_eq!(app.status_msg, "100 rows");
+}
+
+#[test]
+fn load_more_never_exceeds_the_user_limit() {
+    let mut app = DbGuiApp::construct();
+    {
+        let tab = app.tab_mut();
+        tab.kind = crate::components::QueryTabKind::Table;
+        tab.sql = "SELECT * FROM table_0 LIMIT 100;".into();
+        tab.edits.source = Some(EditSource {
+            schema: None,
+            table: "table_0".into(),
+            pk_cols: vec!["field_0".into()],
+        });
+        tab.set_result(fake_result(100, 1));
+    }
+
+    app.load_more_rows();
+    assert_eq!(app.tab().result.as_ref().unwrap().row_count(), 100);
+    assert!(app.tab().page_exhausted);
+    assert!(app.tab().stream.is_none());
+    assert_eq!(app.busy, Busy::Idle);
+}
+
+#[test]
+fn continuation_stream_appends_and_marks_a_short_page_exhausted() {
+    let mut app = DbGuiApp::construct();
+    let tab_id = app.tab().id;
+    app.tab_mut().set_result(QueryResult {
+        columns: vec![ColumnMeta {
+            name: "id".into(),
+            type_name: "INTEGER".into(),
+        }],
+        rows: vec![vec![Value::Int(1)], vec![Value::Int(2)]],
+        ..QueryResult::default()
+    });
+    app.tab_mut().selection.select_one(0);
+    app.query_seq = 8;
+    app.busy = Busy::Querying;
+    app.querying_tab_id = Some(tab_id);
+    app.tx
+        .send(AppMessage::QueryStreamStarted {
+            tab_id,
+            columns: vec![ColumnMeta {
+                name: "id".into(),
+                type_name: "INTEGER".into(),
+            }],
+            append: true,
+            seq: 8,
+        })
+        .unwrap();
+    app.tx
+        .send(AppMessage::QueryRows {
+            tab_id,
+            rows: vec![vec![Value::Int(3)]],
+            seq: 8,
+        })
+        .unwrap();
+    app.tx
+        .send(AppMessage::QueryStreamFinished {
+            tab_id,
+            conn_id: String::new(),
+            sql: "SELECT * FROM items LIMIT 2 OFFSET 2".into(),
+            elapsed_ms: 2.0,
+            rows_loaded: 1,
+            page: dbcore::PageWindow {
+                limit: Some(2),
+                offset: 2,
+            },
+            result_limit: 3,
+            append: true,
+            result: Ok(1),
+            canceled: false,
+            seq: 8,
+        })
+        .unwrap();
+
+    app.poll_messages(&egui::Context::default());
+    assert_eq!(app.tab().result.as_ref().unwrap().row_count(), 3);
+    assert!(app.tab().selection.contains(0));
+    assert!(app.tab().page_exhausted);
+    assert_eq!(app.busy, Busy::Idle);
+}
+
+/// Cmd+Enter / Cmd+R land in `RunQuery` unconditionally; while a query is in flight they must
+/// refuse silently instead of racing a second run or exposing background prefetch state.
 #[test]
 fn run_query_is_refused_while_busy() {
     let mut app = DbGuiApp::construct();
     app.tab_mut().sql = "SELECT 1".into();
     app.busy = Busy::Querying;
+    app.status_msg = "512 rows".into();
     app.apply_action(Action::RunQuery);
     assert_eq!(
         app.query_seq, 0,
         "no new run may start while one is in flight"
     );
-    assert!(app.status_msg.contains("already running"));
+    assert_eq!(app.status_msg, "512 rows");
 }
 
 #[test]
@@ -2292,9 +2717,8 @@ fn structure_table_resolves_source() {
     assert!(app.structure_table(0).is_none());
 }
 
-/// Render the Structure view headlessly (a table tab switched to Structure mode) and
-/// capture ID clashes between its columns/indexes grids. Also checks the mode survives
-/// drawing — `view_mode_bar` must not force it back to Data while the table resolves.
+/// Render direct Structure editing headlessly and ensure selecting the mode installs the
+/// existing table editor without an intermediate read-only surface or ID clashes.
 #[test]
 fn probe_structure_view_id_clash() {
     let ctx = egui::Context::default();
@@ -2302,6 +2726,7 @@ fn probe_structure_view_id_clash() {
     crate::style::apply(&ctx);
 
     let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
     let db: std::sync::Arc<dyn dbcore::Database> = std::sync::Arc::new(DummyDb);
     app.active_connections.push(ActiveConnection {
         config_id: "c1".into(),
@@ -2344,6 +2769,11 @@ fn probe_structure_view_id_clash() {
     }
 
     assert!(app.tab().view == TabView::Structure);
+    assert!(matches!(
+        app.tab().schema_editor.as_ref(),
+        Some(ObjectEditor::Table(editor))
+            if editor.active_tab == crate::schema::SchemaTab::Columns
+    ));
     clashes.sort();
     clashes.dedup();
     assert!(
@@ -2353,9 +2783,98 @@ fn probe_structure_view_id_clash() {
     );
 }
 
-/// Render the inline schema editor headlessly (Edit Table now occupies the central
-/// panel instead of a dialog) across its three tabs, catching panics and ID clashes.
-/// Also checks it stays open across frames and closes via CancelSchema.
+#[test]
+fn structure_rows_use_data_grid_delete_keys() {
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    let schema = fake_schema(1, 3);
+    let table = schema.tables[0].clone();
+    let db: std::sync::Arc<dyn dbcore::Database> = std::sync::Arc::new(DummyDb);
+    app.active_connections.push(ActiveConnection {
+        config_id: "c1".into(),
+        name: "one".into(),
+        db,
+        databases: Vec::new(),
+        schema,
+    });
+    app.tab_mut().conn_id = Some("c1".into());
+    app.tab_mut().kind = crate::components::QueryTabKind::Table;
+    app.tab_mut().edits.source = Some(EditSource {
+        schema: None,
+        table: table.name.clone(),
+        pk_cols: vec!["field_0".into()],
+    });
+    app.apply_action(Action::OpenEditTable(table));
+    let editor = match app.tab_mut().schema_editor.as_mut() {
+        Some(ObjectEditor::Table(editor)) => editor,
+        _ => panic!("table editor should be open"),
+    };
+    editor.grid_selection = Some(crate::schema::SchemaGridSelection {
+        tab: crate::schema::SchemaTab::Columns,
+        row: 1,
+    });
+
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::Delete, egui::Modifiers::NONE)],
+    );
+    let dropped = match app.tab().schema_editor.as_ref() {
+        Some(ObjectEditor::Table(editor)) => editor.columns[1].drop,
+        _ => false,
+    };
+    assert!(dropped, "Delete marks the selected existing column");
+
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::Delete, egui::Modifiers::NONE)],
+    );
+    let restored = match app.tab().schema_editor.as_ref() {
+        Some(ObjectEditor::Table(editor)) => !editor.columns[1].drop,
+        _ => false,
+    };
+    assert!(restored, "pressing Delete again restores the marked column");
+
+    if let Some(ObjectEditor::Table(editor)) = app.tab_mut().schema_editor.as_mut() {
+        editor.columns[1].name = "renamed_field".into();
+    }
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::S, egui::Modifiers::COMMAND)],
+    );
+    assert!(
+        app.schema_pending.is_some(),
+        "Cmd/Ctrl+S previews schema changes like Data-grid edits"
+    );
+    app.apply_action(Action::CancelSchema);
+
+    if let Some(ObjectEditor::Table(editor)) = app.tab_mut().schema_editor.as_mut() {
+        editor.columns[1].name = "discard_me".into();
+    }
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
+    );
+    let reset_name = match app.tab().schema_editor.as_ref() {
+        Some(ObjectEditor::Table(editor)) => editor.columns[1].name.as_str(),
+        _ => "",
+    };
+    assert_eq!(reset_name, "field_1");
+    assert!(app.tab().view == TabView::Structure);
+}
+
+/// Render the create-table editor across its local tabs, catching panics and ID clashes.
+/// Existing table tabs promote Structure and Indexes to their persistent result bar instead.
 #[test]
 fn probe_inline_schema_editor() {
     let ctx = egui::Context::default();
@@ -2380,8 +2899,7 @@ fn probe_inline_schema_editor() {
             pk_cols: vec!["field_0".into()],
         });
     }
-    let info = app.structure_table(0).cloned().expect("table resolves");
-    app.apply_action(Action::OpenEditTable(info));
+    app.apply_action(Action::OpenNewTable);
     assert!(app.tab().schema_editor.is_some());
 
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
@@ -3211,8 +3729,16 @@ fn run_frame(
     events: Vec<egui::Event>,
 ) -> egui::FullOutput {
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+    let modifiers = events
+        .iter()
+        .find_map(|event| match event {
+            egui::Event::Key { modifiers, .. } => Some(*modifiers),
+            _ => None,
+        })
+        .unwrap_or_default();
     let raw = egui::RawInput {
         screen_rect: Some(screen),
+        modifiers,
         events,
         ..Default::default()
     };
@@ -3852,6 +4378,9 @@ fn snapshot_erd_views() {
         data_type: ty.into(),
         nullable: !pk,
         primary_key: pk,
+        default: None,
+        check: None,
+        comment: None,
     };
     let fk = |cols: &[&str], ref_table: &str| dbcore::ForeignKeyInfo {
         name: format!("fk_{ref_table}"),
@@ -4175,6 +4704,36 @@ fn sidebar_history_tab_owns_the_cache() {
     );
 }
 
+#[test]
+fn query_history_groups_newest_first_by_local_day_and_filters_entries() {
+    let entry = |at: &str, conn: &str, sql: &str| dbcore::history::HistoryEntry {
+        at: at.into(),
+        conn_id: conn.into(),
+        conn_name: conn.into(),
+        sql: sql.into(),
+        ok: true,
+        error: None,
+        rows: Some(1),
+        elapsed_ms: 1.0,
+    };
+    let entries = vec![
+        entry("2026-07-29T12:00:00+07:00", "archive", "SELECT old"),
+        entry("2026-08-11T09:00:00+07:00", "primary", "SELECT first"),
+        entry("2026-08-11T10:00:00+07:00", "primary", "SELECT newest"),
+    ];
+
+    let days = super::panels::grouped_history(&entries, "");
+    assert_eq!(days.len(), 2);
+    assert_eq!(days[0].entries, vec![2, 1]);
+    assert_eq!(days[1].entries, vec![0]);
+    assert!(days[0].label.contains("August"));
+    assert!(days[1].label.contains("July"));
+
+    let filtered = super::panels::grouped_history(&entries, "newest");
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].entries, vec![2]);
+}
+
 /// Show Diagram needs a live connection: without one it surfaces an error and
 /// opens nothing.
 #[test]
@@ -4217,6 +4776,9 @@ fn erd_refresh_keeps_positions_and_disconnect_keeps_snapshot() {
                 data_type: "INTEGER".into(),
                 nullable: false,
                 primary_key: true,
+                default: None,
+                check: None,
+                comment: None,
             }],
             indexes: Vec::new(),
             foreign_keys: Vec::new(),
@@ -4768,10 +5330,13 @@ fn shot_fold() {
     harness.run_steps(4);
     // Park the pointer over the gutter so the open regions show their chevrons.
     let gutter = harness.get_by_label("SQL line numbers").rect();
-    harness.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(
-        gutter.right() / 2.0,
-        gutter.center().y / 2.0,
-    )));
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(egui::pos2(
+            gutter.right() / 2.0,
+            gutter.center().y / 2.0,
+        )));
     harness.run_steps(3);
     harness.snapshot("sql_fold_open");
 

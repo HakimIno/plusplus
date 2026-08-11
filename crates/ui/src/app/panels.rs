@@ -1,7 +1,7 @@
 use super::{
     result_status, schema_table_key, Action, ActiveConnection, Busy, ConnField, ConnTestState,
     DbGuiApp, PageNav, ProductionGuardContinuation, QueryEditorPlacement, QueryTab,
-    SchemaTableDrag, SettingsSection, SidebarTab, TabView,
+    SchemaTableDrag, SettingsSection, SidebarTab, TabView, MAX_FETCH_ROWS,
 };
 use crate::components;
 use crate::filter::{self, FilterEvent};
@@ -32,8 +32,82 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
+fn live_log_clock(timestamp: &str) -> &str {
+    timestamp
+        .split_once('T')
+        .map(|(_, clock)| clock.trim_end_matches('Z'))
+        .unwrap_or(timestamp)
+}
+
+#[derive(Debug, PartialEq)]
+pub(super) struct HistoryDay {
+    pub(super) key: String,
+    pub(super) label: String,
+    pub(super) entries: Vec<usize>,
+}
+
+fn history_moment(timestamp: &str) -> (String, String, String) {
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(timestamp) else {
+        let day = timestamp.get(..10).unwrap_or(timestamp).to_string();
+        return (day.clone(), day, live_log_clock(timestamp).to_string());
+    };
+    let local = parsed.with_timezone(&chrono::Local);
+    let key = local.format("%Y-%m-%d").to_string();
+    let label = local.format("%e %B %Y").to_string().trim().to_string();
+    let clock = local
+        .format("%I:%M:%S %p")
+        .to_string()
+        .trim_start_matches('0')
+        .to_string();
+    (key, label, clock)
+}
+
+pub(super) fn grouped_history(
+    entries: &[dbcore::history::HistoryEntry],
+    filter: &str,
+) -> Vec<HistoryDay> {
+    let filter = filter.trim().to_lowercase();
+    let mut days: Vec<HistoryDay> = Vec::new();
+    for idx in (0..entries.len()).rev() {
+        let entry = &entries[idx];
+        let (key, label, _) = history_moment(&entry.at);
+        if !filter.is_empty()
+            && !entry.sql.to_lowercase().contains(&filter)
+            && !entry.conn_name.to_lowercase().contains(&filter)
+            && !entry
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .to_lowercase()
+                .contains(&filter)
+            && !label.to_lowercase().contains(&filter)
+        {
+            continue;
+        }
+        if let Some(day) = days.last_mut().filter(|day| day.key == key) {
+            day.entries.push(idx);
+        } else {
+            days.push(HistoryDay {
+                key,
+                label,
+                entries: vec![idx],
+            });
+        }
+    }
+    days
+}
+
 /// Width of the SQL gutter's fold chevron column, in points.
 const FOLD_CHEVRON_W: f32 = 12.0;
+
+const LIVE_LOG_HEADER_H: f32 = 32.0;
+const LIVE_LOG_DEFAULT_H: f32 = 124.0;
+
+pub(super) fn live_log_max_size(available: f32) -> f32 {
+    // Let the log consume almost the whole workspace when the user needs to inspect a long
+    // trace, while retaining a small usable strip of the primary surface.
+    (available - 96.0).max(LIVE_LOG_HEADER_H)
+}
 
 /// Whether a syntax error covers the caret — the token the user is in the middle of typing,
 /// which is half-written by definition and must not be flagged yet. The range is inclusive at
@@ -133,6 +207,30 @@ fn group_digits(n: u64) -> String {
         out.push(c);
     }
     out
+}
+
+#[derive(Clone)]
+struct PagerDraft {
+    limit: String,
+    offset: String,
+    focus_limit: bool,
+}
+
+fn parse_pager_window(limit: &str, offset: &str) -> Result<(u64, u64), &'static str> {
+    let parse = |value: &str| value.trim().replace([',', '_'], "").parse::<u64>();
+    let limit = parse(limit).map_err(|_| "Enter a valid limit.")?;
+    if limit == 0 {
+        return Err("Limit must be at least 1.");
+    }
+    if limit > MAX_FETCH_ROWS as u64 {
+        return Err("Limit can be at most 100,000.");
+    }
+    let offset = if offset.trim().is_empty() {
+        0
+    } else {
+        parse(offset).map_err(|_| "Enter a valid offset.")?
+    };
+    Ok((limit, offset))
 }
 
 /// Query failures belong in the result surface: this keeps the database's precise message
@@ -386,6 +484,16 @@ impl DbGuiApp {
                         }
                         if components::layout_toggle(
                             ui,
+                            self.show_live_log,
+                            components::LayoutSide::LiveLog,
+                            "Live log panel",
+                        )
+                        .clicked()
+                        {
+                            self.show_live_log = !self.show_live_log;
+                        }
+                        if components::layout_toggle(
+                            ui,
                             self.show_connection_tabs,
                             components::LayoutSide::Connections,
                             "Connection tabs",
@@ -624,7 +732,7 @@ impl DbGuiApp {
     }
 
     /// Thin status strip pinned to the very bottom edge: row count / selection / errors.
-    pub(super) fn status_bar(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
+    pub(super) fn status_bar(&mut self, root: &mut egui::Ui) {
         egui::Panel::bottom("status_bar").show_inside(root, |ui| {
             ui.add_space(2.0);
             ui.horizontal(|ui| {
@@ -641,25 +749,6 @@ impl DbGuiApp {
                             icons::show_colored(ui, icons::warning(), 13.0, palette::DANGER());
                             ui.label(egui::RichText::new(err).size(11.0).color(palette::DANGER()));
                         } else {
-                            if self.busy == Busy::Querying {
-                                ui.add(components::spinner(11.0));
-                                ui.add_space(4.0);
-                                if ui
-                                    .add(
-                                        egui::Label::new(
-                                            egui::RichText::new("Cancel")
-                                                .size(11.0)
-                                                .color(palette::DANGER()),
-                                        )
-                                        .sense(egui::Sense::click()),
-                                    )
-                                    .on_hover_text("Abort the running query")
-                                    .clicked()
-                                {
-                                    actions.push(Action::CancelQuery);
-                                }
-                                ui.add_space(4.0);
-                            }
                             icons::show_native(ui, icons::table(), 12.0);
                             ui.label(
                                 egui::RichText::new(&self.status_msg)
@@ -715,10 +804,9 @@ impl DbGuiApp {
         });
     }
 
-    /// Server-side pager, right-aligned in the view-mode bar. Shown only for table tabs
-    /// whose SQL is a paged simple read (`LIMIT n …` / `TOP n`) — exactly the queries
-    /// [`dbcore::with_page_window`] can rewrite. Page flips re-run against the server, so a
-    /// million-row table is browsed one page at a time instead of being fetched whole.
+    /// Server-side pager, right-aligned in the view-mode bar. The centre control opens a
+    /// compact Limit/Offset popover; values remain local until Go/Enter so editing never
+    /// fires a query per keystroke. Page flips re-run only the requested server-side window.
     fn pager(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let tab = self.tab();
         if tab.result.is_none()
@@ -732,68 +820,160 @@ impl DbGuiApp {
         let Some(limit) = win.limit.filter(|&l| l > 0) else {
             return;
         };
-        let shown = tab.result.as_ref().map_or(0, |r| r.row_count() as u64);
-        let total = tab.total_rows;
         let idle = self.busy == Busy::Idle;
         let at_start = win.offset == 0;
-        let has_more = match total {
-            Some(t) => win.offset + shown < t,
-            // Unknown total: a full page means there's probably another one.
-            None => shown == limit,
+        let has_more = !tab.page_exhausted;
+
+        let nav_button = |ui: &mut egui::Ui, right: bool, enabled: bool, hint: &str| {
+            let src = if right {
+                icons::arrow_right()
+            } else {
+                icons::arrow_left()
+            };
+            components::soft_icon_button(ui, src, hint, enabled && idle).clicked()
         };
 
-        // Right-to-left, so the first widget lands at the right edge:
-        // … ⏮ ◀ "1–100 of 1,234,567" ▶ ⏭ · size ▾
+        // Right-to-left puts Next at the outer edge, matching the familiar ‹ sliders › shape.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(4.0);
-            egui::ComboBox::from_id_salt("pager_size")
-                .width(70.0)
-                .selected_text(egui::RichText::new(format!("{limit} / page")).size(11.0))
-                .show_ui(ui, |ui| {
-                    for n in [100u64, 500, 1_000, 5_000, 10_000] {
-                        if ui.selectable_label(limit == n, group_digits(n)).clicked() && idle {
-                            actions.push(Action::SetPageSize(n));
-                        }
-                    }
-                });
-
-            let nav_btn = |ui: &mut egui::Ui, glyph: &str, enabled: bool, hint: &str| {
-                ui.add_enabled(
-                    enabled && idle,
-                    egui::Button::new(egui::RichText::new(glyph).size(11.0)),
-                )
-                .on_hover_text(hint.to_string())
-                .clicked()
-            };
-            if nav_btn(ui, "⏭", has_more && total.is_some(), "Last page") {
-                actions.push(Action::Page(PageNav::Last));
-            }
-            if nav_btn(ui, "▶", has_more, "Next page") {
+            if nav_button(ui, true, has_more, "Next page") {
                 actions.push(Action::Page(PageNav::Next));
             }
-            let range = if shown == 0 {
-                "0".to_string()
-            } else {
-                format!(
-                    "{}–{}",
-                    group_digits(win.offset + 1),
-                    group_digits(win.offset + shown)
-                )
-            };
-            let of = match total {
-                Some(t) => format!(" of {}", group_digits(t)),
-                None => " of ?".to_string(),
-            };
-            ui.label(
-                egui::RichText::new(format!("{range}{of}"))
-                    .size(11.0)
-                    .color(palette::TEXT_WEAK()),
+
+            let pager_hint = format!(
+                "Limit {} · Offset {}",
+                group_digits(limit),
+                group_digits(win.offset)
             );
-            if nav_btn(ui, "◀", !at_start, "Previous page") {
-                actions.push(Action::Page(PageNav::Prev));
+            let pager_button = components::soft_icon_button(ui, icons::pager(), &pager_hint, idle);
+            let popup_id = pager_button.id.with("window");
+            let draft_id = popup_id.with("draft");
+            if pager_button.clicked() {
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(
+                        draft_id,
+                        PagerDraft {
+                            limit: limit.to_string(),
+                            offset: if win.offset == 0 {
+                                String::new()
+                            } else {
+                                win.offset.to_string()
+                            },
+                            focus_limit: true,
+                        },
+                    );
+                });
             }
-            if nav_btn(ui, "⏮", !at_start, "First page") {
-                actions.push(Action::Page(PageNav::First));
+
+            let popup_frame = egui::Frame::popup(ui.style())
+                .fill(palette::PANEL())
+                .stroke(egui::Stroke::new(1.0, palette::BORDER_STRONG()))
+                .corner_radius(egui::CornerRadius::same(14))
+                .inner_margin(egui::Margin::same(10));
+            let popup = egui::Popup::from_toggle_button_response(&pager_button)
+                .id(popup_id)
+                .align(egui::RectAlign::TOP)
+                .align_alternatives(&[])
+                .gap(9.0)
+                .width(180.0)
+                .frame(popup_frame)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .layout(egui::Layout::top_down(egui::Align::Min))
+                .show(|ui| {
+                    ui.set_width(160.0);
+                    let mut draft = ui.ctx().data_mut(|data| {
+                        data.get_temp::<PagerDraft>(draft_id).unwrap_or(PagerDraft {
+                            limit: limit.to_string(),
+                            offset: win.offset.to_string(),
+                            focus_limit: false,
+                        })
+                    });
+
+                    let mut limit_response = None;
+                    egui::Grid::new(popup_id.with("fields"))
+                        .num_columns(2)
+                        .spacing(egui::vec2(8.0, 6.0))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("Limit").strong());
+                            limit_response = Some(components::text_input(
+                                ui,
+                                &mut draft.limit,
+                                "Rows to load",
+                                110.0,
+                            ));
+                            ui.end_row();
+                            ui.label(egui::RichText::new("Offset").strong());
+                            components::text_input(ui, &mut draft.offset, "0", 110.0);
+                            ui.end_row();
+                        });
+                    if draft.focus_limit {
+                        if let Some(response) = limit_response {
+                            response.request_focus();
+                        }
+                        draft.focus_limit = false;
+                    }
+
+                    let parsed = parse_pager_window(&draft.limit, &draft.offset);
+                    if let Err(message) = parsed {
+                        ui.label(
+                            egui::RichText::new(message)
+                                .size(10.5)
+                                .color(palette::DANGER()),
+                        );
+                    } else {
+                        ui.add_space(2.0);
+                    }
+                    ui.add_space(4.0);
+                    let go = ui
+                        .add_enabled(
+                            idle && parsed.is_ok(),
+                            egui::Button::new(
+                                egui::RichText::new("Go").strong().color(palette::TEXT()),
+                            )
+                            .corner_radius(egui::CornerRadius::same(8))
+                            .min_size(egui::vec2(ui.available_width(), style::CONTROL_H)),
+                        )
+                        .clicked();
+                    let enter = ui.input_mut(|input| {
+                        input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                    });
+                    let submit = if (go || enter) && idle {
+                        parsed.ok()
+                    } else {
+                        None
+                    };
+                    ui.ctx().data_mut(|data| data.insert_temp(draft_id, draft));
+                    if submit.is_some() {
+                        ui.close();
+                    }
+                    submit
+                });
+            if let Some(response) = popup {
+                let rect = response.response.rect;
+                let anchor_x = pager_button
+                    .rect
+                    .center()
+                    .x
+                    .clamp(rect.left() + 10.0, rect.right() - 10.0);
+                let left = egui::pos2(anchor_x - 8.0, rect.bottom() - 1.0);
+                let right = egui::pos2(anchor_x + 8.0, rect.bottom() - 1.0);
+                let tip = egui::pos2(anchor_x, rect.bottom() + 8.0);
+                let painter = ui.ctx().layer_painter(response.response.layer_id);
+                painter.add(egui::Shape::convex_polygon(
+                    vec![left, right, tip],
+                    palette::PANEL(),
+                    egui::Stroke::NONE,
+                ));
+                let stroke = egui::Stroke::new(1.0, palette::BORDER_STRONG());
+                painter.line_segment([left, tip], stroke);
+                painter.line_segment([tip, right], stroke);
+                if let Some((limit, offset)) = response.inner {
+                    actions.push(Action::SetPageWindow { limit, offset });
+                }
+            }
+
+            if nav_button(ui, false, !at_start, "Previous page") {
+                actions.push(Action::Page(PageNav::Prev));
             }
         });
     }
@@ -826,28 +1006,12 @@ impl DbGuiApp {
                     ui.allocate_exact_size(egui::vec2(8.0, row_h), egui::Sense::hover());
                 ui.painter().circle_filled(dot_rect.center(), 3.0, dot);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self.busy == Busy::Querying {
-                        let resp = ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new("Cancel")
-                                        .color(palette::ON_ACCENT())
-                                        .strong(),
-                                )
-                                .fill(palette::DANGER()),
-                            )
-                            .on_hover_text("Abort the running query");
-                        if resp.clicked() {
-                            actions.push(Action::CancelQuery);
-                        }
-                    } else {
-                        let can_run = self.active().is_some() && self.busy == Busy::Idle;
-                        if components::primary_button(ui, icons::play(), "Run", can_run)
-                            .on_hover_text("Cmd/Ctrl+Enter")
-                            .clicked()
-                        {
-                            actions.push(Action::RunQuery);
-                        }
+                    let can_run = self.active().is_some() && self.busy == Busy::Idle;
+                    if components::primary_button(ui, icons::play(), "Run", can_run)
+                        .on_hover_text("Cmd/Ctrl+Enter")
+                        .clicked()
+                    {
+                        actions.push(Action::RunQuery);
                     }
                     let resp =
                         components::beautify_button(ui, &mut self.beautify, has_sql, dialect_label);
@@ -1235,6 +1399,190 @@ impl DbGuiApp {
             }
             Some(_) => {}
         }
+    }
+
+    /// Session-only stream of statements completed for the connection bound to this tab.
+    /// It shares the SQL console instead of becoming another workspace/sidebar destination:
+    /// the editor answers "what will run", while this panel answers "what just ran".
+    pub(super) fn live_log_panel(&mut self, root: &mut egui::Ui, tab_id: u64) {
+        let conn_id = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| tab.conn_id.clone());
+        let visible = |entry: &&dbcore::history::HistoryEntry| {
+            conn_id
+                .as_deref()
+                .is_none_or(|id| entry.conn_id.as_str() == id)
+        };
+        let count = self.live_log.iter().filter(visible).count();
+        let available = root.available_height();
+        // On a compact bottom-docked table console, default to the title strip so the SQL
+        // editor keeps enough room to type. A generously-sized console opens the stream.
+        let default_size = if available >= 220.0 {
+            LIVE_LOG_DEFAULT_H
+        } else {
+            LIVE_LOG_HEADER_H
+        };
+        let max_size = live_log_max_size(available);
+
+        egui::Panel::bottom(egui::Id::new(("live_log", tab_id)))
+            .resizable(true)
+            .default_size(default_size)
+            .min_size(LIVE_LOG_HEADER_H)
+            .max_size(max_size)
+            .frame(
+                egui::Frame::new()
+                    .fill(palette::CODE_BG())
+                    .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                    .inner_margin(egui::Margin::ZERO),
+            )
+            .show_inside(root, |ui| {
+                let mut clear = false;
+                let mut close = false;
+                let (header_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), LIVE_LOG_HEADER_H),
+                    egui::Sense::hover(),
+                );
+                ui.painter()
+                    .rect_filled(header_rect, egui::CornerRadius::ZERO, palette::PANEL());
+                ui.painter().hline(
+                    header_rect.x_range(),
+                    header_rect.bottom(),
+                    egui::Stroke::new(1.0, palette::BORDER()),
+                );
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(header_rect.shrink2(egui::vec2(8.0, 2.0)))
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        icons::show_colored(ui, icons::history(), 14.0, palette::ACCENT());
+                        ui.label(egui::RichText::new("Live log").strong().size(12.0));
+                        ui.label(
+                            egui::RichText::new(if count == 1 {
+                                "1 entry".to_string()
+                            } else {
+                                format!("{count} entries")
+                            })
+                            .small()
+                            .color(palette::TEXT_FAINT()),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if components::Btn::ghost_icon(icons::close())
+                                .tooltip("Close Live log")
+                                .show(ui)
+                                .clicked()
+                            {
+                                close = true;
+                            }
+                            if components::Btn::ghost_icon(icons::trash())
+                                .enabled(count > 0)
+                                .tooltip("Clear this connection's live log")
+                                .show(ui)
+                                .clicked()
+                            {
+                                clear = true;
+                            }
+                        });
+                    },
+                );
+
+                if close {
+                    self.show_live_log = false;
+                    return;
+                }
+                if clear {
+                    if let Some(conn_id) = &conn_id {
+                        self.live_log.retain(|entry| &entry.conn_id != conn_id);
+                    } else {
+                        self.live_log.clear();
+                    }
+                }
+                if ui.available_height() < 8.0 {
+                    return;
+                }
+
+                let font = egui::FontId::new(11.5, egui::FontFamily::Monospace);
+                egui::ScrollArea::vertical()
+                    .id_salt(("live_log_scroll", tab_id))
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        let mut entries = self.live_log.iter().filter(visible).peekable();
+                        if entries.peek().is_none() {
+                            egui::Frame::new()
+                                .inner_margin(egui::Margin::symmetric(10, 8))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new("Run a query to see it here")
+                                            .small()
+                                            .color(palette::TEXT_FAINT()),
+                                    );
+                                });
+                            return;
+                        }
+
+                        while let Some(entry) = entries.next() {
+                            egui::Frame::new()
+                                .inner_margin(egui::Margin::symmetric(10, 6))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        let status = if entry.ok { "--" } else { "-- error" };
+                                        let color = if entry.ok {
+                                            palette::SUCCESS()
+                                        } else {
+                                            palette::DANGER()
+                                        };
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "{status} {}",
+                                                live_log_clock(&entry.at)
+                                            ))
+                                            .font(font.clone())
+                                            .color(color),
+                                        );
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                let rows = entry
+                                                    .rows
+                                                    .map(|rows| format!("{rows} rows · "))
+                                                    .unwrap_or_default();
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "{rows}{:.0} ms",
+                                                        entry.elapsed_ms
+                                                    ))
+                                                    .small()
+                                                    .color(palette::TEXT_FAINT()),
+                                                );
+                                            },
+                                        );
+                                    });
+
+                                    let mut job = crate::highlight::highlight_sql(
+                                        entry.sql.trim(),
+                                        font.clone(),
+                                    );
+                                    job.wrap.max_width = ui.available_width().max(40.0);
+                                    ui.add(egui::Label::new(job).wrap())
+                                        .on_hover_text(entry.sql.trim());
+                                    if let Some(error) = &entry.error {
+                                        ui.label(
+                                            egui::RichText::new(format!("Error: {error}"))
+                                                .small()
+                                                .color(palette::DANGER()),
+                                        );
+                                    }
+                                });
+                            if entries.peek().is_some() {
+                                ui.separator();
+                            }
+                        }
+                    });
+            });
     }
 
     /// Paint the SQL editor's gutter — line numbers and fold chevrons — and apply a click on
@@ -2311,7 +2659,7 @@ impl DbGuiApp {
     /// The History tab: the clear-all control above the executed-statement list.
     fn sidebar_history(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         ui.horizontal(|ui| {
-            components::section_header(ui, "Query History");
+            components::section_header(ui, "History");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if components::icon_button(ui, icons::trash(), "Delete the entire history")
                     .clicked()
@@ -2321,6 +2669,14 @@ impl DbGuiApp {
             });
         });
         ui.add_space(4.0);
+        components::icon_text_input(
+            ui,
+            &mut self.history_filter,
+            "Search history…",
+            icons::search(),
+            ui.available_width(),
+        );
+        ui.add_space(6.0);
         self.history_list(ui, actions);
     }
 
@@ -2330,7 +2686,12 @@ impl DbGuiApp {
         };
 
         ui.horizontal(|ui| {
-            icons::show_native(ui, icons::database(), icons::SIZE);
+            ui.add(
+                egui::Image::new(icons::db_kind_icon(active.db.kind()))
+                    .fit_to_exact_size(egui::Vec2::splat(icons::DB_KIND_ICON_SIZE))
+                    .tint(icons::db_kind_icon_tint(active.db.kind())),
+            )
+            .on_hover_text(active.db.kind().label());
             components::truncated_label(
                 ui,
                 &active.schema.database_name,
@@ -2915,7 +3276,7 @@ impl DbGuiApp {
     }
 
     /// Contextual result switch next to the query toolbar. Query tabs show Data / Message /
-    /// Chart; table and view tabs show Data / Structure / Edit Table.
+    /// Chart; table and view tabs expose their editable Structure and Indexes directly.
     pub(super) fn view_mode_bar(
         &mut self,
         root: &mut egui::Ui,
@@ -2924,11 +3285,35 @@ impl DbGuiApp {
     ) {
         let idx = self.active_query_tab;
         let query_result_tabs = self.tabs[idx].kind == crate::components::QueryTabKind::Query;
+        let editable_table = self.tabs[idx].kind == crate::components::QueryTabKind::Table;
         if !query_result_tabs && self.structure_table(idx).is_none() {
             self.tabs[idx].view = TabView::Data;
             return;
         }
         let table_info = self.structure_table(idx).cloned();
+        if editable_table && matches!(self.tabs[idx].view, TabView::Structure | TabView::Indexes) {
+            let schema_view = self.tabs[idx].view;
+            if self.tabs[idx].schema_editor.is_none() {
+                if let Some(info) = table_info.as_ref() {
+                    let kind = self
+                        .active()
+                        .map(|active| active.db.kind())
+                        .unwrap_or(dbcore::DbKind::Sqlite);
+                    self.tabs[idx].schema_editor = Some(crate::schema::ObjectEditor::Table(
+                        crate::schema::SchemaEditor::edit_table(info, kind),
+                    ));
+                }
+            }
+            if let Some(crate::schema::ObjectEditor::Table(editor)) =
+                self.tabs[idx].schema_editor.as_mut()
+            {
+                editor.active_tab = if schema_view == TabView::Indexes {
+                    crate::schema::SchemaTab::Indexes
+                } else {
+                    crate::schema::SchemaTab::Columns
+                };
+            }
+        }
         let panel = match placement {
             QueryEditorPlacement::Top => egui::Panel::top("view_mode_bar"),
             QueryEditorPlacement::Bottom => egui::Panel::bottom("view_mode_bar"),
@@ -2964,53 +3349,26 @@ impl DbGuiApp {
                         self.tabs[idx].view = modes[choice];
                         return;
                     }
-                    // While the schema editor owns the central panel, neither data mode is
-                    // current; clicking one closes the editor and switches back.
-                    let editing = self.tabs[idx].schema_editor.is_some();
-                    let selected = if editing {
-                        2
-                    } else if self.tabs[idx].view == TabView::Structure {
-                        1
-                    } else {
-                        0
-                    };
-                    let choice = components::segmented_sized(
-                        ui,
-                        &[
-                            (icons::table(), "Data"),
-                            (icons::column(), "Structure"),
-                            (icons::edit(), "Edit Table"),
-                        ],
-                        selected,
-                        300.0,
-                        false,
-                    );
-                    if choice != selected {
-                        match choice {
-                            0 => {
-                                self.tabs[idx].view = TabView::Data;
-                                if editing {
-                                    actions.push(Action::CancelSchema);
-                                }
-                            }
-                            1 => {
-                                self.tabs[idx].view = TabView::Structure;
-                                if editing {
-                                    actions.push(Action::CancelSchema);
-                                }
-                            }
-                            2 => {
-                                if let Some(info) = table_info {
-                                    actions.push(Action::OpenEditTable(info));
-                                }
-                            }
-                            _ => {}
-                        }
+                    if !editable_table {
+                        let modes = [TabView::Data, TabView::Structure];
+                        let selected = modes
+                            .iter()
+                            .position(|mode| *mode == self.tabs[idx].view)
+                            .unwrap_or(0);
+                        let choice = components::segmented_sized(
+                            ui,
+                            &[(icons::table(), "Data"), (icons::column(), "Structure")],
+                            selected,
+                            200.0,
+                            false,
+                        );
+                        self.tabs[idx].view = modes[choice];
+                        return;
                     }
-                    // Undo/redo of staged cell edits, mirroring Cmd/Ctrl+Z — a visible affordance
-                    // for the keyboard shortcut, greyed out when there's nothing to step through.
-                    if self.tabs[idx].edits.editable() {
-                        ui.separator();
+                    // Staged-data actions lead the row: the user acts on the table first, then
+                    // chooses which table surface to inspect. Keep them Data-only and preserve
+                    // the existing keyboard shortcuts and enabled states.
+                    if self.tabs[idx].view == TabView::Data && self.tabs[idx].edits.editable() {
                         let (can_undo, can_redo) = {
                             let e = &self.tabs[idx].edits;
                             (e.can_undo(), e.can_redo())
@@ -3040,9 +3398,49 @@ impl DbGuiApp {
                         {
                             actions.push(Action::Redo);
                         }
+                        ui.separator();
                     }
-                    // The server-side pager lives on the right, directly under the grid.
-                    self.pager(ui, actions);
+                    let editing = self.tabs[idx].schema_editor.is_some();
+                    let modes = [TabView::Data, TabView::Structure, TabView::Indexes];
+                    let selected = modes
+                        .iter()
+                        .position(|mode| *mode == self.tabs[idx].view)
+                        .unwrap_or(0);
+                    let choice = components::segmented_sized(
+                        ui,
+                        &[
+                            (icons::table(), "Data"),
+                            (icons::column(), "Structure"),
+                            (icons::index(), "Indexes"),
+                        ],
+                        selected,
+                        300.0,
+                        false,
+                    );
+                    if choice != selected {
+                        self.tabs[idx].view = modes[choice];
+                        if choice == 0 {
+                            if editing {
+                                actions.push(Action::CancelSchema);
+                            }
+                        } else if !editing {
+                            if let Some(info) = table_info.clone() {
+                                actions.push(Action::OpenEditTable(info));
+                            }
+                        } else if let Some(crate::schema::ObjectEditor::Table(editor)) =
+                            self.tabs[idx].schema_editor.as_mut()
+                        {
+                            editor.active_tab = if choice == 1 {
+                                crate::schema::SchemaTab::Columns
+                            } else {
+                                crate::schema::SchemaTab::Indexes
+                            };
+                        }
+                    }
+                    // Row paging belongs only to the Data surface, not schema editing.
+                    if self.tabs[idx].view == TabView::Data {
+                        self.pager(ui, actions);
+                    }
                 });
             });
     }
@@ -3114,7 +3512,7 @@ impl DbGuiApp {
                     });
                     return;
                 }
-                TabView::Data | TabView::Structure => {}
+                TabView::Data | TabView::Structure | TabView::Indexes => {}
             }
         }
         let editable = self.tabs[idx].edits.editable();
@@ -3127,6 +3525,15 @@ impl DbGuiApp {
         let kind = self.tabs[idx].kind;
         let query_error = self.tabs[idx].query_error.clone();
         let loading = self.querying_tab_id == Some(tab_id);
+        let can_load_more = !loading
+            && matches!(
+                self.tabs[idx].kind,
+                crate::components::QueryTabKind::Table | crate::components::QueryTabKind::View
+            )
+            && !self.tabs[idx].page_exhausted
+            && self.tabs[idx].sort.is_none()
+            && (self.tabs[idx].edits.source.is_some()
+                || self.tabs[idx].edits.pending_source.is_some());
         let QueryTab {
             result,
             row_order,
@@ -3157,6 +3564,9 @@ impl DbGuiApp {
                         emoji,
                         &fk_cols,
                     );
+                    if resp.near_end && can_load_more {
+                        actions.push(Action::LoadMoreRows);
+                    }
                     if let Some(cmd) = resp.sort {
                         actions.push(match cmd {
                             crate::grid::SortCmd::Asc(col) => Action::SetSort { col, asc: true },
@@ -3308,9 +3718,6 @@ impl DbGuiApp {
                 Some(_) => {
                     components::empty_state(ui, icons::table(), "No columns", status_msg);
                 }
-                None if loading => {
-                    components::loading_state(ui, status_msg);
-                }
                 None => match kind {
                     crate::components::QueryTabKind::Query => {
                         components::empty_illustration(ui);
@@ -3428,7 +3835,7 @@ impl DbGuiApp {
                     egui::vec2(card_w, stack_h),
                 );
 
-                let mut card_rect = content; // updated below; used to seat the mascot
+                let mut card_rect = content; // updated below; used to seat the ++ mark
                 ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
                     // Speech-bubble header card.
                     let bubble = egui::Frame::new()
@@ -3618,14 +4025,14 @@ impl DbGuiApp {
                     card_rect = card.response.rect;
                 });
 
-                // Mascot on the ground beside the card stack (skipped when the window is too
+                // Soft ++ mark beside the card stack (skipped when the window is too
                 // narrow for it to sit clear of the cards).
-                let sheep = egui::Rect::from_min_size(
+                let mark = egui::Rect::from_min_size(
                     egui::pos2(card_rect.right() + 24.0, full.bottom() - 142.0),
                     egui::vec2(150.0, 150.0),
                 );
-                if sheep.right() < full.right() - 8.0 {
-                    ui.scope_builder(egui::UiBuilder::new().max_rect(sheep), |ui| {
+                if mark.right() < full.right() - 8.0 {
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(mark), |ui| {
                         crate::pet::show(ui);
                     });
                 }
@@ -4254,90 +4661,109 @@ impl DbGuiApp {
             return;
         }
 
+        let days = grouped_history(&self.history_cache, &self.history_filter);
+        if days.is_empty() {
+            ui.label(
+                egui::RichText::new("No history matches this search.").color(palette::TEXT_WEAK()),
+            );
+            return;
+        }
+
         let font = egui::TextStyle::Monospace.resolve(ui.style());
-        let body_h = ui.text_style_height(&egui::TextStyle::Body);
-        let spacing = ui.spacing().item_spacing.y;
-        // Each entry stacks three lines plus a separator; keep the estimate in
-        // sync with the layout below so `show_rows` scrolls without jitter.
-        let row_h = 3.0 * (body_h + spacing) + 8.0;
-        let count = self.history_cache.len();
         egui::ScrollArea::vertical()
             .id_salt("history_scroll")
             .auto_shrink([false, false])
-            .show_rows(ui, row_h, count, |ui, range| {
-                for offset in range {
-                    // Newest entries last in the cache; display newest first.
-                    let idx = count - 1 - offset;
-                    let entry = &self.history_cache[idx];
-
-                    // Line 1: status + connection, actions on the right.
-                    ui.horizontal(|ui| {
-                        let (status, color) = if entry.ok {
-                            ("ok", egui::Color32::from_rgb(58, 178, 108))
-                        } else {
-                            ("err", palette::DANGER())
-                        };
-                        ui.label(egui::RichText::new(status).strong().color(color));
-                        ui.label(egui::RichText::new(&entry.conn_name).strong());
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if components::Btn::new("Use")
-                                .show(ui)
-                                .on_hover_text("Put this SQL into the active tab")
-                                .clicked()
-                            {
-                                actions.push(Action::UseHistorySql(idx));
-                            }
-                            if components::Btn::new("Copy").show(ui).clicked() {
-                                ui.ctx().copy_text(entry.sql.clone());
-                            }
-                            if components::Btn::new("Save")
-                                .show(ui)
-                                .on_hover_text("Save as a favorite")
-                                .clicked()
-                            {
-                                actions.push(Action::SaveFavoriteFromHistory(idx));
-                            }
-                        });
-                    });
-
-                    // Line 2: when, how many rows, how long.
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(entry.at.replace('T', " ").trim_end_matches('Z'))
-                                .small()
-                                .color(palette::TEXT_WEAK()),
-                        );
-                        if let Some(rows) = entry.rows {
-                            ui.label(
-                                egui::RichText::new(format!("{rows} rows"))
-                                    .small()
-                                    .color(palette::TEXT_WEAK()),
-                            );
-                        }
-                        ui.label(
-                            egui::RichText::new(format!("{:.0} ms", entry.elapsed_ms))
-                                .small()
-                                .color(palette::TEXT_WEAK()),
-                        );
-                    });
-
-                    // Line 3: one truncated line of SQL (or the error); hover for all.
-                    let detail = match &entry.error {
-                        Some(e) => format!("{} — {e}", first_line(&entry.sql)),
-                        None => first_line(&entry.sql).to_string(),
-                    };
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(detail).font(font.clone()).color(
-                            if entry.ok {
-                                palette::TEXT_WEAK()
-                            } else {
-                                palette::DANGER()
-                            },
-                        ))
-                        .truncate(),
+            .show(ui, |ui| {
+                for (day_index, day) in days.iter().enumerate() {
+                    let count = day.entries.len();
+                    let title = format!(
+                        "{}  ·  {count} {}",
+                        day.label,
+                        if count == 1 { "entry" } else { "entries" }
+                    );
+                    egui::CollapsingHeader::new(
+                        egui::RichText::new(title)
+                            .monospace()
+                            .strong()
+                            .color(palette::TEXT()),
                     )
-                    .on_hover_text(&entry.sql);
-                    ui.separator();
+                    .id_salt(("history_day", &day.key))
+                    .default_open(day_index == 0)
+                    .show(ui, |ui| {
+                        for &idx in &day.entries {
+                            let entry = &self.history_cache[idx];
+                            let (_, _, clock) = history_moment(&entry.at);
+
+                            ui.add_space(3.0);
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(clock)
+                                        .small()
+                                        .strong()
+                                        .color(palette::TEXT_WEAK()),
+                                );
+                                let (status, color) = if entry.ok {
+                                    ("ok", egui::Color32::from_rgb(58, 178, 108))
+                                } else {
+                                    ("err", palette::DANGER())
+                                };
+                                ui.label(egui::RichText::new(status).small().strong().color(color));
+                                ui.label(
+                                    egui::RichText::new(&entry.conn_name)
+                                        .small()
+                                        .color(palette::TEXT_FAINT()),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if components::Btn::new("Use")
+                                            .show(ui)
+                                            .on_hover_text("Put this SQL into the active tab")
+                                            .clicked()
+                                        {
+                                            actions.push(Action::UseHistorySql(idx));
+                                        }
+                                        if components::Btn::new("Copy").show(ui).clicked() {
+                                            ui.ctx().copy_text(entry.sql.clone());
+                                        }
+                                        if components::Btn::new("Save")
+                                            .show(ui)
+                                            .on_hover_text("Save as a favorite")
+                                            .clicked()
+                                        {
+                                            actions.push(Action::SaveFavoriteFromHistory(idx));
+                                        }
+                                    },
+                                );
+                            });
+
+                            let detail = match &entry.error {
+                                Some(e) => format!("{} — {e}", first_line(&entry.sql)),
+                                None => first_line(&entry.sql).to_string(),
+                            };
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(detail).font(font.clone()).color(
+                                        if entry.ok {
+                                            palette::TEXT_WEAK()
+                                        } else {
+                                            palette::DANGER()
+                                        },
+                                    ),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(format!(
+                                "{}\n\n{} rows · {:.0} ms",
+                                entry.sql,
+                                entry
+                                    .rows
+                                    .map_or_else(|| "—".to_string(), |rows| rows.to_string()),
+                                entry.elapsed_ms
+                            ));
+                            ui.separator();
+                        }
+                    });
                 }
             });
     }
@@ -5715,6 +6141,20 @@ impl DbGuiApp {
     /// a dialog. Only the DDL preview remains a modal (it's a confirm step).
     fn schema_editor_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let idx = self.active_query_tab;
+        let editing_existing_table = matches!(
+            self.tabs[idx].schema_editor.as_ref(),
+            Some(crate::schema::ObjectEditor::Table(editor))
+                if editor.mode == crate::schema::SchemaEditorMode::Edit
+        );
+        // An existing table has one schema-editing surface: the dense Structure/Indexes grids.
+        // Normalize stale tabs that still carry the former Data-form state so the legacy
+        // Columns/Indexes/Foreign Keys editor can never reappear for a live table.
+        if editing_existing_table
+            && !matches!(self.tabs[idx].view, TabView::Structure | TabView::Indexes)
+        {
+            self.tabs[idx].view = TabView::Structure;
+        }
+        let table_section = editing_existing_table.then_some(self.tabs[idx].view);
         // The designer owns the whole tab; a slim margin keeps the form off the panel edge.
         let rect = ui
             .available_rect_before_wrap()
@@ -5722,7 +6162,14 @@ impl DbGuiApp {
         ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
             match self.tabs[idx].schema_editor.as_mut() {
                 Some(crate::schema::ObjectEditor::Table(editor)) => {
-                    table_editor_view(ui, actions, editor)
+                    if let Some(section) = table_section {
+                        editor.active_tab = if section == TabView::Indexes {
+                            crate::schema::SchemaTab::Indexes
+                        } else {
+                            crate::schema::SchemaTab::Columns
+                        };
+                    }
+                    table_editor_view(ui, actions, editor, table_section)
                 }
                 Some(crate::schema::ObjectEditor::View(editor)) => {
                     view_editor_view(ui, actions, editor)
@@ -5826,18 +6273,61 @@ fn object_editor_header(ui: &mut egui::Ui, actions: &mut Vec<Action>, title: &st
     ui.add_space(10.0);
 }
 
+/// Compact metadata bar used when an existing table is edited in-place. Keeping this separate
+/// from the create-table header makes Structure/Indexes read like data grids, not dialog forms.
+fn embedded_table_editor_header(ui: &mut egui::Ui, editor: &crate::schema::SchemaEditor) {
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("Name")
+                .size(11.0)
+                .strong()
+                .color(palette::TEXT_WEAK()),
+        );
+        ui.label(
+            egui::RichText::new(&editor.table_name)
+                .monospace()
+                .strong()
+                .color(palette::TEXT()),
+        );
+
+        let primary = editor
+            .columns
+            .iter()
+            .filter(|column| column.primary_key && !column.drop)
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !primary.is_empty() {
+            ui.add_space(14.0);
+            ui.label(
+                egui::RichText::new("Primary")
+                    .size(11.0)
+                    .strong()
+                    .color(palette::TEXT_WEAK()),
+            );
+            components::type_badge(ui, &primary, palette::ACCENT());
+        }
+    });
+    ui.add_space(8.0);
+    ui.separator();
+}
+
 /// Render the table create/edit form (columns, indexes, foreign keys) into the central panel.
 fn table_editor_view(
     ui: &mut egui::Ui,
     actions: &mut Vec<Action>,
     editor: &mut crate::schema::SchemaEditor,
+    table_section: Option<TabView>,
 ) {
     use crate::schema::{SchemaEditorMode, SchemaTab};
-    let title = match editor.mode {
-        SchemaEditorMode::New => "Create Table".to_string(),
-        SchemaEditorMode::Edit => format!("Edit Table — {}", editor.table_name),
-        SchemaEditorMode::DesignNew => "Add Table to ER Design".to_string(),
-        SchemaEditorMode::DesignEdit => format!("Edit ER Table — {}", editor.table_name),
+    let title = match (table_section, editor.mode) {
+        (Some(TabView::Structure), _) => format!("Structure — {}", editor.table_name),
+        (Some(TabView::Indexes), _) => format!("Indexes — {}", editor.table_name),
+        (_, SchemaEditorMode::New) => "Create Table".to_string(),
+        (_, SchemaEditorMode::Edit) => format!("Structure — {}", editor.table_name),
+        (_, SchemaEditorMode::DesignNew) => "Add Table to ER Design".to_string(),
+        (_, SchemaEditorMode::DesignEdit) => format!("Edit ER Table — {}", editor.table_name),
     };
     let design_mode = matches!(
         editor.mode,
@@ -5865,68 +6355,95 @@ fn table_editor_view(
         ui.add_space(10.0);
         ui.separator();
         ui.add_space(10.0);
+    } else if table_section.is_some() {
+        embedded_table_editor_header(ui, editor);
     } else {
         object_editor_header(ui, actions, &title);
     }
 
     // Live EditTable keeps the database object's name fixed; portable designs allow renames.
-    ui.horizontal(|ui| {
-        ui.label("Table name:");
-        components::text_input_enabled(
-            ui,
-            editor.mode != SchemaEditorMode::Edit,
-            &mut editor.table_name,
-            "my_table",
-            200.0,
-        );
-        if !editor.schema_name.is_empty() || editor.mode != SchemaEditorMode::Edit {
-            ui.label("Schema:");
-            components::text_input(ui, &mut editor.schema_name, "public", 120.0);
-        }
-    });
-    ui.add_space(10.0);
+    if table_section.is_none() {
+        ui.horizontal(|ui| {
+            ui.label("Table name:");
+            components::text_input_enabled(
+                ui,
+                editor.mode != SchemaEditorMode::Edit,
+                &mut editor.table_name,
+                "my_table",
+                200.0,
+            );
+            if !editor.schema_name.is_empty() || editor.mode != SchemaEditorMode::Edit {
+                ui.label("Schema:");
+                components::text_input(ui, &mut editor.schema_name, "public", 120.0);
+            }
+        });
+        ui.add_space(10.0);
+    }
 
-    // Tab selector: Columns | Indexes | Foreign Keys — the same segmented switch used
-    // by the result-mode bars, so the designer reads as part of the app. CQL has no
-    // foreign keys, so that tab is dropped for Cassandra/ScyllaDB.
-    let (tabs, tab_labels, tab_width): (&[SchemaTab], &[(_, _)], f32) = if editor.db_kind.is_cql() {
-        (
-            &[SchemaTab::Columns, SchemaTab::Indexes],
-            &[(icons::column(), "Columns"), (icons::index(), "Indexes")],
-            240.0,
-        )
-    } else {
-        (
-            &[
-                SchemaTab::Columns,
-                SchemaTab::Indexes,
-                SchemaTab::ForeignKeys,
-            ],
-            &[
-                (icons::column(), "Columns"),
-                (icons::index(), "Indexes"),
-                (icons::key(), "Foreign Keys"),
-            ],
-            340.0,
-        )
-    };
-    // A tab remembered from another connection (e.g. ForeignKeys) may not exist here.
-    let selected = tabs
-        .iter()
-        .position(|t| *t == editor.active_tab)
-        .unwrap_or(0);
-    let choice = components::segmented_sized(ui, tab_labels, selected, tab_width, false);
-    editor.active_tab = tabs[choice];
-    ui.add_space(8.0);
+    if table_section.is_none() {
+        // Create-table and ER-design flows keep their local selector. Existing table tabs expose
+        // Structure and Indexes in the persistent result bar instead of nesting another switch.
+        let (tabs, tab_labels, tab_width): (&[SchemaTab], &[(_, _)], f32) =
+            if editor.db_kind.is_cql() {
+                (
+                    &[SchemaTab::Columns, SchemaTab::Indexes],
+                    &[(icons::column(), "Columns"), (icons::index(), "Indexes")],
+                    240.0,
+                )
+            } else {
+                (
+                    &[
+                        SchemaTab::Columns,
+                        SchemaTab::Indexes,
+                        SchemaTab::ForeignKeys,
+                    ],
+                    &[
+                        (icons::column(), "Columns"),
+                        (icons::index(), "Indexes"),
+                        (icons::key(), "Foreign Keys"),
+                    ],
+                    340.0,
+                )
+            };
+        let selected = tabs
+            .iter()
+            .position(|tab| *tab == editor.active_tab)
+            .unwrap_or(0);
+        let choice = components::segmented_sized(ui, tab_labels, selected, tab_width, false);
+        editor.active_tab = tabs[choice];
+        ui.add_space(8.0);
+    }
+
+    if table_section.is_some() {
+        schema_grid_keyboard(ui, editor, table_section);
+    }
 
     egui::ScrollArea::vertical()
         .id_salt("schema_editor_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| match editor.active_tab {
             SchemaTab::Columns => {
-                schema_columns_tab(ui, &mut editor.columns, editor.mode, editor.db_kind);
+                if table_section == Some(TabView::Structure) {
+                    schema_structure_grid(
+                        ui,
+                        &mut editor.columns,
+                        &editor.fks,
+                        editor.db_kind,
+                        &mut editor.grid_selection,
+                        &mut editor.focus_selected_cell,
+                    );
+                } else {
+                    schema_columns_tab(ui, &mut editor.columns, editor.mode, editor.db_kind);
+                }
             }
+            SchemaTab::Indexes if table_section == Some(TabView::Indexes) => schema_indexes_grid(
+                ui,
+                &mut editor.indexes,
+                &mut editor.grid_selection,
+                &mut editor.focus_selected_cell,
+            ),
             SchemaTab::Indexes => schema_indexes_tab(ui, &mut editor.indexes),
+            SchemaTab::ForeignKeys if table_section.is_some() => {}
             SchemaTab::ForeignKeys => schema_fk_tab(ui, &mut editor.fks),
         });
 }
@@ -6355,7 +6872,7 @@ fn table_actions_menu(
         ui.close();
     }
     ui.separator();
-    if components::button(ui, icons::edit(), "Edit Table…", true).clicked() {
+    if components::button(ui, icons::edit(), "Edit Structure…", true).clicked() {
         actions.push(Action::OpenEditTable(table.clone()));
         ui.close();
     }
@@ -7571,65 +8088,177 @@ fn details_value_box(
 
 /// Common column types per database, offered in the Type dropdown. The current value is
 /// always shown even if it isn't in this list (e.g. an exotic type on an existing column).
-fn db_type_options(kind: dbcore::DbKind) -> &'static [&'static str] {
+pub(super) fn db_type_options(kind: dbcore::DbKind) -> &'static [&'static str] {
     use dbcore::DbKind;
     match kind {
         DbKind::Postgres => &[
-            "TEXT",
-            "VARCHAR(255)",
-            "INTEGER",
-            "BIGINT",
-            "SERIAL",
-            "BIGSERIAL",
-            "NUMERIC",
-            "REAL",
-            "DOUBLE PRECISION",
-            "BOOLEAN",
-            "DATE",
-            "TIME",
-            "TIMESTAMP",
-            "TIMESTAMPTZ",
-            "UUID",
-            "JSONB",
-            "BYTEA",
+            "bigint",
+            "bigserial",
+            "bit",
+            "bit varying",
+            "bool",
+            "boolean",
+            "box",
+            "bytea",
+            "char(1)",
+            "char",
+            "character varying(255)",
+            "cidr",
+            "circle",
+            "date",
+            "decimal",
+            "double precision",
+            "float4",
+            "float8",
+            "inet",
+            "integer",
+            "int2",
+            "int4",
+            "int8",
+            "interval",
+            "json",
+            "jsonb",
+            "line",
+            "lseg",
+            "macaddr",
+            "macaddr8",
+            "money",
+            "numeric",
+            "oid",
+            "path",
+            "pg_lsn",
+            "point",
+            "polygon",
+            "real",
+            "serial",
+            "serial2",
+            "serial4",
+            "serial8",
+            "smallint",
+            "smallserial",
+            "text",
+            "time",
+            "time with time zone",
+            "timestamp",
+            "timestamp with time zone",
+            "timestamptz",
+            "timetz",
+            "tsquery",
+            "tsvector",
+            "uuid",
+            "varchar(255)",
+            "varchar",
+            "xml",
+            "integer[]",
+            "text[]",
+            "uuid[]",
         ],
         DbKind::MySql | DbKind::MariaDb => &[
-            "VARCHAR(255)",
-            "TEXT",
-            "INT",
             "BIGINT",
-            "TINYINT",
-            "DECIMAL(10,2)",
-            "FLOAT",
-            "DOUBLE",
+            "BINARY(255)",
+            "BIT",
+            "BLOB",
             "BOOLEAN",
+            "CHAR(255)",
             "DATE",
             "DATETIME",
-            "TIMESTAMP",
-            "TIME",
+            "DECIMAL(10,2)",
+            "DOUBLE",
+            "ENUM('value1','value2')",
+            "FLOAT",
+            "GEOMETRY",
+            "GEOMETRYCOLLECTION",
+            "INT",
             "JSON",
-            "BLOB",
+            "LINESTRING",
+            "LONGBLOB",
+            "LONGTEXT",
+            "MEDIUMBLOB",
+            "MEDIUMINT",
+            "MEDIUMTEXT",
+            "MULTILINESTRING",
+            "MULTIPOINT",
+            "MULTIPOLYGON",
+            "NUMERIC(10,2)",
+            "POINT",
+            "POLYGON",
+            "REAL",
+            "SET('value1','value2')",
+            "SMALLINT",
+            "TEXT",
+            "TIME",
+            "TIMESTAMP",
+            "TINYBLOB",
+            "TINYINT",
+            "TINYTEXT",
+            "VARBINARY(255)",
+            "VARCHAR(255)",
+            "YEAR",
         ],
         DbKind::SqlServer => &[
-            "NVARCHAR(255)",
-            "NVARCHAR(MAX)",
-            "INT",
             "BIGINT",
+            "BINARY(50)",
             "BIT",
+            "CHAR(255)",
+            "DATE",
+            "DATETIME",
+            "DATETIME2",
+            "DATETIMEOFFSET",
             "DECIMAL(18,2)",
             "FLOAT",
+            "GEOGRAPHY",
+            "GEOMETRY",
+            "HIERARCHYID",
+            "IMAGE",
+            "INT",
+            "MONEY",
+            "NCHAR(255)",
+            "NTEXT",
+            "NUMERIC(18,2)",
+            "NVARCHAR(255)",
+            "NVARCHAR(MAX)",
             "REAL",
-            "DATE",
-            "DATETIME2",
+            "ROWVERSION",
+            "SMALLDATETIME",
+            "SMALLINT",
+            "SMALLMONEY",
+            "SQL_VARIANT",
+            "TEXT",
             "TIME",
+            "TINYINT",
             "UNIQUEIDENTIFIER",
+            "VARBINARY(255)",
             "VARBINARY(MAX)",
+            "VARCHAR(255)",
+            "VARCHAR(MAX)",
+            "XML",
         ],
         DbKind::Sqlite => &[
-            "TEXT", "INTEGER", "REAL", "NUMERIC", "BLOB", "BOOLEAN", "DATE", "DATETIME",
+            "BIGINT",
+            "BLOB",
+            "BOOLEAN",
+            "CHAR(255)",
+            "CLOB",
+            "DATE",
+            "DATETIME",
+            "DECIMAL(10,2)",
+            "DOUBLE",
+            "FLOAT",
+            "INT",
+            "INTEGER",
+            "JSON",
+            "NONE",
+            "NUMERIC",
+            "REAL",
+            "SMALLINT",
+            "TEXT",
+            "TIME",
+            "TIMESTAMP",
+            "VARCHAR(255)",
         ],
         DbKind::Cassandra | DbKind::ScyllaDb => &[
             "text",
+            "ascii",
             "int",
             "bigint",
             "smallint",
@@ -7651,7 +8280,591 @@ fn db_type_options(kind: dbcore::DbKind) -> &'static [&'static str] {
             "list<text>",
             "set<text>",
             "map<text, text>",
+            "frozen<list<text>>",
+            "tuple<text, int>",
         ],
+    }
+}
+
+fn schema_grid_keyboard(
+    ui: &mut egui::Ui,
+    editor: &mut crate::schema::SchemaEditor,
+    table_section: Option<TabView>,
+) {
+    use crate::schema::{SchemaGridSelection, SchemaTab};
+
+    if ui.ctx().memory(|memory| memory.focused().is_some()) || egui::Popup::is_any_open(ui.ctx()) {
+        return;
+    }
+
+    let default_tab = if table_section == Some(TabView::Indexes) {
+        SchemaTab::Indexes
+    } else {
+        SchemaTab::Columns
+    };
+    let visible = |tab| match table_section {
+        Some(TabView::Indexes) => tab == SchemaTab::Indexes,
+        Some(TabView::Structure) => tab == SchemaTab::Columns,
+        _ => false,
+    };
+    if editor
+        .grid_selection
+        .is_some_and(|selection| !visible(selection.tab))
+    {
+        editor.grid_selection = None;
+    }
+
+    let (up, down, delete, edit, clear) = ui.ctx().input_mut(|input| {
+        (
+            input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+            input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+            input.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
+                || input.consume_key(egui::Modifiers::NONE, egui::Key::Backspace),
+            input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                || input.consume_key(egui::Modifiers::NONE, egui::Key::F2),
+            input.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+        )
+    });
+    if !(up || down || delete || edit || clear) {
+        return;
+    }
+
+    if clear {
+        editor.grid_selection = None;
+        return;
+    }
+
+    let row_count = |tab| match tab {
+        SchemaTab::Columns => editor.columns.len(),
+        SchemaTab::Indexes => editor.indexes.len(),
+        SchemaTab::ForeignKeys => 0,
+    };
+    if up || down {
+        let tab = editor
+            .grid_selection
+            .map_or(default_tab, |selection| selection.tab);
+        let len = row_count(tab);
+        if len > 0 {
+            let row = match editor.grid_selection {
+                Some(selection) if up => selection.row.saturating_sub(1),
+                Some(selection) if down => (selection.row + 1).min(len - 1),
+                _ => 0,
+            };
+            editor.grid_selection = Some(SchemaGridSelection { tab, row });
+        }
+    }
+
+    if delete {
+        if let Some(selection) = editor.grid_selection {
+            let remaining = match selection.tab {
+                SchemaTab::Columns if selection.row < editor.columns.len() => {
+                    if editor.columns[selection.row].is_existing {
+                        editor.columns[selection.row].drop = !editor.columns[selection.row].drop;
+                    } else {
+                        editor.columns.remove(selection.row);
+                    }
+                    editor.columns.len()
+                }
+                SchemaTab::Indexes if selection.row < editor.indexes.len() => {
+                    if editor.indexes[selection.row].is_existing {
+                        editor.indexes[selection.row].drop = !editor.indexes[selection.row].drop;
+                    } else {
+                        editor.indexes.remove(selection.row);
+                    }
+                    editor.indexes.len()
+                }
+                _ => 0,
+            };
+            editor.grid_selection = (remaining > 0).then_some(SchemaGridSelection {
+                tab: selection.tab,
+                row: selection.row.min(remaining.saturating_sub(1)),
+            });
+        }
+    }
+
+    if edit && editor.grid_selection.is_some() {
+        editor.focus_selected_cell = true;
+    }
+    ui.ctx().request_repaint();
+}
+
+fn schema_grid_header(ui: &mut egui::Ui, label: &str) {
+    components::paint_table_header_cell(ui);
+    ui.with_layout(
+        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+        |ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(label)
+                        .size(11.0)
+                        .strong()
+                        .color(palette::TEXT()),
+                )
+                .selectable(false)
+                .truncate(),
+            );
+        },
+    );
+}
+
+fn schema_grid_row_tint(ui: &mut egui::Ui, drop: bool, is_new: bool) {
+    let fill = if drop {
+        palette::DANGER().linear_multiply(0.10)
+    } else if is_new {
+        palette::ACCENT().linear_multiply(0.07)
+    } else {
+        return;
+    };
+    ui.painter().rect_filled(
+        ui.available_rect_before_wrap(),
+        egui::CornerRadius::ZERO,
+        fill,
+    );
+}
+
+fn schema_grid_text(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    value: &mut String,
+    hint: &str,
+) -> egui::Response {
+    let width = ui.available_width().max(24.0);
+    ui.add_enabled_ui(enabled, |ui| {
+        ui.add_sized(
+            egui::vec2(width, 21.0),
+            egui::TextEdit::singleline(value)
+                .hint_text(hint)
+                .font(egui::TextStyle::Monospace)
+                .vertical_align(egui::Align::Center)
+                .margin(egui::Margin::symmetric(4, 0))
+                .frame(egui::Frame::NONE),
+        )
+    })
+    .inner
+}
+
+fn schema_grid_bool(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    value: &mut bool,
+    hover: &str,
+) -> egui::Response {
+    ui.with_layout(
+        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+        |ui| {
+            let color = if *value {
+                palette::TEXT()
+            } else {
+                palette::TEXT_WEAK()
+            };
+            let response = ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::new(
+                        egui::RichText::new(if *value { "YES" } else { "NO" })
+                            .size(11.0)
+                            .monospace()
+                            .color(color),
+                    )
+                    .frame(false)
+                    .min_size(egui::vec2(ui.available_width(), 21.0)),
+                )
+                .on_hover_text(hover);
+            if response.clicked() {
+                *value = !*value;
+            }
+            response
+        },
+    )
+    .inner
+}
+
+fn schema_grid_combo<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.scope(|ui| {
+        let widgets = &mut ui.visuals_mut().widgets;
+        widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+        widgets.inactive.bg_stroke = egui::Stroke::NONE;
+        widgets.hovered.weak_bg_fill = egui::Color32::TRANSPARENT;
+        widgets.hovered.bg_stroke = egui::Stroke::NONE;
+        widgets.active.weak_bg_fill = egui::Color32::TRANSPARENT;
+        widgets.active.bg_stroke = egui::Stroke::NONE;
+        widgets.open.weak_bg_fill = egui::Color32::TRANSPARENT;
+        widgets.open.bg_stroke = egui::Stroke::NONE;
+        add(ui)
+    })
+    .inner
+}
+
+fn schema_grid_combo_icon(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    visuals: &egui::style::WidgetVisuals,
+    _is_open: bool,
+) {
+    let size = egui::vec2(12.0, 12.0);
+    let icon_rect = egui::Rect::from_center_size(rect.center(), size);
+    egui::Image::new(icons::chevron_down())
+        .fit_to_exact_size(size)
+        .tint(visuals.fg_stroke.color)
+        .paint_at(ui, icon_rect);
+}
+
+fn schema_grid_select_on_click(
+    response: &egui::Response,
+    selection: &mut Option<crate::schema::SchemaGridSelection>,
+    tab: crate::schema::SchemaTab,
+    row: usize,
+) {
+    if response.clicked() {
+        *selection = Some(crate::schema::SchemaGridSelection { tab, row });
+    }
+}
+
+fn schema_grid_metadata(ui: &mut egui::Ui, value: &str, empty: &str) -> egui::Response {
+    let value = value.trim();
+    let (text, color) = if value.is_empty() {
+        (empty, palette::TEXT_FAINT())
+    } else {
+        (value, palette::TEXT_WEAK())
+    };
+    ui.add(
+        egui::Label::new(egui::RichText::new(text).monospace().color(color))
+            .truncate()
+            .sense(egui::Sense::click()),
+    )
+    .on_hover_text(text)
+}
+
+fn schema_column_foreign_key(fks: &[crate::schema::FkDraft], column_name: &str) -> String {
+    fks.iter()
+        .filter(|fk| {
+            !fk.drop
+                && fk
+                    .columns_raw
+                    .split(',')
+                    .any(|column| column.trim() == column_name)
+        })
+        .map(|fk| {
+            let table = fk
+                .ref_schema
+                .as_deref()
+                .filter(|schema| !schema.is_empty())
+                .map_or_else(
+                    || fk.ref_table.clone(),
+                    |schema| format!("{schema}.{}", fk.ref_table),
+                );
+            format!("{table}({})", fk.ref_columns_raw)
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Editable Structure table for an existing database table. Inputs intentionally have no card
+/// chrome: the table grid provides the alignment and a focused cell supplies its own affordance.
+fn schema_structure_grid(
+    ui: &mut egui::Ui,
+    columns: &mut Vec<crate::schema::ColumnDraft>,
+    fks: &[crate::schema::FkDraft],
+    db_kind: dbcore::DbKind,
+    selection: &mut Option<crate::schema::SchemaGridSelection>,
+    focus_selected_cell: &mut bool,
+) {
+    use crate::schema::{SchemaGridSelection, SchemaTab};
+    use egui_extras::{Column, TableBuilder};
+
+    let row_height = 24.0;
+    TableBuilder::new(ui)
+        .id_salt("editable_structure_columns")
+        .sense(egui::Sense::click())
+        .striped(true)
+        .resizable(true)
+        .vscroll(false)
+        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+        .auto_shrink([false, true])
+        .column(Column::exact(34.0))
+        .column(Column::initial(180.0).at_least(110.0).clip(true))
+        .column(Column::initial(150.0).at_least(100.0).clip(true))
+        .column(Column::initial(90.0).at_least(72.0).clip(true))
+        .column(Column::initial(140.0).at_least(90.0).clip(true))
+        .column(Column::initial(210.0).at_least(120.0).clip(true))
+        .column(Column::initial(220.0).at_least(130.0).clip(true))
+        .column(Column::remainder().at_least(140.0).clip(true))
+        .header(24.0, |mut header| {
+            for label in [
+                "#",
+                "column_name",
+                "data_type",
+                "is_nullable",
+                "check",
+                "column_default",
+                "foreign_key",
+                "comment",
+            ] {
+                header.col(|ui| schema_grid_header(ui, label));
+            }
+        })
+        .body(|mut body| {
+            for (row_index, column) in columns.iter_mut().enumerate() {
+                body.row(row_height, |mut row| {
+                    let is_new = !column.is_existing;
+                    let selected = selection.is_some_and(|selected| {
+                        selected.tab == SchemaTab::Columns && selected.row == row_index
+                    });
+                    row.set_selected(selected);
+                    row.col(|ui| {
+                        schema_grid_row_tint(ui, column.drop, is_new);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new((row_index + 1).to_string())
+                                    .size(11.0)
+                                    .monospace()
+                                    .color(palette::TEXT_FAINT()),
+                            );
+                        });
+                    });
+                    row.col(|ui| {
+                        schema_grid_row_tint(ui, column.drop, is_new);
+                        let response =
+                            schema_grid_text(ui, !column.drop, &mut column.name, "column_name");
+                        schema_grid_select_on_click(
+                            &response,
+                            selection,
+                            SchemaTab::Columns,
+                            row_index,
+                        );
+                        if selected && *focus_selected_cell && !column.drop {
+                            response.request_focus();
+                            *focus_selected_cell = false;
+                        }
+                    });
+                    row.col(|ui| {
+                        schema_grid_row_tint(ui, column.drop, is_new);
+                        ui.add_enabled_ui(!column.drop, |ui| {
+                            ui.spacing_mut().interact_size.y = 21.0;
+                            let response = schema_grid_combo(ui, |ui| {
+                                egui::ComboBox::from_id_salt(("structure_column_type", row_index))
+                                    .icon(schema_grid_combo_icon)
+                                    .height(320.0)
+                                    .selected_text(
+                                        egui::RichText::new(&column.data_type).monospace(),
+                                    )
+                                    .width((ui.available_width() - 4.0).max(60.0))
+                                    .show_ui(ui, |ui| {
+                                        components::text_input(
+                                            ui,
+                                            &mut column.data_type,
+                                            "Manual data type…",
+                                            210.0,
+                                        );
+                                        ui.separator();
+                                        for data_type in db_type_options(db_kind) {
+                                            ui.selectable_value(
+                                                &mut column.data_type,
+                                                data_type.to_string(),
+                                                *data_type,
+                                            );
+                                        }
+                                    })
+                                    .response
+                            });
+                            schema_grid_select_on_click(
+                                &response,
+                                selection,
+                                SchemaTab::Columns,
+                                row_index,
+                            );
+                        });
+                    });
+                    row.col(|ui| {
+                        schema_grid_row_tint(ui, column.drop, is_new);
+                        let response = schema_grid_bool(
+                            ui,
+                            !column.drop,
+                            &mut column.nullable,
+                            "Click to change nullability",
+                        );
+                        schema_grid_select_on_click(
+                            &response,
+                            selection,
+                            SchemaTab::Columns,
+                            row_index,
+                        );
+                    });
+                    row.col(|ui| {
+                        schema_grid_row_tint(ui, column.drop, is_new);
+                        let response = schema_grid_metadata(ui, &column.check, "NULL");
+                        schema_grid_select_on_click(
+                            &response,
+                            selection,
+                            SchemaTab::Columns,
+                            row_index,
+                        );
+                    });
+                    row.col(|ui| {
+                        schema_grid_row_tint(ui, column.drop, is_new);
+                        let response =
+                            schema_grid_text(ui, !column.drop, &mut column.default, "NULL");
+                        schema_grid_select_on_click(
+                            &response,
+                            selection,
+                            SchemaTab::Columns,
+                            row_index,
+                        );
+                    });
+                    row.col(|ui| {
+                        schema_grid_row_tint(ui, column.drop, is_new);
+                        let foreign_key = schema_column_foreign_key(fks, &column.name);
+                        let response = schema_grid_metadata(ui, &foreign_key, "EMPTY");
+                        schema_grid_select_on_click(
+                            &response,
+                            selection,
+                            SchemaTab::Columns,
+                            row_index,
+                        );
+                    });
+                    row.col(|ui| {
+                        schema_grid_row_tint(ui, column.drop, is_new);
+                        let response = schema_grid_metadata(ui, &column.comment, "NULL");
+                        schema_grid_select_on_click(
+                            &response,
+                            selection,
+                            SchemaTab::Columns,
+                            row_index,
+                        );
+                    });
+                    if row.response().clicked() {
+                        *selection = Some(SchemaGridSelection {
+                            tab: SchemaTab::Columns,
+                            row: row_index,
+                        });
+                    }
+                });
+            }
+        });
+
+    ui.add_space(6.0);
+    if components::button(ui, icons::plus(), "Column", true).clicked() {
+        let row = columns.len();
+        columns.push(crate::schema::ColumnDraft::new_empty());
+        *selection = Some(SchemaGridSelection {
+            tab: SchemaTab::Columns,
+            row,
+        });
+        *focus_selected_cell = true;
+    }
+}
+
+fn schema_indexes_grid(
+    ui: &mut egui::Ui,
+    indexes: &mut Vec<crate::schema::IndexDraft>,
+    selection: &mut Option<crate::schema::SchemaGridSelection>,
+    focus_selected_cell: &mut bool,
+) {
+    use crate::schema::{SchemaGridSelection, SchemaTab};
+    use egui_extras::{Column, TableBuilder};
+
+    TableBuilder::new(ui)
+        .id_salt("editable_structure_indexes")
+        .sense(egui::Sense::click())
+        .striped(true)
+        .resizable(true)
+        .vscroll(false)
+        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+        .auto_shrink([false, true])
+        .column(Column::exact(34.0))
+        .column(Column::initial(300.0).at_least(120.0).clip(true))
+        .column(Column::initial(120.0).at_least(80.0).clip(true))
+        .column(Column::remainder().at_least(180.0).clip(true))
+        .header(24.0, |mut header| {
+            for label in ["#", "index_name", "is_unique", "column_name"] {
+                header.col(|ui| schema_grid_header(ui, label));
+            }
+        })
+        .body(|mut body| {
+            for (row_index, index) in indexes.iter_mut().enumerate() {
+                body.row(24.0, |mut row| {
+                    let is_new = !index.is_existing;
+                    let selected = selection.is_some_and(|selected| {
+                        selected.tab == SchemaTab::Indexes && selected.row == row_index
+                    });
+                    row.set_selected(selected);
+                    row.col(|ui| {
+                        schema_grid_row_tint(ui, index.drop, is_new);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new((row_index + 1).to_string())
+                                    .size(11.0)
+                                    .monospace()
+                                    .color(palette::TEXT_FAINT()),
+                            );
+                        });
+                    });
+                    row.col(|ui| {
+                        schema_grid_row_tint(ui, index.drop, is_new);
+                        let response =
+                            schema_grid_text(ui, !index.drop, &mut index.name, "index_name");
+                        schema_grid_select_on_click(
+                            &response,
+                            selection,
+                            SchemaTab::Indexes,
+                            row_index,
+                        );
+                        if selected && *focus_selected_cell && !index.drop {
+                            response.request_focus();
+                            *focus_selected_cell = false;
+                        }
+                    });
+                    row.col(|ui| {
+                        schema_grid_row_tint(ui, index.drop, is_new);
+                        let response = schema_grid_bool(
+                            ui,
+                            !index.drop,
+                            &mut index.unique,
+                            "Click to change uniqueness",
+                        );
+                        schema_grid_select_on_click(
+                            &response,
+                            selection,
+                            SchemaTab::Indexes,
+                            row_index,
+                        );
+                    });
+                    row.col(|ui| {
+                        schema_grid_row_tint(ui, index.drop, is_new);
+                        let response = schema_grid_text(
+                            ui,
+                            !index.drop,
+                            &mut index.columns_raw,
+                            "column1, column2",
+                        );
+                        schema_grid_select_on_click(
+                            &response,
+                            selection,
+                            SchemaTab::Indexes,
+                            row_index,
+                        );
+                    });
+                    if row.response().clicked() {
+                        *selection = Some(SchemaGridSelection {
+                            tab: SchemaTab::Indexes,
+                            row: row_index,
+                        });
+                    }
+                });
+            }
+        });
+
+    ui.add_space(6.0);
+    if components::button(ui, icons::plus(), "Index", true).clicked() {
+        let row = indexes.len();
+        indexes.push(crate::schema::IndexDraft::new_empty());
+        *selection = Some(SchemaGridSelection {
+            tab: SchemaTab::Indexes,
+            row,
+        });
+        *focus_selected_cell = true;
     }
 }
 
@@ -7707,6 +8920,7 @@ fn schema_columns_tab(
                 ui.add_enabled_ui(!col.drop, |ui| {
                     ui.spacing_mut().interact_size.y = style::CONTROL_H;
                     egui::ComboBox::from_id_salt(("schema_col_type", i))
+                        .height(320.0)
                         .selected_text(if col.data_type.is_empty() {
                             "TEXT"
                         } else {
@@ -7714,6 +8928,13 @@ fn schema_columns_tab(
                         })
                         .width(TYPE_W)
                         .show_ui(ui, |ui| {
+                            components::text_input(
+                                ui,
+                                &mut col.data_type,
+                                "Manual data type…",
+                                210.0,
+                            );
+                            ui.separator();
                             for ty in db_type_options(db_kind) {
                                 ui.selectable_value(&mut col.data_type, ty.to_string(), *ty);
                             }
@@ -8005,5 +9226,24 @@ fn schema_fk_tab(ui: &mut egui::Ui, fks: &mut Vec<crate::schema::FkDraft>) {
         .clicked()
     {
         fks.push(crate::schema::FkDraft::new_empty());
+    }
+}
+
+#[cfg(test)]
+mod pager_tests {
+    use super::parse_pager_window;
+
+    #[test]
+    fn pager_window_accepts_blank_offset_and_grouped_numbers() {
+        assert_eq!(parse_pager_window("75,000", ""), Ok((75_000, 0)));
+        assert_eq!(parse_pager_window("1_000", "250"), Ok((1_000, 250)));
+    }
+
+    #[test]
+    fn pager_window_rejects_invalid_or_oversized_limits() {
+        assert!(parse_pager_window("", "0").is_err());
+        assert!(parse_pager_window("0", "0").is_err());
+        assert!(parse_pager_window("100001", "0").is_err());
+        assert!(parse_pager_window("100", "-1").is_err());
     }
 }

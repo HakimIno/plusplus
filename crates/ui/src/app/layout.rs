@@ -39,7 +39,7 @@ impl DbGuiApp {
             let mut actions = Vec::new();
             self.top_bar(ui_root, frame, &mut actions);
             self.query_tab_bar(ui_root, &mut actions);
-            self.status_bar(ui_root, &mut actions);
+            self.status_bar(ui_root);
             self.draw_settings_page(ui_root, &mut actions);
             for action in actions {
                 self.apply_action(action);
@@ -60,7 +60,7 @@ impl DbGuiApp {
 
             self.top_bar(ui_root, frame, &mut actions);
             self.query_tab_bar(ui_root, &mut actions);
-            self.status_bar(ui_root, &mut actions);
+            self.status_bar(ui_root);
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(palette::BASE()))
                 .show_inside(ui_root, |_ui| {});
@@ -86,10 +86,7 @@ impl DbGuiApp {
             if self.workspace_dirty {
                 ctx.request_repaint_after(std::time::Duration::from_millis(1600));
             }
-            if self.busy != Busy::Idle
-                || self.update.is_busy()
-                || !self.pending_page_counts.is_empty()
-            {
+            if self.busy != Busy::Idle || self.update.is_busy() {
                 ctx.request_repaint_after(std::time::Duration::from_millis(80));
             }
             return;
@@ -99,9 +96,20 @@ impl DbGuiApp {
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter)) {
             actions.push(Action::RunQuery);
         }
-        // Cmd/Ctrl+S opens the SQL preview dialog for staged cell edits.
+        let editing_table_schema = self.schema_pending.is_none()
+            && matches!(self.tab().view, TabView::Structure | TabView::Indexes)
+            && matches!(
+                self.tab().schema_editor.as_ref(),
+                Some(crate::schema::ObjectEditor::Table(_))
+            );
+        // Cmd/Ctrl+S previews whichever grid is being edited: row DML in Data, table DDL in
+        // Structure/Indexes. Both remain review-before-commit workflows.
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
-            actions.push(Action::PreviewEdits);
+            actions.push(if editing_table_schema {
+                Action::GenerateSchema
+            } else {
+                Action::PreviewEdits
+            });
         }
         // Cmd/Ctrl+R reloads the current result (re-runs the tab's SQL), dropping any
         // unsaved cell edits — the reloaded result starts from a clean edit slate.
@@ -112,7 +120,13 @@ impl DbGuiApp {
         // is open — the open-editor case is handled inside `render_editor` (cancel that
         // cell only). Skipped while the filter bar is up, which uses Esc to close itself.
         // Recorded as one undo step so an accidental discard can be taken back with Cmd/Ctrl+Z.
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape))
+        let typing_now = ctx.memory(|m| m.focused().is_some());
+        let discard_schema = editing_table_schema
+            && !typing_now
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        if discard_schema {
+            actions.push(Action::DiscardSchemaChanges);
+        } else if ctx.input(|i| i.key_pressed(egui::Key::Escape))
             && self.tab().edits.active.is_none()
             && self.tab().edits.has_pending()
             && !self.tab().filter.visible
@@ -127,7 +141,6 @@ impl DbGuiApp {
         // delete mark, new row, fill, paste, discard). Only when no text field is focused —
         // an open cell editor / SQL console handles its own in-field undo. Shift+Z is matched
         // first so a redo isn't also read as an undo.
-        let typing_now = ctx.memory(|m| m.focused().is_some());
         if !typing_now && self.tab().edits.editable() {
             let (undo, redo) = ctx.input_mut(|i| {
                 let redo = i.consume_key(
@@ -151,6 +164,8 @@ impl DbGuiApp {
         if !typing
             && self.tab().edits.editable()
             && self.tab().edits.active.is_none()
+            && self.tab().view == TabView::Data
+            && self.tab().schema_editor.is_none()
             && ctx
                 .input(|i| i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete))
             && !self.tab().selection.is_empty()
@@ -313,11 +328,10 @@ impl DbGuiApp {
         // Order matters: top/bottom/left/right carve space, central takes the rest. The status
         // bar is carved first so it pins to the very bottom edge. Side panels are carved before
         // the SQL editor so they run the full height; the editor stays confined to the central
-        // column. Its edge is contextual: code-first tabs dock it above the result, data-first
-        // tabs keep it below the grid.
+        // column. Table/View tabs are data workspaces, so SQL authoring stays in Query tabs.
         self.top_bar(ui_root, frame, &mut actions);
         self.query_tab_bar(ui_root, &mut actions);
-        self.status_bar(ui_root, &mut actions);
+        self.status_bar(ui_root);
         if self.show_connection_tabs {
             self.connection_tabs(ui_root, &mut actions);
         }
@@ -333,22 +347,34 @@ impl DbGuiApp {
         // An open object designer (Create/Edit Table, View, Trigger, Routine) owns the whole
         // tab the same way: the SQL console and result bars would only crowd the form.
         let designing = self.tab().schema_editor.is_some();
-        if self.show_query_console && !diagram_tab && !designing {
+        let sql_authoring_tab = matches!(
+            self.tab().kind,
+            crate::components::QueryTabKind::Query
+                | crate::components::QueryTabKind::Function
+                | crate::components::QueryTabKind::Procedure
+                | crate::components::QueryTabKind::Trigger
+        );
+        let console_visible =
+            self.show_query_console && sql_authoring_tab && !diagram_tab && !designing;
+        if console_visible {
             self.query_console(ui_root, editor_placement, &mut actions);
+        }
+        // Live log is a workspace-level bottom dock, not part of the SQL editor. Keeping it
+        // independent makes it stay put across Data / Structure / Indexes and places it below
+        // query results instead of between the editor and its toolbar.
+        if self.show_live_log && !diagram_tab {
+            self.live_log_panel(ui_root, self.tab().id);
         }
         if !diagram_tab && !designing {
             // A top panel after left/right carves the strip directly above the grid.
             self.filter_bar(ui_root);
-            // Keep result controls next to the query toolbar: below it on code-first tabs,
-            // and between the grid and bottom editor on data-first tabs.
-            // Table/View tabs include this bar in their resizable bottom stack so the drag
-            // edge sits above Data / Structure / Edit Table. Query tabs keep it below the
-            // top-docked editor as before; when the console is hidden it remains standalone.
-            if editor_placement == QueryEditorPlacement::Top || !self.show_query_console {
+            // Query result controls sit below the top editor. Table/View mode controls remain
+            // a standalone bottom strip because those tabs intentionally have no SQL console.
+            if editor_placement == QueryEditorPlacement::Top || !console_visible {
                 self.view_mode_bar(ui_root, editor_placement, &mut actions);
             }
         }
-        // While designing on a Table/View tab, keep Data / Structure / Edit Table visible as
+        // While editing a Table/View schema, keep Data / Structure / Indexes visible as
         // the way back out (Query tabs' Data/Message/Chart switch is meaningless here).
         if designing && !diagram_tab && self.tab().kind != crate::components::QueryTabKind::Query {
             self.view_mode_bar(ui_root, editor_placement, &mut actions);
@@ -401,8 +427,8 @@ impl DbGuiApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(1600));
         }
 
-        // Keep animating the spinner while background work is in flight.
-        if self.busy != Busy::Idle || self.update.is_busy() || !self.pending_page_counts.is_empty() {
+        // Keep background progress and incoming query rows responsive.
+        if self.busy != Busy::Idle || self.update.is_busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(80));
         }
     }

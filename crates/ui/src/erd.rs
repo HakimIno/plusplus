@@ -139,11 +139,7 @@ impl TableLookup {
         Self { by_key, by_name }
     }
 
-    fn resolve(
-        &self,
-        table: &dbcore::TableInfo,
-        fk: &dbcore::ForeignKeyInfo,
-    ) -> Option<usize> {
+    fn resolve(&self, table: &dbcore::TableInfo, fk: &dbcore::ForeignKeyInfo) -> Option<usize> {
         if let Some(ref_schema) = &fk.ref_schema {
             return self
                 .by_key
@@ -176,6 +172,9 @@ fn schema_from_design(design: &dbcore::ErDesign) -> SchemaTree {
                         data_type: column.data_type.clone(),
                         nullable: column.nullable,
                         primary_key: column.primary_key,
+                        default: column.default.clone(),
+                        check: None,
+                        comment: None,
                     })
                     .collect(),
                 indexes: table
@@ -282,7 +281,10 @@ impl ErDiagram {
                     .and_then(|c| t.columns.iter().position(|tc| &tc.name == c))
                     .unwrap_or(0);
                 let to_row = fk.ref_columns.first().and_then(|c| {
-                    schema.tables[to].columns.iter().position(|tc| &tc.name == c)
+                    schema.tables[to]
+                        .columns
+                        .iter()
+                        .position(|tc| &tc.name == c)
                 });
 
                 // Cardinality, derived from the referencing side's constraints: a unique
@@ -299,14 +301,14 @@ impl ErDiagram {
                 pk_cols.sort_unstable();
                 let unique = (!pk_cols.is_empty() && pk_cols == fk_cols)
                     || t.indexes.iter().any(|ix| {
-                        let mut cols: Vec<&str> =
-                            ix.columns.iter().map(|s| s.as_str()).collect();
+                        let mut cols: Vec<&str> = ix.columns.iter().map(|s| s.as_str()).collect();
                         cols.sort_unstable();
                         ix.unique && cols == fk_cols
                     });
-                let optional = fk.columns.iter().any(|fc| {
-                    t.columns.iter().any(|tc| &tc.name == fc && tc.nullable)
-                });
+                let optional = fk
+                    .columns
+                    .iter()
+                    .any(|fc| t.columns.iter().any(|tc| &tc.name == fc && tc.nullable));
 
                 let name = if fk.name.is_empty() {
                     String::new()
@@ -554,14 +556,15 @@ impl ErDiagram {
 
             // Place the component: columns advance rightward by their widest box, and
             // each column centers vertically on the component's tallest column.
-            let col_width = |col: &[usize]| {
-                col.iter().map(|&i| sizes[i].x).fold(0.0_f32, f32::max)
-            };
+            let col_width = |col: &[usize]| col.iter().map(|&i| sizes[i].x).fold(0.0_f32, f32::max);
             let col_height = |col: &[usize]| {
                 col.iter().map(|&i| sizes[i].y).sum::<f32>()
                     + V_GAP * col.len().saturating_sub(1) as f32
             };
-            let comp_height = columns.iter().map(|c| col_height(c)).fold(0.0_f32, f32::max);
+            let comp_height = columns
+                .iter()
+                .map(|c| col_height(c))
+                .fold(0.0_f32, f32::max);
             let mut x = MARGIN;
             for col in &columns {
                 if col.is_empty() {
@@ -586,9 +589,7 @@ impl ErDiagram {
             .map(|m| m[0])
             .collect();
         if !singles.is_empty() {
-            let cell = singles
-                .iter()
-                .fold(Vec2::ZERO, |acc, &i| acc.max(sizes[i]))
+            let cell = singles.iter().fold(Vec2::ZERO, |acc, &i| acc.max(sizes[i]))
                 + vec2(H_GAP * 0.5, V_GAP);
             let per_row = (singles.len() as f32).sqrt().ceil() as usize;
             for (slot, &i) in singles.iter().enumerate() {
@@ -615,6 +616,9 @@ mod tests {
             data_type: "INTEGER".into(),
             nullable: !pk,
             primary_key: pk,
+            default: None,
+            check: None,
+            comment: None,
         }
     }
 
@@ -671,7 +675,11 @@ mod tests {
 
         // orders.user_id → users.id, anchored at the right rows. user_id is nullable
         // and not unique, so the relation is an optional many-to-one.
-        let e = d.edges.iter().find(|e| d.nodes[e.from].title == "orders").unwrap();
+        let e = d
+            .edges
+            .iter()
+            .find(|e| d.nodes[e.from].title == "orders")
+            .unwrap();
         assert_eq!(d.nodes[e.to].title, "users");
         assert_eq!(e.from_row, 1); // user_id is the second column
         assert_eq!(e.to_row, Some(0)); // users.id is the first
@@ -714,11 +722,22 @@ mod tests {
         });
 
         let d = ErDiagram::build("c1", &schema);
-        let profiles = d.edges.iter().find(|e| d.nodes[e.from].title == "profiles").unwrap();
+        let profiles = d
+            .edges
+            .iter()
+            .find(|e| d.nodes[e.from].title == "profiles")
+            .unwrap();
         assert!(!profiles.many && !profiles.optional);
         assert!(profiles.detail.ends_with("one-to-one"));
-        let children = d.edges.iter().find(|e| d.nodes[e.from].title == "children").unwrap();
-        assert!(!children.many, "a PK that is also the FK caps the child at one");
+        let children = d
+            .edges
+            .iter()
+            .find(|e| d.nodes[e.from].title == "children")
+            .unwrap();
+        assert!(
+            !children.many,
+            "a PK that is also the FK caps the child at one"
+        );
     }
 
     #[test]
@@ -854,7 +873,10 @@ mod tests {
         // employees is unrelated (only a self-reference): parked below, not inline.
         let users_y = d.nodes.iter().find(|n| n.title == "users").unwrap().pos.y;
         let employees = d.nodes.iter().find(|n| n.title == "employees").unwrap();
-        assert!(employees.pos.y > users_y, "isolated tables go under the graph");
+        assert!(
+            employees.pos.y > users_y,
+            "isolated tables go under the graph"
+        );
     }
 
     #[test]

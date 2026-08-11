@@ -471,6 +471,9 @@ impl Database for CassandraDb {
                     data_type: row_str(&row, 5).unwrap_or_default(),
                     nullable: !primary_key,
                     primary_key,
+                    default: None,
+                    check: None,
+                    comment: None,
                 },
             ));
         }

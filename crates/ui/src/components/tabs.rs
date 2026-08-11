@@ -188,31 +188,83 @@ impl QueryTabKind {
 const TAB_ICON_SIZE: f32 = 13.0;
 const TAB_ICON_GAP: f32 = 6.0;
 
-fn tab_icon_color(kind: QueryTabKind, selected: bool) -> egui::Color32 {
+fn tab_icon_color(kind: QueryTabKind, select_t: f32) -> egui::Color32 {
     let color = kind.color();
-    if selected {
-        color
-    } else {
-        color.linear_multiply(0.78)
-    }
+    crate::style::mix(color.linear_multiply(0.78), color, select_t)
 }
 
 fn translucent(color: egui::Color32, alpha: u8) -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
 }
 
+fn ease_out_cubic(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
+
+/// Per-tab selection progress (`0` idle → `1` active), stored in egui temp data so
+/// activating a chip fades fill/waves in instead of popping.
+#[derive(Clone, Copy)]
+struct TabSelectAnim {
+    progress: f32,
+    last_t: f64,
+}
+
+/// Advance selection toward `selected`, returning the eased visual amount.
+fn tick_tab_select(ui: &egui::Ui, id: egui::Id, selected: bool) -> f32 {
+    const SPEED: f32 = 10.0; // ~200ms to settle
+
+    let now = ui.input(|i| i.time);
+    let target = if selected { 1.0 } else { 0.0 };
+    let mut anim = ui
+        .ctx()
+        .data(|d| d.get_temp::<TabSelectAnim>(id))
+        .unwrap_or(TabSelectAnim {
+            progress: target,
+            last_t: now,
+        });
+
+    let dt = ((now - anim.last_t) as f32).clamp(0.0, 0.05);
+    anim.last_t = now;
+    let step = 1.0 - (-SPEED * dt).exp();
+    anim.progress += (target - anim.progress) * step;
+    if (anim.progress - target).abs() < 0.002 {
+        anim.progress = target;
+    } else if ui.ctx().input(|i| i.focused) {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(16));
+    }
+
+    ui.ctx().data_mut(|d| d.insert_temp(id, anim));
+    ease_out_cubic(anim.progress)
+}
+
 /// Water-like motion behind the active tab: two sine layers of different wavelength drift in
 /// opposite directions and are filled from their crest down to the chip's bottom edge. Drawn
 /// as a triangle strip because a wave outline is not convex, so `convex_polygon` would tear.
-/// `t` is `input.time`; the caller drives the repaint.
-fn paint_tab_waves(painter: &egui::Painter, rect: egui::Rect, accent: egui::Color32, t: f32) {
+/// `t` is `input.time`; `intensity` (0..1) fades the layers in/out with selection.
+fn paint_tab_waves(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    accent: egui::Color32,
+    t: f32,
+    intensity: f32,
+) {
+    let intensity = intensity.clamp(0.0, 1.0);
+    if intensity <= 0.01 {
+        return;
+    }
     // (amplitude, wavelength, drift px/s, baseline above the bottom edge, alpha)
     const LAYERS: [(f32, f32, f32, f32, u8); 2] =
         [(2.4, 44.0, 17.0, 9.0, 30), (3.0, 29.0, -11.0, 5.5, 22)];
     let steps = ((rect.width() / 3.0).ceil() as usize).clamp(8, 96);
     for (amp, wavelength, speed, base, alpha) in LAYERS {
-        let color = translucent(accent, alpha);
-        let baseline = rect.bottom() - base;
+        let a = ((alpha as f32) * intensity).round() as u8;
+        let color = translucent(accent, a);
+        // Waves rise in from the bottom as the tab activates.
+        let rise = 1.0 - (1.0 - intensity) * 0.55;
+        let baseline = rect.bottom() - base * rise;
+        let amp = amp * (0.35 + 0.65 * intensity);
         let mut mesh = egui::Mesh::default();
         for i in 0..=steps {
             let x = rect.left() + rect.width() * i as f32 / steps as f32;
@@ -254,7 +306,7 @@ fn paint_tab_chip(
     close_color: egui::Color32,
     pad: f32,
     close_w: f32,
-    selected: bool,
+    select_t: f32,
     close_hovered: bool,
 ) {
     let rounding = egui::CornerRadius {
@@ -267,31 +319,28 @@ fn paint_tab_chip(
     if stroke != egui::Stroke::NONE {
         painter.hline(rect.x_range(), rect.top(), stroke);
     }
-    if selected {
+    if select_t > 0.01 {
         paint_tab_waves(
             painter,
             rect,
             palette::ACCENT(),
             ui.input(|i| i.time) as f32,
+            select_t,
         );
         request_wave_repaint(ui.ctx());
-        painter.hline(
-            rect.x_range(),
-            rect.top(),
-            egui::Stroke::new(1.0, palette::ACCENT()),
-        );
     }
 
-    let icon_color = tab_icon_color(kind, selected);
+    let icon_color = tab_icon_color(kind, select_t);
     let badge_rect = egui::Rect::from_center_size(
         egui::pos2(rect.left() + pad + 7.0, rect.center().y),
         egui::vec2(16.0, 16.0),
     );
     if db_kind.is_none() {
+        let badge_a = (20.0 + 14.0 * select_t).round() as u8;
         painter.rect_filled(
             badge_rect,
             egui::CornerRadius::same(4),
-            translucent(icon_color, if selected { 34 } else { 20 }),
+            translucent(icon_color, badge_a),
         );
     }
     let icon_rect = egui::Rect::from_center_size(
@@ -355,11 +404,22 @@ pub(crate) fn query_tab_item(
     let dragging = drag_float_x.is_some();
 
     let font = egui::TextStyle::Body.resolve(ui.style());
-    let color = if selected {
-        palette::TEXT()
-    } else {
-        palette::TEXT_WEAK()
-    };
+    let close_w = 16.0;
+    let pad = 9.0;
+    // Measure with a placeholder color; the painted galley uses the animated text color.
+    let text_w = ui
+        .painter()
+        .layout_no_wrap(label.clone(), font.clone(), egui::Color32::WHITE)
+        .size()
+        .x;
+    let size = egui::vec2(
+        pad + 16.0 + TAB_ICON_GAP + text_w + 8.0 + close_w + pad,
+        29.0,
+    );
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+
+    let select_t = tick_tab_select(ui, resp.id.with("select_anim"), selected || dragging);
+    let color = crate::style::mix(palette::TEXT_WEAK(), palette::TEXT(), select_t);
     let galley = ui
         .painter()
         .layout_job(egui::text::LayoutJob::single_section(
@@ -371,14 +431,6 @@ pub(crate) fn query_tab_item(
                 ..Default::default()
             },
         ));
-    let text_w = galley.size().x;
-    let close_w = 16.0;
-    let pad = 9.0;
-    let size = egui::vec2(
-        pad + 16.0 + TAB_ICON_GAP + text_w + 8.0 + close_w + pad,
-        29.0,
-    );
-    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
 
     // The × hit area sits at the right edge; its own hover/click is tested separately so a
     // click there closes rather than selects. Inert while the tab floats mid-drag.
@@ -396,12 +448,15 @@ pub(crate) fn query_tab_item(
         },
     );
 
-    let fill = if selected || dragging {
-        palette::SURFACE()
-    } else if resp.hovered() {
+    let idle_fill = if resp.hovered() {
         palette::SURFACE_HOVER()
     } else {
         palette::PANEL()
+    };
+    let fill = if dragging {
+        palette::SURFACE()
+    } else {
+        crate::style::mix(idle_fill, palette::SURFACE(), select_t)
     };
     let stroke = if dragging {
         egui::Stroke::new(1.0, palette::ACCENT())
@@ -410,7 +465,7 @@ pub(crate) fn query_tab_item(
     };
     let close_color = if close_resp.hovered() && !dragging {
         palette::DANGER()
-    } else if selected || resp.hovered() {
+    } else if select_t > 0.5 || resp.hovered() {
         palette::TEXT_WEAK()
     } else {
         palette::TEXT_FAINT()
@@ -451,7 +506,7 @@ pub(crate) fn query_tab_item(
                         close_color,
                         pad,
                         close_w,
-                        selected,
+                        select_t,
                         close_resp.hovered() && !dragging,
                     );
                 });
@@ -469,7 +524,7 @@ pub(crate) fn query_tab_item(
                 close_color,
                 pad,
                 close_w,
-                selected,
+                select_t,
                 close_resp.hovered() && !dragging,
             );
         }
@@ -519,13 +574,9 @@ pub(crate) fn settings_tab_item(ui: &mut egui::Ui) -> QueryTabResponse {
             rect,
             palette::ACCENT(),
             ui.input(|i| i.time) as f32,
+            1.0,
         );
         request_wave_repaint(ui.ctx());
-        ui.painter().hline(
-            rect.x_range(),
-            rect.top(),
-            egui::Stroke::new(1.0, palette::ACCENT()),
-        );
 
         let badge = egui::Rect::from_center_size(
             egui::pos2(rect.left() + pad + 7.0, rect.center().y),

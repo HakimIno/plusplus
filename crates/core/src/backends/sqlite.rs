@@ -322,6 +322,9 @@ impl SqliteDb {
                 data_type: r.try_get::<String, _>("type").unwrap_or_default(),
                 nullable: r.try_get::<i64, _>("notnull").unwrap_or(0) == 0,
                 primary_key: r.try_get::<i64, _>("pk").unwrap_or(0) > 0,
+                default: r.try_get::<Option<String>, _>("dflt_value").unwrap_or(None),
+                check: None,
+                comment: None,
             })
             .collect())
     }

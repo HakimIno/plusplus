@@ -20,12 +20,17 @@ pub struct ColumnDraft {
     pub nullable: bool,
     pub primary_key: bool,
     pub default: String,
+    /// Introspected metadata shown in Structure. Editing these requires dialect-specific DDL,
+    /// so the current migration editor presents them read-only.
+    pub check: String,
+    pub comment: String,
     /// Only set for existing columns (ALTER TABLE context).
     pub original_name: Option<String>,
     /// Type/nullability as introspected, kept so an edit to them can be detected and turned
     /// into an `ALTER COLUMN`. `None` for newly added columns.
     pub original_type: Option<String>,
     pub original_nullable: Option<bool>,
+    pub original_default: Option<String>,
     /// Whether the column existed before editing (vs. being newly added).
     pub is_existing: bool,
     /// Mark for deletion (existing column will get DROP COLUMN).
@@ -40,24 +45,30 @@ impl ColumnDraft {
             nullable: true,
             primary_key: false,
             default: String::new(),
+            check: String::new(),
+            comment: String::new(),
             original_name: None,
             original_type: None,
             original_nullable: None,
+            original_default: None,
             is_existing: false,
             drop: false,
         }
     }
 
-    pub fn from_existing(name: &str, data_type: &str, nullable: bool, primary_key: bool) -> Self {
+    pub fn from_existing(column: &dbcore::ColumnInfo) -> Self {
         Self {
-            name: name.into(),
-            data_type: data_type.into(),
-            nullable,
-            primary_key,
-            default: String::new(),
-            original_name: Some(name.into()),
-            original_type: Some(data_type.into()),
-            original_nullable: Some(nullable),
+            name: column.name.clone(),
+            data_type: column.data_type.clone(),
+            nullable: column.nullable,
+            primary_key: column.primary_key,
+            default: column.default.clone().unwrap_or_default(),
+            check: column.check.clone().unwrap_or_default(),
+            comment: column.comment.clone().unwrap_or_default(),
+            original_name: Some(column.name.clone()),
+            original_type: Some(column.data_type.clone()),
+            original_nullable: Some(column.nullable),
+            original_default: Some(column.default.clone().unwrap_or_default()),
             is_existing: true,
             drop: false,
         }
@@ -74,8 +85,11 @@ impl ColumnDraft {
             .as_deref()
             .is_some_and(|t| !t.eq_ignore_ascii_case(self.data_type.trim()));
         let null_changed = self.original_nullable.is_some_and(|n| n != self.nullable);
-        let default_set = !self.default.trim().is_empty();
-        type_changed || null_changed || default_set
+        let default_changed = self
+            .original_default
+            .as_deref()
+            .is_some_and(|value| value.trim() != self.default.trim());
+        type_changed || null_changed || default_changed
     }
 
     pub fn to_def(&self) -> ColumnDef {
@@ -99,6 +113,9 @@ pub struct IndexDraft {
     /// Space-separated column names (editable as a single string).
     pub columns_raw: String,
     pub unique: bool,
+    original_name: Option<String>,
+    original_columns_raw: Option<String>,
+    original_unique: Option<bool>,
     pub is_existing: bool,
     pub drop: bool,
 }
@@ -109,6 +126,9 @@ impl IndexDraft {
             name: String::new(),
             columns_raw: String::new(),
             unique: false,
+            original_name: None,
+            original_columns_raw: None,
+            original_unique: None,
             is_existing: false,
             drop: false,
         }
@@ -119,9 +139,23 @@ impl IndexDraft {
             name: name.into(),
             columns_raw: columns.join(", "),
             unique,
+            original_name: Some(name.into()),
+            original_columns_raw: Some(columns.join(", ")),
+            original_unique: Some(unique),
             is_existing: true,
             drop: false,
         }
+    }
+
+    pub fn is_altered(&self) -> bool {
+        self.is_existing
+            && (self.original_name.as_deref() != Some(self.name.trim())
+                || self.original_columns_raw.as_deref() != Some(self.columns_raw.trim())
+                || self.original_unique != Some(self.unique))
+    }
+
+    fn original_name(&self) -> &str {
+        self.original_name.as_deref().unwrap_or(&self.name)
     }
 
     pub fn columns(&self) -> Vec<String> {
@@ -220,6 +254,12 @@ pub enum SchemaTab {
     ForeignKeys,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SchemaGridSelection {
+    pub tab: SchemaTab,
+    pub row: usize,
+}
+
 // ─── Main editor struct ──────────────────────────────────────────────────────
 
 pub struct SchemaEditor {
@@ -233,6 +273,8 @@ pub struct SchemaEditor {
     pub fks: Vec<FkDraft>,
 
     pub active_tab: SchemaTab,
+    pub grid_selection: Option<SchemaGridSelection>,
+    pub focus_selected_cell: bool,
     /// Original table name when editing (used for future rename support).
     #[allow(dead_code)]
     pub original_table_name: Option<String>,
@@ -249,6 +291,8 @@ impl SchemaEditor {
             indexes: Vec::new(),
             fks: Vec::new(),
             active_tab: SchemaTab::Columns,
+            grid_selection: None,
+            focus_selected_cell: false,
             original_table_name: None,
         }
     }
@@ -257,16 +301,18 @@ impl SchemaEditor {
         let columns = table
             .columns
             .iter()
-            .map(|c| {
-                ColumnDraft::from_existing(&c.name, &c.data_type, c.nullable, c.primary_key)
-            })
+            .map(ColumnDraft::from_existing)
             .collect();
         let indexes = table
             .indexes
             .iter()
             .map(|i| IndexDraft::from_existing(&i.name, &i.columns, i.unique))
             .collect();
-        let fks = table.foreign_keys.iter().map(FkDraft::from_existing).collect();
+        let fks = table
+            .foreign_keys
+            .iter()
+            .map(FkDraft::from_existing)
+            .collect();
         Self {
             mode: SchemaEditorMode::Edit,
             table_name: table.name.clone(),
@@ -276,6 +322,8 @@ impl SchemaEditor {
             indexes,
             fks,
             active_tab: SchemaTab::Columns,
+            grid_selection: None,
+            focus_selected_cell: false,
             original_table_name: Some(table.name.clone()),
         }
     }
@@ -294,12 +342,15 @@ impl SchemaEditor {
             .columns
             .iter()
             .map(|column| {
-                let mut draft = ColumnDraft::from_existing(
-                    &column.name,
-                    &column.data_type,
-                    column.nullable,
-                    column.primary_key,
-                );
+                let mut draft = ColumnDraft::from_existing(&dbcore::ColumnInfo {
+                    name: column.name.clone(),
+                    data_type: column.data_type.clone(),
+                    nullable: column.nullable,
+                    primary_key: column.primary_key,
+                    default: column.default.clone(),
+                    check: None,
+                    comment: None,
+                });
                 draft.default = column.default.clone().unwrap_or_default();
                 draft
             })
@@ -332,6 +383,8 @@ impl SchemaEditor {
             indexes,
             fks,
             active_tab: SchemaTab::Columns,
+            grid_selection: None,
+            focus_selected_cell: false,
             original_table_name: Some(table.name.clone()),
         }
     }
@@ -433,8 +486,12 @@ impl SchemaEditor {
                     return Err("All columns must have a name.".into());
                 }
 
-                let active_fks: Vec<ForeignKeyDef> =
-                    self.fks.iter().filter(|f| !f.drop).map(|f| f.to_def()).collect();
+                let active_fks: Vec<ForeignKeyDef> = self
+                    .fks
+                    .iter()
+                    .filter(|f| !f.drop)
+                    .map(|f| f.to_def())
+                    .collect();
 
                 stmts.push(build_create_table_sql(
                     self.db_kind,
@@ -449,7 +506,10 @@ impl SchemaEditor {
                         return Err("All indexes must have a name.".into());
                     }
                     if idx.columns().is_empty() {
-                        return Err(format!("Index '{}' must specify at least one column.", idx.name));
+                        return Err(format!(
+                            "Index '{}' must specify at least one column.",
+                            idx.name
+                        ));
                     }
                     stmts.push(build_create_index_sql(
                         self.db_kind,
@@ -473,11 +533,7 @@ impl SchemaEditor {
                 }
 
                 // Renamed columns
-                for col in self
-                    .columns
-                    .iter()
-                    .filter(|c| c.is_existing && !c.drop)
-                {
+                for col in self.columns.iter().filter(|c| c.is_existing && !c.drop) {
                     let orig = col.original_name.as_deref().unwrap_or(&col.name);
                     if orig != col.name.trim() && !col.name.trim().is_empty() {
                         stmts.push(build_rename_column_sql(
@@ -525,23 +581,35 @@ impl SchemaEditor {
                     ));
                 }
 
-                // Dropped indexes
-                for idx in self.indexes.iter().filter(|i| i.is_existing && i.drop) {
+                // Existing index edits are applied portably as drop + recreate; this also makes
+                // renaming and changing the indexed columns work across every supported backend.
+                for idx in self
+                    .indexes
+                    .iter()
+                    .filter(|i| i.is_existing && (i.drop || i.is_altered()))
+                {
                     stmts.push(build_drop_index_sql(
                         self.db_kind,
                         self.schema(),
                         table,
-                        &idx.name,
+                        idx.original_name(),
                     ));
                 }
 
-                // New indexes
-                for idx in self.indexes.iter().filter(|i| !i.is_existing && !i.drop) {
+                // New and edited indexes
+                for idx in self
+                    .indexes
+                    .iter()
+                    .filter(|i| !i.drop && (!i.is_existing || i.is_altered()))
+                {
                     if idx.name.trim().is_empty() {
                         return Err("New indexes must have a name.".into());
                     }
                     if idx.columns().is_empty() {
-                        return Err(format!("Index '{}' must specify at least one column.", idx.name));
+                        return Err(format!(
+                            "Index '{}' must specify at least one column.",
+                            idx.name
+                        ));
                     }
                     stmts.push(build_create_index_sql(
                         self.db_kind,
@@ -572,9 +640,7 @@ impl SchemaEditor {
                 // New foreign keys
                 for fk in self.fks.iter().filter(|f| !f.is_existing && !f.drop) {
                     if self.db_kind == DbKind::Sqlite {
-                        return Err(
-                            "SQLite cannot add a foreign key to an existing table.".into()
-                        );
+                        return Err("SQLite cannot add a foreign key to an existing table.".into());
                     }
                     let def = fk.to_def();
                     if def.columns.is_empty() || def.ref_table.trim().is_empty() {
@@ -700,7 +766,12 @@ impl ViewEditor {
             let renamed = orig_name != name;
             let mat_changed = *orig_mat != self.materialized;
             if renamed || mat_changed || !view_supports_replace(self.db_kind, self.materialized) {
-                stmts.push(build_drop_view_sql(self.db_kind, self.schema(), orig_name, *orig_mat));
+                stmts.push(build_drop_view_sql(
+                    self.db_kind,
+                    self.schema(),
+                    orig_name,
+                    *orig_mat,
+                ));
             }
         }
         // Use an in-place replace only in Edit mode when we didn't already drop the old view.
@@ -847,7 +918,12 @@ impl TriggerEditor {
         let mut stmts = Vec::new();
         // Triggers have no portable in-place replace, so an edit is drop-then-create.
         if let (ObjectMode::Edit, Some((orig_name, orig_table))) = (self.mode, &self.original) {
-            stmts.push(build_drop_trigger_sql(self.db_kind, self.schema(), orig_name, orig_table));
+            stmts.push(build_drop_trigger_sql(
+                self.db_kind,
+                self.schema(),
+                orig_name,
+                orig_table,
+            ));
         }
         stmts.extend(build_create_trigger_sql(self.db_kind, &build)?);
         Ok(stmts)
@@ -1055,7 +1131,7 @@ fn extract_dollar_quoted(def: &str) -> Option<String> {
 #[cfg(test)]
 mod object_editor_tests {
     use super::*;
-    use dbcore::ViewInfo;
+    use dbcore::{ColumnInfo, IndexInfo, ViewInfo};
 
     fn view(schema: Option<&str>, materialized: bool) -> ViewInfo {
         ViewInfo {
@@ -1065,6 +1141,36 @@ mod object_editor_tests {
             definition: "SELECT 1".into(),
             materialized,
         }
+    }
+
+    #[test]
+    fn editing_an_existing_index_drops_then_recreates_it() {
+        let table = TableInfo {
+            schema: None,
+            name: "items".into(),
+            columns: vec![ColumnInfo {
+                name: "sku".into(),
+                data_type: "TEXT".into(),
+                nullable: false,
+                primary_key: false,
+                default: None,
+                check: None,
+                comment: None,
+            }],
+            indexes: vec![IndexInfo {
+                name: "idx_items_sku".into(),
+                unique: false,
+                columns: vec!["sku".into()],
+            }],
+            foreign_keys: Vec::new(),
+        };
+        let mut editor = SchemaEditor::edit_table(&table, DbKind::Sqlite);
+        editor.indexes[0].unique = true;
+
+        let sql = editor.build_ddl().unwrap();
+        assert_eq!(sql.len(), 2);
+        assert!(sql[0].starts_with("DROP INDEX"));
+        assert!(sql[1].starts_with("CREATE UNIQUE INDEX"));
     }
 
     #[test]

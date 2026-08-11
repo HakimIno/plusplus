@@ -15,7 +15,18 @@ const FALLBACK_COL_W: f32 = 120.0;
 
 /// Header row height. Used both by the `TableBuilder` header and by the empty-table
 /// double-click zone, which measures down from the header — they must agree.
-const HEADER_H: f32 = 26.0;
+const HEADER_H: f32 = 28.0;
+
+/// Horizontal breathing room shared by header labels and body cells.
+const CELL_INSET_X: f32 = 8.0;
+
+/// Grid code values are intentionally a touch smaller than surrounding UI text. This keeps
+/// dates and long identifiers precise without letting the monospace face dominate the table.
+const GRID_MONO_SIZE: f32 = 11.5;
+
+/// Begin fetching the next result chunk while several viewports remain. This absorbs normal
+/// database/network latency so reaching the currently loaded tail feels continuous.
+const RESULT_PREFETCH_ROWS: usize = 128;
 
 #[derive(Clone, Default)]
 struct GridColumnView {
@@ -30,10 +41,10 @@ fn column_view_id(grid_id: u64) -> egui::Id {
 }
 
 fn fitted_column_width(ui: &egui::Ui, result: &QueryResult, col: usize) -> Option<f32> {
-    const MIN_WIDTH: f32 = 56.0;
-    const MAX_WIDTH: f32 = 480.0;
-    const HEADER_CHROME: f32 = 64.0;
-    const CELL_PADDING: f32 = 18.0;
+    const MIN_WIDTH: f32 = 72.0;
+    const MAX_WIDTH: f32 = 320.0;
+    const HEADER_CHROME: f32 = CELL_INSET_X * 2.0;
+    const CELL_PADDING: f32 = CELL_INSET_X * 2.0;
     // Font layout is considerably more expensive than iterating the result set. Keep initial
     // auto-fit and the explicit "Fit this column" action responsive for large results by
     // measuring an evenly distributed sample instead of every cell.
@@ -42,7 +53,8 @@ fn fitted_column_width(ui: &egui::Ui, result: &QueryResult, col: usize) -> Optio
     let meta = result.columns.get(col)?;
     let kind = EditorKind::classify(&meta.type_name);
     let body_font = egui::TextStyle::Body.resolve(ui.style());
-    let mono_font = egui::TextStyle::Monospace.resolve(ui.style());
+    let header_font = egui::TextStyle::Heading.resolve(ui.style());
+    let mono_font = egui::FontId::new(GRID_MONO_SIZE, egui::FontFamily::Monospace);
     let sample_step = result.rows.len().div_ceil(MAX_SAMPLED_ROWS).max(1);
     let measure = |text: &str, font: &egui::FontId| {
         ui.ctx().fonts_mut(|fonts| {
@@ -53,7 +65,8 @@ fn fitted_column_width(ui: &egui::Ui, result: &QueryResult, col: usize) -> Optio
         })
     };
 
-    let mut width = measure(&meta.name, &body_font) + HEADER_CHROME;
+    let header_width = measure(&meta.name, &header_font) + HEADER_CHROME;
+    let mut measured_values = Vec::with_capacity(result.rows.len().min(MAX_SAMPLED_ROWS));
     for row in result.rows.iter().step_by(sample_step) {
         let Some(value) = row.get(col) else {
             continue;
@@ -70,12 +83,17 @@ fn fitted_column_width(ui: &egui::Ui, result: &QueryResult, col: usize) -> Optio
         } else {
             &body_font
         };
-        width = width.max(measure(&text, font) + CELL_PADDING);
-        if width >= MAX_WIDTH {
-            break;
-        }
+        measured_values.push(measure(&text, font) + CELL_PADDING);
     }
-    Some(width.clamp(MIN_WIDTH, MAX_WIDTH))
+    // One unusually long note/URL should not make every normal value pay for its width. The
+    // 90th percentile keeps most cells readable; clipping and the existing Fit command still
+    // provide access to outliers.
+    measured_values.sort_by(f32::total_cmp);
+    let content_width = measured_values
+        .get(measured_values.len().saturating_sub(1) * 9 / 10)
+        .copied()
+        .unwrap_or(MIN_WIDTH);
+    Some(header_width.max(content_width).clamp(MIN_WIDTH, MAX_WIDTH))
 }
 
 /// A sort request from a column header (click or the header menu).
@@ -311,6 +329,8 @@ impl Selection {
 /// What the grid reports back to the app after a frame.
 #[derive(Default)]
 pub struct GridResponse {
+    /// The viewport is within a small prefetch margin of the last loaded row.
+    pub near_end: bool,
     /// A header sort request (click or menu).
     pub sort: Option<SortCmd>,
     /// Open the filter bar with a condition targeting this column.
@@ -350,6 +370,7 @@ pub struct GridResponse {
     fill_handle: Option<egui::Rect>,
     fill_handle_source: Option<(usize, usize)>,
     fill_range_border: Option<egui::Rect>,
+    last_visible_row: Option<usize>,
 }
 
 /// What a body row at a given display index represents.
@@ -385,7 +406,7 @@ pub fn results_grid(
         return out;
     }
 
-    let row_height = egui::TextStyle::Monospace.resolve(ui.style()).size + 8.0;
+    let row_height = ui.text_style_height(&egui::TextStyle::Body) + 10.0;
     // Width of the row-number gutter, sized to the largest row number.
     let digits = (order.len().max(1) as f64).log10().floor() as usize + 1;
     let gutter_w = 18.0 + 8.0 * digits as f32;
@@ -535,6 +556,10 @@ pub fn results_grid(
         grid_id,
         &mut out,
     );
+    out.near_end = rendered_rows == 0
+        || out
+            .last_visible_row
+            .is_some_and(|last| last.saturating_add(RESULT_PREFETCH_ROWS) >= rendered_rows);
 
     out
 }
@@ -591,7 +616,7 @@ fn build_grid(
     for &col in visible_cols {
         let width = column_widths[col].unwrap_or(FALLBACK_COL_W);
         let mut column = Column::initial(width)
-            .at_least(40.0)
+            .at_least(64.0)
             .clip(true)
             .resizable(true);
         if fit_content_col == Some(col) {
@@ -620,7 +645,7 @@ fn build_grid(
                         ui.label(
                             egui::RichText::new("#")
                                 .color(palette::TEXT_FAINT())
-                                .monospace(),
+                                .font(egui::TextStyle::Small.resolve(ui.style())),
                         );
                     },
                 );
@@ -635,6 +660,10 @@ fn build_grid(
             let total = order.len() + new_rows;
             body.rows(row_height, total, |mut row| {
                 let disp = row.index();
+                out.last_visible_row = Some(
+                    out.last_visible_row
+                        .map_or(disp, |previous| previous.max(disp)),
+                );
                 // Display index splits into: stored rows, then new rows.
                 let kind = if disp < order.len() {
                     RowKind::Stored(order[disp])
@@ -660,7 +689,11 @@ fn build_grid(
                             RowKind::Stored(_) => format!("{}", disp + 1),
                             RowKind::New(_) => "✱".to_string(),
                         };
-                        ui.weak(egui::RichText::new(label).monospace());
+                        ui.label(
+                            egui::RichText::new(label)
+                                .font(egui::FontId::new(10.5, egui::FontFamily::Monospace))
+                                .color(palette::TEXT_FAINT()),
+                        );
                     });
                 });
                 if let (Some(fill), Some(pointer)) = (fill_drag.as_mut(), pointer_pos) {
@@ -971,8 +1004,8 @@ fn in_fill_range(from: usize, to: usize, row: usize) -> bool {
     row >= from.min(to) && row <= from.max(to)
 }
 
-/// One column header: a centered name with right-aligned sort/menu chrome. The name's center is
-/// always the column's center, so resizing a column never leaves the header at its old position.
+/// One centered column header. Long names truncate inside the column, while a right-click on
+/// the full header surface opens its actions without permanent menu chrome.
 fn header_cell(
     ui: &mut egui::Ui,
     i: usize,
@@ -997,40 +1030,45 @@ fn header_cell(
         );
     }
     let cell_rect = ui.max_rect();
-    // Reserve the same total chrome width on both sides. The left slot is intentionally empty:
-    // it balances the sort/menu controls on the right, keeping the name centered in the column.
-    let menu_slot = (cell_rect.width() * 0.25).min(22.0);
     let sort_slot = if sorted_dir.is_some() {
         (cell_rect.width() * 0.18).min(18.0)
     } else {
         0.0
     };
-    let side_slot = menu_slot + sort_slot;
     let label_rect = egui::Rect::from_min_max(
-        egui::pos2(cell_rect.left() + side_slot, cell_rect.top()),
-        egui::pos2(cell_rect.right() - side_slot, cell_rect.bottom()),
+        egui::pos2(cell_rect.left() + CELL_INSET_X + sort_slot, cell_rect.top()),
+        egui::pos2(
+            cell_rect.right() - CELL_INSET_X - sort_slot,
+            cell_rect.bottom(),
+        ),
     );
     let sort_rect = egui::Rect::from_min_max(
-        egui::pos2(cell_rect.right() - menu_slot - sort_slot, cell_rect.top()),
-        egui::pos2(cell_rect.right() - menu_slot, cell_rect.bottom()),
-    );
-    let action_rect = egui::Rect::from_min_max(
-        egui::pos2(cell_rect.right() - menu_slot, cell_rect.top()),
+        egui::pos2(cell_rect.right() - sort_slot - 2.0, cell_rect.top()),
         cell_rect.right_bottom(),
     );
 
     let color = if sorted_dir.is_some() {
         palette::ACCENT()
     } else {
-        palette::TEXT()
+        palette::TEXT_WEAK()
     };
-    let text = egui::RichText::new(&col.name).strong().color(color);
-    ui.put(
-        label_rect,
-        egui::Label::new(text)
-            .truncate()
-            .halign(egui::Align::Center)
-            .selectable(false),
+    let text = egui::RichText::new(&col.name)
+        .font(egui::TextStyle::Heading.resolve(ui.style()))
+        .color(color);
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(label_rect)
+            .layout(egui::Layout::centered_and_justified(
+                egui::Direction::LeftToRight,
+            )),
+        |ui| {
+            ui.add(
+                egui::Label::new(text)
+                    .truncate()
+                    .halign(egui::Align::Center)
+                    .selectable(false),
+            );
+        },
     );
     if let Some(ascending) = sorted_dir {
         let src = if ascending {
@@ -1047,37 +1085,25 @@ fn header_cell(
             );
     }
 
-    ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(action_rect)
-            .layout(egui::Layout::centered_and_justified(
-                egui::Direction::LeftToRight,
-            )),
-        |ui| {
-            let dots = egui::Image::new(crate::icons::more_vert())
-                .fit_to_exact_size(egui::vec2(12.0, 12.0))
-                .tint(palette::TEXT_FAINT())
-                .alt_text("Column options")
-                .sense(egui::Sense::click());
-            let menu = ui.add(dots).on_hover_text("Column options");
-            egui::Popup::menu(&menu)
-                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                .show(|ui| {
-                    header_menu(
-                        ui,
-                        i,
-                        col,
-                        sorted_dir.is_some(),
-                        out,
-                        grid_id,
-                        visible_count,
-                    )
-                });
-        },
+    let header_response = ui.interact(
+        cell_rect,
+        egui::Id::new(("result_header_context", grid_id, i)),
+        egui::Sense::click(),
     );
+    header_response.context_menu(|ui| {
+        header_menu(
+            ui,
+            i,
+            col,
+            sorted_dir.is_some(),
+            out,
+            grid_id,
+            visible_count,
+        )
+    });
 }
 
-/// The per-column header menu, opened only from the `⋮` icon.
+/// The per-column menu opened by right-clicking its header.
 fn header_menu(
     ui: &mut egui::Ui,
     col: usize,
@@ -1087,6 +1113,8 @@ fn header_menu(
     grid_id: u64,
     visible_count: usize,
 ) {
+    ui.spacing_mut().item_spacing.y = 1.0;
+    ui.spacing_mut().button_padding.y = 1.0;
     const MENU_LABELS: [&str; 9] = [
         "Copy column name",
         "Copy column type",
@@ -1114,7 +1142,7 @@ fn header_menu(
     // Column identity uses one compact row: the data name anchors left and its type anchors right.
     let header_width = ui.available_width();
     ui.allocate_ui_with_layout(
-        egui::vec2(header_width, 24.0),
+        egui::vec2(header_width, 22.0),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
             ui.label(egui::RichText::new(&meta.name).strong());
@@ -1200,7 +1228,7 @@ fn header_menu_item(
     enabled: bool,
 ) -> egui::Response {
     let image = egui::Image::new(icon)
-        .fit_to_exact_size(egui::vec2(14.0, 14.0))
+        .fit_to_exact_size(egui::vec2(13.0, 13.0))
         .tint(if enabled {
             palette::TEXT_WEAK()
         } else {
@@ -1211,7 +1239,7 @@ fn header_menu_item(
         enabled,
         egui::Button::image_and_text(image, label)
             .right_text("")
-            .min_size(egui::vec2(width, 26.0)),
+            .min_size(egui::vec2(width, 22.0)),
     )
 }
 
@@ -1491,7 +1519,62 @@ mod tests {
         });
 
         assert!(widths[1].unwrap() > widths[0].unwrap());
-        assert!(widths.iter().flatten().all(|width| *width <= 480.0));
+        assert!(widths.iter().flatten().all(|width| *width <= 320.0));
+    }
+
+    #[test]
+    fn fitted_width_never_truncates_a_header_over_short_values() {
+        let ctx = egui::Context::default();
+        let result = QueryResult {
+            columns: vec![ColumnMeta {
+                name: "customer_shipping_address_id".into(),
+                type_name: "INTEGER".into(),
+            }],
+            rows: vec![vec![Value::Int(3)], vec![Value::Int(12)]],
+            ..QueryResult::default()
+        };
+        let mut measured = (0.0, 0.0);
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let header_font = egui::TextStyle::Heading.resolve(ui.style());
+            let header_text = ui.ctx().fonts_mut(|fonts| {
+                fonts
+                    .layout_no_wrap(result.columns[0].name.clone(), header_font, palette::TEXT())
+                    .size()
+                    .x
+            });
+            measured = (
+                fitted_column_width(ui, &result, 0).unwrap(),
+                header_text + CELL_INSET_X * 2.0,
+            );
+        });
+
+        assert!(
+            measured.0 >= measured.1,
+            "fitted width {} must contain rendered header width {}",
+            measured.0,
+            measured.1
+        );
+    }
+
+    #[test]
+    fn fitted_width_ignores_a_single_extreme_outlier() {
+        let ctx = egui::Context::default();
+        let mut rows = vec![vec![Value::Text("normal value".into())]; 99];
+        rows.push(vec![Value::Text("x".repeat(2_000))]);
+        let result = QueryResult {
+            columns: vec![ColumnMeta {
+                name: "description".into(),
+                type_name: "TEXT".into(),
+            }],
+            rows,
+            ..QueryResult::default()
+        };
+        let mut width = None;
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            width = fitted_column_width(ui, &result, 0);
+        });
+
+        assert!(width.unwrap() < 200.0);
     }
 
     fn collect_clash_text(shapes: &[egui::epaint::ClippedShape], out: &mut Vec<String>) {
@@ -1695,6 +1778,57 @@ mod tests {
                 cell_rect.center()
             );
         }
+    }
+
+    #[test]
+    fn right_clicking_a_header_opens_its_column_menu() {
+        let ctx = egui::Context::default();
+        let meta = ColumnMeta {
+            name: "customer_name".into(),
+            type_name: "TEXT".into(),
+        };
+        let cell_rect =
+            egui::Rect::from_min_size(egui::pos2(24.0, 20.0), egui::vec2(180.0, HEADER_H));
+        let pointer = cell_rect.center();
+        let render = |events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(480.0, 420.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(cell_rect), |ui| {
+                        header_cell(ui, 0, &meta, None, &mut GridResponse::default(), 101, 3);
+                    });
+                },
+            )
+        };
+
+        render(vec![egui::Event::PointerMoved(pointer)]);
+        let pressed = render(vec![egui::Event::PointerButton {
+            pos: pointer,
+            button: egui::PointerButton::Secondary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        }]);
+        let released = render(vec![egui::Event::PointerButton {
+            pos: pointer,
+            button: egui::PointerButton::Secondary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        }]);
+        let settled = render(Vec::new());
+
+        assert!(
+            [&pressed, &released, &settled]
+                .iter()
+                .any(|output| find_text_pos(&output.shapes, "Copy column name").is_some()),
+            "right-clicking the header must reveal its column actions"
+        );
     }
 
     /// Two slowish clicks landing ~20pt apart in the *same cell* must still begin an edit.
@@ -1926,6 +2060,56 @@ mod tests {
 
         assert!(added, "double-clicking blank table space must add a row");
     }
+
+    #[test]
+    fn grid_reports_when_the_viewport_reaches_the_loaded_tail() {
+        let render = |rows: usize, grid_id: u64| {
+            let ctx = egui::Context::default();
+            let result = fake_result(rows, 3);
+            let order: Vec<usize> = (0..result.rows.len()).collect();
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 300.0));
+            let mut edits = Edits::default();
+            let mut near_end = false;
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                        near_end = results_grid(
+                            ui,
+                            &result,
+                            &order,
+                            None,
+                            &Selection::default(),
+                            &mut edits,
+                            false,
+                            grid_id,
+                            None,
+                            &EmojiAtlas::default(),
+                            &[],
+                        )
+                        .near_end;
+                    });
+                },
+            );
+            near_end
+        };
+
+        assert!(
+            render(3, 700),
+            "a fully visible page should request more rows"
+        );
+        assert!(
+            render(120, 702),
+            "the next page should be prefetched several viewports before the tail"
+        );
+        assert!(
+            !render(2_000, 701),
+            "a large page must wait until the user scrolls near its tail"
+        );
+    }
 }
 
 /// Render a single cell with database-grid alignment: text starts left, numbers end right,
@@ -1971,25 +2155,32 @@ fn cell(
         (Value::Null | Value::Bool(_) | Value::Bytes(_), _) => egui::Align::Center,
         (Value::Text(_), _) => egui::Align::Min,
     };
-    ui.with_layout(
-        egui::Layout::left_to_right(egui::Align::Center).with_main_align(main_align),
+    let content_rect = ui.max_rect().shrink2(egui::vec2(CELL_INSET_X, 0.0));
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(content_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(main_align)),
         |ui| {
             let resp = match value {
-                Value::Null => label(ui, egui::RichText::new("NULL").italics().monospace()),
-                Value::Bool(v) => label(
+                Value::Null => label(ui, egui::RichText::new("NULL").italics()),
+                Value::Bool(v) => label(ui, egui::RichText::new(if *v { "true" } else { "false" })),
+                Value::Int(_) | Value::Float(_) => label(
                     ui,
-                    egui::RichText::new(if *v { "true" } else { "false" }).monospace(),
+                    egui::RichText::new(value.display()).font(egui::FontId::new(
+                        GRID_MONO_SIZE,
+                        egui::FontFamily::Monospace,
+                    )),
                 ),
-                Value::Int(_) | Value::Float(_) => {
-                    label(ui, egui::RichText::new(value.display()).monospace())
-                }
                 Value::Text(text) if emoji::contains_emoji(text) => {
                     emoji_cell(ui, text, color, emoji)
                 }
                 Value::Text(text) => {
                     let text = egui::RichText::new(text);
                     let text = if kind.monospace_value() {
-                        text.monospace()
+                        text.font(egui::FontId::new(
+                            GRID_MONO_SIZE,
+                            egui::FontFamily::Monospace,
+                        ))
                     } else {
                         text
                     };
@@ -1997,7 +2188,9 @@ fn cell(
                 }
                 Value::Bytes(bytes) => label(
                     ui,
-                    egui::RichText::new(format!("[{} bytes]", bytes.len())).monospace(),
+                    egui::RichText::new(format!("[{} bytes]", bytes.len())).font(
+                        egui::FontId::new(GRID_MONO_SIZE, egui::FontFamily::Monospace),
+                    ),
                 ),
             };
             // A Shift-hovered, followable FK value: append a small arrow after the text so the

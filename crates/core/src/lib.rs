@@ -154,6 +154,14 @@ impl Database for Tunneled {
     ) -> Result<u64> {
         self.inner.export_query(sql, sink).await
     }
+    async fn export_query_cancellable(
+        &self,
+        sql: &str,
+        cancel: tokio_util::sync::CancellationToken,
+        sink: &mut (dyn export::RowSink + Send),
+    ) -> Result<u64> {
+        self.inner.export_query_cancellable(sql, cancel, sink).await
+    }
     async fn list_databases(&self) -> Result<Vec<String>> {
         self.inner.list_databases().await
     }

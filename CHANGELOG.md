@@ -3,6 +3,17 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
+## 0.3.0 — 2026-08-11
+
+- Redesigned table browsing around a faster virtualized grid with content-aware columns,
+  background page prefetching, strict row limits, and smoother navigation controls.
+- Reworked table Structure and Indexes into compact inline-editable grids, with broader
+  dialect-specific data types and keyboard editing consistent with the Data grid.
+- Added a persistent, resizable Live Log panel while keeping History focused on activity
+  performed inside PlusPlus, grouped by local date and searchable from the sidebar.
+- Refined navigation, tabs, menus, icons, empty states, and the product website for a more
+  consistent interface across database backends.
+
 ## 0.2.26 — 2026-08-05
 
 - Improved result-grid readability with content-aware initial column widths, centered headers,

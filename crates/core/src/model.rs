@@ -1052,6 +1052,12 @@ pub struct ColumnInfo {
     pub data_type: String,
     pub nullable: bool,
     pub primary_key: bool,
+    /// Introspected DEFAULT expression, kept verbatim for display and migration previews.
+    pub default: Option<String>,
+    /// Column-level CHECK expression when the backend exposes one.
+    pub check: Option<String>,
+    /// Column comment/description when supported by the backend.
+    pub comment: Option<String>,
 }
 
 /// An index on a table.

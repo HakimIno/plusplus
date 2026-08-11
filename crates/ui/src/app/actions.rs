@@ -481,12 +481,12 @@ impl DbGuiApp {
                 // The Run button is disabled while busy, but the Cmd+Enter / Cmd+R shortcuts
                 // land here unconditionally. Refuse instead of silently racing a second run
                 // against the one in flight (or against a connect/import in progress).
+                if self.busy == Busy::Querying {
+                    return;
+                }
                 if self.busy != Busy::Idle {
-                    self.status_msg = if self.busy == Busy::Querying {
-                        "A query is already running — cancel it first to run again.".to_string()
-                    } else {
-                        "Busy — wait for the current operation to finish.".to_string()
-                    };
+                    self.status_msg =
+                        "Busy — wait for the current operation to finish.".to_string();
                     return;
                 }
                 let idx = self.active_query_tab;
@@ -542,12 +542,6 @@ impl DbGuiApp {
                     }
                 }
                 self.start_query_for(idx);
-            }
-            Action::CancelQuery => {
-                if let Some(cancel) = self.query_cancel.take() {
-                    cancel.cancel();
-                    self.status_msg = "Cancelling…".to_string();
-                }
             }
             Action::ConfirmDangerQuery => {
                 let Some(pending) = self.danger_pending.as_ref() else {
@@ -660,7 +654,8 @@ impl DbGuiApp {
                 }
             }
             Action::Page(nav) => self.page_nav(nav),
-            Action::SetPageSize(n) => self.set_page_size(n),
+            Action::SetPageWindow { limit, offset } => self.set_page_window(limit, offset),
+            Action::LoadMoreRows => self.load_more_rows(),
             Action::CopyRows(format) => self.copy_selection(format),
             Action::PasteRows(text) => self.paste_rows(&text),
             Action::ExportTable { table, format } => self.export_table(&table, format),
@@ -720,6 +715,9 @@ impl DbGuiApp {
             }
             Action::OpenEditTable(table) => {
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
+                if !matches!(self.tab().view, TabView::Structure | TabView::Indexes) {
+                    self.tab_mut().view = TabView::Structure;
+                }
                 self.tab_mut().schema_editor =
                     Some(ObjectEditor::Table(SchemaEditor::edit_table(&table, kind)));
                 self.schema_pending = None;
@@ -957,10 +955,33 @@ impl DbGuiApp {
                 }
                 self.apply_schema_confirmed();
             }
+            Action::DiscardSchemaChanges => {
+                let idx = self.active_query_tab;
+                let section = self.tabs[idx].view;
+                let table = self.structure_table(idx).cloned();
+                let kind = self.active().map(|active| active.db.kind());
+                if let (Some(table), Some(kind)) = (table, kind) {
+                    let mut editor = SchemaEditor::edit_table(&table, kind);
+                    editor.active_tab = if section == TabView::Indexes {
+                        crate::schema::SchemaTab::Indexes
+                    } else {
+                        crate::schema::SchemaTab::Columns
+                    };
+                    self.tabs[idx].schema_editor = Some(ObjectEditor::Table(editor));
+                    self.schema_pending = None;
+                    self.error = None;
+                    self.status_msg = "Discarded schema changes".to_string();
+                }
+            }
             Action::CancelSchema => {
                 if self.schema_pending.is_some() {
                     self.schema_pending = None;
                 } else {
+                    if matches!(self.tab().view, TabView::Structure | TabView::Indexes)
+                        && matches!(self.tab().schema_editor, Some(ObjectEditor::Table(_)))
+                    {
+                        self.tab_mut().view = TabView::Data;
+                    }
                     self.tab_mut().schema_editor = None;
                     self.tab_mut().design_edit_index = None;
                 }

@@ -148,7 +148,12 @@ fn table_ref_before_caret<'a>(
     chars: &[char],
     schema: &'a SchemaTree,
 ) -> Option<(&'a TableInfo, String, Keyword)> {
-    let find = |name: &str| schema.tables.iter().find(|t| t.name.eq_ignore_ascii_case(name));
+    let find = |name: &str| {
+        schema
+            .tables
+            .iter()
+            .find(|t| t.name.eq_ignore_ascii_case(name))
+    };
 
     let (word, word_start) = sqlctx::word_at(chars, chars.len())?;
     if sqlctx::is_keyword(&word) {
@@ -187,7 +192,11 @@ fn on_from_fk(
         if name.eq_ignore_ascii_case(&table.name) {
             continue; // the target itself
         }
-        let Some(other) = schema.tables.iter().find(|t| t.name.eq_ignore_ascii_case(name)) else {
+        let Some(other) = schema
+            .tables
+            .iter()
+            .find(|t| t.name.eq_ignore_ascii_case(name))
+        else {
             continue;
         };
         // `other` references the target: `target.ref_col = other.col`.
@@ -303,7 +312,9 @@ fn single_pk(table: &TableInfo) -> Option<&str> {
 /// ghost text readable (`users`, but `"My Table"`). Mirrors the editor's own quoting.
 fn qual(name: &str, kind: Option<DbKind>) -> String {
     let plain = !name.is_empty()
-        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
         && !name.chars().next().is_some_and(|c| c.is_ascii_digit());
     if plain {
         name.to_string()
@@ -337,6 +348,9 @@ mod tests {
             data_type: "int".to_string(),
             nullable: !pk,
             primary_key: pk,
+            default: None,
+            check: None,
+            comment: None,
         }
     }
 
@@ -418,7 +432,10 @@ mod tests {
 
     #[test]
     fn select_keyword_scaffolds_from() {
-        assert_eq!(suggest_end("SELECT", &[], None).as_deref(), Some(" * FROM "));
+        assert_eq!(
+            suggest_end("SELECT", &[], None).as_deref(),
+            Some(" * FROM ")
+        );
     }
 
     #[test]

@@ -283,7 +283,7 @@ impl Database for MsSqlDb {
                        THEN '(' + CAST(NUMERIC_PRECISION AS varchar(11)) + ',' \
                                 + CAST(NUMERIC_SCALE AS varchar(11)) + ')' \
                      ELSE '' END AS FULL_TYPE, \
-                   IS_NULLABLE \
+                   IS_NULLABLE, COLUMN_DEFAULT \
                  FROM INFORMATION_SCHEMA.COLUMNS \
                  ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION",
             )
@@ -297,6 +297,12 @@ impl Database for MsSqlDb {
                 data_type: get_str(&row, 3),
                 nullable: get_str(&row, 4).eq_ignore_ascii_case("YES"),
                 primary_key: pk.contains(&(schema.clone(), table.clone(), column)),
+                default: {
+                    let value = get_str(&row, 5);
+                    (!value.is_empty()).then_some(value)
+                },
+                check: None,
+                comment: None,
             };
             if let Some(info) = tables.get_mut(&(schema.clone(), table.clone())) {
                 info.columns.push(col);
@@ -731,6 +737,74 @@ impl Database for MsSqlDb {
                     let values: Vec<Value> = row.into_iter().map(|c| decode(&c)).collect();
                     sink.write_row(&values)?;
                     count += 1;
+                }
+            }
+        }
+        sink.finish()?;
+        Ok(count)
+    }
+
+    async fn export_query_cancellable(
+        &self,
+        sql: &str,
+        cancel: CancellationToken,
+        sink: &mut (dyn crate::export::RowSink + Send),
+    ) -> Result<u64> {
+        use futures_util::TryStreamExt;
+        use tiberius::QueryItem;
+
+        let mut conn = self.pool.get().await.map_err(map_pool_err)?;
+        let spid: i32 = {
+            let rows = conn
+                .simple_query("SELECT @@SPID")
+                .await?
+                .into_first_result()
+                .await?;
+            rows.first()
+                .and_then(|row| row.try_get::<i16, _>(0).ok().flatten())
+                .map(|value| value as i32)
+                .ok_or_else(|| CoreError::Pool("could not read @@SPID".into()))?
+        };
+        let mut stream = conn.simple_query(sql.to_string()).await?;
+        let mut result_sets = 0usize;
+        let mut count = 0u64;
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    // TDS must not return a half-drained result to the pool. Kill this exact
+                    // server session before allowing the connection guard to drop.
+                    drop(stream);
+                    self.kill_spid(spid).await;
+                    return Err(CoreError::Canceled);
+                }
+                item = stream.try_next() => {
+                    let Some(item) = item? else { break };
+                    match item {
+                        QueryItem::Metadata(meta) => {
+                            result_sets += 1;
+                            if result_sets == 1 {
+                                let columns: Vec<ColumnMeta> = meta
+                                    .columns()
+                                    .iter()
+                                    .map(|column| ColumnMeta {
+                                        name: column.name().to_string(),
+                                        type_name: format!("{:?}", column.column_type()),
+                                    })
+                                    .collect();
+                                sink.begin(&columns)?;
+                            }
+                        }
+                        QueryItem::Row(row) => {
+                            if result_sets > 1 {
+                                continue;
+                            }
+                            let values: Vec<Value> =
+                                row.into_iter().map(|cell| decode(&cell)).collect();
+                            sink.write_row(&values)?;
+                            count += 1;
+                        }
+                    }
                 }
             }
         }

@@ -35,19 +35,6 @@ pub(crate) fn callout(
         });
 }
 
-pub(crate) fn loading_state(ui: &mut egui::Ui, message: &str) {
-    ui.add_space((ui.available_height() * 0.30).max(24.0));
-    ui.vertical_centered(|ui| {
-        ui.add(spinner(32.0));
-        ui.add_space(16.0);
-        ui.label(
-            egui::RichText::new(message)
-                .size(14.5)
-                .color(palette::TEXT_WEAK()),
-        );
-    });
-}
-
 pub(crate) fn empty_state(
     ui: &mut egui::Ui,
     icon: egui::ImageSource<'static>,

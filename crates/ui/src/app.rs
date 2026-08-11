@@ -2,8 +2,7 @@
 //!
 //! Threading model: the UI never blocks on database I/O. A `tokio` runtime owned by the
 //! app runs connect/introspect/query work on background tasks; results come back over an
-//! `mpsc` channel that we drain each frame. While work is in flight the UI stays
-//! interactive and shows a spinner.
+//! `mpsc` channel that we drain each frame while the UI stays interactive.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender};
@@ -38,6 +37,14 @@ use crate::theme::ThemeRegistry;
 /// the pager (table tabs) or a narrower query. ~100k rows keeps even wide results in the
 /// hundreds of MB, far below where the grid stops being useful anyway.
 const MAX_FETCH_ROWS: usize = 100_000;
+
+/// Rows fetched from the database for one lazy-loading continuation.
+const QUERY_STREAM_CHUNK_ROWS: usize = 512;
+
+/// Rows appended to an existing grid per UI message. Continuation queries start before the
+/// loaded tail is visible, so smaller paint batches keep scrolling responsive without exposing
+/// a one-row loading state.
+const QUERY_STREAM_PAINT_ROWS: usize = 128;
 
 fn schema_table_key(schema: Option<&str>, table: &str) -> String {
     format!("{}\0{table}", schema.unwrap_or_default())
@@ -100,20 +107,40 @@ enum AppMessage {
         conn_id: String,
         sql: String,
         result: Result<QueryResult, String>,
-        /// True when the query was aborted via the Cancel button (a `CoreError::Canceled`),
-        /// so the UI shows "Query cancelled" instead of a red error and doesn't log a failure.
+        /// True when the query was aborted internally (a `CoreError::Canceled`), so it is not
+        /// reported as a database failure.
         canceled: bool,
         /// Generation stamp of the run that produced this result; results from a superseded
         /// run (`seq != query_seq`) are logged to history but never touch UI state.
         seq: u64,
     },
-    /// The background COUNT(*) for a paged table query finished. Kept separate from
-    /// [`Queried`](Self::Queried) so rows render immediately without waiting for the count.
-    PageCounted {
+    /// Column metadata arrived for a paged query. Rows follow in independently paintable
+    /// chunks, so a large page no longer leaves the old grid frozen until the whole fetch ends.
+    QueryStreamStarted {
         tab_id: u64,
+        columns: Vec<dbcore::ColumnMeta>,
+        append: bool,
+        seq: u64,
+    },
+    /// The next rows of a paged query are ready to append to the visible grid.
+    QueryRows {
+        tab_id: u64,
+        rows: Vec<Vec<dbcore::Value>>,
+        seq: u64,
+    },
+    /// A paged streaming query ended. `Ok` carries the total rows delivered.
+    QueryStreamFinished {
+        tab_id: u64,
+        conn_id: String,
         sql: String,
-        total: Option<u64>,
-        /// Generation stamp of the run whose page this count belongs to (see `Queried::seq`).
+        elapsed_ms: f64,
+        rows_loaded: u64,
+        page: dbcore::PageWindow,
+        /// User-visible LIMIT for the whole result; `page.limit` is only this internal fetch.
+        result_limit: u64,
+        append: bool,
+        result: Result<u64, String>,
+        canceled: bool,
         seq: u64,
     },
     /// A batch of staged edits was saved (`Ok` carries the number of rows updated).
@@ -165,7 +192,7 @@ enum AppMessage {
     },
 }
 
-/// What the background runtime is currently doing (drives the spinner / disables buttons).
+/// What the background runtime is currently doing (disables conflicting actions).
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Busy {
     Idle,
@@ -365,7 +392,7 @@ impl ImportDraft {
 }
 
 /// Which result surface the central panel shows. Query tabs use Data / Message / Chart;
-/// table and view tabs use Data / Structure.
+/// table tabs use Data / Structure / Indexes; views use Data / Structure.
 #[derive(Clone, Copy, PartialEq, Default)]
 enum TabView {
     #[default]
@@ -373,6 +400,7 @@ enum TabView {
     Message,
     Chart,
     Structure,
+    Indexes,
 }
 
 /// Which side of the result area owns the SQL editor. Code-first tabs follow execution order
@@ -446,6 +474,14 @@ struct ConnectionTimings {
     database_list_ms: Option<f64>,
 }
 
+struct QueryStreamUi {
+    seq: u64,
+    append: bool,
+    columns: Vec<dbcore::ColumnMeta>,
+    pending_rows: Vec<Vec<dbcore::Value>>,
+    received_rows: usize,
+}
+
 /// One query tab: an independent SQL editor with its own result, view state, and the
 /// connection it runs against. Tabs are global (a single row above the editor) but each
 /// remembers its own `conn_id`, so switching tabs switches the active connection too.
@@ -488,9 +524,13 @@ struct QueryTab {
     filter: FilterState,
     /// Data vs Structure view in the central panel (table tabs only).
     view: TabView,
-    /// Total rows the tab's query matches server-side (ignoring LIMIT/OFFSET), counted in
-    /// the background for paged table tabs. `None` while unknown / not a table tab.
-    total_rows: Option<u64>,
+    /// In-flight bounded page stream. Keeping this beside the visible result lets a replacement
+    /// retain the old rows until its first new batch arrives, while an automatic continuation
+    /// appends without resetting selection or staged edits.
+    stream: Option<QueryStreamUi>,
+    /// The most recent page fetch returned fewer rows than requested, so scrolling at the end
+    /// must not keep issuing empty continuation queries.
+    page_exhausted: bool,
     /// Open schema editor (Create/Edit Table) shown in the central panel. Per-tab, so
     /// switching tabs or opening another table never leaves a stale editor on screen —
     /// and in-progress edits survive a tab switch.
@@ -524,7 +564,8 @@ impl QueryTab {
             edits: Edits::default(),
             filter: FilterState::default(),
             view: TabView::default(),
-            total_rows: None,
+            stream: None,
+            page_exhausted: false,
             schema_editor: None,
             pending_scroll: None,
             diagram: None,
@@ -964,9 +1005,6 @@ enum Action {
     BrowseSslClientKey,
     BrowseSshKey,
     RunQuery,
-    /// Abort the in-flight query (Cancel button): asks the backend to kill the running
-    /// statement server-side and unblocks the UI.
-    CancelQuery,
     /// Reformat the active tab's SQL in its connection's dialect (Beautify, Cmd/Ctrl+I).
     BeautifySql,
     /// Open a table's rows from the sidebar. `source` makes the result editable. `pin` opens
@@ -1001,8 +1039,13 @@ enum Action {
     /// Pager: jump to another page of a paged table tab. Rewrites the tab's LIMIT/OFFSET
     /// in place (the SQL editor always shows what runs) and re-runs the query.
     Page(PageNav),
-    /// Pager: switch the page size, staying on the page that holds the current offset.
-    SetPageSize(u64),
+    /// Pager: apply an exact server-side LIMIT/OFFSET window entered by the user.
+    SetPageWindow {
+        limit: u64,
+        offset: u64,
+    },
+    /// The grid reached its loaded tail; fetch the next bounded server-side window and append it.
+    LoadMoreRows,
     /// Copy the currently selected result rows to the clipboard in the given format.
     CopyRows(dbcore::CopyFormat),
     /// Paste clipboard text (TSV) into the active editable table as new (staged) insert rows.
@@ -1091,6 +1134,8 @@ enum Action {
     GenerateSchema,
     /// User confirmed the DDL preview: execute the statements and re-introspect.
     ApplySchema,
+    /// Restore the live table definition while keeping Structure/Indexes open.
+    DiscardSchemaChanges,
     /// Close the schema editor / DDL preview without applying.
     CancelSchema,
     /// Open the in-app update dialog.
@@ -1109,11 +1154,8 @@ enum Action {
 /// Where the pager should jump.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PageNav {
-    First,
     Prev,
     Next,
-    /// Only offered when the total row count is known.
-    Last,
 }
 
 /// Drag-to-reorder state for the query-tab strip.
@@ -1152,16 +1194,13 @@ pub struct DbGuiApp {
     rx: Receiver<AppMessage>,
     busy: Busy,
     next_connection_test_id: u64,
-    /// Tab id of the in-flight `SELECT` (cleared when [`AppMessage::Queried`] arrives).
+    /// Tab id of the in-flight query (cleared by its terminal result message).
     querying_tab_id: Option<u64>,
     /// Generation stamp of the most recently started query run. Every `start_query_for`
-    /// increments it and tags the run's result messages; a [`AppMessage::Queried`] or
-    /// [`AppMessage::PageCounted`] carrying an older stamp is a superseded run whose result
-    /// must not touch UI state (it may otherwise clobber the newer run's result, busy flag,
-    /// or the tab's pending edit source, depending on which run finishes last).
+    /// increments it and tags every materialized or streaming result message. An older stamp
+    /// belongs to a superseded run and must not touch UI state (it may otherwise clobber the
+    /// newer rows, busy flag, or the tab's pending edit source).
     query_seq: u64,
-    /// Tabs waiting for a background COUNT(*) so the pager can repaint as soon as totals arrive.
-    pending_page_counts: HashSet<u64>,
     /// Cancellation handle for the in-flight query; firing it asks the backend to abort and
     /// kill the server-side statement. `None` when no query is running.
     query_cancel: Option<tokio_util::sync::CancellationToken>,
@@ -1206,6 +1245,8 @@ pub struct DbGuiApp {
     schema_filter: String,
     /// Queries tab: live name/SQL filter over the saved-query list.
     favorites_filter: String,
+    /// History tab: live SQL/connection/error filter over the grouped timeline.
+    history_filter: String,
     /// SQL editor autocomplete (table/column/keyword popup). Transient; not persisted.
     autocomplete: crate::autocomplete::State,
     /// Recently-run, successful SQL — the pool the editor's ghost-text autosuggestion
@@ -1260,6 +1301,9 @@ pub struct DbGuiApp {
     /// rows while it is.
     sidebar_tab: SidebarTab,
     history_cache: Vec<dbcore::history::HistoryEntry>,
+    /// Session-only statements shown in the SQL console's Live log. Unlike query history this
+    /// stays available when on-disk history is disabled and is discarded when the app exits.
+    live_log: Vec<dbcore::history::HistoryEntry>,
     /// All saved queries, kept in memory and mirrored to `favorites.json` on every change.
     /// Loaded once at startup so the Saved queries tab count is immediately correct.
     favorites_cache: Vec<dbcore::Favorite>,
@@ -1278,6 +1322,7 @@ pub struct DbGuiApp {
     show_schema_panel: bool,
     show_details_panel: bool,
     show_query_console: bool,
+    show_live_log: bool,
 
     // --- preferences ---
     /// Stable key of the currently selected colour theme (persisted to settings.json).
@@ -1425,7 +1470,6 @@ impl DbGuiApp {
             next_connection_test_id: 1,
             querying_tab_id: None,
             query_seq: 0,
-            pending_page_counts: HashSet::new(),
             query_cancel: None,
             active_connections: Vec::new(),
             connection_jobs: HashSet::new(),
@@ -1460,6 +1504,7 @@ impl DbGuiApp {
             show_schema_panel: true,
             show_details_panel: true,
             show_query_console: true,
+            show_live_log: true,
             theme,
             themes,
             beautify,
@@ -1472,6 +1517,8 @@ impl DbGuiApp {
             update_check_enabled,
             sidebar_tab: SidebarTab::default(),
             history_cache: Vec::new(),
+            history_filter: String::new(),
+            live_log: Vec::new(),
             // Loaded from disk in `new` (this builder stays config-dir-free for tests).
             favorites_cache: Vec::new(),
             bookmarks: Vec::new(),

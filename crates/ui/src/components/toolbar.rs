@@ -3,7 +3,6 @@
 use crate::icons;
 use crate::style::palette;
 
-const TOOLBAR_BUTTON_SIZE: egui::Vec2 = egui::vec2(22.0, 22.0);
 const TOOLBAR_ICON_GAP: f32 = 0.0;
 
 /// Small layout toggle (sidebar on/off) used in the unified title bar.
@@ -13,38 +12,17 @@ pub(crate) fn layout_toggle(
     side: LayoutSide,
     hover: &str,
 ) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(TOOLBAR_BUTTON_SIZE, egui::Sense::click());
-
-    if ui.is_rect_visible(rect) {
-        // Flat and borderless: a soft rounded backdrop only on hover. The on/off state reads
-        // from the glyph colour (accent when the panel is shown) rather than a boxed frame.
-        if resp.hovered() {
-            ui.painter()
-                .rect_filled(rect, egui::CornerRadius::same(5), palette::SURFACE_HOVER());
-        }
-
-        let icon = rect.shrink(5.0);
-        let color = if active {
-            palette::ACCENT()
-        } else if resp.hovered() {
-            palette::TEXT()
-        } else {
-            palette::TEXT_WEAK()
-        };
-        let src = match side {
-            LayoutSide::Connections => icons::layout_connections(),
-            LayoutSide::Schema => icons::layout_schema(),
-            LayoutSide::Details => icons::layout_details(),
-            LayoutSide::Query => icons::layout_query(),
-        };
-        egui::Image::new(src)
-            .fit_to_exact_size(icon.size())
-            .tint(color)
-            .paint_at(ui, icon);
-    }
+    let src = match side {
+        LayoutSide::Connections => icons::layout_connections(),
+        LayoutSide::Schema => icons::layout_schema(),
+        LayoutSide::Details => icons::layout_details(),
+        LayoutSide::Query => icons::layout_query(),
+        LayoutSide::LiveLog => icons::layout_log(),
+    };
+    let resp = super::soft_icon_button_state(ui, src, hover, true, active);
 
     ui.add_space(TOOLBAR_ICON_GAP);
-    resp.on_hover_text(hover)
+    resp
 }
 
 #[derive(Clone, Copy)]
@@ -53,6 +31,7 @@ pub(crate) enum LayoutSide {
     Schema,
     Details,
     Query,
+    LiveLog,
 }
 
 /// Outline accent button for the title-bar update affordance.
@@ -74,28 +53,10 @@ pub(crate) fn toolbar_icon_button(
     src: egui::ImageSource<'static>,
     hover: &str,
 ) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(TOOLBAR_BUTTON_SIZE, egui::Sense::click());
-
-    if ui.is_rect_visible(rect) {
-        // Flat and borderless: only a soft rounded backdrop on hover, no frame at rest.
-        if resp.hovered() {
-            ui.painter()
-                .rect_filled(rect, egui::CornerRadius::same(5), palette::SURFACE_HOVER());
-        }
-
-        let color = if resp.hovered() {
-            palette::TEXT()
-        } else {
-            palette::TEXT_WEAK()
-        };
-        let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(13.0, 13.0));
-        ui.scope_builder(egui::UiBuilder::new().max_rect(icon_rect), |ui| {
-            icons::show_colored(ui, src, 13.0, color);
-        });
-    }
+    let resp = super::soft_icon_button(ui, src, hover, true);
 
     ui.add_space(TOOLBAR_ICON_GAP);
-    resp.on_hover_text(hover)
+    resp
 }
 
 /// Outcome of the Beautify split button.
@@ -262,7 +223,9 @@ pub(crate) fn beautify_button(
             ui.separator();
             for (width, label) in [(2u8, "Indent: 2 spaces"), (4u8, "Indent: 4 spaces")] {
                 if ui
-                    .horizontal(|ui| crate::components::accent_radio(ui, &mut prefs.indent, width, label))
+                    .horizontal(|ui| {
+                        crate::components::accent_radio(ui, &mut prefs.indent, width, label)
+                    })
                     .inner
                     .changed()
                 {

@@ -122,14 +122,7 @@ impl DbGuiApp {
                 self.suggest_pool.remove(0);
             }
         }
-        if !self.history_enabled {
-            return;
-        }
-        // Unit tests construct real apps and pump real messages; never let them write
-        // into the user's actual history file.
-        if cfg!(test) {
-            return;
-        }
+
         let conn_name = self
             .connections
             .iter()
@@ -146,6 +139,23 @@ impl DbGuiApp {
             rows,
             elapsed_ms,
         };
+        // The console log is intentionally session-only and independent of the history
+        // preference. Bound it so a long-running workspace cannot grow without limit.
+        self.live_log.push(entry.clone());
+        const MAX_LIVE_LOG_ENTRIES: usize = 500;
+        if self.live_log.len() > MAX_LIVE_LOG_ENTRIES {
+            self.live_log
+                .drain(..self.live_log.len() - MAX_LIVE_LOG_ENTRIES);
+        }
+
+        if !self.history_enabled {
+            return;
+        }
+        // Unit tests construct real apps and pump real messages; never let them write
+        // into the user's actual history file.
+        if cfg!(test) {
+            return;
+        }
         let _ = dbcore::history::append(&entry);
         // Keep the sidebar's History tab live while it's showing.
         if self.sidebar_tab == SidebarTab::History {

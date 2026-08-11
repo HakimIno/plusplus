@@ -3,7 +3,7 @@
 use egui::{ImageSource, Response, RichText, Ui};
 
 use crate::icons;
-use crate::style::palette;
+use crate::style::{palette, CONTROL_H};
 
 /// Visual treatment for a shared app button.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +78,17 @@ impl<'a> Btn<'a> {
 
     pub(crate) fn show(self, ui: &mut Ui) -> Response {
         let (variant, enabled) = (self.variant, self.enabled);
+        if matches!(variant, ButtonVariant::Ghost) && self.icon_only {
+            if let Some(src) = self.icon {
+                return soft_icon_button_state(
+                    ui,
+                    src,
+                    self.tooltip.unwrap_or("Icon button"),
+                    enabled,
+                    false,
+                );
+            }
+        }
         let text_color = match self.variant {
             ButtonVariant::Primary => palette::ON_ACCENT(),
             ButtonVariant::Danger => palette::DANGER(),
@@ -151,6 +162,83 @@ impl<'a> Btn<'a> {
     }
 }
 
+/// Compact raised icon control used across toolbars. The outer surface is always visible,
+/// while hover/press feedback sits inside it like a soft hardware keycap. `active` changes the
+/// glyph colour (for layout toggles) without turning every selected control into a loud fill.
+pub(crate) fn soft_icon_button_state(
+    ui: &mut Ui,
+    src: ImageSource<'static>,
+    hover: &str,
+    enabled: bool,
+    active: bool,
+) -> Response {
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(egui::Vec2::splat(CONTROL_H), sense);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, hover));
+
+    if ui.is_rect_visible(rect) {
+        let radius = egui::CornerRadius::same(7);
+        ui.painter().rect(
+            rect,
+            radius,
+            palette::SURFACE(),
+            egui::Stroke::new(1.0, palette::BORDER()),
+            egui::StrokeKind::Inside,
+        );
+        if enabled && (resp.hovered() || resp.is_pointer_button_down_on()) {
+            let fill = if resp.is_pointer_button_down_on() {
+                palette::SELECTION()
+            } else {
+                palette::SURFACE_HOVER()
+            };
+            ui.painter()
+                .rect_filled(rect.shrink(3.0), egui::CornerRadius::same(5), fill);
+        }
+        if resp.has_focus() {
+            ui.painter().rect_stroke(
+                rect.shrink(0.5),
+                radius,
+                egui::Stroke::new(1.0, palette::ACCENT()),
+                egui::StrokeKind::Inside,
+            );
+        }
+
+        let color = if !enabled {
+            palette::TEXT_FAINT()
+        } else if active {
+            palette::ACCENT()
+        } else if resp.hovered() {
+            palette::TEXT()
+        } else {
+            palette::TEXT_WEAK()
+        };
+        let icon_rect = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(14.0));
+        egui::Image::new(src)
+            .fit_to_exact_size(icon_rect.size())
+            .tint(color)
+            .paint_at(ui, icon_rect);
+    }
+
+    if hover.is_empty() {
+        resp
+    } else {
+        resp.on_hover_text(hover)
+    }
+}
+
+pub(crate) fn soft_icon_button(
+    ui: &mut Ui,
+    src: ImageSource<'static>,
+    hover: &str,
+    enabled: bool,
+) -> Response {
+    soft_icon_button_state(ui, src, hover, enabled, false)
+}
+
 fn icon_image(src: ImageSource<'static>, size: f32, tint: egui::Color32) -> egui::Image<'static> {
     egui::Image::new(src)
         .fit_to_exact_size(egui::vec2(size, size))
@@ -203,20 +291,38 @@ pub(crate) fn primary_button(
 /// control in one toolbar row.
 pub(crate) fn pill_icon_button(ui: &mut Ui, src: ImageSource<'static>, hover: &str) -> Response {
     let (rect, resp) = ui.allocate_exact_size(egui::Vec2::splat(28.0), egui::Sense::click());
-    resp.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, hover)
-    });
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, hover));
     if ui.is_rect_visible(rect) {
-        ui.painter()
-            .rect_filled(rect, egui::CornerRadius::same(8), palette::SURFACE());
+        let radius = egui::CornerRadius::same(8);
+        ui.painter().rect(
+            rect,
+            radius,
+            palette::SURFACE(),
+            egui::Stroke::new(1.0, palette::BORDER()),
+            egui::StrokeKind::Inside,
+        );
         if resp.hovered() || resp.is_pointer_button_down_on() {
-            ui.painter().rect_filled(
-                rect.shrink(3.0),
-                egui::CornerRadius::same(6),
-                palette::SURFACE_HOVER(),
+            let fill = if resp.is_pointer_button_down_on() {
+                palette::SELECTION()
+            } else {
+                palette::SURFACE_HOVER()
+            };
+            ui.painter()
+                .rect_filled(rect.shrink(3.0), egui::CornerRadius::same(6), fill);
+        }
+        if resp.has_focus() {
+            ui.painter().rect_stroke(
+                rect.shrink(0.5),
+                radius,
+                egui::Stroke::new(1.0, palette::ACCENT()),
+                egui::StrokeKind::Inside,
             );
         }
-        let color = ui.visuals().widgets.inactive.fg_stroke.color;
+        let color = if resp.hovered() {
+            palette::TEXT()
+        } else {
+            palette::TEXT_WEAK()
+        };
         let icon_rect = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(icons::SIZE));
         egui::Image::new(src).tint(color).paint_at(ui, icon_rect);
     }
@@ -224,7 +330,7 @@ pub(crate) fn pill_icon_button(ui: &mut Ui, src: ImageSource<'static>, hover: &s
 }
 
 pub(crate) fn icon_button(ui: &mut Ui, src: ImageSource<'static>, hover: &str) -> Response {
-    Btn::ghost_icon(src).tooltip(hover).show(ui)
+    soft_icon_button(ui, src, hover, true)
 }
 
 #[cfg(test)]

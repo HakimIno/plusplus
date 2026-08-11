@@ -1,37 +1,13 @@
-//! A small sheep mascot for empty states, drawn with `egui::Painter`.
+//! Chameleon-on-pencil mascot for empty states.
 //!
-//! It intentionally stays calm: no physics, no dragging, no cursor tracking. The only motion is
-//! a quick blink so the empty state has a little life without bouncing around.
+//! Silhouette comes from a tinted PNG traced from the reference doodle
+//! (`assets/illus/empty-chameleon.png`). Eyes are drawn in code as `+ +` / `- -`
+//! so they can blink without touching the artwork.
 
-use egui::{Color32, Pos2, Rect, Sense, Stroke};
+use egui::{Color32, Pos2, Sense, Stroke, Vec2};
 
-/// One row of the 16x16 body sprite.
-///
-/// Characters map to palette slots in [`pixel_color`]: `.` transparent, `o` outline, `w` wool,
-/// `h` highlight, `s` wool shadow, `f` face, `e` ear, `l` leg. Eyes and mouth are painted on top.
-const SPRITE: [&str; 16] = [
-    ".....oooooo.....",
-    "...owwwwwwwwo...",
-    "..owwwhwwhwwwo..",
-    ".owwwwwwwwwwwwo.",
-    "oeeooffffffooeeo",
-    "oeeoffffffffoeeo",
-    "..offffffffffo..",
-    "..offffffffffo..",
-    "..offffffffffo..",
-    "...offfffffo....",
-    "..oowwwwwwwwoo..",
-    ".owwwwwwwwwwwwo.",
-    ".owhwwwwwwwwhwo.",
-    "..owwwsssswwwo..",
-    "...oll....llo...",
-    "....oo....oo....",
-];
-
-const GRID: f32 = 16.0;
-const MASCOT_ALPHA: f32 = 0.8;
-const LEFT_EYE: (f32, f32) = (5.2, 7.2);
-const RIGHT_EYE: (f32, f32) = (10.8, 7.2);
+/// Eye centres as fractions of [`empty-chameleon.png`].
+const EYES: [(f32, f32); 2] = [(0.5878, 0.3190), (0.8443, 0.3003)];
 
 #[derive(Clone)]
 struct Pet {
@@ -53,7 +29,6 @@ impl Default for Pet {
     }
 }
 
-/// Deterministic pseudo-random in `0.0..1.0` from a float seed, enough to vary blink timing.
 fn rand01(seed: f32) -> f32 {
     let v = (seed * 12.9898).sin() * 43758.547;
     v - v.floor()
@@ -65,55 +40,41 @@ fn blend(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(f(a.r(), b.r()), f(a.g(), b.g()), f(a.b(), b.b()))
 }
 
-fn fade(color: Color32) -> Color32 {
+fn with_alpha(color: Color32, alpha: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(
         color.r(),
         color.g(),
         color.b(),
-        (color.a() as f32 * MASCOT_ALPHA).round() as u8,
+        (alpha.clamp(0.0, 1.0) * 255.0).round() as u8,
     )
-}
-
-fn pixel_color(ch: char, accent: Color32) -> Option<Color32> {
-    let dark = Color32::from_rgb(53, 38, 48);
-    Some(fade(match ch {
-        'w' => blend(accent, Color32::from_rgb(246, 246, 226), 0.86),
-        'h' => Color32::from_rgb(255, 251, 231),
-        's' => blend(accent, Color32::from_rgb(194, 220, 211), 0.58),
-        'f' => Color32::from_rgb(244, 190, 155),
-        'e' => Color32::from_rgb(224, 145, 135),
-        'l' => Color32::from_rgb(78, 48, 50),
-        'o' => blend(accent, dark, 0.7),
-        _ => return None,
-    }))
 }
 
 /// Draw the empty-state mascot, centred in the available area.
 pub fn show(ui: &mut egui::Ui) {
     let accent = crate::style::palette::ACCENT();
-    let dark = blend(accent, Color32::from_rgb(40, 32, 54), 0.62);
+    let faint = crate::style::palette::TEXT_FAINT();
 
     ui.scope(|ui| {
         let rect = ui.available_rect_before_wrap();
         ui.allocate_rect(rect, Sense::hover()).widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Image, true, "Empty state mascot")
+            egui::WidgetInfo::labeled(egui::WidgetType::Image, true, "Empty state mark")
         });
         if !ui.is_rect_visible(rect) {
             return;
         }
 
-        let px = (rect.width().min(rect.height()) * 0.30 / GRID)
-            .floor()
-            .clamp(3.0, 10.0);
-        let half = GRID * px / 2.0;
-        let pos = Pos2::new(rect.center().x, rect.center().y + px * 0.8);
-        let id = ui.id().with("empty_pet");
+        let side = (rect.width().min(rect.height()) * 0.72).clamp(110.0, 220.0);
+        let img_rect = egui::Rect::from_center_size(
+            rect.center() + Vec2::new(0.0, side * 0.02),
+            Vec2::splat(side),
+        );
 
         let t = ui.input(|i| i.time);
+        let id = ui.id().with("empty_pet");
         let mut pet = ui.data_mut(|d| d.get_temp::<Pet>(id)).unwrap_or_default();
         if !pet.init {
             pet.last_t = t;
-            pet.next_blink = t + 1.2;
+            pet.next_blink = t + 1.4;
             pet.init = true;
         }
 
@@ -121,117 +82,68 @@ pub fn show(ui: &mut egui::Ui) {
         pet.last_t = t;
 
         if pet.blink > 0.0 {
-            pet.blink = (pet.blink + dt * 10.0).min(2.0);
+            pet.blink = (pet.blink + dt * 9.0).min(2.0);
             if pet.blink >= 2.0 {
                 pet.blink = 0.0;
-                pet.next_blink = t + 1.8 + rand01(t as f32 + 3.0) as f64 * 3.2;
+                pet.next_blink = t + 2.0 + rand01(t as f32 + 3.0) as f64 * 3.5;
             }
         } else if t >= pet.next_blink {
             pet.blink = 0.001;
         }
         let lid = (1.0 - (pet.blink - 1.0).abs()).clamp(0.0, 1.0);
 
+        let tint = with_alpha(blend(faint, accent, 0.22), 0.58);
+
+        let tex = egui::include_image!("../assets/illus/empty-chameleon.png").load(
+            ui.ctx(),
+            egui::TextureOptions::LINEAR,
+            egui::SizeHint::Size {
+                width: 512,
+                height: 512,
+                maintain_aspect_ratio: true,
+            },
+        );
+
         let painter = ui.painter_at(rect);
-        paint_shadow(&painter, pos, half, px, dark);
-        paint_sprite(&painter, pos, accent, px);
-        paint_face(&painter, pos, px, dark, lid);
+        match tex {
+            Ok(egui::load::TexturePoll::Ready { texture }) => {
+                painter.image(
+                    texture.id,
+                    img_rect,
+                    egui::Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    tint,
+                );
+            }
+            Ok(egui::load::TexturePoll::Pending { .. }) => {
+                // First frames: loader still decoding the embedded PNG.
+                ui.ctx().request_repaint();
+            }
+            Err(_) => {}
+        }
+
+        paint_pupils(&painter, img_rect, tint, lid);
 
         ui.data_mut(|d| d.insert_temp(id, pet));
-        ui.ctx().request_repaint();
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(33));
     });
 }
 
-fn paint_shadow(painter: &egui::Painter, pos: Pos2, half: f32, px: f32, dark: Color32) {
-    let shadow = Rect::from_center_size(
-        Pos2::new(pos.x, pos.y + half - px * 0.35),
-        egui::vec2(half * 1.25, px * 1.2),
-    );
-    painter.rect_filled(
-        shadow,
-        egui::CornerRadius::same((px * 0.6) as u8),
-        Color32::from_rgba_unmultiplied(
-            dark.r(),
-            dark.g(),
-            dark.b(),
-            (48.0 * MASCOT_ALPHA).round() as u8,
-        ),
-    );
-}
+fn paint_pupils(painter: &egui::Painter, img: egui::Rect, color: Color32, lid: f32) {
+    let stroke = Stroke::new((img.width() * 0.018).clamp(1.6, 3.2), color);
+    let arm = img.width() * 0.028;
 
-fn paint_sprite(painter: &egui::Painter, pos: Pos2, accent: Color32, px: f32) {
-    let left = pos.x - GRID * px / 2.0;
-    let top = pos.y - GRID * px / 2.0;
-
-    for (row, line) in SPRITE.iter().enumerate() {
-        for (col, ch) in line.chars().enumerate() {
-            if let Some(color) = pixel_color(ch, accent) {
-                let p = Pos2::new(left + col as f32 * px, top + row as f32 * px);
-                let r = Rect::from_min_size(p, egui::vec2(px + 0.6, px + 0.6));
-                painter.rect_filled(r, 0.0, color);
-            }
-        }
-    }
-}
-
-fn paint_face(painter: &egui::Painter, pos: Pos2, px: f32, dark: Color32, lid: f32) {
-    let left = pos.x - GRID * px / 2.0;
-    let top = pos.y - GRID * px / 2.0;
-    let eye_pos = |g: (f32, f32)| Pos2::new(left + g.0 * px, top + g.1 * px);
-
-    for eye in [LEFT_EYE, RIGHT_EYE] {
-        let c = eye_pos(eye);
-        if lid > 0.55 {
+    for &(fx, fy) in &EYES {
+        let eye = Pos2::new(img.left() + fx * img.width(), img.top() + fy * img.height());
+        painter.line_segment(
+            [Pos2::new(eye.x - arm, eye.y), Pos2::new(eye.x + arm, eye.y)],
+            stroke,
+        );
+        if lid <= 0.55 {
             painter.line_segment(
-                [
-                    Pos2::new(c.x - px * 0.85, c.y),
-                    Pos2::new(c.x + px * 0.85, c.y),
-                ],
-                Stroke::new((px * 0.42).max(1.0), fade(dark)),
-            );
-        } else {
-            let stroke = Stroke::new((px * 0.38).max(1.0), fade(dark));
-            painter.line_segment(
-                [
-                    Pos2::new(c.x - px * 0.72, c.y),
-                    Pos2::new(c.x + px * 0.72, c.y),
-                ],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(c.x, c.y - px * 0.72),
-                    Pos2::new(c.x, c.y + px * 0.72),
-                ],
+                [Pos2::new(eye.x, eye.y - arm), Pos2::new(eye.x, eye.y + arm)],
                 stroke,
             );
         }
     }
-
-    // A tiny nose and mouth give the sheep the friendly expression from the reference without
-    // adding another animation or losing the crisp pixel silhouette.
-    let nose = Pos2::new(left + GRID * px * 0.5, top + 9.0 * px);
-    painter.rect_filled(
-        Rect::from_center_size(nose, egui::vec2(px * 1.8, px * 1.15)),
-        egui::CornerRadius::same((px * 0.35) as u8),
-        fade(dark),
-    );
-    let mouth_y = nose.y + px * 1.15;
-    painter.line_segment(
-        [nose, Pos2::new(nose.x, mouth_y)],
-        Stroke::new((px * 0.34).max(1.0), fade(dark)),
-    );
-    painter.line_segment(
-        [
-            Pos2::new(nose.x - px * 0.75, mouth_y),
-            Pos2::new(nose.x, mouth_y + px * 0.45),
-        ],
-        Stroke::new((px * 0.28).max(1.0), fade(dark)),
-    );
-    painter.line_segment(
-        [
-            Pos2::new(nose.x, mouth_y + px * 0.45),
-            Pos2::new(nose.x + px * 0.75, mouth_y),
-        ],
-        Stroke::new((px * 0.28).max(1.0), fade(dark)),
-    );
 }

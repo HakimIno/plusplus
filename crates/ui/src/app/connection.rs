@@ -39,6 +39,8 @@ impl DbGuiApp {
                 tab.selection.clear();
                 tab.edits.clear();
                 tab.edits.pending_source = None;
+                tab.stream = None;
+                tab.page_exhausted = false;
                 // A schema editor against a dropped connection is stale; close it.
                 tab.schema_editor = None;
                 tab.design_edit_index = None;

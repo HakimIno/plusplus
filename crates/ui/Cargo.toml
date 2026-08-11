@@ -20,6 +20,8 @@ dbcore.workspace = true
 eframe.workspace = true
 egui.workspace = true
 egui_extras.workspace = true
+# Enables PNG decoding for `include_image!("…png")` via egui_extras' image loader.
+image.workspace = true
 tokio.workspace = true
 # CancellationToken handed to the backend so the Cancel button can abort a running query.
 tokio-util.workspace = true

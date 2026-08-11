@@ -134,6 +134,22 @@ pub trait Database: Send + Sync {
     /// export of arbitrarily large tables.
     async fn export_query(&self, sql: &str, sink: &mut (dyn RowSink + Send)) -> Result<u64>;
 
+    /// Stream a row-returning query into `sink`, stopping promptly when `cancel` fires.
+    /// Dropping the backend stream is sufficient for the pooled drivers' client-side
+    /// cancellation; backends may override this when they need a server-side kill.
+    async fn export_query_cancellable(
+        &self,
+        sql: &str,
+        cancel: CancellationToken,
+        sink: &mut (dyn RowSink + Send),
+    ) -> Result<u64> {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(crate::error::CoreError::Canceled),
+            result = self.export_query(sql, sink) => result,
+        }
+    }
+
     /// Return all databases visible from this connection. Used to populate the
     /// "Switch database" submenu on the connection icon. Returns an empty vec for
     /// backends that don't support multiple databases (SQLite).

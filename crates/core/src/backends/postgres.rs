@@ -216,10 +216,12 @@ impl Database for PostgresDb {
         }
 
         // Columns (ordered by ordinal position).
-        let col_rows: Vec<(String, String, String, String, String)> = sqlx::query_as(AssertSqlSafe(format!(
-            "SELECT table_schema, table_name, column_name, data_type, is_nullable FROM information_schema.columns \
-             WHERE table_schema NOT IN {SYSTEM_SCHEMAS} \
-             ORDER BY table_schema, table_name, ordinal_position"
+        let col_rows: Vec<(String, String, String, String, String, Option<String>, Option<String>)> = sqlx::query_as(AssertSqlSafe(format!(
+            "SELECT c.table_schema, c.table_name, c.column_name, c.data_type, c.is_nullable, c.column_default, \
+                    pg_catalog.col_description(pg_catalog.to_regclass(format('%I.%I', c.table_schema, c.table_name))::oid, c.ordinal_position) \
+             FROM information_schema.columns c \
+             WHERE c.table_schema NOT IN {SYSTEM_SCHEMAS} \
+             ORDER BY c.table_schema, c.table_name, c.ordinal_position"
         )))
         .fetch_all(&self.pool)
         .await?;
@@ -241,13 +243,41 @@ impl Database for PostgresDb {
             pk_set.insert((s, t, c), ());
         }
 
-        for (schema, table, column, data_type, is_nullable) in col_rows {
+        let check_rows: Vec<(String, String, String, String)> =
+            sqlx::query_as(AssertSqlSafe(format!(
+                "SELECT tc.table_schema, tc.table_name, ccu.column_name, cc.check_clause \
+                 FROM information_schema.table_constraints tc \
+                 JOIN information_schema.check_constraints cc \
+                   ON cc.constraint_catalog = tc.constraint_catalog \
+                  AND cc.constraint_schema = tc.constraint_schema \
+                  AND cc.constraint_name = tc.constraint_name \
+                 JOIN information_schema.constraint_column_usage ccu \
+                   ON ccu.constraint_catalog = tc.constraint_catalog \
+                  AND ccu.constraint_schema = tc.constraint_schema \
+                  AND ccu.constraint_name = tc.constraint_name \
+                 WHERE tc.constraint_type = 'CHECK' \
+                   AND tc.table_schema NOT IN {SYSTEM_SCHEMAS}"
+            )))
+            .fetch_all(&self.pool)
+            .await?;
+        let mut checks: BTreeMap<(String, String, String), Vec<String>> = BTreeMap::new();
+        for (schema, table, column, clause) in check_rows {
+            checks
+                .entry((schema, table, column))
+                .or_default()
+                .push(clause);
+        }
+
+        for (schema, table, column, data_type, is_nullable, default, comment) in col_rows {
             let key = (schema.clone(), table.clone(), column.clone());
             let col = ColumnInfo {
                 name: column,
                 data_type,
                 nullable: is_nullable.eq_ignore_ascii_case("YES"),
                 primary_key: pk_set.contains_key(&key),
+                default,
+                check: checks.get(&key).map(|items| items.join(" AND ")),
+                comment,
             };
             if let Some(info) = tables.get_mut(&(schema.clone(), table.clone())) {
                 info.columns.push(col);
@@ -469,10 +499,7 @@ impl Database for PostgresDb {
                 truncated,
             })
         } else {
-            let res = self
-                .pool
-                .execute(AssertSqlSafe(sql.to_string()))
-                .await?;
+            let res = self.pool.execute(AssertSqlSafe(sql.to_string())).await?;
             Ok(QueryResult {
                 columns: Vec::new(),
                 rows: Vec::new(),
