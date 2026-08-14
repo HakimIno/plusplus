@@ -1,6 +1,4 @@
-<p align="center">
-  <img src=".github/readme-banner.svg" alt="plusplus — a production-safe native database client" width="100%">
-</p>
+
 
 <p align="center">
   <strong>A fast, native SQL client that makes production mistakes harder.</strong><br>
