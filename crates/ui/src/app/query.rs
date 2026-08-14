@@ -221,8 +221,12 @@ impl DbGuiApp {
         if sql.is_empty() {
             return;
         }
-        let result_limit = dbcore::parse_page_window(&sql).and_then(|window| window.limit);
-        let fetch_sql = result_limit
+        let requested_result_limit =
+            dbcore::parse_page_window(&sql).and_then(|window| window.limit);
+        // SQL typed directly into the editor bypasses the pager dialog's validation. Clamp it
+        // here as well so lazy continuation can never accumulate beyond the process-wide cap.
+        let result_limit = requested_result_limit.map(|limit| limit.min(MAX_FETCH_ROWS as u64));
+        let fetch_sql = requested_result_limit
             .filter(|limit| *limit > QUERY_STREAM_CHUNK_ROWS as u64)
             .and_then(|_| {
                 let kind = tab.conn_id.as_deref().and_then(|id| {
@@ -236,7 +240,7 @@ impl DbGuiApp {
             })
             .unwrap_or_else(|| sql.clone());
         let count_sql = (refresh_total
-            && result_limit.is_some()
+            && requested_result_limit.is_some()
             && matches!(
                 tab.kind,
                 crate::components::QueryTabKind::Table | crate::components::QueryTabKind::View
@@ -401,15 +405,22 @@ impl DbGuiApp {
         let Some(window) = dbcore::parse_page_window(&tab.sql) else {
             return;
         };
-        let Some(limit) = window.limit.filter(|limit| *limit > 0) else {
+        let Some(requested_limit) = window.limit.filter(|limit| *limit > 0) else {
             return;
         };
+        let limit = requested_limit.min(MAX_FETCH_ROWS as u64);
         let loaded = tab
             .result
             .as_ref()
             .map_or(0, |result| result.row_count() as u64);
         if loaded >= limit {
-            self.tabs[idx].page_exhausted = true;
+            let tab = &mut self.tabs[idx];
+            tab.page_exhausted = true;
+            if requested_limit > MAX_FETCH_ROWS as u64 {
+                if let Some(result) = &mut tab.result {
+                    result.truncated = true;
+                }
+            }
             return;
         }
         let offset = window.offset.saturating_add(loaded);

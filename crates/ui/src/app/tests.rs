@@ -134,16 +134,21 @@ fn metadata_pipeline_exposes_fast_results_before_full_schema() {
         Arc::new(DelayedMetadataDb),
         "slow-connection".into(),
         tx,
+        tokio_util::sync::CancellationToken::new(),
     ));
 
     let messages: Vec<_> = rx.try_iter().collect();
-    assert_eq!(messages.len(), 3);
+    assert_eq!(messages.len(), 4);
     assert!(matches!(messages[0], AppMessage::DatabaseListLoaded { .. }));
     assert!(matches!(
         messages[1],
         AppMessage::SchemaOverviewLoaded { .. }
     ));
     assert!(matches!(messages[2], AppMessage::SchemaLoaded { .. }));
+    assert!(matches!(
+        messages[3],
+        AppMessage::ConnectionJobFinished { .. }
+    ));
 
     let overview_ms = match &messages[1] {
         AppMessage::SchemaOverviewLoaded { elapsed_ms, .. } => *elapsed_ms,
@@ -161,6 +166,79 @@ fn metadata_pipeline_exposes_fast_results_before_full_schema() {
         full_schema_ms >= 55.0,
         "schema timing was {full_schema_ms:.1} ms"
     );
+}
+
+#[test]
+fn disconnect_cancels_the_connection_metadata_pipeline() {
+    let mut app = DbGuiApp::construct();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    app.connection_jobs.insert("conn-1".into());
+    app.connection_cancels
+        .insert("conn-1".into(), cancel.clone());
+
+    app.disconnect_conn("conn-1");
+
+    assert!(cancel.is_cancelled());
+    assert!(!app.connection_cancels.contains_key("conn-1"));
+}
+
+#[test]
+fn cancelled_connection_job_drops_a_late_connected_handle() {
+    let mut app = DbGuiApp::construct();
+    let ctx = egui::Context::default();
+    let mut cfg = ConnectionConfig::new(DbKind::Sqlite);
+    cfg.id = "conn-1".into();
+    cfg.name = "DB".into();
+    app.connections.push(cfg);
+    app.connection_jobs.insert("conn-1".into());
+    app.tx
+        .send(AppMessage::Connected {
+            conn_id: "conn-1".into(),
+            name: "DB".into(),
+            elapsed_ms: 1.0,
+            result: Ok(Arc::new(DummyDb)),
+        })
+        .unwrap();
+    app.tx
+        .send(AppMessage::ConnectionJobCancelled {
+            conn_id: "conn-1".into(),
+        })
+        .unwrap();
+
+    app.poll_messages(&ctx);
+
+    assert!(app.active_connections.is_empty());
+    assert!(!app.connection_jobs.contains("conn-1"));
+}
+
+#[test]
+fn schema_refresh_result_does_not_clear_a_newer_connection_job() {
+    let mut app = DbGuiApp::construct();
+    let ctx = egui::Context::default();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    app.connection_jobs.insert("conn-1".into());
+    app.connection_cancels
+        .insert("conn-1".into(), cancel.clone());
+    app.active_connections.push(ActiveConnection {
+        config_id: "conn-1".into(),
+        name: "DB".into(),
+        db: Arc::new(DummyDb),
+        schema: SchemaTree::default(),
+        databases: Vec::new(),
+    });
+    app.tx
+        .send(AppMessage::SchemaLoaded {
+            conn_id: "conn-1".into(),
+            elapsed_ms: 1.0,
+            result: Ok(fake_schema(1, 1)),
+        })
+        .unwrap();
+
+    app.poll_messages(&ctx);
+
+    assert!(app.connection_jobs.contains("conn-1"));
+    assert!(app.connection_cancels.contains_key("conn-1"));
+    assert!(!cancel.is_cancelled());
 }
 
 #[test]
@@ -223,9 +301,17 @@ fn connection_becomes_live_before_schema_arrives() {
     app.poll_messages(&ctx);
 
     assert_eq!(app.active_connections[0].schema.tables.len(), 2);
-    assert!(!app.connection_jobs.contains("conn-1"));
+    assert!(app.connection_jobs.contains("conn-1"));
     assert!(app.status_msg.contains("2 tables"));
     assert_eq!(app.connection_timings["conn-1"].full_schema_ms, Some(80.0));
+
+    app.tx
+        .send(AppMessage::ConnectionJobFinished {
+            conn_id: "conn-1".into(),
+        })
+        .unwrap();
+    app.poll_messages(&ctx);
+    assert!(!app.connection_jobs.contains("conn-1"));
 
     app.tx
         .send(AppMessage::DatabaseListLoaded {
@@ -295,6 +381,11 @@ fn schema_failure_keeps_connection_live() {
             conn_id: "conn-1".into(),
             elapsed_ms: 50.0,
             result: Err("metadata permission denied".into()),
+        })
+        .unwrap();
+    app.tx
+        .send(AppMessage::ConnectionJobFinished {
+            conn_id: "conn-1".into(),
         })
         .unwrap();
     app.poll_messages(&ctx);
@@ -1849,6 +1940,30 @@ fn live_log_is_session_only_and_independent_of_history_preferences() {
 }
 
 #[test]
+fn visible_history_cache_stays_at_the_disk_history_limit() {
+    let mut app = DbGuiApp::construct();
+    app.sidebar_tab = SidebarTab::History;
+    for i in 0..=dbcore::history::MAX_ENTRIES {
+        app.record_history(
+            dbcore::audit::AuditAction::Query,
+            "c1",
+            &format!("SELECT {i}"),
+            true,
+            None,
+            Some(1),
+            0.1,
+        );
+    }
+
+    assert_eq!(app.history_cache.len(), dbcore::history::MAX_ENTRIES);
+    assert_eq!(app.history_cache.first().unwrap().sql, "SELECT 1");
+    assert_eq!(
+        app.history_cache.last().unwrap().sql,
+        format!("SELECT {}", dbcore::history::MAX_ENTRIES)
+    );
+}
+
+#[test]
 fn live_log_can_expand_beyond_the_old_fixed_height_cap() {
     assert!(super::panels::live_log_max_size(900.0) > 700.0);
     assert_eq!(super::panels::live_log_max_size(100.0), 32.0);
@@ -2452,6 +2567,34 @@ fn load_more_never_exceeds_the_user_limit() {
     assert_eq!(app.tab().result.as_ref().unwrap().row_count(), 100);
     assert!(app.tab().page_exhausted);
     assert!(app.tab().stream.is_none());
+    assert_eq!(app.busy, Busy::Idle);
+}
+
+#[test]
+fn load_more_never_exceeds_the_global_materialization_cap() {
+    let mut app = DbGuiApp::construct();
+    {
+        let tab = app.tab_mut();
+        tab.kind = crate::components::QueryTabKind::Table;
+        tab.sql = format!(
+            "SELECT * FROM table_0 LIMIT {};",
+            MAX_FETCH_ROWS as u64 * 10
+        );
+        tab.edits.source = Some(EditSource {
+            schema: None,
+            table: "table_0".into(),
+            pk_cols: vec!["field_0".into()],
+        });
+        tab.set_result(fake_result(MAX_FETCH_ROWS, 1));
+    }
+
+    app.load_more_rows();
+    assert_eq!(
+        app.tab().result.as_ref().unwrap().row_count(),
+        MAX_FETCH_ROWS
+    );
+    assert!(app.tab().page_exhausted);
+    assert!(app.tab().result.as_ref().unwrap().truncated);
     assert_eq!(app.busy, Busy::Idle);
 }
 

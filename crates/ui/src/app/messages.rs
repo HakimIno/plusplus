@@ -16,6 +16,7 @@ impl DbGuiApp {
                     self.record_connection_timing(&conn_id, ConnectStage::Connect, elapsed_ms);
                     if !self.connections.iter().any(|cfg| cfg.id == conn_id) {
                         self.connection_jobs.remove(&conn_id);
+                        self.connection_cancels.remove(&conn_id);
                         continue;
                     }
                     self.busy = Busy::Idle;
@@ -69,6 +70,7 @@ impl DbGuiApp {
                         }
                         Err(e) => {
                             self.connection_jobs.remove(&conn_id);
+                            self.connection_cancels.remove(&conn_id);
                             self.record_audit(
                                 dbcore::audit::AuditAction::Connect,
                                 &conn_id,
@@ -114,7 +116,6 @@ impl DbGuiApp {
                     elapsed_ms,
                     result,
                 } => {
-                    self.connection_jobs.remove(&conn_id);
                     self.record_connection_timing(&conn_id, ConnectStage::FullSchema, elapsed_ms);
                     let Some(idx) = self
                         .active_connections
@@ -153,6 +154,21 @@ impl DbGuiApp {
                                 "Connected — schema unavailable".to_string()
                             };
                         }
+                    }
+                }
+                AppMessage::ConnectionJobFinished { conn_id } => {
+                    self.connection_jobs.remove(&conn_id);
+                    self.connection_cancels.remove(&conn_id);
+                }
+                AppMessage::ConnectionJobCancelled { conn_id } => {
+                    self.connection_jobs.remove(&conn_id);
+                    self.connection_cancels.remove(&conn_id);
+                    // A successful `Connected` message may already be queued when the user
+                    // disconnects. Ensure that late delivery cannot resurrect its database Arc.
+                    self.active_connections
+                        .retain(|connection| connection.config_id != conn_id);
+                    if self.busy == Busy::Connecting {
+                        self.busy = Busy::Idle;
                     }
                 }
                 AppMessage::DatabaseListLoaded {
@@ -525,11 +541,15 @@ impl DbGuiApp {
                                     ..QueryResult::default()
                                 });
                             }
+                            let capped_by_global_limit = dbcore::parse_page_window(&tab.sql)
+                                .and_then(|window| window.limit)
+                                .is_some_and(|limit| limit > MAX_FETCH_ROWS as u64);
                             let result = tab.result.get_or_insert_with(QueryResult::default);
                             result.stats.elapsed_ms = elapsed_ms;
                             result.stats.rows_affected = None;
-                            result.truncated = false;
                             let total_rows = result.row_count() as u64;
+                            result.truncated =
+                                total_rows >= MAX_FETCH_ROWS as u64 && capped_by_global_limit;
                             tab.page_exhausted = total_rows >= result_limit
                                 || page.limit.is_some_and(|limit| rows_loaded < limit);
                             let status = result_status(result);
@@ -765,8 +785,18 @@ impl DbGuiApp {
                                     let tx = self.tx.clone();
                                     self.rt.spawn(async move {
                                         let started = Instant::now();
-                                        let result =
-                                            db.introspect().await.map_err(|e| e.to_string());
+                                        let result = match tokio::time::timeout(
+                                            std::time::Duration::from_secs(30),
+                                            db.introspect(),
+                                        )
+                                        .await
+                                        {
+                                            Ok(result) => result.map_err(|e| e.to_string()),
+                                            Err(_) => {
+                                                Err("schema refresh timed out after 30 seconds"
+                                                    .to_string())
+                                            }
+                                        };
                                         let _ = tx.send(AppMessage::SchemaLoaded {
                                             conn_id,
                                             elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,

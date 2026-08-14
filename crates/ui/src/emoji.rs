@@ -19,6 +19,10 @@ use unicode_segmentation::UnicodeSegmentation;
 /// each cached texture small (64·64·4 ≈ 16 KB).
 const RASTER_PX: f32 = 64.0;
 
+/// At 64×64 RGBA each successful texture is roughly 16 KiB before driver overhead. Keeping the
+/// hottest 512 graphemes bounds the atlas near 8 MiB while comfortably covering normal datasets.
+const MAX_CACHE_ENTRIES: usize = 512;
+
 /// Where the OS colour-emoji font lives. macOS only for now; other platforms leave the atlas
 /// disabled (emoji render monochrome through egui's bundled Noto Emoji fallback).
 #[cfg(target_os = "macos")]
@@ -86,15 +90,63 @@ pub struct EmojiAtlas {
     scale: RefCell<ScaleContext>,
     shape: RefCell<ShapeContext>,
     /// grapheme → cached texture (`None` = font has no colour glyph for it; fall back to text).
-    cache: RefCell<HashMap<String, Option<egui::TextureHandle>>>,
+    cache: RefCell<EmojiCache>,
+}
+
+#[derive(Default)]
+struct EmojiCache {
+    entries: HashMap<String, CacheEntry>,
+    access_clock: u64,
+}
+
+struct CacheEntry {
+    handle: Option<egui::TextureHandle>,
+    last_used: u64,
+}
+
+impl EmojiCache {
+    /// Outer `Option` distinguishes a miss from a cached no-colour-glyph result.
+    fn get(&mut self, grapheme: &str) -> Option<Option<egui::TextureId>> {
+        self.access_clock = self.access_clock.saturating_add(1);
+        let entry = self.entries.get_mut(grapheme)?;
+        entry.last_used = self.access_clock;
+        Some(entry.handle.as_ref().map(egui::TextureHandle::id))
+    }
+
+    fn insert(&mut self, grapheme: String, handle: Option<egui::TextureHandle>) {
+        self.access_clock = self.access_clock.saturating_add(1);
+        if let Some(entry) = self.entries.get_mut(&grapheme) {
+            entry.handle = handle;
+            entry.last_used = self.access_clock;
+            return;
+        }
+        if self.entries.len() >= MAX_CACHE_ENTRIES {
+            let oldest = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone());
+            // Dropping the last handle releases the texture from egui's texture manager.
+            if let Some(oldest) = oldest {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.entries.insert(
+            grapheme,
+            CacheEntry {
+                handle,
+                last_used: self.access_clock,
+            },
+        );
+    }
 }
 
 impl EmojiAtlas {
     /// The texture id for `grapheme`'s colour emoji, rasterizing and caching on first use.
     /// `None` when the OS font is unavailable or has no colour glyph for it — render text then.
     pub fn texture(&self, ctx: &egui::Context, grapheme: &str) -> Option<egui::TextureId> {
-        if let Some(cached) = self.cache.borrow().get(grapheme) {
-            return cached.as_ref().map(|t| t.id());
+        if let Some(cached) = self.cache.borrow_mut().get(grapheme) {
+            return cached;
         }
         let handle = self.rasterize(ctx, grapheme);
         let id = handle.as_ref().map(|t| t.id());
@@ -199,6 +251,24 @@ mod tests {
         assert!(!contains_emoji("just plain ascii, 123"));
         assert!(!contains_emoji("ภาษาไทยไม่ใช่ emoji"));
         assert!(contains_emoji("hi 👍"));
+    }
+
+    #[test]
+    fn texture_cache_evicts_the_least_recently_used_entry() {
+        let mut cache = EmojiCache::default();
+        for i in 0..MAX_CACHE_ENTRIES {
+            cache.insert(format!("emoji-{i}"), None);
+        }
+        assert_eq!(cache.entries.len(), MAX_CACHE_ENTRIES);
+
+        // Touch the oldest key so the next insertion evicts key 1 instead of key 0.
+        assert_eq!(cache.get("emoji-0"), Some(None));
+        cache.insert("new-emoji".into(), None);
+
+        assert_eq!(cache.entries.len(), MAX_CACHE_ENTRIES);
+        assert!(cache.entries.contains_key("emoji-0"));
+        assert!(!cache.entries.contains_key("emoji-1"));
+        assert!(cache.entries.contains_key("new-emoji"));
     }
 
     /// Probe (ignored, macOS-only): swash must rasterize Apple Color Emoji (sbix) to coloured

@@ -72,6 +72,9 @@ impl DbGuiApp {
             Action::DeleteConnection(i) => {
                 if i < self.connections.len() {
                     let cfg = self.connections.remove(i);
+                    if let Some(cancel) = self.connection_cancels.remove(&cfg.id) {
+                        cancel.cancel();
+                    }
                     self.connection_jobs.remove(&cfg.id);
                     self.schema_cache.remove(&cfg.id);
                     self.connection_timings.remove(&cfg.id);

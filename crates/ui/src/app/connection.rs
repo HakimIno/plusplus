@@ -28,6 +28,9 @@ impl DbGuiApp {
     }
     /// Drop a live connection from the pool (tabs bound to it become "not connected").
     pub(super) fn disconnect_conn(&mut self, id: &str) {
+        if let Some(cancel) = self.connection_cancels.remove(id) {
+            cancel.cancel();
+        }
         self.active_connections.retain(|c| c.config_id != id);
         self.connection_timings.remove(id);
         // Diagram tabs keep their schema snapshot — still viewable, just not refreshable.
@@ -113,20 +116,45 @@ impl DbGuiApp {
         let tx = self.tx.clone();
         let id = cfg.id.clone();
         let name = cfg.name.clone();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        self.connection_cancels.insert(id.clone(), cancel.clone());
         self.busy = Busy::Connecting;
         self.error = None;
         self.status_msg = format!("Connecting to {name}…");
         self.rt.spawn(async move {
             let connect_started = Instant::now();
-            match dbcore::connect(&cfg, password, ssh_secret).await {
-                Ok(db) => {
-                    let _ = tx.send(AppMessage::Connected {
+            const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+            let connected = tokio::select! {
+                _ = cancel.cancelled() => {
+                    let _ = tx.send(AppMessage::ConnectionJobCancelled {
                         conn_id: id.clone(),
-                        name,
-                        elapsed_ms: connect_started.elapsed().as_secs_f64() * 1000.0,
-                        result: Ok(db.clone()),
                     });
-                    load_connection_metadata(db, id, tx).await;
+                    return;
+                }
+                result = tokio::time::timeout(
+                    CONNECT_TIMEOUT,
+                    dbcore::connect(&cfg, password, ssh_secret),
+                ) => match result {
+                    Ok(result) => result,
+                    Err(_) => Err(dbcore::CoreError::Pool(
+                        "connection timed out after 30 seconds".into(),
+                    )),
+                },
+            };
+            match connected {
+                Ok(db) => {
+                    if tx
+                        .send(AppMessage::Connected {
+                            conn_id: id.clone(),
+                            name,
+                            elapsed_ms: connect_started.elapsed().as_secs_f64() * 1000.0,
+                            result: Ok(db.clone()),
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                    let _ = load_connection_metadata(db, id, tx, cancel).await;
                 }
                 Err(e) => {
                     let _ = tx.send(AppMessage::Connected {

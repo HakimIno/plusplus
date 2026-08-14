@@ -151,15 +151,18 @@ impl DbGuiApp {
         if !self.history_enabled {
             return;
         }
-        // Unit tests construct real apps and pump real messages; never let them write
-        // into the user's actual history file.
-        if cfg!(test) {
-            return;
+        // Unit tests construct real apps and pump real messages; never let them write into the
+        // user's actual history file. The in-memory cache still follows production lifecycle.
+        if !cfg!(test) {
+            let _ = dbcore::history::append(&entry);
         }
-        let _ = dbcore::history::append(&entry);
         // Keep the sidebar's History tab live while it's showing.
         if self.sidebar_tab == SidebarTab::History {
             self.history_cache.push(entry);
+            if self.history_cache.len() > dbcore::history::MAX_ENTRIES {
+                self.history_cache
+                    .drain(..self.history_cache.len() - dbcore::history::MAX_ENTRIES);
+            }
         }
     }
 }

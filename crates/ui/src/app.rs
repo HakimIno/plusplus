@@ -80,6 +80,13 @@ enum AppMessage {
         elapsed_ms: f64,
         result: Result<SchemaTree, String>,
     },
+    /// Every branch of the initial metadata pipeline exited, so its cancellation handle and job
+    /// guard can be released. Kept separate from `SchemaLoaded`: the database-list branch may
+    /// still be running, and later schema refreshes use that result message too.
+    ConnectionJobFinished { conn_id: String },
+    /// A connect/metadata pipeline was canceled because its saved connection was disconnected
+    /// or deleted. This releases the UI-side job guard after the spawned future has exited.
+    ConnectionJobCancelled { conn_id: String },
     /// Databases visible to an already-live connection finished loading.
     DatabaseListLoaded {
         conn_id: String,
@@ -690,13 +697,28 @@ async fn stream_export(
 
 /// Load metadata after authentication. The name-only overview intentionally completes before
 /// full introspection for that branch, while the independent database list runs alongside it.
-async fn load_connection_metadata(db: Arc<dyn Database>, conn_id: String, tx: Sender<AppMessage>) {
+async fn load_connection_metadata(
+    db: Arc<dyn Database>,
+    conn_id: String,
+    tx: Sender<AppMessage>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> bool {
+    const METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
     let schema_tx = tx.clone();
+    let terminal_tx = tx.clone();
+    let terminal_tx_id = conn_id.clone();
     let schema_id = conn_id.clone();
     let schema_db = db.clone();
+    let schema_cancel = cancel.clone();
     let schema = async move {
         let overview_started = Instant::now();
-        if let Ok(schema) = schema_db.introspect_overview().await {
+        let overview = tokio::select! {
+            _ = schema_cancel.cancelled() => return false,
+            result = tokio::time::timeout(METADATA_TIMEOUT, schema_db.introspect_overview()) => {
+                result.ok().and_then(std::result::Result::ok)
+            }
+        };
+        if let Some(schema) = overview {
             let _ = schema_tx.send(AppMessage::SchemaOverviewLoaded {
                 conn_id: schema_id.clone(),
                 schema,
@@ -704,23 +726,49 @@ async fn load_connection_metadata(db: Arc<dyn Database>, conn_id: String, tx: Se
             });
         }
         let schema_started = Instant::now();
-        let result = schema_db.introspect().await.map_err(|e| e.to_string());
+        let result = tokio::select! {
+            _ = schema_cancel.cancelled() => return false,
+            result = tokio::time::timeout(METADATA_TIMEOUT, schema_db.introspect()) => {
+                match result {
+                    Ok(result) => result.map_err(|e| e.to_string()),
+                    Err(_) => Err("schema load timed out after 30 seconds".to_string()),
+                }
+            }
+        };
         let _ = schema_tx.send(AppMessage::SchemaLoaded {
             conn_id: schema_id,
             elapsed_ms: schema_started.elapsed().as_secs_f64() * 1000.0,
             result,
         });
+        true
     };
+    let database_cancel = cancel;
     let databases = async move {
         let started = Instant::now();
-        let databases = db.list_databases().await.unwrap_or_default();
+        let databases = tokio::select! {
+            _ = database_cancel.cancelled() => return,
+            result = tokio::time::timeout(METADATA_TIMEOUT, db.list_databases()) => {
+                result.ok().and_then(std::result::Result::ok).unwrap_or_default()
+            }
+        };
         let _ = tx.send(AppMessage::DatabaseListLoaded {
             conn_id,
             databases,
             elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
         });
     };
-    tokio::join!(schema, databases);
+    let (schema_completed, ()) = tokio::join!(schema, databases);
+    let message = if schema_completed {
+        AppMessage::ConnectionJobFinished {
+            conn_id: terminal_tx_id,
+        }
+    } else {
+        AppMessage::ConnectionJobCancelled {
+            conn_id: terminal_tx_id,
+        }
+    };
+    let _ = terminal_tx.send(message);
+    schema_completed
 }
 
 /// How often the import reports progress back to the UI thread.
@@ -1224,6 +1272,9 @@ pub struct DbGuiApp {
     /// Connect + metadata pipelines currently in flight. One saved connection may own at most
     /// one pipeline, preventing repeated clicks from creating overlapping five-connection pools.
     connection_jobs: HashSet<String>,
+    /// Cancellation handle for each connect + metadata pipeline. A disconnect must release the
+    /// task's database `Arc` as well as removing the already-visible connection from the UI.
+    connection_cancels: HashMap<String, tokio_util::sync::CancellationToken>,
     /// Last complete schema per saved connection. Survives disconnects within this process so
     /// reconnect can paint immediately; mutations and config changes invalidate it.
     schema_cache: HashMap<String, SchemaTree>,
@@ -1486,6 +1537,7 @@ impl DbGuiApp {
             query_cancel: None,
             active_connections: Vec::new(),
             connection_jobs: HashSet::new(),
+            connection_cancels: HashMap::new(),
             schema_cache: HashMap::new(),
             connection_timings: HashMap::new(),
             tabs: vec![default_tab],

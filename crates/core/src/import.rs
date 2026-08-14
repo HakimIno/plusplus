@@ -29,6 +29,9 @@ use std::fs::File;
 use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
 
+use serde::de::{Error as DeError, IgnoredAny, SeqAccess, Visitor};
+use serde::Deserializer;
+
 use crate::coerce::{CoerceError, EditorKind};
 use crate::error::{CoreError, Result};
 use crate::model::DbKind;
@@ -38,6 +41,11 @@ use crate::value::Value;
 /// statement is held in memory until the commit, so an unbounded file would OOM the app; the
 /// user is told to split the file rather than being silently truncated.
 pub const MAX_IMPORT_ROWS: usize = 200_000;
+
+/// Hard byte ceiling for JSON imports. CSV is genuinely streamed, but JSON array parsing keeps
+/// the accepted records in memory until coercion, so a byte cap is required in addition to the
+/// row cap (one row can otherwise contain an arbitrarily large string).
+pub const MAX_JSON_IMPORT_BYTES: u64 = 256 * 1024 * 1024;
 
 /// A format a table can be imported from. Mirrors [`crate::export::ExportFormat`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +100,14 @@ pub struct Preview {
 
 /// Read the first `n` records of `path` (plus its headers) without consuming the whole file.
 pub fn preview(path: &Path, fmt: ImportFormat, has_header: bool, n: usize) -> Result<Preview> {
+    if fmt == ImportFormat::Json {
+        let parsed = parse_json(path, n)?;
+        return Ok(Preview {
+            headers: parsed.headers,
+            rows: parsed.rows,
+            more: parsed.more,
+        });
+    }
     let mut reader = read_records(path, fmt, has_header)?;
     let headers = reader.headers().to_vec();
     let mut rows = Vec::with_capacity(n);
@@ -109,8 +125,8 @@ pub fn preview(path: &Path, fmt: ImportFormat, has_header: bool, n: usize) -> Re
 
 /// Open `path` and stream its records. `None` entries are JSON `null`s.
 ///
-/// CSV is streamed off the disk. JSON is parsed whole (a JSON array cannot be read
-/// incrementally without a streaming parser, and [`MAX_IMPORT_ROWS`] bounds the cost).
+/// CSV is streamed off disk. JSON is decoded directly into records and stops as soon as the
+/// row cap is exceeded, without first materializing a second `serde_json::Value` document.
 ///
 /// `has_header` applies to CSV only — JSON objects are always keyed by name, so it is ignored
 /// there.
@@ -236,47 +252,113 @@ fn open_stripping_bom(path: &Path) -> Result<Box<dyn Read>> {
 }
 
 fn open_json(path: &Path) -> Result<RecordReader> {
-    let doc: serde_json::Value = serde_json::from_reader(BufReader::new(File::open(path)?))?;
-    let serde_json::Value::Array(items) = doc else {
-        return Err(CoreError::Import(
-            "expected a JSON array of objects at the top level".into(),
-        ));
-    };
-
-    // Header order follows the first object's keys. `serde_json`'s Map is a BTreeMap unless the
-    // `preserve_order` feature is on, so in practice that is alphabetical — deterministic, and
-    // irrelevant to correctness because columns are matched onto the table by name.
-    let headers: Vec<String> = match items.first() {
-        Some(serde_json::Value::Object(m)) => m.keys().cloned().collect(),
-        Some(_) => {
-            return Err(CoreError::Import(
-                "expected a JSON array of objects, found a non-object element".into(),
-            ))
-        }
-        None => Vec::new(),
-    };
-
-    let mut rows = Vec::with_capacity(items.len());
-    for (i, item) in items.into_iter().enumerate() {
-        let serde_json::Value::Object(map) = item else {
-            return Err(CoreError::Import(format!(
-                "row {}: expected a JSON object",
-                i + 1
-            )));
-        };
-        let mut record = Vec::with_capacity(headers.len());
-        for key in &headers {
-            // A key missing from a later object is NULL; keys absent from the first object are
-            // not part of the header and cannot be mapped, so they are ignored.
-            record.push(json_scalar(map.get(key), key, i + 1)?);
-        }
-        rows.push(record);
+    let parsed = parse_json(path, MAX_IMPORT_ROWS)?;
+    if parsed.more {
+        return Err(CoreError::Import(format!(
+            "file holds more than {MAX_IMPORT_ROWS} rows — split it and import in parts"
+        )));
     }
 
     Ok(RecordReader {
-        headers,
-        inner: Inner::Json(rows.into_iter()),
+        headers: parsed.headers,
+        inner: Inner::Json(parsed.rows.into_iter()),
     })
+}
+
+#[derive(Default)]
+struct ParsedJson {
+    headers: Vec<String>,
+    rows: Vec<Record>,
+    more: bool,
+}
+
+/// Parse at most `keep_rows` JSON objects plus one cheap look-ahead item. Returning from the
+/// sequence visitor after that probe leaves the rest of the file unread, which keeps preview
+/// latency proportional to the preview rather than the import size.
+fn parse_json(path: &Path, keep_rows: usize) -> Result<ParsedJson> {
+    let size = std::fs::metadata(path)?.len();
+    if size > MAX_JSON_IMPORT_BYTES {
+        return Err(CoreError::Import(format!(
+            "JSON file is {} MiB; the import limit is {} MiB — split it into smaller files",
+            size.div_ceil(1024 * 1024),
+            MAX_JSON_IMPORT_BYTES / (1024 * 1024)
+        )));
+    }
+
+    let mut deserializer = serde_json::Deserializer::from_reader(BufReader::new(File::open(path)?));
+    let mut parsed = ParsedJson::default();
+    let result = deserializer.deserialize_seq(JsonArrayVisitor {
+        keep_rows,
+        parsed: &mut parsed,
+    });
+    match result {
+        Ok(()) => deserializer.end()?,
+        // The visitor deliberately errors after its look-ahead because serde_json otherwise
+        // insists on scanning to `]`. At that point the bounded preview state is complete.
+        Err(_) if parsed.more => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(parsed)
+}
+
+struct JsonArrayVisitor<'a> {
+    keep_rows: usize,
+    parsed: &'a mut ParsedJson,
+}
+
+impl<'de> Visitor<'de> for JsonArrayVisitor<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON array of objects")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let Some(first) = seq.next_element::<serde_json::Map<String, serde_json::Value>>()? else {
+            return Ok(());
+        };
+        // serde_json's Map is sorted without `preserve_order`, matching the previous parser.
+        self.parsed.headers = first.keys().cloned().collect();
+        self.parsed.rows = Vec::with_capacity(self.keep_rows.min(1_024));
+        if self.keep_rows == 0 {
+            self.parsed.more = true;
+            return Err(A::Error::custom("bounded JSON preview complete"));
+        }
+        self.parsed
+            .rows
+            .push(json_map_to_record(first, &self.parsed.headers, 1).map_err(A::Error::custom)?);
+
+        while self.parsed.rows.len() < self.keep_rows {
+            let Some(map) = seq.next_element::<serde_json::Map<String, serde_json::Value>>()?
+            else {
+                return Ok(());
+            };
+            let row = self.parsed.rows.len() + 1;
+            self.parsed.rows.push(
+                json_map_to_record(map, &self.parsed.headers, row).map_err(A::Error::custom)?,
+            );
+        }
+
+        if seq.next_element::<IgnoredAny>()?.is_some() {
+            self.parsed.more = true;
+            return Err(A::Error::custom("bounded JSON preview complete"));
+        }
+        Ok(())
+    }
+}
+
+fn json_map_to_record(
+    map: serde_json::Map<String, serde_json::Value>,
+    headers: &[String],
+    row: usize,
+) -> Result<Record> {
+    headers
+        .iter()
+        .map(|key| json_scalar(map.get(key), key, row))
+        .collect()
 }
 
 /// Render one JSON scalar as the record's text form. Nested containers have no column-shaped
@@ -609,6 +691,35 @@ mod tests {
         let p = preview(&path, ImportFormat::Csv, true, 10).unwrap();
         assert_eq!(p.rows.len(), 4);
         assert!(!p.more);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn json_preview_stops_after_the_more_probe() {
+        // Preview needs the requested row plus one look-ahead record, not a parse of the
+        // complete import. The malformed third item is deliberately beyond that boundary.
+        let path = temp_file("preview.json", br#"[{"a":1},{"a":2},not-json]"#);
+        let p = preview(&path, ImportFormat::Json, true, 1).unwrap();
+        assert_eq!(p.headers, ["a"]);
+        assert_eq!(p.rows.len(), 1);
+        assert!(p.more);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn oversized_json_is_rejected_before_parsing() {
+        let path = temp_file("oversized.json", b"[]");
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_JSON_IMPORT_BYTES + 1)
+            .unwrap();
+
+        let err = preview(&path, ImportFormat::Json, true, 10)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("split it into smaller files"), "got: {err}");
         std::fs::remove_file(&path).ok();
     }
 
