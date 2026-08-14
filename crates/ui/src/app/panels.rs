@@ -823,6 +823,28 @@ impl DbGuiApp {
         let idle = self.busy == Busy::Idle;
         let at_start = win.offset == 0;
         let has_more = !tab.page_exhausted;
+        let loaded = tab.result.as_ref().map_or(0_u64, |result| result.row_count() as u64);
+        let row_summary = if loaded == 0 {
+            match tab.total_rows {
+                Some(total) => format!("0 of {} rows", group_digits(total)),
+                None if tab.total_rows_pending => "0 of … rows".to_string(),
+                None => "0 rows".to_string(),
+            }
+        } else {
+            let first = win.offset.saturating_add(1);
+            let last = win.offset.saturating_add(loaded);
+            let total = match tab.total_rows {
+                Some(total) => group_digits(total),
+                None if tab.total_rows_pending => "…".to_string(),
+                None if has_more => format!("{}+", group_digits(last)),
+                None => group_digits(last),
+            };
+            format!(
+                "{}–{} of {total} rows",
+                group_digits(first),
+                group_digits(last)
+            )
+        };
 
         let nav_button = |ui: &mut egui::Ui, right: bool, enabled: bool, hint: &str| {
             let src = if right {
@@ -975,6 +997,12 @@ impl DbGuiApp {
             if nav_button(ui, false, !at_start, "Previous page") {
                 actions.push(Action::Page(PageNav::Prev));
             }
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(row_summary)
+                    .size(11.5)
+                    .color(palette::TEXT_WEAK()),
+            );
         });
     }
 
@@ -1713,11 +1741,11 @@ impl DbGuiApp {
         // Recompute only when the text or caret moved since the cached suggestion. While the
         // focused editor merely repaints — e.g. the result grid is scrolling — reuse the cached
         // value instead of re-scanning history and the schema every frame.
-        let key = (
-            self.tabs[self.active_query_tab].sql.chars().count(),
-            cursor_char,
-        );
-        if self.ghost_key != Some(key) {
+        let tab_id = self.tabs[self.active_query_tab].id;
+        let cache_hit = self.ghost_key.as_ref().is_some_and(|(id, sql, caret)| {
+            *id == tab_id && *caret == cursor_char && sql == &self.tabs[self.active_query_tab].sql
+        });
+        if !cache_hit {
             self.ghost_suggestion = {
                 let (schema, kind) = match self.active() {
                     Some(c) => (Some(&c.schema), Some(c.db.kind())),
@@ -1738,7 +1766,11 @@ impl DbGuiApp {
                 let sql = &self.tabs[self.active_query_tab].sql;
                 crate::ghost::suggest(sql, cursor_char, &pool, schema, kind)
             };
-            self.ghost_key = Some(key);
+            self.ghost_key = Some((
+                tab_id,
+                self.tabs[self.active_query_tab].sql.clone(),
+                cursor_char,
+            ));
         }
 
         let Some(remainder) = self.ghost_suggestion.clone() else {
@@ -1746,7 +1778,7 @@ impl DbGuiApp {
         };
 
         if accept {
-            self.accept_ghost(ctx, editor_id, &remainder);
+            self.accept_ghost(ctx, editor_id, cursor_char, &remainder);
             self.ghost_suggestion = None;
             self.ghost_key = None;
             return;
@@ -1885,16 +1917,30 @@ impl DbGuiApp {
         });
     }
 
-    /// Append an accepted ghost suggestion at the caret (the end of the buffer) and move
-    /// the caret past it.
-    fn accept_ghost(&mut self, ctx: &egui::Context, editor_id: egui::Id, remainder: &str) {
+    /// Insert an accepted ghost suggestion at the source caret and move the caret past it.
+    fn accept_ghost(
+        &mut self,
+        ctx: &egui::Context,
+        editor_id: egui::Id,
+        cursor_char: usize,
+        remainder: &str,
+    ) {
         let tab = &mut self.tabs[self.active_query_tab];
-        tab.sql.push_str(remainder);
+        let byte_cursor = char_to_byte(&tab.sql, cursor_char);
+        if byte_cursor > tab.sql.len() {
+            return;
+        }
+        tab.sql.insert_str(byte_cursor, remainder);
         tab.edits.source = None;
         tab.preview = false;
         self.workspace_dirty = true;
+        self.shift_folds(
+            self.active_query_tab,
+            cursor_char,
+            remainder.chars().count() as isize,
+        );
 
-        let new_cursor = self.editor_caret(self.tabs[self.active_query_tab].sql.chars().count());
+        let new_cursor = self.editor_caret(cursor_char + remainder.chars().count());
         if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, editor_id) {
             state
                 .cursor
@@ -2050,6 +2096,12 @@ impl DbGuiApp {
 
             match completion {
                 Some(c) => {
+                    // A single append-only match reads more naturally as inline ghost text;
+                    // Ctrl+Space still force-opens the popup when the user explicitly asks.
+                    if !force && crate::autocomplete::inline_suffix(&c).is_some() {
+                        self.autocomplete.open = false;
+                        return;
+                    }
                     self.autocomplete.items = c.items;
                     self.autocomplete.replace_start = c.replace_start;
                     self.autocomplete.prefix = c.prefix;
@@ -3365,9 +3417,9 @@ impl DbGuiApp {
                         self.tabs[idx].view = modes[choice];
                         return;
                     }
-                    // Staged-data actions lead the row: the user acts on the table first, then
-                    // chooses which table surface to inspect. Keep them Data-only and preserve
-                    // the existing keyboard shortcuts and enabled states.
+                    // Staged row-edit history only applies to the Data surface. Keep these
+                    // controls contextual; the table pager below remains stable across all
+                    // three surfaces.
                     if self.tabs[idx].view == TabView::Data && self.tabs[idx].edits.editable() {
                         let (can_undo, can_redo) = {
                             let e = &self.tabs[idx].edits;
@@ -3379,21 +3431,25 @@ impl DbGuiApp {
                             } else {
                                 egui::Modifiers::COMMAND
                             };
-                            ui.ctx()
-                                .format_shortcut(&egui::KeyboardShortcut::new(mods, egui::Key::Z))
+                            ui.ctx().format_shortcut(&egui::KeyboardShortcut::new(
+                                mods,
+                                egui::Key::Z,
+                            ))
                         };
+                        let undo_hint = format!("Undo  ({})", hint(ui, false));
+                        let redo_hint = format!("Redo  ({})", hint(ui, true));
                         if components::Btn::ghost_icon(icons::undo())
                             .enabled(can_undo)
+                            .tooltip(&undo_hint)
                             .show(ui)
-                            .on_hover_text(format!("Undo  ({})", hint(ui, false)))
                             .clicked()
                         {
                             actions.push(Action::Undo);
                         }
                         if components::Btn::ghost_icon(icons::redo())
                             .enabled(can_redo)
+                            .tooltip(&redo_hint)
                             .show(ui)
-                            .on_hover_text(format!("Redo  ({})", hint(ui, true)))
                             .clicked()
                         {
                             actions.push(Action::Redo);
@@ -3437,10 +3493,9 @@ impl DbGuiApp {
                             };
                         }
                     }
-                    // Row paging belongs only to the Data surface, not schema editing.
-                    if self.tabs[idx].view == TabView::Data {
-                        self.pager(ui, actions);
-                    }
+                    // Paging describes the table result, so its range and navigation stay visible
+                    // while inspecting Structure or Indexes as well as Data.
+                    self.pager(ui, actions);
                 });
             });
     }

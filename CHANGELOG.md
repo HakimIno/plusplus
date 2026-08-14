@@ -3,6 +3,17 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
+## 0.3.1 — 2026-08-14
+
+- Made SQL autocomplete feel more immediate by showing unambiguous keyword, table, and column
+  completions as inline ghost text accepted with Tab, while preserving the popup for ambiguous
+  or quoted matches and adding schema-aware INSERT, UPDATE, and DELETE scaffolds.
+- Added exact background row counts and clear visible row ranges to table pagination without
+  delaying the first page, and kept the pager available while inspecting table structure or
+  indexes.
+- Split the core connection and data models into focused modules and moved SQLite workflow
+  coverage into integration tests without changing the public database API.
+
 ## 0.3.0 — 2026-08-11
 
 - Redesigned table browsing around a faster virtualized grid with content-aware columns,

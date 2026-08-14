@@ -73,6 +73,14 @@ impl dbcore::RowSink for UiQuerySink {
     }
 }
 
+fn total_from_count_result(result: &QueryResult) -> Option<u64> {
+    match result.rows.first()?.first()? {
+        dbcore::Value::Int(value) => u64::try_from(*value).ok(),
+        dbcore::Value::Text(value) => value.parse().ok(),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod query_sink_tests {
     use super::*;
@@ -100,6 +108,15 @@ mod query_sink_tests {
             rx.recv().unwrap(),
             AppMessage::QueryRows { rows, .. } if rows.len() == QUERY_STREAM_PAINT_ROWS
         ));
+    }
+
+    #[test]
+    fn exact_total_decodes_from_backend_count_results() {
+        let result = QueryResult {
+            rows: vec![vec![dbcore::Value::Int(12_534)]],
+            ..QueryResult::default()
+        };
+        assert_eq!(total_from_count_result(&result), Some(12_534));
     }
 }
 
@@ -193,6 +210,10 @@ impl DbGuiApp {
 
     /// Run the SQL of the tab at `idx` against its bound connection.
     pub(super) fn start_query_for(&mut self, idx: usize) {
+        self.start_query_for_with_total(idx, true);
+    }
+
+    fn start_query_for_with_total(&mut self, idx: usize, refresh_total: bool) {
         let Some(tab) = self.tabs.get(idx) else {
             return;
         };
@@ -214,7 +235,19 @@ impl DbGuiApp {
                 dbcore::with_page_window(kind, &sql, QUERY_STREAM_CHUNK_ROWS as u64, window.offset)
             })
             .unwrap_or_else(|| sql.clone());
-        self.start_query_sql(idx, fetch_sql, false, result_limit);
+        let count_sql = (refresh_total
+            && result_limit.is_some()
+            && matches!(
+                tab.kind,
+                crate::components::QueryTabKind::Table | crate::components::QueryTabKind::View
+            ))
+        .then(|| dbcore::build_count_sql(&sql))
+        .flatten();
+        if refresh_total {
+            self.tabs[idx].total_rows = None;
+            self.tabs[idx].total_rows_pending = count_sql.is_some();
+        }
+        self.start_query_sql(idx, fetch_sql, false, result_limit, count_sql);
     }
 
     /// Start either a replacement query or a bounded continuation. A continuation deliberately
@@ -226,6 +259,7 @@ impl DbGuiApp {
         sql: String,
         append: bool,
         result_limit: Option<u64>,
+        count_sql: Option<String>,
     ) {
         let Some(tab) = self.tabs.get(idx) else {
             return;
@@ -280,6 +314,29 @@ impl DbGuiApp {
             self.tabs[idx].page_exhausted = false;
         }
         self.error = None;
+        if let Some(count_sql) = count_sql {
+            let count_db = db.clone();
+            let count_tx = tx.clone();
+            let count_cancel = cancel.clone();
+            self.rt.spawn(async move {
+                const COUNT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+                let query_cancel = count_cancel.clone();
+                let total = match tokio::time::timeout(
+                    COUNT_TIMEOUT,
+                    count_db.execute_capped_cancellable(&count_sql, 1, query_cancel),
+                )
+                .await
+                {
+                    Ok(Ok(result)) => total_from_count_result(&result),
+                    Ok(Err(_)) => None,
+                    Err(_) => {
+                        count_cancel.cancel();
+                        None
+                    }
+                };
+                let _ = count_tx.send(AppMessage::QueryTotal { tab_id, total, seq });
+            });
+        }
         self.rt.spawn(async move {
             if let Some(page) = page {
                 let started = Instant::now();
@@ -363,7 +420,7 @@ impl DbGuiApp {
         let Some(sql) = dbcore::with_page_window(kind, &tab.sql, fetch_limit, offset) else {
             return;
         };
-        self.start_query_sql(idx, sql, true, Some(limit));
+        self.start_query_sql(idx, sql, true, Some(limit), None);
     }
     /// Rewrite the active tab's paging window to `(limit, offset)` in its connection's
     /// dialect and re-run. No-op when the tab isn't a paged simple-table read.
@@ -379,7 +436,8 @@ impl DbGuiApp {
         // The rewrite preserves the simple-select shape, so the result stays editable.
         self.tabs[idx].edits.pending_source = self.derive_edit_source(idx);
         self.workspace_dirty = true;
-        self.start_query_for(idx);
+        let refresh_total = self.tabs[idx].total_rows.is_none();
+        self.start_query_for_with_total(idx, refresh_total);
     }
     /// Pager navigation for the active (paged) table tab.
     pub(super) fn page_nav(&mut self, nav: PageNav) {

@@ -1940,6 +1940,8 @@ fn table_tab_keeps_data_controls_without_a_query_console() {
         pk_cols: vec!["field_0".into()],
     });
     app.tab_mut().set_result(fake_result(2, 3));
+    app.tab_mut().page_exhausted = true;
+    app.tab_mut().total_rows = Some(12_534);
 
     let mut setup = false;
     let mut harness = egui_kittest::Harness::builder()
@@ -1967,6 +1969,19 @@ fn table_tab_keeps_data_controls_without_a_query_console() {
             && harness.query_by_label("Run").is_none(),
         "table tabs must not render query-console controls"
     );
+    for label in ["1–2 of 12,534 rows", "Previous page", "Next page"] {
+        harness.get_by_label(label);
+    }
+    harness.get_by_label("Structure").click();
+    harness.run_steps(4);
+    for label in ["1–2 of 12,534 rows", "Previous page", "Next page"] {
+        harness.get_by_label(label);
+    }
+    harness.get_by_label("Indexes").click();
+    harness.run_steps(4);
+    for label in ["1–2 of 12,534 rows", "Previous page", "Next page"] {
+        harness.get_by_label(label);
+    }
 }
 
 /// Regression: an open object designer owns the whole tab — the SQL console and the
@@ -2158,6 +2173,36 @@ fn superseded_query_result_never_touches_ui_state() {
         app.tab().query_error.is_none(),
         "a stale failure must not surface on the tab"
     );
+}
+
+#[test]
+fn exact_table_total_is_routed_only_to_the_matching_query() {
+    let mut app = DbGuiApp::construct();
+    let tab_id = app.tab().id;
+    app.query_seq = 3;
+    app.tab_mut().total_rows_pending = true;
+
+    app.tx
+        .send(AppMessage::QueryTotal {
+            tab_id,
+            total: Some(99),
+            seq: 2,
+        })
+        .unwrap();
+    app.poll_messages(&egui::Context::default());
+    assert_eq!(app.tab().total_rows, None, "a stale count must be ignored");
+    assert!(app.tab().total_rows_pending);
+
+    app.tx
+        .send(AppMessage::QueryTotal {
+            tab_id,
+            total: Some(12_534),
+            seq: 3,
+        })
+        .unwrap();
+    app.poll_messages(&egui::Context::default());
+    assert_eq!(app.tab().total_rows, Some(12_534));
+    assert!(!app.tab().total_rows_pending);
 }
 
 /// Replacement chunks stay off-screen until the terminal message installs the complete page.

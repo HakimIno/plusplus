@@ -314,6 +314,17 @@ impl DbGuiApp {
                         }
                     }
                 }
+                AppMessage::QueryTotal { tab_id, total, seq } => {
+                    if seq != self.query_seq {
+                        continue;
+                    }
+                    let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+                        continue;
+                    };
+                    tab.total_rows = total;
+                    tab.total_rows_pending = false;
+                    ctx.request_repaint();
+                }
                 AppMessage::QueryStreamStarted {
                     tab_id,
                     columns,

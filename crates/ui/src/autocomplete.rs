@@ -281,6 +281,31 @@ pub fn complete(
     }
 }
 
+/// The append-only tail of an unambiguous completion, suitable for inline ghost text.
+///
+/// A completion that needs to rewrite what the user typed (most notably adding an opening
+/// identifier quote) stays in the popup: ghost text can only append after the caret.
+pub fn inline_suffix(completion: &Completion) -> Option<String> {
+    let [item] = completion.items.as_slice() else {
+        return None;
+    };
+    if completion.prefix.is_empty() {
+        return None;
+    }
+
+    let mut candidate = item.insert.char_indices();
+    let mut end = 0;
+    for expected in completion.prefix.chars() {
+        let (at, actual) = candidate.next()?;
+        if !actual.eq_ignore_ascii_case(&expected) {
+            return None;
+        }
+        end = at + actual.len_utf8();
+    }
+    let suffix = &item.insert[end..];
+    (!suffix.is_empty()).then(|| suffix.to_string())
+}
+
 /// Byte length of the leading run of `insert` that the typed `prefix` matched — what the
 /// popup paints in the accent colour. `0` when nothing matched (a forced, empty-prefix
 /// listing, or a suggestion that got on the list some other way).
@@ -615,6 +640,30 @@ mod tests {
         let c = complete("SEL", 3, Some(&s), None, false).unwrap();
         assert_eq!(c.items[0].insert, "SELECT");
         assert_eq!(c.items[0].kind, SuggestionKind::Keyword);
+    }
+
+    #[test]
+    fn one_unambiguous_completion_can_be_shown_inline() {
+        let c = complete("SEL", 3, None, None, false).unwrap();
+        assert_eq!(inline_suffix(&c).as_deref(), Some("ECT"));
+    }
+
+    #[test]
+    fn ambiguous_or_rewriting_completion_stays_in_the_popup() {
+        let s = schema();
+        let c = complete("SELECT ", 7, Some(&s), None, true).unwrap();
+        assert!(inline_suffix(&c).is_none());
+
+        let c = Completion {
+            replace_start: 14,
+            prefix: "My".to_string(),
+            items: vec![Suggestion {
+                insert: "\"MyTable\"".to_string(),
+                detail: "table".to_string(),
+                kind: SuggestionKind::Table,
+            }],
+        };
+        assert!(inline_suffix(&c).is_none());
     }
 
     #[test]

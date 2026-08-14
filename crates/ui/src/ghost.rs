@@ -1,10 +1,12 @@
 //! Inline "ghost text" suggestion for the SQL editor — the greyed-out completion that
 //! trails the caret and is accepted with Tab, fish-shell style.
 //!
-//! Two sources, history first:
+//! Three sources, in priority order:
 //! 1. **History** — the most recent successfully-run statement that starts with what's
 //!    typed so far. Covers "re-run that query I wrote yesterday" with one keystroke.
-//! 2. **Schema/FK heuristics** — deterministic clause completions from the connected
+//! 2. **Unambiguous autocomplete** — a single keyword/table/column match is rendered inline
+//!    instead of opening a one-row popup.
+//! 3. **Schema/FK heuristics** — deterministic clause completions from the connected
 //!    schema: `SELECT ` → `* FROM `, `FROM users ` → a `JOIN` built from a foreign key,
 //!    or a `WHERE <pk> = ` when the table has a single-column primary key.
 //!
@@ -22,8 +24,8 @@ use dbcore::{DbKind, SchemaTree, TableInfo};
 /// Compute the ghost suggestion for `sql` with the caret at char index `cursor`.
 ///
 /// Returns the text to append after the caret, or `None` when nothing fits. Only fires
-/// when the caret sits at the very end of the buffer (like a shell autosuggestion) and at
-/// least a few characters of the current statement have been typed, so it never flickers
+/// when the caret sits at the logical end of the buffer (only whitespace may follow it) and
+/// at least a few characters of the current statement have been typed, so it never flickers
 /// under light editing.
 ///
 /// `history` is newest-last (the order [`dbcore::history::load`] returns).
@@ -35,20 +37,25 @@ pub fn suggest(
     kind: Option<DbKind>,
 ) -> Option<String> {
     let chars: Vec<char> = sql.chars().collect();
-    // Caret must be at the end of the text — autosuggestions only complete the tail.
-    if cursor != chars.len() {
+    // Autosuggestions only complete the logical tail. Allow blank lines/indentation after the
+    // caret, but never paint a completion over meaningful text that is already there.
+    let range = sqlctx::statement_range(&chars, cursor);
+    if chars[cursor.min(chars.len())..range.end]
+        .iter()
+        .any(|c| !c.is_whitespace())
+    {
         return None;
     }
 
     // Complete the statement the caret is in, ignoring any that precede it. Leading
     // whitespace is dropped so the newline after a `;` doesn't defeat the history match;
     // trailing whitespace is kept, because `WHERE id = ` completing to `2` depends on it.
-    let range = sqlctx::statement_range(&chars, cursor);
-    let lead = chars[range.clone()]
+    let prefix_end = cursor.min(range.end);
+    let lead = chars[range.start..prefix_end]
         .iter()
         .take_while(|c| c.is_whitespace())
         .count();
-    let stmt = &chars[range.start + lead..range.end];
+    let stmt = &chars[range.start + lead..prefix_end];
 
     // Not until enough has been typed to be discriminating (avoids a suggestion popping
     // up on the first letter of a statement).
@@ -57,7 +64,21 @@ pub fn suggest(
         return None;
     }
 
-    history_suggestion(&stmt_str, history).or_else(|| schema_suggestion(stmt, schema, kind))
+    history_suggestion(&stmt_str, history)
+        .or_else(|| identifier_suggestion(sql, cursor, schema, kind))
+        .or_else(|| schema_suggestion(stmt, schema, kind))
+}
+
+/// Turn a one-row identifier popup into append-only ghost text. Ambiguous matches and
+/// completions that need to rewrite a quote remain owned by the popup.
+fn identifier_suggestion(
+    sql: &str,
+    cursor: usize,
+    schema: Option<&SchemaTree>,
+    kind: Option<DbKind>,
+) -> Option<String> {
+    let completion = crate::autocomplete::complete(sql, cursor, schema, kind, false)?;
+    crate::autocomplete::inline_suffix(&completion)
 }
 
 /// Most-recent history entry that starts with `sql` (case-insensitively) and is strictly
@@ -101,6 +122,10 @@ fn schema_suggestion(
     if chars.last() != Some(&' ') {
         return None;
     }
+
+    if let Some(template) = statement_template(chars, schema, kind) {
+        return Some(template);
+    }
     let (table, correlation, keyword) = table_ref_before_caret(chars, schema)?;
     let in_scope = sqlctx::referenced_tables(chars);
 
@@ -117,6 +142,57 @@ fn schema_suggestion(
             Some(format!("WHERE {correlation}.{} = ", qual(pk, kind)))
         }
     }
+}
+
+/// Conservative scaffolds for write statements. These only fire immediately after a known
+/// table reference, before the user has started the next clause.
+fn statement_template(chars: &[char], schema: &SchemaTree, kind: Option<DbKind>) -> Option<String> {
+    let words = sqlctx::tokenize_words(chars);
+    let referenced = sqlctx::referenced_tables(chars);
+    let (correlation, table_name) = referenced.last()?;
+    let table = schema
+        .tables
+        .iter()
+        .find(|t| t.name.eq_ignore_ascii_case(table_name))?;
+
+    if words.len() == 2 && words[0].eq_ignore_ascii_case("UPDATE") {
+        return Some("SET ".to_string());
+    }
+    if words.len() == 3
+        && words[0].eq_ignore_ascii_case("INSERT")
+        && words[1].eq_ignore_ascii_case("INTO")
+    {
+        let mut columns: Vec<&str> = table
+            .columns
+            .iter()
+            .filter(|c| !c.primary_key)
+            .map(|c| c.name.as_str())
+            .collect();
+        if columns.is_empty() {
+            columns = table.columns.iter().map(|c| c.name.as_str()).collect();
+        }
+        if columns.is_empty() {
+            return None;
+        }
+        let columns = columns
+            .into_iter()
+            .map(|name| qual(name, kind))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Some(format!("({columns}) VALUES ("));
+    }
+    if (words.len() == 3 || words.len() == 4)
+        && words[0].eq_ignore_ascii_case("DELETE")
+        && words[1].eq_ignore_ascii_case("FROM")
+    {
+        let pk = single_pk(table)?;
+        return Some(format!(
+            "WHERE {}.{} = ",
+            qual(correlation, kind),
+            qual(pk, kind)
+        ));
+    }
+    None
 }
 
 /// Which keyword opened the table reference before the caret. They take different
@@ -425,6 +501,24 @@ mod tests {
     }
 
     #[test]
+    fn caret_at_logical_end_ignores_trailing_whitespace() {
+        let hist = ["SELECT * FROM users".to_string()];
+        let refs: Vec<&str> = hist.iter().map(String::as_str).collect();
+        let sql = "SELECT * FROM us\n\n";
+        let cursor = "SELECT * FROM us".chars().count();
+        assert_eq!(
+            suggest(sql, cursor, &refs, None, None).as_deref(),
+            Some("ers")
+        );
+    }
+
+    #[test]
+    fn caret_inside_trailing_blank_statement_is_safe() {
+        let sql = "SELECT 1;\n   ";
+        assert!(suggest(sql, sql.chars().count() - 1, &[], None, None).is_none());
+    }
+
+    #[test]
     fn no_suggestion_below_min_length() {
         let hist = vec!["SELECT 1".to_string()];
         assert!(suggest_end("SE", &hist, None).is_none());
@@ -436,6 +530,11 @@ mod tests {
             suggest_end("SELECT", &[], None).as_deref(),
             Some(" * FROM ")
         );
+    }
+
+    #[test]
+    fn unique_keyword_prefix_becomes_ghost_text() {
+        assert_eq!(suggest_end("SEL", &[], None).as_deref(), Some("ECT"));
     }
 
     #[test]
@@ -483,6 +582,28 @@ mod tests {
         });
         let g = suggest_end("SELECT * FROM settings ", &[], Some(&s)).unwrap();
         assert_eq!(g, "WHERE settings.id = ");
+    }
+
+    #[test]
+    fn update_and_delete_scaffold_safe_clauses() {
+        let s = schema();
+        assert_eq!(
+            suggest_end("UPDATE users ", &[], Some(&s)).as_deref(),
+            Some("SET ")
+        );
+        assert_eq!(
+            suggest_end("DELETE FROM users ", &[], Some(&s)).as_deref(),
+            Some("WHERE users.id = ")
+        );
+    }
+
+    #[test]
+    fn insert_scaffold_uses_non_primary_key_columns() {
+        let s = schema();
+        assert_eq!(
+            suggest_end("INSERT INTO users ", &[], Some(&s)).as_deref(),
+            Some("(email) VALUES (")
+        );
     }
 
     #[test]

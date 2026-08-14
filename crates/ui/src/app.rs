@@ -114,6 +114,13 @@ enum AppMessage {
         /// run (`seq != query_seq`) are logged to history but never touch UI state.
         seq: u64,
     },
+    /// Exact row count for the simple table query associated with `seq`. Counting runs beside
+    /// the page fetch so a slow `COUNT(*)` never delays the first visible rows.
+    QueryTotal {
+        tab_id: u64,
+        total: Option<u64>,
+        seq: u64,
+    },
     /// Column metadata arrived for a paged query. Rows follow in independently paintable
     /// chunks, so a large page no longer leaves the old grid frozen until the whole fetch ends.
     QueryStreamStarted {
@@ -531,6 +538,10 @@ struct QueryTab {
     /// The most recent page fetch returned fewer rows than requested, so scrolling at the end
     /// must not keep issuing empty continuation queries.
     page_exhausted: bool,
+    /// Exact total matching the simple table query, calculated independently of LIMIT/OFFSET.
+    total_rows: Option<u64>,
+    /// The background COUNT query is still running; the pager shows an ellipsis meanwhile.
+    total_rows_pending: bool,
     /// Open schema editor (Create/Edit Table) shown in the central panel. Per-tab, so
     /// switching tabs or opening another table never leaves a stale editor on screen —
     /// and in-progress edits survive a tab switch.
@@ -566,6 +577,8 @@ impl QueryTab {
             view: TabView::default(),
             stream: None,
             page_exhausted: false,
+            total_rows: None,
+            total_rows_pending: false,
             schema_editor: None,
             pending_scroll: None,
             diagram: None,
@@ -1259,9 +1272,9 @@ pub struct DbGuiApp {
     /// changes, then repainted each frame (so scrolling a focused editor doesn't re-scan
     /// history/schema every frame).
     ghost_suggestion: Option<String>,
-    /// `(sql char-length, caret char index)` the cached `ghost_suggestion` was computed for;
-    /// a mismatch is what triggers a recompute.
-    ghost_key: Option<(usize, usize)>,
+    /// `(tab id, exact SQL, caret char index)` the cached `ghost_suggestion` was computed for;
+    /// exact text and tab identity prevent same-length edits/tab switches from reusing stale text.
+    ghost_key: Option<(u64, String, usize)>,
     /// First syntax error in the active editor's SQL — the red squiggle and its tooltip —
     /// or `None` when the buffer parses. Recomputed on a short pause after typing, never
     /// per keystroke: parsing a half-written statement only ever reports the obvious.
