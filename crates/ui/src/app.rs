@@ -20,6 +20,7 @@ mod connection;
 mod edits;
 mod journal;
 mod layout;
+mod memory;
 mod messages;
 mod navigate;
 mod panels;
@@ -37,6 +38,10 @@ use crate::theme::ThemeRegistry;
 /// the pager (table tabs) or a narrower query. ~100k rows keeps even wide results in the
 /// hundreds of MB, far below where the grid stops being useful anyway.
 const MAX_FETCH_ROWS: usize = 100_000;
+
+const DEFAULT_RESULT_MEMORY_BUDGET_MB: u32 = 512;
+const MIN_RESULT_MEMORY_BUDGET_MB: u32 = 128;
+const MAX_RESULT_MEMORY_BUDGET_MB: u32 = 4096;
 
 /// Rows fetched from the database for one lazy-loading continuation.
 const QUERY_STREAM_CHUNK_ROWS: usize = 512;
@@ -142,7 +147,7 @@ enum AppMessage {
         rows: Vec<Vec<dbcore::Value>>,
         seq: u64,
     },
-    /// A paged streaming query ended. `Ok` carries the total rows delivered.
+    /// A row-returning streaming query ended. `Ok` carries the total rows delivered.
     QueryStreamFinished {
         tab_id: u64,
         conn_id: String,
@@ -155,6 +160,10 @@ enum AppMessage {
         append: bool,
         result: Result<u64, String>,
         canceled: bool,
+        /// The cross-tab memory ceiling stopped the stream before the database was exhausted.
+        budget_truncated: bool,
+        /// The process-wide materialized row cap stopped the stream.
+        row_truncated: bool,
         seq: u64,
     },
     /// A batch of staged edits was saved (`Ok` carries the number of rows updated).
@@ -220,6 +229,7 @@ enum ProductionGuardContinuation {
     Query,
     Edits,
     Schema,
+    Import,
 }
 
 #[derive(Clone)]
@@ -527,6 +537,10 @@ struct QueryTab {
     /// query tab that produced it instead of existing only in the global status bar.
     query_error: Option<String>,
     result: Option<QueryResult>,
+    /// Monotonic access stamp used by the global result-memory manager.
+    result_last_used: u64,
+    /// True when the global budget released this result from an inactive tab.
+    result_evicted: bool,
     /// Indices into `result.rows` giving the current display order (filter + sort).
     row_order: Vec<usize>,
     sort: Option<(usize, bool)>,
@@ -576,6 +590,8 @@ impl QueryTab {
             editor_size: None,
             query_error: None,
             result: None,
+            result_last_used: 0,
+            result_evicted: false,
             row_order: Vec::new(),
             sort: None,
             selection: crate::grid::Selection::default(),
@@ -605,6 +621,7 @@ impl QueryTab {
         // Classify each column once so the cell editors can be type-aware.
         self.edits.set_columns(&res.columns);
         self.result = Some(res);
+        self.result_evicted = false;
         self.recompute_view();
     }
 
@@ -885,7 +902,10 @@ fn validate_connection_test_config(
         if cfg.database.trim().is_empty() {
             fields.push(ConnField::Database);
         }
-    } else if cfg.sqlite_path.trim().is_empty() {
+    } else if match cfg.kind {
+        DbKind::DuckDb => cfg.duckdb_path.trim().is_empty(),
+        _ => cfg.sqlite_path.trim().is_empty(),
+    } {
         fields.push(ConnField::SqlitePath);
     }
 
@@ -1287,6 +1307,10 @@ pub struct DbGuiApp {
     active_query_tab: usize,
     /// Monotonic id source for new tabs.
     next_tab_id: u64,
+    /// Approximate memory ceiling shared by materialized results in every query tab.
+    result_memory_budget: usize,
+    /// Monotonic clock for least-recently-used result eviction.
+    result_access_clock: u64,
 
     // --- workspace persistence ---
     /// Set when tabs/SQL/bindings change; flushed to disk on a throttle (see `draw`).
@@ -1515,6 +1539,11 @@ impl DbGuiApp {
         let audit_enabled = settings.audit_enabled.unwrap_or(true);
         let update_check_enabled = settings.update_check_enabled.unwrap_or(true);
         let schema_table_order = settings.schema_table_order.clone();
+        let result_memory_budget_mb = settings
+            .result_memory_budget_mb
+            .unwrap_or(DEFAULT_RESULT_MEMORY_BUDGET_MB)
+            .clamp(MIN_RESULT_MEMORY_BUDGET_MB, MAX_RESULT_MEMORY_BUDGET_MB);
+        let result_memory_budget = result_memory_budget_mb as usize * 1024 * 1024;
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -1543,6 +1572,8 @@ impl DbGuiApp {
             tabs: vec![default_tab],
             active_query_tab: 0,
             next_tab_id: 1,
+            result_memory_budget,
+            result_access_clock: 0,
             workspace_dirty: false,
             last_workspace_save: std::time::Instant::now(),
             editor: None,

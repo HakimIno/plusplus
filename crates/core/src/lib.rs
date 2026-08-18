@@ -33,7 +33,7 @@ pub use bookmarks::Bookmark;
 pub use clipboard::{copy_rows, CopyFormat};
 pub use coerce::{CoerceError, EditorKind};
 pub use connection::connect;
-pub use database::Database;
+pub use database::{returns_rows as query_returns_rows, Database};
 pub use erd::{DesignColumn, DesignForeignKey, DesignIndex, DesignTable, ErDesign};
 pub use error::{CoreError, Result};
 pub use export::{ExportFormat, RowSink};
@@ -47,11 +47,11 @@ pub use model::{
     build_drop_trigger_sql, build_drop_view_sql, build_insert_sql, build_rename_column_sql,
     build_select_where_sql, build_truncate_table_sql, build_update_sql, parse_page_window,
     parse_trigger_header, routine_supports_replace, select_body_after_as, simple_select_target,
-    view_supports_replace, with_page_window, ColumnDef, ColumnInfo, ColumnMeta, ConnectionColor,
-    ConnectionConfig, ConnectionIcon, DbKind, FkAction, ForeignKeyDef, ForeignKeyInfo, IndexDef,
-    IndexInfo, PageWindow, ParamMode, QueryResult, QueryStats, RoutineBuild, RoutineInfo,
-    RoutineKind, RoutineParam, SafetyProfile, SchemaTree, SslMode, TableInfo, TriggerBuild,
-    TriggerEvent, TriggerInfo, TriggerLevel, TriggerTiming, ViewInfo,
+    view_supports_replace, with_keyset_page, with_page_window, ColumnDef, ColumnInfo, ColumnMeta,
+    ConnectionColor, ConnectionConfig, ConnectionIcon, DbKind, FkAction, ForeignKeyDef,
+    ForeignKeyInfo, IndexDef, IndexInfo, PageWindow, ParamMode, QueryResult, QueryStats,
+    RoutineBuild, RoutineInfo, RoutineKind, RoutineParam, SafetyProfile, SchemaTree, SslMode,
+    TableInfo, TriggerBuild, TriggerEvent, TriggerInfo, TriggerLevel, TriggerTiming, ViewInfo,
 };
 pub use syntax::{check_syntax, SyntaxError};
 pub use value::Value;

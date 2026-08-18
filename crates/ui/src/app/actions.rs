@@ -457,7 +457,11 @@ impl DbGuiApp {
             Action::BrowseSqlitePath => {
                 if let Some(path) = rfd::FileDialog::new().pick_file() {
                     if let Some(ed) = &mut self.editor {
-                        ed.config.sqlite_path = path.to_string_lossy().into_owned();
+                        if ed.config.kind == DbKind::DuckDb {
+                            ed.config.duckdb_path = path.to_string_lossy().into_owned();
+                        } else {
+                            ed.config.sqlite_path = path.to_string_lossy().into_owned();
+                        }
                         ed.test_state = ConnTestState::Untested;
                     }
                 }
@@ -497,51 +501,44 @@ impl DbGuiApp {
                 // single-table `SELECT *` — including a hand-tuned LIMIT/WHERE/ORDER BY —
                 // stays editable; anything else runs as a read-only ad-hoc query.
                 self.tabs[idx].edits.pending_source = self.derive_edit_source(idx);
-                // A read-only connection refuses anything that isn't provably a read —
-                // no confirmation dialog, it simply doesn't run. The backends enforce
-                // this at the session level too where the engine supports it; this check
-                // gives the clear, local error.
-                if self.tab_connection_is_read_only(idx) {
-                    let found = dbcore::safety::write_statements(&self.tabs[idx].sql);
-                    if let Some(first) = found.first() {
-                        let shown: String = first.chars().take(80).collect();
-                        self.refuse_read_only(&format!(
-                            "not running: {shown}{}",
-                            if found.len() > 1 {
-                                format!(" (+{} more)", found.len() - 1)
-                            } else {
-                                String::new()
-                            }
-                        ));
-                        return;
-                    }
-                }
-                // A production connection holds destructive SQL for confirmation first.
-                if self.tab_connection_is_production(idx) {
+                let guardian_enabled = self.tab_connection_is_production(idx);
+                let read_only = self.tab_connection_is_read_only(idx);
+                if guardian_enabled || read_only {
                     let Some(kind) = self.tabs[idx]
                         .conn_id
                         .as_deref()
-                        .and_then(|id| {
-                            self.active_connections
-                                .iter()
-                                .find(|connection| connection.config_id == id)
-                        })
-                        .map(|connection| connection.db.kind())
+                        .and_then(|id| self.connections.iter().find(|config| config.id == id))
+                        .map(|config| config.kind)
                     else {
                         self.error =
-                            Some("Production Guardian requires an active connection.".into());
+                            Some("Production Guardian requires a saved connection.".into());
                         return;
                     };
                     let sql = self.tabs[idx].sql.trim().to_string();
-                    let found = dbcore::safety::dangerous_statements(kind, &sql);
-                    if !found.is_empty() {
-                        self.start_production_guard(
-                            idx,
-                            sql,
-                            found,
-                            ProductionGuardContinuation::Query,
-                        );
-                        return;
+                    match dbcore::safety::evaluate_sql(kind, &sql, guardian_enabled, read_only) {
+                        dbcore::safety::SqlSafetyDecision::Allow => {}
+                        dbcore::safety::SqlSafetyDecision::Block(found) => {
+                            let Some(first) = found.first() else { return };
+                            let shown: String = first.chars().take(80).collect();
+                            self.refuse_read_only(&format!(
+                                "not running: {shown}{}",
+                                if found.len() > 1 {
+                                    format!(" (+{} more)", found.len() - 1)
+                                } else {
+                                    String::new()
+                                }
+                            ));
+                            return;
+                        }
+                        dbcore::safety::SqlSafetyDecision::Confirm(found) => {
+                            self.start_production_guard(
+                                idx,
+                                sql,
+                                found,
+                                ProductionGuardContinuation::Query,
+                            );
+                            return;
+                        }
                     }
                 }
                 self.start_query_for(idx);
@@ -576,6 +573,9 @@ impl DbGuiApp {
                         .schema_pending
                         .as_ref()
                         .is_some_and(|statements| statements.join("\n") == pending.sql),
+                    ProductionGuardContinuation::Import => self
+                        .pending_import_guard_sql()
+                        .is_some_and(|sql| sql == pending.sql),
                 };
                 let unchanged = source_unchanged
                     && self.tabs[idx].conn_id.as_deref() == Some(pending.conn_id.as_str())
@@ -609,6 +609,7 @@ impl DbGuiApp {
                     ProductionGuardContinuation::Query => self.start_query_for(idx),
                     ProductionGuardContinuation::Edits => self.confirm_edits(),
                     ProductionGuardContinuation::Schema => self.apply_schema_confirmed(),
+                    ProductionGuardContinuation::Import => self.confirm_import_guarded(),
                 }
             }
             Action::SetDangerConfirmation(value) => {
@@ -1018,8 +1019,7 @@ impl DbGuiApp {
         }
     }
 
-    /// Start the single production confirmation for a staged UPDATE/DELETE transaction.
-    /// INSERT-only previews keep the ordinary transaction review dialog.
+    /// Start one production confirmation for the exact staged edit transaction snapshot.
     fn start_pending_edits_guard(&mut self, idx: usize) -> bool {
         if !self.tab_connection_is_production(idx) || self.tab_connection_is_read_only(idx) {
             return false;

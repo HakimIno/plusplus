@@ -2,6 +2,7 @@ use super::{
     result_status, schema_table_key, Action, ActiveConnection, Busy, ConnField, ConnTestState,
     DbGuiApp, PageNav, ProductionGuardContinuation, QueryEditorPlacement, QueryTab,
     SchemaTableDrag, SettingsSection, SidebarTab, TabView, MAX_FETCH_ROWS,
+    MAX_RESULT_MEMORY_BUDGET_MB, MIN_RESULT_MEMORY_BUDGET_MB,
 };
 use crate::components;
 use crate::filter::{self, FilterEvent};
@@ -823,7 +824,10 @@ impl DbGuiApp {
         let idle = self.busy == Busy::Idle;
         let at_start = win.offset == 0;
         let has_more = !tab.page_exhausted;
-        let loaded = tab.result.as_ref().map_or(0_u64, |result| result.row_count() as u64);
+        let loaded = tab
+            .result
+            .as_ref()
+            .map_or(0_u64, |result| result.row_count() as u64);
         let row_summary = if loaded == 0 {
             match tab.total_rows {
                 Some(total) => format!("0 of {} rows", group_digits(total)),
@@ -2591,12 +2595,13 @@ impl DbGuiApp {
                 inactive.bg_stroke = egui::Stroke::NONE;
                 let connected = self.active().is_some();
                 let active_kind = self.active().map(|a| a.db.kind());
-                // SQLite has no stored functions or procedures.
-                let supports_routines =
-                    active_kind.is_some_and(|k| k != dbcore::DbKind::Sqlite && !k.is_cql());
-                // CQL has no plain views or triggers (materialized views have a bespoke
-                // syntax not covered by these editors).
-                let supports_views_triggers = active_kind.is_some_and(|k| !k.is_cql());
+                let supports_routines = active_kind.is_some_and(|kind| {
+                    !matches!(kind, dbcore::DbKind::Sqlite | dbcore::DbKind::DuckDb)
+                        && !kind.is_cql()
+                });
+                let supports_views = active_kind.is_some_and(|kind| !kind.is_cql());
+                let supports_triggers = active_kind
+                    .is_some_and(|kind| kind != dbcore::DbKind::DuckDb && !kind.is_cql());
                 let menu = ui.add_enabled_ui(connected, |ui| {
                     let plus = egui::Image::new(icons::plus())
                         .fit_to_exact_size(egui::vec2(icons::SIZE, icons::SIZE))
@@ -2607,13 +2612,13 @@ impl DbGuiApp {
                             actions.push(Action::OpenNewTable);
                             ui.close();
                         }
-                        if supports_views_triggers
+                        if supports_views
                             && components::button(ui, icons::view(), "New View…", true).clicked()
                         {
                             actions.push(Action::OpenNewView);
                             ui.close();
                         }
-                        if supports_views_triggers
+                        if supports_triggers
                             && components::button(ui, icons::play(), "New Trigger…", true).clicked()
                         {
                             actions.push(Action::OpenNewTrigger);
@@ -3431,10 +3436,8 @@ impl DbGuiApp {
                             } else {
                                 egui::Modifiers::COMMAND
                             };
-                            ui.ctx().format_shortcut(&egui::KeyboardShortcut::new(
-                                mods,
-                                egui::Key::Z,
-                            ))
+                            ui.ctx()
+                                .format_shortcut(&egui::KeyboardShortcut::new(mods, egui::Key::Z))
                         };
                         let undo_hint = format!("Undo  ({})", hint(ui, false));
                         let redo_hint = format!("Redo  ({})", hint(ui, true));
@@ -4284,6 +4287,7 @@ impl DbGuiApp {
         let mut history_enabled = self.history_enabled;
         let mut audit_enabled = self.audit_enabled;
         let mut update_check_enabled = self.update_check_enabled;
+        let mut result_memory_budget_mb = (self.result_memory_budget / (1024 * 1024)) as u32;
         // Snapshot the display data so rendering a choice never holds a borrow on `self`.
         let options: Vec<ThemeOption> = self
             .themes
@@ -4423,6 +4427,45 @@ impl DbGuiApp {
                                                         );
                                                     });
                                                 });
+                                            });
+                                        ui.add_space(24.0);
+                                        ui.label(
+                                            egui::RichText::new("Query results")
+                                                .size(13.0)
+                                                .strong()
+                                                .color(palette::TEXT_WEAK()),
+                                        );
+                                        ui.add_space(10.0);
+                                        egui::Frame::new()
+                                            .fill(palette::PANEL())
+                                            .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                                            .corner_radius(egui::CornerRadius::same(14))
+                                            .inner_margin(egui::Margin::symmetric(18, 14))
+                                            .show(ui, |ui| {
+                                                ui.set_width(content_w - 36.0);
+                                                ui.label(
+                                                    egui::RichText::new("Global memory budget")
+                                                        .size(13.0)
+                                                        .color(palette::TEXT()),
+                                                );
+                                                ui.add_space(4.0);
+                                                ui.label(
+                                                    egui::RichText::new(
+                                                        "Shared by results in every tab. Inactive least-recently-used results are released first; staged edits are protected.",
+                                                    )
+                                                    .size(11.5)
+                                                    .color(palette::TEXT_WEAK()),
+                                                );
+                                                ui.add_space(8.0);
+                                                ui.add(
+                                                    egui::Slider::new(
+                                                        &mut result_memory_budget_mb,
+                                                        MIN_RESULT_MEMORY_BUDGET_MB
+                                                            ..=MAX_RESULT_MEMORY_BUDGET_MB,
+                                                    )
+                                                    .suffix(" MiB")
+                                                    .logarithmic(true),
+                                                );
                                             });
                                     }
                                     SettingsSection::Appearance => {
@@ -4698,11 +4741,14 @@ impl DbGuiApp {
 
         let preferences_changed = history_enabled != self.history_enabled
             || audit_enabled != self.audit_enabled
-            || update_check_enabled != self.update_check_enabled;
+            || update_check_enabled != self.update_check_enabled
+            || result_memory_budget_mb as usize * 1024 * 1024 != self.result_memory_budget;
         if preferences_changed {
             self.history_enabled = history_enabled;
             self.audit_enabled = audit_enabled;
             self.update_check_enabled = update_check_enabled;
+            self.result_memory_budget = result_memory_budget_mb as usize * 1024 * 1024;
+            self.enforce_result_memory_budget();
             self.persist_settings();
         }
     }
@@ -6133,10 +6179,15 @@ impl DbGuiApp {
                         } else {
                             ui.label("File");
                             ui.horizontal(|ui| {
+                                let (path, hint) = if editor.config.kind == dbcore::DbKind::DuckDb {
+                                    (&mut editor.config.duckdb_path, "/path/to/analytics.duckdb")
+                                } else {
+                                    (&mut editor.config.sqlite_path, "/path/to/database.sqlite")
+                                };
                                 form_changed |= status_text_input(
                                     ui,
-                                    &mut editor.config.sqlite_path,
-                                    "/path/to/database.sqlite",
+                                    path,
+                                    hint,
                                     field_w,
                                     field_test_status(&test_state, ConnField::SqlitePath),
                                 )
@@ -8288,7 +8339,7 @@ pub(super) fn db_type_options(kind: dbcore::DbKind) -> &'static [&'static str] {
             "VARCHAR(MAX)",
             "XML",
         ],
-        DbKind::Sqlite => &[
+        DbKind::Sqlite | DbKind::DuckDb => &[
             "BIGINT",
             "BLOB",
             "BOOLEAN",

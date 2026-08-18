@@ -69,7 +69,9 @@ async fn connect_query_mutate_and_introspect() {
             "CREATE TABLE plusplus_ci_smoke (id INT PRIMARY KEY, label VARCHAR(64) NOT NULL)",
             "CREATE TABLE plusplus_ci_smoke_child (id INT PRIMARY KEY, parent_id INT NOT NULL, CONSTRAINT plusplus_ci_smoke_child_fk FOREIGN KEY (parent_id) REFERENCES plusplus_ci_smoke(id))",
         ),
-        DbKind::Sqlite => unreachable!("SQLite has its own always-on test suite"),
+        DbKind::Sqlite | DbKind::DuckDb => {
+            unreachable!("embedded databases have their own always-on test suites")
+        }
         DbKind::Cassandra | DbKind::ScyllaDb => {
             unreachable!("CQL uses cql_connect_query_mutate_and_introspect")
         }
@@ -112,7 +114,7 @@ async fn connect_query_mutate_and_introspect() {
         DbKind::SqlServer => {
             assert!(preflight.plan.is_none(), "SHOWPLAN is deliberately skipped");
         }
-        DbKind::Sqlite => unreachable!(),
+        DbKind::Sqlite | DbKind::DuckDb => unreachable!(),
         DbKind::Cassandra | DbKind::ScyllaDb => unreachable!("CQL skipped above"),
     }
     let unchanged = db
@@ -145,7 +147,9 @@ async fn connect_query_mutate_and_introspect() {
     assert_eq!(fk.ref_columns.len(), 1);
     assert!(fk.ref_columns[0].eq_ignore_ascii_case("id"));
 
-    db.execute(drop_child_sql).await.expect("drop smoke child table");
+    db.execute(drop_child_sql)
+        .await
+        .expect("drop smoke child table");
     db.execute(drop_sql).await.expect("drop smoke table");
 }
 
@@ -217,7 +221,10 @@ async fn cql_connect_query_mutate_and_introspect() {
 
     // A capped read stops materializing at the cap and decodes the native types.
     let result = db
-        .execute_capped("SELECT id, label, big, active, tags FROM plusplus_ci_smoke", 10)
+        .execute_capped(
+            "SELECT id, label, big, active, tags FROM plusplus_ci_smoke",
+            10,
+        )
         .await
         .expect("read smoke row");
     assert_eq!(result.rows.len(), 1);

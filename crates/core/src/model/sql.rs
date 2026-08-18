@@ -9,11 +9,12 @@ fn value_to_literal(value: &Value, kind: DbKind) -> Option<String> {
     Some(match value {
         Value::Null => "NULL".to_string(),
         Value::Int(i) => i.to_string(),
-        Value::Float(f) => f.to_string(),
+        Value::Float(f) if f.is_finite() => f.to_string(),
+        Value::Float(_) => return None,
         Value::Bool(b) => match kind {
             // Postgres and CQL have a real boolean type; the others store it as an
             // integer/bit (CQL additionally rejects 0/1 as boolean literals).
-            DbKind::Postgres | DbKind::Cassandra | DbKind::ScyllaDb => {
+            DbKind::Postgres | DbKind::DuckDb | DbKind::Cassandra | DbKind::ScyllaDb => {
                 if *b { "TRUE" } else { "FALSE" }.to_string()
             }
             _ => if *b { "1" } else { "0" }.to_string(),
@@ -591,6 +592,102 @@ pub fn with_page_window(kind: DbKind, sql: &str, limit: u64, offset: u64) -> Opt
         }
         _ if offset == 0 => format!("{base} LIMIT {limit};"),
         _ => format!("{base} LIMIT {limit} OFFSET {offset};"),
+    })
+}
+
+/// Build a stable keyset page for a simple `SELECT *` using ascending unique-key columns.
+/// Existing filters are preserved and combined with the cursor predicate. Queries with a
+/// custom `ORDER BY`, non-zero OFFSET, CQL dialects, NULL/binary cursors, or no keys return
+/// `None` so callers can safely fall back to offset pagination.
+pub fn with_keyset_page(
+    kind: DbKind,
+    sql: &str,
+    key_columns: &[String],
+    after: Option<&[Value]>,
+    limit: u64,
+) -> Option<String> {
+    if key_columns.is_empty() || limit == 0 || kind.is_cql() {
+        return None;
+    }
+    simple_select_target(sql)?;
+    let window = parse_page_window(sql)?;
+    if window.offset != 0 {
+        return None;
+    }
+
+    let sql = sql.trim().trim_end_matches(';').trim_end();
+    let mut base = sql.to_string();
+    if let Some(after_select) = strip_keyword(sql, "SELECT") {
+        if let Some(after_top) = strip_keyword(after_select, "TOP") {
+            let digits = after_top
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(after_top.len());
+            if digits > 0 {
+                base = format!("SELECT {}", after_top[digits..].trim_start());
+            }
+        }
+    }
+    let (cut, _, _) = trailing_paging(&base);
+    base.truncate(cut);
+    let base = base.trim_end();
+    if !keyword_positions(base, "ORDER").is_empty() {
+        return None;
+    }
+
+    let order = key_columns
+        .iter()
+        .map(|column| kind.quote_ident(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let filtered = if let Some(values) = after {
+        if values.len() != key_columns.len()
+            || values
+                .iter()
+                .any(|value| matches!(value, Value::Null | Value::Bytes(_)))
+        {
+            return None;
+        }
+        let literals = values
+            .iter()
+            .map(|value| value_to_literal(value, kind))
+            .collect::<Option<Vec<_>>>()?;
+        let cursor = (0..key_columns.len())
+            .map(|greater_idx| {
+                let mut terms = (0..greater_idx)
+                    .map(|equal_idx| {
+                        format!(
+                            "{} = {}",
+                            kind.quote_ident(&key_columns[equal_idx]),
+                            literals[equal_idx]
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                terms.push(format!(
+                    "{} > {}",
+                    kind.quote_ident(&key_columns[greater_idx]),
+                    literals[greater_idx]
+                ));
+                format!("({})", terms.join(" AND "))
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        if let Some(where_pos) = keyword_positions(base, "WHERE").first().copied() {
+            let prefix = base[..where_pos].trim_end();
+            let condition = base[where_pos + "WHERE".len()..].trim();
+            format!("{prefix} WHERE ({condition}) AND ({cursor})")
+        } else {
+            format!("{base} WHERE {cursor}")
+        }
+    } else {
+        base.to_string()
+    };
+
+    Some(match kind {
+        DbKind::SqlServer => {
+            let rest = strip_keyword(&filtered, "SELECT")?;
+            format!("SELECT TOP {limit} {rest} ORDER BY {order};")
+        }
+        _ => format!("{filtered} ORDER BY {order} LIMIT {limit};"),
     })
 }
 

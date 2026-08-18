@@ -105,6 +105,7 @@ pub fn db_kind_icon(kind: DbKind) -> ImageSource<'static> {
         DbKind::MariaDb => db_mariadb(),
         DbKind::SqlServer => db_sqlserver(),
         DbKind::Sqlite => db_sqlite(),
+        DbKind::DuckDb => database(),
         DbKind::Cassandra => db_cassandra(),
         DbKind::ScyllaDb => db_scylladb(),
     }
@@ -115,7 +116,7 @@ pub fn db_kind_icon(kind: DbKind) -> ImageSource<'static> {
 /// so they take the theme's text colour like any other single-colour icon.
 pub fn db_kind_icon_tint(kind: DbKind) -> egui::Color32 {
     match kind {
-        DbKind::Cassandra | DbKind::ScyllaDb => crate::style::palette::TEXT(),
+        DbKind::DuckDb | DbKind::Cassandra | DbKind::ScyllaDb => crate::style::palette::TEXT(),
         _ => egui::Color32::WHITE,
     }
 }

@@ -513,6 +513,14 @@ fn new_connection_defaults_to_require_but_default_stays_prefer() {
 }
 
 #[test]
+fn duckdb_connection_defaults_to_an_in_memory_embedded_database() {
+    let config = ConnectionConfig::new(DbKind::DuckDb);
+    assert_eq!(config.duckdb_path, ":memory:");
+    assert!(!config.kind.is_server());
+    assert_eq!(config.target_summary(), ":memory:");
+}
+
+#[test]
 fn safety_profiles_enforce_their_policy() {
     let mut cfg = ConnectionConfig::new(DbKind::Postgres);
     assert_eq!(cfg.safety_profile, SafetyProfile::Custom);
@@ -751,6 +759,71 @@ fn with_page_window_rewrites_in_place() {
     );
     // Joins and projections are refused.
     assert!(with_page_window(DbKind::Postgres, "SELECT a FROM t", 10, 0).is_none());
+}
+
+#[test]
+fn keyset_page_is_stable_composite_and_preserves_filters() {
+    let keys = vec!["tenant_id".to_string(), "id".to_string()];
+    let values = vec![Value::Int(7), Value::Text("a'b".into())];
+    assert_eq!(
+        with_keyset_page(
+            DbKind::Postgres,
+            "SELECT * FROM events WHERE active = TRUE LIMIT 1000;",
+            &keys,
+            Some(&values),
+            512,
+        )
+        .unwrap(),
+        "SELECT * FROM events WHERE (active = TRUE) AND ((\"tenant_id\" > 7) OR (\"tenant_id\" = 7 AND \"id\" > 'a''b')) ORDER BY \"tenant_id\", \"id\" LIMIT 512;"
+    );
+    assert_eq!(
+        with_keyset_page(
+            DbKind::SqlServer,
+            "SELECT TOP 1000 * FROM [events];",
+            &["id".to_string()],
+            None,
+            512,
+        )
+        .unwrap(),
+        "SELECT TOP 512 * FROM [events] ORDER BY \"id\";"
+    );
+}
+
+#[test]
+fn keyset_page_falls_back_for_unsafe_query_shapes() {
+    let keys = vec!["id".to_string()];
+    assert!(with_keyset_page(
+        DbKind::Postgres,
+        "SELECT * FROM events ORDER BY created_at LIMIT 100",
+        &keys,
+        None,
+        50,
+    )
+    .is_none());
+    assert!(with_keyset_page(
+        DbKind::Postgres,
+        "SELECT * FROM events LIMIT 100 OFFSET 50",
+        &keys,
+        None,
+        50,
+    )
+    .is_none());
+    assert!(with_keyset_page(
+        DbKind::Postgres,
+        "SELECT * FROM events LIMIT 100",
+        &keys,
+        Some(&[Value::Null]),
+        50,
+    )
+    .is_none());
+    assert!(with_keyset_page(
+        DbKind::Postgres,
+        "SELECT * FROM events LIMIT 100",
+        &keys,
+        Some(&[Value::Float(f64::NAN)]),
+        50,
+    )
+    .is_none());
 }
 
 #[test]

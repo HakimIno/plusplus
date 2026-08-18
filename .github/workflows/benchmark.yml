@@ -1,0 +1,40 @@
+name: Performance Benchmarks
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  criterion:
+    name: Criterion baseline artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: benchmark
+
+      - name: Install native build dependencies
+        run: scripts/linux-deps.sh
+
+      - name: Run deterministic benchmark suite
+        run: scripts/benchmark.sh
+
+      - name: Upload raw benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: plusplus-performance-${{ github.sha }}
+          path: target/performance/
+          if-no-files-found: error
+          retention-days: 90

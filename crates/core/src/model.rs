@@ -11,6 +11,8 @@ pub enum DbKind {
     MariaDb,
     SqlServer,
     Sqlite,
+    /// Embedded analytical database, backed by a local file or an in-memory catalog.
+    DuckDb,
     /// Apache Cassandra, spoken over the CQL native protocol.
     Cassandra,
     /// ScyllaDB — wire-compatible with Cassandra; both share the CQL backend.
@@ -25,6 +27,7 @@ impl DbKind {
             DbKind::MariaDb => "MariaDB",
             DbKind::SqlServer => "SQL Server",
             DbKind::Sqlite => "SQLite",
+            DbKind::DuckDb => "DuckDB",
             DbKind::Cassandra => "Cassandra",
             DbKind::ScyllaDb => "ScyllaDB",
         }
@@ -40,7 +43,7 @@ impl DbKind {
     /// Whether this backend authenticates with a server (host/port/user/password)
     /// versus a local file path.
     pub fn is_server(self) -> bool {
-        !matches!(self, DbKind::Sqlite)
+        !matches!(self, DbKind::Sqlite | DbKind::DuckDb)
     }
 
     /// Whether this backend can present a client certificate (mutual TLS).
@@ -55,6 +58,7 @@ impl DbKind {
             DbKind::MySql | DbKind::MariaDb => 3306,
             DbKind::SqlServer => 1433,
             DbKind::Sqlite => 0,
+            DbKind::DuckDb => 0,
             DbKind::Cassandra | DbKind::ScyllaDb => 9042,
         }
     }

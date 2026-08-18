@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>A fast, native SQL client that makes production mistakes harder.</strong><br>
-  PostgreSQL · MySQL / MariaDB · SQL Server · SQLite · macOS · Windows · Linux
+  PostgreSQL · MySQL / MariaDB · SQL Server · SQLite · DuckDB · macOS · Windows · Linux
 </p>
 
 <p align="center">
@@ -33,16 +33,16 @@ queries or results to a third party.
 | What matters | What plusplus does |
 | --- | --- |
 | Safety profiles | Development, Staging, Production, and Custom profiles turn the existing safeguards into clear connection policies. |
-| Safer production access | Warns about destructive SQL and missing `WHERE` clauses; production connections require confirmation. |
+| Safer production access | Classifies every write, blocks it on read-only connections, and requires audited confirmation plus bounded preflight checks in production. |
 | Read-only that actually blocks writes | Enforces read-only mode in the application and, where supported, in the database session itself. |
-| Responsive work on large tables | Uses a virtualized, server-paged grid and caps materialized query results at 100,000 rows. |
-| A focused native app | Ships as a small Rust desktop app with no Electron, browser runtime, cloud account, or telemetry. |
-| One familiar workflow | Uses the same schema browser, SQL editor, result grid, shortcuts, and staged edits across four database families. |
+| Responsive work on large tables | Uses a virtualized grid, keyset pagination when a safe primary key is available, and a configurable cross-tab memory budget. |
+| A focused native app | Ships as a Rust desktop app with no Electron, browser runtime, cloud account, or telemetry. |
+| One familiar workflow | Uses the same schema browser, SQL editor, result grid, shortcuts, and staged edits across server and embedded databases. |
 
 ### Built for everyday database work
 
 - **Explore quickly.** Filter tables, columns, keys, indexes, views, routines, and triggers; preview rows with one click.
-- **Design once, target any connection.** Edit ER models, keep them as portable JSON, and preview dialect-specific DDL before applying it to PostgreSQL, MySQL/MariaDB, SQL Server, or SQLite.
+- **Design once, target any connection.** Edit ER models, keep them as portable JSON, and preview dialect-specific DDL before applying it to PostgreSQL, MySQL/MariaDB, SQL Server, SQLite, or DuckDB.
 - **Keep working during long operations.** Queries, counts, and exports run away from the UI thread.
 - **Edit deliberately.** Cell edits, inserted rows, and deletions remain staged until you save or discard them.
 - **Move complete datasets.** Stream table exports to CSV or JSON without loading the whole table into memory.
@@ -79,6 +79,10 @@ cargo run --bin plusplus
 Add `examples/sample.sqlite` as a SQLite connection. The sample contains a small Thai
 e-commerce schema and realistic linked data for trying schema navigation, queries, paging,
 filters, and staged editing.
+
+For local analytics, add a DuckDB connection with `:memory:` or a `.duckdb` file. DuckDB SQL can
+query Parquet/CSV directly (for example, `SELECT * FROM read_parquet('events/*.parquet')`) while
+PlusPlus streams visible rows through the same global result-memory ceiling.
 
 ### Build on your platform
 

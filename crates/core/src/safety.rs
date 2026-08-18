@@ -3,7 +3,9 @@
 
 use std::ops::ControlFlow;
 
-use sqlparser::ast::{Expr, FromTable, ObjectName, Query, Statement, TableFactor, Visit, Visitor};
+use sqlparser::ast::{
+    Expr, FromTable, ObjectName, Query, Statement, TableFactor, TableObject, Visit, Visitor,
+};
 use sqlparser::parser::Parser;
 
 use crate::database::{skip_leading_noise, split_statements};
@@ -12,12 +14,48 @@ use crate::model::{DbKind, QueryResult};
 /// The destructive statement classes worth confirming before they touch production.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DangerKind {
+    Insert,
     Update,
     Delete,
+    Create,
     Drop,
     Truncate,
     Alter,
     Merge,
+    Privilege,
+    Call,
+    Copy,
+    Other,
+}
+
+/// One policy result used by every SQL execution entry point. Read-only always wins over
+/// Guardian review: a blocked statement can never be turned into a confirmable one.
+#[derive(Debug, Clone)]
+pub enum SqlSafetyDecision {
+    Allow,
+    Confirm(Vec<DangerousStatement>),
+    Block(Vec<String>),
+}
+
+/// Evaluate the effective connection protections once instead of duplicating subtly different
+/// read-only and Guardian conditions throughout the UI.
+pub fn evaluate_sql(
+    kind: DbKind,
+    sql: &str,
+    guardian_enabled: bool,
+    read_only: bool,
+) -> SqlSafetyDecision {
+    let writes = write_statements(sql);
+    if writes.is_empty() {
+        return SqlSafetyDecision::Allow;
+    }
+    if read_only {
+        return SqlSafetyDecision::Block(writes);
+    }
+    if guardian_enabled {
+        return SqlSafetyDecision::Confirm(dangerous_statements(kind, sql));
+    }
+    SqlSafetyDecision::Allow
 }
 
 /// Production Guardian's final severity after static analysis and safe preflight queries.
@@ -61,12 +99,18 @@ pub struct ProductionPreflight {
 impl DangerKind {
     pub fn label(self) -> &'static str {
         match self {
+            DangerKind::Insert => "INSERT",
             DangerKind::Update => "UPDATE",
             DangerKind::Delete => "DELETE",
+            DangerKind::Create => "CREATE",
             DangerKind::Drop => "DROP",
             DangerKind::Truncate => "TRUNCATE",
             DangerKind::Alter => "ALTER",
             DangerKind::Merge => "MERGE",
+            DangerKind::Privilege => "PRIVILEGE",
+            DangerKind::Call => "CALL",
+            DangerKind::Copy => "COPY",
+            DangerKind::Other => "WRITE",
         }
     }
 }
@@ -96,7 +140,15 @@ impl DangerousStatement {
             || self.missing_where
             || matches!(
                 self.kind,
-                DangerKind::Drop | DangerKind::Truncate | DangerKind::Alter
+                DangerKind::Insert
+                    | DangerKind::Create
+                    | DangerKind::Drop
+                    | DangerKind::Truncate
+                    | DangerKind::Alter
+                    | DangerKind::Privilege
+                    | DangerKind::Call
+                    | DangerKind::Copy
+                    | DangerKind::Other
             )
         {
             RiskLevel::Critical
@@ -140,6 +192,7 @@ impl DangerousStatement {
             DbKind::Postgres => format!("EXPLAIN (FORMAT JSON) {}", self.sql),
             DbKind::MySql | DbKind::MariaDb => format!("EXPLAIN FORMAT=JSON {}", self.sql),
             DbKind::Sqlite => format!("EXPLAIN QUERY PLAN {}", self.sql),
+            DbKind::DuckDb => format!("EXPLAIN {}", self.sql),
             // SQL Server SHOWPLAN is connection-scoped. It needs a dedicated connection
             // lifecycle so a failed OFF cannot poison a pooled session; fail closed for now.
             // CQL has no EXPLAIN at all (tracing is a different, stateful mechanism).
@@ -192,6 +245,12 @@ fn dangerous_from_ast(statement: &Statement) -> Option<DangerousStatement> {
     let mut targets = Vec::new();
     let mut count_sql = None;
     let missing_where = match statement {
+        Statement::Insert(insert) => {
+            if let TableObject::TableName(name) = &insert.table {
+                targets.push(object_display_name(name));
+            }
+            false
+        }
         Statement::Update(update) => {
             if let Some((sql_name, display_name)) = table_factor_name(&update.table.relation) {
                 targets.push(display_name);
@@ -259,6 +318,10 @@ fn dangerous_from_ast(statement: &Statement) -> Option<DangerousStatement> {
         }
         Statement::AlterTable(alter) => {
             targets.push(object_display_name(&alter.name));
+            false
+        }
+        Statement::CreateTable(create) => {
+            targets.push(object_display_name(&create.name));
             false
         }
         Statement::Merge(merge) => {
@@ -348,13 +411,22 @@ fn classify_danger(stmt: &str) -> Option<DangerKind> {
         .unwrap_or("")
         .to_ascii_lowercase();
     match first.as_str() {
+        "insert" | "replace" => Some(DangerKind::Insert),
         "update" => Some(DangerKind::Update),
         "delete" => Some(DangerKind::Delete),
+        "create" => Some(DangerKind::Create),
         "drop" => Some(DangerKind::Drop),
         "truncate" => Some(DangerKind::Truncate),
         "alter" => Some(DangerKind::Alter),
         "merge" => Some(DangerKind::Merge),
+        "grant" | "revoke" => Some(DangerKind::Privilege),
+        "call" | "exec" | "execute" => Some(DangerKind::Call),
+        "copy" => Some(DangerKind::Copy),
         "with" => first_danger_verb(stmt),
+        // Plain EXPLAIN never executes its nested statement. EXPLAIN ANALYZE is handled from
+        // the parsed AST above and deliberately remains guarded.
+        "explain" => None,
+        _ if !statement_is_read_only(stmt) => Some(DangerKind::Other),
         _ => None,
     }
 }
@@ -456,9 +528,43 @@ pub(crate) fn summarize_plan(kind: DbKind, result: &QueryResult) -> Option<Query
                 && !upper.contains("USING COVERING INDEX");
             summary.index = extract_sqlite_index(&text);
         }
+        DbKind::DuckDb => {
+            let upper = text.to_ascii_uppercase();
+            summary.full_scan = upper.contains("SEQ_SCAN") || upper.contains("TABLE_SCAN");
+            summary.scan_type = if summary.full_scan {
+                Some("Sequential scan".to_string())
+            } else if upper.contains("INDEX_SCAN") {
+                Some("Index scan".to_string())
+            } else {
+                None
+            };
+            summary.estimated_rows = duckdb_estimated_rows(&text);
+        }
         DbKind::SqlServer | DbKind::Cassandra | DbKind::ScyllaDb => return None,
     }
     Some(summary)
+}
+
+fn duckdb_estimated_rows(detail: &str) -> Option<u64> {
+    detail
+        .match_indices('~')
+        .filter_map(|(index, _)| {
+            let tail = &detail[index + 1..];
+            let digits = tail
+                .chars()
+                .take_while(|character| character.is_ascii_digit() || *character == ',')
+                .collect::<String>();
+            if digits.is_empty()
+                || !tail[digits.len()..]
+                    .trim_start()
+                    .to_ascii_lowercase()
+                    .starts_with("rows")
+            {
+                return None;
+            }
+            digits.replace(',', "").parse::<u64>().ok()
+        })
+        .max()
 }
 
 fn json_find_all<'a>(value: &'a serde_json::Value, key: &str) -> Vec<&'a serde_json::Value> {
@@ -534,12 +640,19 @@ fn truncate_detail(value: &str, max_chars: usize) -> String {
 /// the list below, not position in the text — UPDATE/DELETE outrank DDL for the label.
 fn first_danger_verb(stmt: &str) -> Option<DangerKind> {
     [
+        ("insert", DangerKind::Insert),
         ("update", DangerKind::Update),
         ("delete", DangerKind::Delete),
         ("merge", DangerKind::Merge),
         ("truncate", DangerKind::Truncate),
         ("drop", DangerKind::Drop),
         ("alter", DangerKind::Alter),
+        ("create", DangerKind::Create),
+        ("grant", DangerKind::Privilege),
+        ("revoke", DangerKind::Privilege),
+        ("call", DangerKind::Call),
+        ("exec", DangerKind::Call),
+        ("copy", DangerKind::Copy),
     ]
     .into_iter()
     .find(|(kw, _)| contains_keyword(stmt, kw))
@@ -693,7 +806,7 @@ mod tests {
     fn selects_are_safe() {
         assert!(dangerous("SELECT * FROM users").is_empty());
         assert!(dangerous("WITH c AS (SELECT 1) SELECT * FROM c").is_empty());
-        assert!(dangerous("INSERT INTO t VALUES (1)").is_empty());
+        assert_eq!(kinds("INSERT INTO t VALUES (1)"), [DangerKind::Insert]);
     }
 
     #[test]
@@ -849,6 +962,20 @@ mod tests {
     }
 
     #[test]
+    fn duckdb_text_plan_reports_full_scan_and_largest_estimate() {
+        let result = QueryResult {
+            rows: vec![vec![crate::Value::Text(
+                "physical_plan | UPDATE | └─ SEQ_SCAN | ~1,250 rows | ~25 rows".to_string(),
+            )]],
+            ..QueryResult::default()
+        };
+        let plan = summarize_plan(DbKind::DuckDb, &result).unwrap();
+        assert_eq!(plan.scan_type.as_deref(), Some("Sequential scan"));
+        assert_eq!(plan.estimated_rows, Some(1_250));
+        assert!(plan.full_scan);
+    }
+
+    #[test]
     fn where_inside_literal_or_comment_does_not_count() {
         let found = dangerous("DELETE FROM t -- where id = 1");
         assert!(found[0].missing_where);
@@ -957,5 +1084,46 @@ mod tests {
         ] {
             assert!(write_statements(sql).is_empty(), "should pass: {sql}");
         }
+    }
+
+    #[test]
+    fn guardian_reviews_every_write_class_not_only_destructive_dml() {
+        let cases = [
+            ("INSERT INTO t VALUES (1)", DangerKind::Insert),
+            ("CREATE TABLE t (id INT)", DangerKind::Create),
+            ("GRANT SELECT ON t TO analyst", DangerKind::Privilege),
+            ("REVOKE SELECT ON t FROM analyst", DangerKind::Privilege),
+            ("CALL cleanup()", DangerKind::Call),
+            ("COPY t FROM '/tmp/data.csv'", DangerKind::Copy),
+            ("SET search_path = public", DangerKind::Other),
+        ];
+        for (sql, expected) in cases {
+            let found = dangerous(sql);
+            assert_eq!(found.len(), 1, "guardian skipped: {sql}");
+            assert_eq!(found[0].kind, expected, "wrong class for: {sql}");
+            assert_eq!(found[0].base_risk(), RiskLevel::Critical);
+        }
+    }
+
+    #[test]
+    fn one_policy_blocks_read_only_reviews_guarded_and_allows_development() {
+        let sql = "INSERT INTO audit_log VALUES (1)";
+        assert!(matches!(
+            evaluate_sql(DbKind::Postgres, sql, false, false),
+            SqlSafetyDecision::Allow
+        ));
+        assert!(matches!(
+            evaluate_sql(DbKind::Postgres, sql, true, false),
+            SqlSafetyDecision::Confirm(statements)
+                if statements.len() == 1 && statements[0].kind == DangerKind::Insert
+        ));
+        assert!(matches!(
+            evaluate_sql(DbKind::Postgres, sql, true, true),
+            SqlSafetyDecision::Block(statements) if statements == [sql]
+        ));
+        assert!(matches!(
+            evaluate_sql(DbKind::Postgres, "SELECT 1", true, true),
+            SqlSafetyDecision::Allow
+        ));
     }
 }

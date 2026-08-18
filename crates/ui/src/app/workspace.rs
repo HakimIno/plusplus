@@ -142,6 +142,7 @@ impl DbGuiApp {
         settings.history_enabled = Some(self.history_enabled);
         settings.audit_enabled = Some(self.audit_enabled);
         settings.update_check_enabled = Some(self.update_check_enabled);
+        settings.result_memory_budget_mb = Some((self.result_memory_budget / (1024 * 1024)) as u32);
         settings.schema_table_order = self.schema_table_order.clone();
         if let Err(e) = dbcore::config::save_settings(&settings) {
             self.error = Some(format!("Could not save settings: {e}"));

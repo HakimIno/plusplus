@@ -8,7 +8,8 @@
 use std::ops::Range;
 
 use sqlparser::dialect::{
-    Dialect, GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
+    Dialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect,
+    SQLiteDialect,
 };
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Location, Token, TokenWithSpan, Tokenizer};
@@ -35,6 +36,7 @@ pub(crate) fn dialect_for(kind: Option<DbKind>) -> Box<dyn Dialect> {
         Some(DbKind::MySql | DbKind::MariaDb) => Box::new(MySqlDialect {}),
         Some(DbKind::SqlServer) => Box::new(MsSqlDialect {}),
         Some(DbKind::Sqlite) => Box::new(SQLiteDialect {}),
+        Some(DbKind::DuckDb) => Box::new(DuckDbDialect {}),
         // sqlparser has no CQL dialect. Generic parses the SQL-shaped core of CQL
         // (UPDATE/DELETE/DROP/TRUNCATE/ALTER); CQL-only clauses (USING TTL, ALLOW
         // FILTERING, IF EXISTS updates) fail to parse and fall back to the conservative

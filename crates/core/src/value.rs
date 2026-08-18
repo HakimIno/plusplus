@@ -45,6 +45,17 @@ impl Value {
     pub fn as_text(&self) -> String {
         self.display()
     }
+
+    /// Approximate bytes owned by this value, including its inline enum storage and any heap
+    /// buffer. Capacity is used instead of length because the allocator retains the spare bytes.
+    pub fn estimated_memory_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + match self {
+                Value::Text(value) => value.capacity(),
+                Value::Bytes(value) => value.capacity(),
+                Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) => 0,
+            }
+    }
 }
 
 impl Value {
@@ -64,5 +75,20 @@ impl Value {
             (Text(a), Text(b)) => a.cmp(b),
             (a, b) => a.display().cmp(&b.display()),
         }
+    }
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+
+    #[test]
+    fn memory_estimate_counts_owned_text_and_binary_capacity() {
+        let base = std::mem::size_of::<Value>();
+        let text = Value::Text(String::with_capacity(1_024));
+        let bytes = Value::Bytes(Vec::with_capacity(2_048));
+        assert!(text.estimated_memory_bytes() >= base + 1_024);
+        assert!(bytes.estimated_memory_bytes() >= base + 2_048);
+        assert_eq!(Value::Int(1).estimated_memory_bytes(), base);
     }
 }

@@ -99,6 +99,10 @@ pub struct Settings {
     /// from the databases the user connects to. `None` = the default (on).
     #[serde(default)]
     pub update_check_enabled: Option<bool>,
+    /// Maximum approximate memory retained by materialized query results across all tabs,
+    /// in MiB. `None` uses the application default.
+    #[serde(default)]
+    pub result_memory_budget_mb: Option<u32>,
     /// The last version of the app the user has seen the "What's New" dialog for.
     #[serde(default)]
     pub last_seen_version: Option<String>,

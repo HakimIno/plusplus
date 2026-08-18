@@ -1,7 +1,8 @@
 //! Database connection factory and SSH-backed connection wrapper.
 
 use crate::backends::{
-    cassandra::CassandraDb, mssql::MsSqlDb, mysql::MySqlDb, postgres::PostgresDb, sqlite::SqliteDb,
+    cassandra::CassandraDb, duckdb::DuckDb, mssql::MsSqlDb, mysql::MySqlDb, postgres::PostgresDb,
+    sqlite::SqliteDb,
 };
 
 use std::sync::Arc;
@@ -60,6 +61,12 @@ async fn connect_direct(
                 return Err(CoreError::InvalidConfig("SQLite path is empty".into()));
             }
             Ok(Arc::new(SqliteDb::connect(cfg).await?))
+        }
+        DbKind::DuckDb => {
+            if cfg.duckdb_path.trim().is_empty() {
+                return Err(CoreError::InvalidConfig("DuckDB path is empty".into()));
+            }
+            Ok(Arc::new(DuckDb::connect(cfg)?))
         }
     }
 }

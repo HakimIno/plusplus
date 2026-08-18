@@ -515,6 +515,73 @@ fn production_connection_gates_destructive_queries() {
 }
 
 #[test]
+fn staging_guard_reviews_insert_and_session_writes() {
+    let mut app = DbGuiApp::construct();
+    app.connections.clear();
+    let mut cfg = dbcore::ConnectionConfig::new(dbcore::DbKind::Sqlite);
+    cfg.id = "c1".into();
+    cfg.set_safety_profile(dbcore::SafetyProfile::Staging);
+    app.connections.push(cfg);
+    app.active_connections.push(ActiveConnection {
+        config_id: "c1".into(),
+        name: "staging".into(),
+        db: std::sync::Arc::new(DummyDb),
+        databases: Vec::new(),
+        schema: fake_schema(1, 1),
+    });
+    app.tab_mut().conn_id = Some("c1".into());
+
+    for sql in [
+        "INSERT INTO table_0 VALUES (1)",
+        "CREATE TABLE staging_copy (id INT)",
+        "PRAGMA journal_mode = WAL",
+    ] {
+        app.tab_mut().sql = sql.into();
+        app.apply_action(Action::RunQuery);
+        assert!(app.danger_pending.is_some(), "Guardian skipped: {sql}");
+        assert_eq!(app.busy, Busy::Idle);
+        app.apply_action(Action::CancelDangerQuery);
+    }
+}
+
+#[test]
+fn global_result_budget_evicts_inactive_lru_and_protects_active_result() {
+    let mut app = DbGuiApp::construct();
+    app.tabs[0].set_result(fake_result(64, 3));
+    app.touch_result(0);
+    app.new_tab();
+    app.tabs[1].set_result(fake_result(64, 3));
+    app.touch_result(1);
+    app.result_memory_budget = app.tabs[1].estimated_result_memory_bytes();
+
+    let released = app.enforce_result_memory_budget();
+
+    assert!(released > 0);
+    assert!(app.tabs[0].result.is_none());
+    assert!(app.tabs[0].result_evicted);
+    assert!(app.tabs[1].result.is_some());
+}
+
+#[test]
+fn global_result_budget_never_discards_tabs_with_staged_edits() {
+    let mut app = DbGuiApp::construct();
+    app.tabs[0].set_result(fake_result(64, 3));
+    app.tabs[0].edits.new_rows = 1;
+    app.new_tab();
+    app.tabs[1].set_result(fake_result(64, 3));
+    app.new_tab();
+    app.tabs[2].set_result(fake_result(64, 3));
+    app.result_memory_budget =
+        app.tabs[0].estimated_result_memory_bytes() + app.tabs[2].estimated_result_memory_bytes();
+
+    app.enforce_result_memory_budget();
+
+    assert!(app.tabs[0].result.is_some());
+    assert!(app.tabs[1].result.is_none());
+    assert!(app.tabs[2].result.is_some());
+}
+
+#[test]
 fn production_guard_never_runs_a_query_changed_after_preflight() {
     let mut app = DbGuiApp::construct();
     app.connections.clear();
@@ -930,6 +997,53 @@ fn import_confirm_spawns_the_transaction() {
     assert!(app.import_pending.is_none(), "dialog closes");
     assert_eq!(app.busy, Busy::Importing);
     assert!(app.error.is_none());
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn production_import_is_bound_to_guarded_table_and_mapping() {
+    let mut app = app_with_users_table(users_columns());
+    app.connections[0].production = true;
+    let path = temp_csv("prod.csv", "id,email\n1,a@b.c\n");
+    app.import_pending = Some(draft_for(&app, &["id", "email"], &path));
+
+    app.apply_action(Action::ConfirmImport);
+
+    let pending = app
+        .danger_pending
+        .as_mut()
+        .expect("production import must be guarded");
+    assert!(matches!(
+        pending.continuation,
+        ProductionGuardContinuation::Import
+    ));
+    assert_eq!(pending.statements[0].targets, ["users"]);
+    assert!(pending.sql.contains("\"id\", \"email\""));
+    assert!(app.import_pending.is_some());
+    assert_eq!(app.busy, Busy::Idle);
+
+    pending.preflights = Some(vec![dbcore::safety::ProductionPreflight::default()]);
+    // Changing even one source mapping invalidates the reviewed snapshot.
+    app.import_pending.as_mut().unwrap().mapping[2] = Some(0);
+    app.apply_action(Action::SetDangerConfirmation("users".into()));
+    app.apply_action(Action::ConfirmDangerQuery);
+
+    assert!(app.danger_pending.is_none());
+    assert!(app.import_pending.is_some());
+    assert_eq!(app.busy, Busy::Idle);
+    assert!(app.error.as_deref().unwrap_or("").contains("changed"));
+
+    // A fresh review of the new mapping can proceed.
+    app.error = None;
+    app.apply_action(Action::ConfirmImport);
+    app.danger_pending.as_mut().unwrap().preflights =
+        Some(vec![dbcore::safety::ProductionPreflight::default()]);
+    app.apply_action(Action::SetDangerConfirmation("users".into()));
+    app.apply_action(Action::ConfirmDangerQuery);
+
+    assert!(app.danger_pending.is_none());
+    assert!(app.import_pending.is_none());
+    assert_eq!(app.busy, Busy::Importing);
     std::fs::remove_file(&path).ok();
 }
 
@@ -2367,6 +2481,8 @@ fn replacement_stream_stays_hidden_until_finished() {
             append: false,
             result: Ok(3),
             canceled: false,
+            budget_truncated: false,
+            row_truncated: false,
             seq: 7,
         })
         .unwrap();
@@ -2377,6 +2493,48 @@ fn replacement_stream_stays_hidden_until_finished() {
     assert_eq!(result.stats.elapsed_ms, 12.5);
     assert_eq!(app.busy, Busy::Idle);
     assert_eq!(app.querying_tab_id, None);
+}
+
+#[test]
+fn memory_limited_stream_is_marked_truncated_and_cannot_auto_continue() {
+    let mut app = DbGuiApp::construct();
+    let tab_id = app.tab().id;
+    app.query_seq = 9;
+    app.tab_mut().stream = Some(QueryStreamUi {
+        seq: 9,
+        append: false,
+        columns: vec![ColumnMeta {
+            name: "payload".into(),
+            type_name: "TEXT".into(),
+        }],
+        pending_rows: vec![vec![Value::Text("bounded".into())]],
+        received_rows: 1,
+    });
+    app.tx
+        .send(AppMessage::QueryStreamFinished {
+            tab_id,
+            conn_id: String::new(),
+            sql: "SELECT * FROM events LIMIT 1000".into(),
+            elapsed_ms: 1.0,
+            rows_loaded: 1,
+            page: dbcore::PageWindow {
+                limit: Some(512),
+                offset: 0,
+            },
+            result_limit: 1000,
+            append: false,
+            result: Ok(1),
+            canceled: false,
+            budget_truncated: true,
+            row_truncated: false,
+            seq: 9,
+        })
+        .unwrap();
+
+    app.poll_messages(&egui::Context::default());
+
+    assert!(app.tab().result.as_ref().unwrap().truncated);
+    assert!(app.tab().page_exhausted);
 }
 
 #[test]
@@ -2427,6 +2585,8 @@ fn canceled_replacement_keeps_the_previous_result() {
             append: false,
             result: Err("query cancelled".into()),
             canceled: true,
+            budget_truncated: false,
+            row_truncated: false,
             seq: 2,
         })
         .unwrap();
@@ -2502,6 +2662,8 @@ fn replacement_stream_keeps_previous_rows_until_completion() {
             append: false,
             result: Ok(1),
             canceled: false,
+            budget_truncated: false,
+            row_truncated: false,
             seq: 4,
         })
         .unwrap();
@@ -2647,6 +2809,8 @@ fn continuation_stream_appends_and_marks_a_short_page_exhausted() {
             append: true,
             result: Ok(1),
             canceled: false,
+            budget_truncated: false,
+            row_truncated: false,
             seq: 8,
         })
         .unwrap();

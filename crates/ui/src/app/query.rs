@@ -14,10 +14,22 @@ struct UiQuerySink {
     append: bool,
     rows: Vec<Vec<dbcore::Value>>,
     sent_rows: usize,
+    accepted_bytes: usize,
+    byte_limit: usize,
+    budget_reached: bool,
+    max_rows: usize,
+    row_limit_reached: bool,
 }
 
 impl UiQuerySink {
-    fn new(tx: Sender<AppMessage>, tab_id: u64, seq: u64, append: bool) -> Self {
+    fn new(
+        tx: Sender<AppMessage>,
+        tab_id: u64,
+        seq: u64,
+        append: bool,
+        byte_limit: usize,
+        max_rows: usize,
+    ) -> Self {
         Self {
             tx,
             tab_id,
@@ -25,6 +37,11 @@ impl UiQuerySink {
             append,
             rows: Vec::with_capacity(QUERY_STREAM_PAINT_ROWS),
             sent_rows: 0,
+            accepted_bytes: 0,
+            byte_limit,
+            budget_reached: false,
+            max_rows,
+            row_limit_reached: false,
         }
     }
 
@@ -59,6 +76,31 @@ impl dbcore::RowSink for UiQuerySink {
     }
 
     fn write_row(&mut self, row: &[dbcore::Value]) -> io::Result<()> {
+        if self.sent_rows.saturating_add(self.rows.len()) >= self.max_rows {
+            self.row_limit_reached = true;
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                "query result row limit reached",
+            ));
+        }
+        let row_bytes = std::mem::size_of::<Vec<dbcore::Value>>()
+            + row.len() * std::mem::size_of::<dbcore::Value>()
+            + row
+                .iter()
+                .map(|value| {
+                    value
+                        .estimated_memory_bytes()
+                        .saturating_sub(std::mem::size_of::<dbcore::Value>())
+                })
+                .sum::<usize>();
+        if self.accepted_bytes.saturating_add(row_bytes) > self.byte_limit {
+            self.budget_reached = true;
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                "query result memory budget reached",
+            ));
+        }
+        self.accepted_bytes = self.accepted_bytes.saturating_add(row_bytes);
         self.rows.push(row.to_vec());
         // Replacement rows stay hidden until completion. Continuations arrive before the user
         // reaches the loaded tail, so paint compact batches instead of exposing one early row.
@@ -81,6 +123,33 @@ fn total_from_count_result(result: &QueryResult) -> Option<u64> {
     }
 }
 
+/// Resolve the last loaded primary-key tuple in catalog order. Missing columns or values that
+/// cannot be rendered as portable SQL literals make the caller fall back to OFFSET pagination.
+fn keyset_cursor(tab: &QueryTab) -> Option<(Vec<String>, Vec<dbcore::Value>)> {
+    let source = tab
+        .edits
+        .source
+        .as_ref()
+        .or(tab.edits.pending_source.as_ref())?;
+    if source.pk_cols.is_empty() {
+        return None;
+    }
+    let result = tab.result.as_ref()?;
+    let last = result.rows.last()?;
+    let values = source
+        .pk_cols
+        .iter()
+        .map(|key| {
+            let index = result
+                .columns
+                .iter()
+                .position(|column| column.name.eq_ignore_ascii_case(key))?;
+            last.get(index).cloned()
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some((source.pk_cols.clone(), values))
+}
+
 #[cfg(test)]
 mod query_sink_tests {
     use super::*;
@@ -88,7 +157,7 @@ mod query_sink_tests {
     #[test]
     fn continuation_rows_are_grouped_in_smooth_paint_batches() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let mut sink = UiQuerySink::new(tx, 7, 9, true);
+        let mut sink = UiQuerySink::new(tx, 7, 9, true, usize::MAX, usize::MAX);
         dbcore::RowSink::begin(&mut sink, &[]).unwrap();
         assert!(matches!(
             rx.recv().unwrap(),
@@ -117,6 +186,32 @@ mod query_sink_tests {
             ..QueryResult::default()
         };
         assert_eq!(total_from_count_result(&result), Some(12_534));
+    }
+
+    #[test]
+    fn stream_stops_before_crossing_its_byte_budget() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let row = vec![dbcore::Value::Text("x".repeat(1024))];
+        let mut sink = UiQuerySink::new(tx, 1, 1, false, 128, usize::MAX);
+
+        let error = dbcore::RowSink::write_row(&mut sink, &row).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::FileTooLarge);
+        assert!(sink.budget_reached);
+        assert_eq!(sink.sent_rows, 0);
+    }
+
+    #[test]
+    fn stream_stops_at_the_global_row_cap_without_buffering_one_more_row() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut sink = UiQuerySink::new(tx, 1, 1, false, usize::MAX, 1);
+        dbcore::RowSink::write_row(&mut sink, &[dbcore::Value::Int(1)]).unwrap();
+
+        let error = dbcore::RowSink::write_row(&mut sink, &[dbcore::Value::Int(2)]).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::FileTooLarge);
+        assert!(sink.row_limit_reached);
+        assert_eq!(sink.rows.len(), 1);
     }
 }
 
@@ -151,8 +246,12 @@ impl DbGuiApp {
         };
         let database = if !active.schema.database_name.is_empty() {
             active.schema.database_name.clone()
-        } else if config.kind == DbKind::Sqlite {
-            config.sqlite_path.clone()
+        } else if matches!(config.kind, DbKind::Sqlite | DbKind::DuckDb) {
+            if config.kind == DbKind::DuckDb {
+                config.duckdb_path.clone()
+            } else {
+                config.sqlite_path.clone()
+            }
         } else {
             config.database.clone()
         };
@@ -236,11 +335,39 @@ impl DbGuiApp {
                         .map(|connection| connection.db.kind())
                 })?;
                 let window = dbcore::parse_page_window(&sql)?;
-                dbcore::with_page_window(kind, &sql, QUERY_STREAM_CHUNK_ROWS as u64, window.offset)
+                let key_columns = tab
+                    .edits
+                    .pending_source
+                    .as_ref()
+                    .or(tab.edits.source.as_ref())
+                    .map(|source| source.pk_cols.as_slice())
+                    .unwrap_or_default();
+                dbcore::with_keyset_page(
+                    kind,
+                    &sql,
+                    key_columns,
+                    None,
+                    QUERY_STREAM_CHUNK_ROWS as u64,
+                )
+                .or_else(|| {
+                    dbcore::with_page_window(
+                        kind,
+                        &sql,
+                        QUERY_STREAM_CHUNK_ROWS as u64,
+                        window.offset,
+                    )
+                })
             })
             .unwrap_or_else(|| sql.clone());
         let count_sql = (refresh_total
             && requested_result_limit.is_some()
+            // One embedded DuckDB connection executes one operation at a time. Running an
+            // exact COUNT before the visible page would serialize two full analytical scans.
+            && tab
+                .conn_id
+                .as_deref()
+                .and_then(|id| self.connections.iter().find(|config| config.id == id))
+                .is_none_or(|config| config.kind != DbKind::DuckDb)
             && matches!(
                 tab.kind,
                 crate::components::QueryTabKind::Table | crate::components::QueryTabKind::View
@@ -297,10 +424,16 @@ impl DbGuiApp {
         }
         self.query_seq += 1;
         let seq = self.query_seq;
-        let page = dbcore::parse_page_window(&sql).filter(|window| {
+        let parsed_page = dbcore::parse_page_window(&sql).filter(|window| {
             window
                 .limit
                 .is_some_and(|limit| limit <= MAX_FETCH_ROWS as u64)
+        });
+        let page = parsed_page.or_else(|| {
+            dbcore::query_returns_rows(&sql).then_some(dbcore::PageWindow {
+                limit: Some(MAX_FETCH_ROWS as u64),
+                offset: 0,
+            })
         });
         let cancel = tokio_util::sync::CancellationToken::new();
         self.query_cancel = Some(cancel.clone());
@@ -318,6 +451,24 @@ impl DbGuiApp {
             self.tabs[idx].page_exhausted = false;
         }
         self.error = None;
+        self.enforce_result_memory_budget();
+        const MIN_REPLACEMENT_HEADROOM: usize = 1024 * 1024;
+        let retained = self.total_result_memory_bytes();
+        if !append
+            && self.result_memory_budget.saturating_sub(retained) < MIN_REPLACEMENT_HEADROOM
+            && !self.tabs[idx].edits.has_pending()
+        {
+            // A very large active result cannot be an eviction candidate. Release it only when
+            // a replacement is definitely starting and it would otherwise leave no room for
+            // even one useful stream batch. Normal replacements keep the old grid visible.
+            self.tabs[idx].result = None;
+            self.tabs[idx].row_order.clear();
+            self.tabs[idx].row_order.shrink_to_fit();
+            self.tabs[idx].selection.clear();
+        }
+        let query_byte_limit = self
+            .result_memory_budget
+            .saturating_sub(self.total_result_memory_bytes());
         if let Some(count_sql) = count_sql {
             let count_db = db.clone();
             let count_tx = tx.clone();
@@ -344,14 +495,27 @@ impl DbGuiApp {
         self.rt.spawn(async move {
             if let Some(page) = page {
                 let started = Instant::now();
-                let mut sink = UiQuerySink::new(tx.clone(), tab_id, seq, append);
+                let mut sink = UiQuerySink::new(
+                    tx.clone(),
+                    tab_id,
+                    seq,
+                    append,
+                    query_byte_limit,
+                    MAX_FETCH_ROWS,
+                );
                 let res = db.export_query_cancellable(&sql, cancel, &mut sink).await;
                 // Cancellation or a driver error can end the stream before `finish`; preserve
                 // rows already decoded so useful partial progress is never thrown away.
                 let _ = sink.flush_rows();
                 let rows_loaded = sink.sent_rows as u64;
                 let canceled = matches!(res, Err(dbcore::CoreError::Canceled));
-                let result = res.map_err(|e| e.to_string());
+                let budget_truncated = sink.budget_reached;
+                let row_truncated = sink.row_limit_reached;
+                let result = if budget_truncated || row_truncated {
+                    Ok(rows_loaded)
+                } else {
+                    res.map_err(|e| e.to_string())
+                };
                 let _ = tx.send(AppMessage::QueryStreamFinished {
                     tab_id,
                     conn_id,
@@ -363,6 +527,8 @@ impl DbGuiApp {
                     append,
                     result,
                     canceled,
+                    budget_truncated,
+                    row_truncated,
                     seq,
                 });
                 return;
@@ -423,12 +589,17 @@ impl DbGuiApp {
             }
             return;
         }
-        let offset = window.offset.saturating_add(loaded);
         let fetch_limit = (limit - loaded).min(QUERY_STREAM_CHUNK_ROWS as u64);
         let Some(kind) = self.active().map(|active| active.db.kind()) else {
             return;
         };
-        let Some(sql) = dbcore::with_page_window(kind, &tab.sql, fetch_limit, offset) else {
+        let keyset_sql = keyset_cursor(tab).and_then(|(keys, values)| {
+            dbcore::with_keyset_page(kind, &tab.sql, &keys, Some(&values), fetch_limit)
+        });
+        let offset = window.offset.saturating_add(loaded);
+        let Some(sql) =
+            keyset_sql.or_else(|| dbcore::with_page_window(kind, &tab.sql, fetch_limit, offset))
+        else {
             return;
         };
         self.start_query_sql(idx, sql, true, Some(limit), None);

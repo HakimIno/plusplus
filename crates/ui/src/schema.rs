@@ -492,6 +492,16 @@ impl SchemaEditor {
                     .filter(|f| !f.drop)
                     .map(|f| f.to_def())
                     .collect();
+                if self.db_kind == DbKind::DuckDb
+                    && active_fks
+                        .iter()
+                        .any(|foreign_key| foreign_key.on_delete != FkAction::NoAction)
+                {
+                    return Err(
+                        "DuckDB foreign keys support NO ACTION only; cascading actions are unavailable."
+                            .into(),
+                    );
+                }
 
                 stmts.push(build_create_table_sql(
                     self.db_kind,
@@ -621,10 +631,11 @@ impl SchemaEditor {
 
                 // Dropped foreign keys
                 for fk in self.fks.iter().filter(|f| f.is_existing && f.drop) {
-                    if self.db_kind == DbKind::Sqlite {
-                        return Err(
-                            "SQLite cannot drop a foreign key from an existing table.".into()
-                        );
+                    if matches!(self.db_kind, DbKind::Sqlite | DbKind::DuckDb) {
+                        return Err(format!(
+                            "{} cannot drop a foreign key from an existing table.",
+                            self.db_kind.label()
+                        ));
                     }
                     if fk.constraint_name.trim().is_empty() {
                         return Err("Cannot drop a foreign key without a constraint name.".into());
@@ -639,8 +650,11 @@ impl SchemaEditor {
 
                 // New foreign keys
                 for fk in self.fks.iter().filter(|f| !f.is_existing && !f.drop) {
-                    if self.db_kind == DbKind::Sqlite {
-                        return Err("SQLite cannot add a foreign key to an existing table.".into());
+                    if matches!(self.db_kind, DbKind::Sqlite | DbKind::DuckDb) {
+                        return Err(format!(
+                            "{} cannot add a foreign key to an existing table.",
+                            self.db_kind.label()
+                        ));
                     }
                     let def = fk.to_def();
                     if def.columns.is_empty() || def.ref_table.trim().is_empty() {

@@ -40,6 +40,7 @@ fn dialect(kind: Option<DbKind>) -> Dialect {
             DbKind::MySql
             | DbKind::MariaDb
             | DbKind::Sqlite
+            | DbKind::DuckDb
             | DbKind::Cassandra
             | DbKind::ScyllaDb,
         )

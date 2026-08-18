@@ -209,9 +209,65 @@ impl DbGuiApp {
             Err(e) => self.error = Some(format!("Could not read the file: {e}")),
         }
     }
+    /// Stable, non-executed SQL used to bind a production import confirmation to its exact
+    /// connection, table, and mapped columns without materializing the input file as SQL.
+    pub(super) fn pending_import_guard_sql(&self) -> Option<String> {
+        use std::hash::{Hash, Hasher};
+
+        let draft = self.import_pending.as_ref()?;
+        let kind = self
+            .active_connections
+            .iter()
+            .find(|connection| connection.config_id == draft.conn_id)?
+            .db
+            .kind();
+        let targets = draft.targets();
+        if targets.is_empty() {
+            return None;
+        }
+        let columns = targets
+            .iter()
+            .map(|target| kind.quote_ident(&target.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let placeholders = std::iter::repeat_n("NULL", targets.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
+        draft.path.hash(&mut fingerprint);
+        format!("{:?}", draft.format).hash(&mut fingerprint);
+        draft.has_header.hash(&mut fingerprint);
+        draft.headers.hash(&mut fingerprint);
+        draft.mapping.hash(&mut fingerprint);
+        if let Ok(metadata) = std::fs::metadata(&draft.path) {
+            metadata.len().hash(&mut fingerprint);
+            metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos())
+                .hash(&mut fingerprint);
+        }
+        Some(format!(
+            "-- PLUSPLUS IMPORT SNAPSHOT {:016x}\nINSERT INTO {} ({columns}) VALUES ({placeholders});",
+            fingerprint.finish(),
+            draft.table.qualified(kind)
+        ))
+    }
+
+    /// Validate the import and route production connections through Guardian first.
+    pub(super) fn confirm_import(&mut self) {
+        self.confirm_import_inner(true);
+    }
+
+    /// Continue an import whose exact connection/table/mapping snapshot passed Guardian.
+    pub(super) fn confirm_import_guarded(&mut self) {
+        self.confirm_import_inner(false);
+    }
+
     /// Read the whole file, coerce every field against its target column, and insert the rows
     /// as a single transaction on the background runtime.
-    pub(super) fn confirm_import(&mut self) {
+    fn confirm_import_inner(&mut self, require_guard: bool) {
         // Snapshot what the spawned task needs, then drop the borrow so the validation below
         // can touch `self`. A failed validation leaves the dialog open with its mapping intact.
         let Some(draft) = self.import_pending.as_ref() else {
@@ -249,12 +305,38 @@ impl DbGuiApp {
             self.error = Some("Map at least one column before importing.".into());
             return;
         }
-        let Some(active) = self.active() else {
-            self.error = Some("Connect to a database to import into a table.".into());
+        let Some(active) = self
+            .active_connections
+            .iter()
+            .find(|connection| connection.config_id == conn_id)
+        else {
+            self.error = Some("The import connection is no longer active.".into());
             return;
         };
         let db = active.db.clone();
         let kind = db.kind();
+
+        if require_guard && self.connection_is_production(&conn_id) {
+            let Some(sql) = self.pending_import_guard_sql() else {
+                self.error = Some("Could not build the production import review.".into());
+                return;
+            };
+            let Some(idx) = self
+                .tabs
+                .iter()
+                .position(|tab| tab.conn_id.as_deref() == Some(conn_id.as_str()))
+            else {
+                self.error = Some("Production import needs a tab bound to its connection.".into());
+                return;
+            };
+            let found = dbcore::safety::dangerous_statements(kind, &sql);
+            if found.is_empty() {
+                self.error = Some("Production Guardian could not classify the import.".into());
+                return;
+            }
+            self.start_production_guard(idx, sql, found, ProductionGuardContinuation::Import);
+            return;
+        }
 
         let table_name = table.name.clone();
         let schema = table.schema.clone();

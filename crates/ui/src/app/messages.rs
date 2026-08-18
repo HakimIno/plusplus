@@ -431,6 +431,7 @@ impl DbGuiApp {
                         // Do not drain an appended continuation in one egui frame. Replacement
                         // batches stay hidden and are cheap to drain before their atomic swap.
                         if streamed_batches >= 2 {
+                            self.enforce_result_memory_budget();
                             return;
                         }
                     } else if let Some(stream) = tab.stream.as_mut() {
@@ -452,6 +453,8 @@ impl DbGuiApp {
                     append,
                     result,
                     canceled,
+                    budget_truncated,
+                    row_truncated,
                     seq,
                 } => {
                     let stale = seq != self.query_seq;
@@ -548,9 +551,12 @@ impl DbGuiApp {
                             result.stats.elapsed_ms = elapsed_ms;
                             result.stats.rows_affected = None;
                             let total_rows = result.row_count() as u64;
-                            result.truncated =
-                                total_rows >= MAX_FETCH_ROWS as u64 && capped_by_global_limit;
-                            tab.page_exhausted = total_rows >= result_limit
+                            result.truncated = budget_truncated
+                                || row_truncated
+                                || (total_rows >= MAX_FETCH_ROWS as u64 && capped_by_global_limit);
+                            tab.page_exhausted = budget_truncated
+                                || row_truncated
+                                || total_rows >= result_limit
                                 || page.limit.is_some_and(|limit| rows_loaded < limit);
                             let status = result_status(result);
                             tab.query_error = None;
@@ -813,6 +819,7 @@ impl DbGuiApp {
                     }
                 }
             }
+            self.enforce_result_memory_budget();
             ctx.request_repaint();
         }
     }

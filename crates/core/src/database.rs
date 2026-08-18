@@ -175,7 +175,7 @@ const RETURNING_DML: &[&str] = &["insert", "update", "delete", "replace"];
 /// keyword would misclassify those as non-row-returning DML, so we scan every statement and
 /// return `true` if *any* of them is row-returning. For a single statement (the common case)
 /// this is identical to matching the leading keyword.
-pub(crate) fn returns_rows(sql: &str) -> bool {
+pub fn returns_rows(sql: &str) -> bool {
     statements_return_rows(sql, ROW_KEYWORDS)
 }
 

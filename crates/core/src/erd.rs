@@ -290,6 +290,18 @@ impl ErDesign {
         target_schema: Option<&str>,
     ) -> Result<Vec<String>, String> {
         self.validate()?;
+        if kind == DbKind::DuckDb
+            && self
+                .tables
+                .iter()
+                .flat_map(|table| &table.foreign_keys)
+                .any(|foreign_key| foreign_key.on_delete != FkAction::NoAction)
+        {
+            return Err(
+                "DuckDB foreign keys support NO ACTION only; change cascading actions before generating DDL."
+                    .to_string(),
+            );
+        }
         let source_schemas: BTreeSet<&str> = self
             .tables
             .iter()
@@ -307,12 +319,51 @@ impl ErDesign {
         };
 
         let mut statements = Vec::new();
-        for table in &self.tables {
+        let create_order = if kind == DbKind::DuckDb {
+            let mut created = BTreeSet::new();
+            let mut remaining = (0..self.tables.len()).collect::<Vec<_>>();
+            let mut ordered = Vec::with_capacity(self.tables.len());
+            while !remaining.is_empty() {
+                let next = remaining.iter().position(|table_index| {
+                    self.tables[*table_index]
+                        .foreign_keys
+                        .iter()
+                        .all(|foreign_key| {
+                            let referenced = self
+                                .resolve_table(
+                                    foreign_key.ref_schema.as_deref(),
+                                    &foreign_key.ref_table,
+                                )
+                                .and_then(|table| {
+                                    self.tables
+                                        .iter()
+                                        .position(|candidate| std::ptr::eq(candidate, table))
+                                });
+                            referenced.is_none_or(|referenced| {
+                                referenced == *table_index || created.contains(&referenced)
+                            })
+                        })
+                });
+                let Some(position) = next else {
+                    return Err(
+                        "DuckDB cannot create cyclic foreign keys because it cannot add constraints after CREATE TABLE."
+                            .to_string(),
+                    );
+                };
+                let table_index = remaining.remove(position);
+                created.insert(table_index);
+                ordered.push(&self.tables[table_index]);
+            }
+            ordered
+        } else {
+            self.tables.iter().collect::<Vec<_>>()
+        };
+        for table in create_order {
             statements.push(create_table_sql(
                 kind,
                 schema_for(table.schema.as_deref()).as_deref(),
                 table,
-                kind == DbKind::Sqlite,
+                matches!(kind, DbKind::Sqlite | DbKind::DuckDb),
                 &schema_for,
             )?);
         }
@@ -324,9 +375,9 @@ impl ErDesign {
             }
         }
 
-        // SQLite cannot ADD CONSTRAINT, so its FKs are emitted inline above. Other engines
-        // get a two-phase migration, allowing forward references and cyclic relationships.
-        if kind != DbKind::Sqlite {
+        // SQLite and DuckDB cannot ADD CONSTRAINT, so their FKs are emitted inline above.
+        // Other engines get a two-phase migration, allowing forward references and cycles.
+        if !matches!(kind, DbKind::Sqlite | DbKind::DuckDb) {
             for table in &self.tables {
                 let schema = schema_for(table.schema.as_deref());
                 for fk in &table.foreign_keys {
@@ -564,6 +615,23 @@ pub fn dialect_type(kind: DbKind, portable: &str) -> Result<String, String> {
         (DbKind::Sqlite, "char" | "varchar" | "text" | "date" | "time" | "timestamp"
             | "uuid" | "json") => "TEXT".into(),
 
+        (DbKind::DuckDb, "smallint") => "SMALLINT".into(),
+        (DbKind::DuckDb, "integer") => "INTEGER".into(),
+        (DbKind::DuckDb, "bigint") => "BIGINT".into(),
+        (DbKind::DuckDb, "real") => "REAL".into(),
+        (DbKind::DuckDb, "double") => "DOUBLE".into(),
+        (DbKind::DuckDb, "decimal") => with_args("DECIMAL", args),
+        (DbKind::DuckDb, "boolean") => "BOOLEAN".into(),
+        (DbKind::DuckDb, "char") => with_args("CHAR", args),
+        (DbKind::DuckDb, "varchar") => with_args_default("VARCHAR", args, "255"),
+        (DbKind::DuckDb, "text") => "TEXT".into(),
+        (DbKind::DuckDb, "date") => "DATE".into(),
+        (DbKind::DuckDb, "time") => "TIME".into(),
+        (DbKind::DuckDb, "timestamp") => "TIMESTAMP".into(),
+        (DbKind::DuckDb, "binary") => "BLOB".into(),
+        (DbKind::DuckDb, "uuid") => "UUID".into(),
+        (DbKind::DuckDb, "json") => "JSON".into(),
+
         (DbKind::Postgres, "smallint") => "SMALLINT".into(),
         (DbKind::Postgres, "integer") => "INTEGER".into(),
         (DbKind::Postgres, "bigint") => "BIGINT".into(),
@@ -735,6 +803,50 @@ mod tests {
     }
 
     #[test]
+    fn duckdb_keeps_schemas_and_orders_inline_foreign_key_dependencies() {
+        let mut model = design();
+        model.tables[1].foreign_keys[0].on_delete = FkAction::NoAction;
+        model.tables.swap(0, 1); // Child first in the canvas/file.
+        let ddl = model
+            .forward_ddl(DbKind::DuckDb, Some("analytics"))
+            .unwrap();
+
+        assert!(ddl[0].contains("\"analytics\".\"users\""));
+        assert!(ddl[1].contains("\"analytics\".\"orders\""));
+        assert!(ddl[1].contains("REFERENCES \"analytics\".\"users\""));
+        assert!(!ddl
+            .iter()
+            .any(|statement| statement.starts_with("ALTER TABLE")));
+    }
+
+    #[test]
+    fn duckdb_refuses_cycles_it_cannot_apply_atomically() {
+        let mut model = design();
+        model.tables[1].foreign_keys[0].on_delete = FkAction::NoAction;
+        model.tables[0].foreign_keys.push(DesignForeignKey {
+            name: "users_order_fk".into(),
+            columns: vec!["id".into()],
+            ref_schema: Some("public".into()),
+            ref_table: "orders".into(),
+            ref_columns: vec!["id".into()],
+            on_delete: FkAction::NoAction,
+        });
+
+        assert!(model
+            .forward_ddl(DbKind::DuckDb, Some("analytics"))
+            .unwrap_err()
+            .contains("cyclic foreign keys"));
+    }
+
+    #[test]
+    fn duckdb_refuses_unsupported_cascading_foreign_keys() {
+        assert!(design()
+            .forward_ddl(DbKind::DuckDb, Some("analytics"))
+            .unwrap_err()
+            .contains("NO ACTION only"));
+    }
+
+    #[test]
     fn invalid_fk_is_rejected_before_ddl() {
         let mut bad = design();
         bad.tables[1].foreign_keys[0].ref_columns = vec!["missing".into()];
@@ -758,6 +870,10 @@ mod tests {
         assert_eq!(
             dialect_type(DbKind::Sqlite, "decimal(12,2)").unwrap(),
             "NUMERIC"
+        );
+        assert_eq!(
+            dialect_type(DbKind::DuckDb, "decimal(12,2)").unwrap(),
+            "DECIMAL(12,2)"
         );
     }
 }

@@ -20,6 +20,10 @@ pub enum CoreError {
     #[error("cassandra error: {0}")]
     Cql(String),
 
+    /// The embedded DuckDB engine returned an error.
+    #[error("duckdb error: {0}")]
+    DuckDb(#[from] duckdb::Error),
+
     /// A connection pool failed to hand out a connection (timeout, manager error, ...).
     #[error("connection pool error: {0}")]
     Pool(String),

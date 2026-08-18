@@ -217,7 +217,9 @@ pub fn build_clone_table_sql(
             format!("INSERT INTO {dst} SELECT * FROM {src};"),
         ],
         DbKind::SqlServer => vec![format!("SELECT * INTO {dst} FROM {src};")],
-        DbKind::Sqlite => vec![format!("CREATE TABLE {dst} AS SELECT * FROM {src};")],
+        DbKind::Sqlite | DbKind::DuckDb => {
+            vec![format!("CREATE TABLE {dst} AS SELECT * FROM {src};")]
+        }
         DbKind::Cassandra | DbKind::ScyllaDb => Vec::new(),
     }
 }
@@ -308,7 +310,7 @@ pub fn build_alter_column_sql(
         .filter(|d| !d.is_empty());
 
     match kind {
-        DbKind::Postgres => {
+        DbKind::Postgres | DbKind::DuckDb => {
             let mut out = vec![
                 format!("ALTER TABLE {tref} ALTER COLUMN {c} TYPE {ty};"),
                 format!(
@@ -443,7 +445,7 @@ fn view_replace_kw(kind: DbKind, materialized: bool) -> &'static str {
         return "";
     }
     match kind {
-        DbKind::Postgres | DbKind::MySql | DbKind::MariaDb => "OR REPLACE ",
+        DbKind::Postgres | DbKind::DuckDb | DbKind::MySql | DbKind::MariaDb => "OR REPLACE ",
         DbKind::SqlServer => "OR ALTER ",
         // SQLite: no such form. CQL: plain views don't exist at all (materialized views
         // have their own syntax); the view editor is not offered there.
@@ -638,6 +640,7 @@ pub fn build_create_trigger_sql(kind: DbKind, t: &TriggerBuild) -> Result<Vec<St
         DbKind::Cassandra | DbKind::ScyllaDb => {
             Err("Cassandra/ScyllaDB have no triggers in CQL.".into())
         }
+        DbKind::DuckDb => Err("DuckDB does not support triggers.".into()),
     }
 }
 
@@ -661,7 +664,9 @@ pub fn build_drop_trigger_sql(
         },
         // CQL has no CREATE TRIGGER, but DROP TRIGGER exists for Java triggers loaded
         // server-side; emit the plain form should one ever appear in the tree.
-        DbKind::Sqlite | DbKind::Cassandra | DbKind::ScyllaDb => format!("DROP TRIGGER {nm};"),
+        DbKind::Sqlite | DbKind::DuckDb | DbKind::Cassandra | DbKind::ScyllaDb => {
+            format!("DROP TRIGGER {nm};")
+        }
     }
 }
 
@@ -726,7 +731,9 @@ fn routine_params_sql(kind: DbKind, is_function: bool, params: &[RoutineParam]) 
                     };
                     format!("{at} {ty}{def}{out}")
                 }
-                DbKind::Sqlite | DbKind::Cassandra | DbKind::ScyllaDb => String::new(),
+                DbKind::Sqlite | DbKind::DuckDb | DbKind::Cassandra | DbKind::ScyllaDb => {
+                    String::new()
+                }
             }
         })
         .filter(|s| !s.trim().is_empty())
@@ -742,8 +749,11 @@ pub fn build_create_routine_sql(
     r: &RoutineBuild,
     or_replace: bool,
 ) -> Result<Vec<String>, String> {
-    if kind == DbKind::Sqlite {
-        return Err("SQLite has no stored functions or procedures.".into());
+    if matches!(kind, DbKind::Sqlite | DbKind::DuckDb) {
+        return Err(format!(
+            "{} has no stored functions or procedures in this editor.",
+            kind.label()
+        ));
     }
     if kind.is_cql() {
         // CQL UDFs exist but are Java/JS snippets, disabled by default server-side, and
@@ -810,7 +820,9 @@ pub fn build_create_routine_sql(
                 format!("CREATE {repl}PROCEDURE {rref}{params}\nAS\n{body};")
             }
         }
-        DbKind::Sqlite | DbKind::Cassandra | DbKind::ScyllaDb => unreachable!("guarded above"),
+        DbKind::Sqlite | DbKind::DuckDb | DbKind::Cassandra | DbKind::ScyllaDb => {
+            unreachable!("guarded above")
+        }
     };
     Ok(vec![sql])
 }

@@ -46,6 +46,7 @@ impl DbGuiApp {
                     Some(dbcore::DbKind::MariaDb) => "MariaDB ",
                     Some(dbcore::DbKind::SqlServer) => "MS ",
                     Some(dbcore::DbKind::Sqlite) => "SQLite ",
+                    Some(dbcore::DbKind::DuckDb) => "DuckDB ",
                     Some(dbcore::DbKind::Cassandra) => "Cassandra ",
                     Some(dbcore::DbKind::ScyllaDb) => "Scylla ",
                     None => "",
@@ -65,6 +66,7 @@ impl DbGuiApp {
             return;
         }
         self.active_query_tab = idx;
+        self.touch_result(idx);
         // Query failures are rendered inside their result surface, not duplicated globally.
         if self.tabs[idx].query_error.is_some() {
             self.status_msg = "Ready".to_string();
@@ -72,6 +74,10 @@ impl DbGuiApp {
         } else {
             self.status_msg = match &self.tabs[idx].result {
                 Some(res) => result_status(res),
+                None if self.tabs[idx].result_evicted => {
+                    "Result released to stay within the memory budget — run the query to reload"
+                        .to_string()
+                }
                 None => "Ready".to_string(),
             };
             self.error = None;

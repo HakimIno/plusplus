@@ -173,7 +173,7 @@ pub struct ConnectionConfig {
     pub user: String,
     #[serde(default)]
     pub database: String,
-    /// TLS policy for server backends. Ignored by SQLite.
+    /// TLS policy for server backends. Ignored by SQLite and DuckDB.
     #[serde(default)]
     pub ssl_mode: SslMode,
     /// Path to a PEM CA certificate used by the verify modes. Empty means the
@@ -205,6 +205,9 @@ pub struct ConnectionConfig {
     // --- file backends ---
     #[serde(default)]
     pub sqlite_path: String,
+    /// DuckDB database file. `:memory:` creates a transient analytical database.
+    #[serde(default)]
+    pub duckdb_path: String,
     /// Optional user-chosen title bar color for visually marking important connections.
     #[serde(default)]
     pub title_bar_color: Option<ConnectionColor>,
@@ -223,7 +226,7 @@ pub struct ConnectionConfig {
     /// [`crate::safety::write_statements`]), in-grid editing and DDL are refused, and the
     /// backends additionally pin the session read-only where the engine supports it
     /// (Postgres `default_transaction_read_only`, MySQL/MariaDB `SET SESSION TRANSACTION
-    /// READ ONLY`, SQLite opened read-only; SQL Server has no session-level equivalent —
+    /// READ ONLY`, SQLite/DuckDB opened read-only; SQL Server has no session-level equivalent —
     /// `ApplicationIntent=ReadOnly` is sent but only enforced by readable replicas).
     #[serde(default)]
     pub read_only: bool,
@@ -254,6 +257,11 @@ impl ConnectionConfig {
             ssh_user: String::new(),
             ssh_key_path: String::new(),
             sqlite_path: String::new(),
+            duckdb_path: if kind == DbKind::DuckDb {
+                ":memory:".to_string()
+            } else {
+                String::new()
+            },
             title_bar_color: None,
             icon: ConnectionIcon::default(),
             safety_profile: SafetyProfile::Custom,
@@ -310,6 +318,7 @@ impl ConnectionConfig {
     pub fn target_summary(&self) -> String {
         match self.kind {
             DbKind::Sqlite => self.sqlite_path.clone(),
+            DbKind::DuckDb => self.duckdb_path.clone(),
             _ => format!(
                 "{}@{}:{}/{}",
                 self.user, self.host, self.port, self.database

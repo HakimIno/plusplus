@@ -192,6 +192,12 @@ impl DbGuiApp {
             .iter()
             .any(|c| c.id == conn_id && c.is_read_only())
     }
+    /// Is the saved config for `conn_id` protected by Production Guardian?
+    pub(super) fn connection_is_production(&self, conn_id: &str) -> bool {
+        self.connections
+            .iter()
+            .any(|c| c.id == conn_id && c.is_production())
+    }
     /// Refuse an action on a read-only connection with a consistent error + status pair.
     /// `what` completes the sentence "This connection is read-only — {what}".
     pub(super) fn refuse_read_only(&mut self, what: &str) {

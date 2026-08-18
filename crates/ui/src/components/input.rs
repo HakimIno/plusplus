@@ -367,6 +367,7 @@ pub(crate) fn db_kind_combo(
                 DbKind::MariaDb,
                 DbKind::SqlServer,
                 DbKind::Sqlite,
+                DbKind::DuckDb,
                 DbKind::Cassandra,
                 DbKind::ScyllaDb,
             ] {

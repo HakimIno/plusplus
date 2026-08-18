@@ -32,7 +32,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -64,10 +64,15 @@ jobs:
         if: runner.os != 'Linux'
         run: cargo test --workspace --locked
 
+      # Compile the benchmark harness on every supported platform without taking noisy
+      # wall-clock measurements on shared PR runners.
+      - name: Compile performance benchmarks
+        run: cargo test -p plusplus-core --bench core_hot_paths --no-run --locked
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     # Reports but does not block yet: the tree currently has 10 clippy warnings (dead code
     # in grid.rs, a type_complexity in panels.rs, an incompatible_msrv, and some style
     # nits). Clear those, then delete this line to make `-D warnings` a real gate. Left

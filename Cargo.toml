@@ -117,6 +117,13 @@ chrono = { version = "0.4", features = ["serde"] }
 # Date type consumed by egui_extras' DatePickerButton (already in-tree via egui_extras).
 jiff = "0.2"
 
+# --- embedded analytical database ---
+duckdb = { version = "1.10505.0", features = ["bundled", "parquet"] }
+
+# --- reproducible performance measurements ---
+# Kept out of production binaries; Criterion only builds for explicit benchmark targets.
+criterion = { version = "0.8.2", features = ["html_reports"] }
+
 [profile.release]
 opt-level = 3
 lto = "thin"
