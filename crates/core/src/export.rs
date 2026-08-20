@@ -100,10 +100,7 @@ impl<W: Write> RowSink for CsvSink<W> {
     }
 }
 
-fn write_csv_record(
-    w: &mut impl Write,
-    fields: impl Iterator<Item = String>,
-) -> io::Result<()> {
+fn write_csv_record(w: &mut impl Write, fields: impl Iterator<Item = String>) -> io::Result<()> {
     let mut first = true;
     for field in fields {
         if !first {

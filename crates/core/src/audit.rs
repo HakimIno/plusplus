@@ -166,7 +166,11 @@ mod tests {
 
         append_at(&path, &entry(AuditAction::Connect, "", true)).unwrap();
         append_at(&path, &entry(AuditAction::Query, "SELECT 1", true)).unwrap();
-        append_at(&path, &entry(AuditAction::EditCommit, "UPDATE t SET a=1", false)).unwrap();
+        append_at(
+            &path,
+            &entry(AuditAction::EditCommit, "UPDATE t SET a=1", false),
+        )
+        .unwrap();
 
         let all = load_at(&path, 100).unwrap();
         assert_eq!(all.len(), 3);
@@ -182,7 +186,10 @@ mod tests {
     fn torn_line_is_skipped_not_fatal() {
         let path = temp_audit_path();
         append_at(&path, &entry(AuditAction::Query, "SELECT 1", true)).unwrap();
-        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         f.write_all(b"{\"at\":\"torn").unwrap();
         drop(f);
         append_at(&path, &entry(AuditAction::Query, "SELECT 2", true)).unwrap();

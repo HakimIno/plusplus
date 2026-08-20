@@ -15,7 +15,9 @@ async fn main() {
     cfg.database = database;
     cfg.ssl_mode = plusplus_core::SslMode::Disable;
 
-    let db = plusplus_core::connect(&cfg, None, None).await.expect("connect");
+    let db = plusplus_core::connect(&cfg, None, None)
+        .await
+        .expect("connect");
     let schema = db.introspect().await.expect("introspect");
     println!("database: {}", schema.database_name);
     for t in &schema.tables {

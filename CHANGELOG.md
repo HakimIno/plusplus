@@ -3,6 +3,39 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
+## 0.4.0 — 2026-08-19
+
+- Restyled the History sidebar to match a date-grouped log: collapsible day folders with
+  the same chevron and folder icons as Items and Queries, the time above each statement,
+  and wrapped syntax-highlighted SQL. Hovering an entry shows a side callout with an arrow,
+  highlighted SQL, and row timing — the same chrome as rename. Run from History now opens a
+  Query tab and executes the statement instead of overwriting the current table tab.
+- Restyled Saved Queries into a folder tree that lists only query names. New queries land
+  in Ungrouped; folders can be created, renamed, reordered by drag-and-drop, and used as
+  drop targets to move queries. Clicking a name still opens a Query tab. Hovering a query
+  shows a side callout with highlighted SQL and an arrow pointing at the row. Rename uses
+  the same callout shape, not an inline editor or a modal.
+- Matched the Items schema tree to that same folder/file spacing: Views, Functions,
+  Procedures, and Triggers use folder rows with indented file-style children.
+- Restyled the production-guard confirm dialog to match the rest of the app: connection
+  row with a database icon, statement cards with type and risk badges, a bordered SQL
+  preview, a confirmation chip plus themed input, and a danger Run button when a phrase
+  is required.
+- Schema apply skips the extra Preview Migration dialog: production connections
+  review the generated DDL in Production Guardian, and other connections apply it
+  immediately.
+- Collapsed the five title-bar layout toggles into one Layout icon that opens a
+  popover of panel glyphs — click a tile to show or hide that chrome, with no
+  checkboxes.
+- Moved the result filter toggle from the title bar into the pager cluster next to
+  page navigation, and bound Cmd/Ctrl+F to show or hide the filter strip.
+- Added an embedded DuckDB backend for local analytical databases and Parquet files, including
+  in-memory databases, schema introspection, and dialect-aware SQL.
+- Added performance safeguards around query memory, tab eviction, stream byte ceilings, and
+  keyset pagination, with a recorded Criterion suite for the hot paths.
+- Made connecting cancellable so metadata loading can be stopped without leaving the UI stuck,
+  and capped the emoji texture cache to bound memory use.
+
 ## 0.3.1 — 2026-08-14
 
 - Made SQL autocomplete feel more immediate by showing unambiguous keyword, table, and column

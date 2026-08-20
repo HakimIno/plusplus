@@ -644,9 +644,8 @@ fn production_guard_also_intercepts_schema_preview_ddl() {
         schema: fake_schema(1, 1),
     });
     app.tab_mut().conn_id = Some("c1".into());
-    app.schema_pending = Some(vec!["DROP TABLE table_0".into()]);
-
-    app.apply_action(Action::ApplySchema);
+    let table = app.active().unwrap().schema.tables[0].clone();
+    app.apply_action(Action::DropTable(table));
     let pending = app.danger_pending.as_ref().expect("DDL must be guarded");
     assert!(matches!(
         pending.continuation,
@@ -655,13 +654,16 @@ fn production_guard_also_intercepts_schema_preview_ddl() {
     assert_eq!(pending.statements[0].targets, ["table_0"]);
     assert!(
         app.schema_pending.is_some(),
-        "preview must survive cancellation"
+        "DDL stays staged until Guardian confirms"
     );
     assert_eq!(app.busy, Busy::Idle);
 
     app.apply_action(Action::CancelDangerQuery);
     assert!(app.danger_pending.is_none());
-    assert!(app.schema_pending.is_some());
+    assert!(
+        app.schema_pending.is_none(),
+        "cancelling Guardian drops the staged DDL"
+    );
 }
 
 #[test]
@@ -783,10 +785,10 @@ fn read_only_connection_blocks_writes() {
     assert!(app.commit_pending.is_none());
     assert!(app.error.as_deref().unwrap_or("").contains("read-only"));
 
-    // Applying a staged schema migration is refused and the preview is dropped.
+    // Applying schema DDL is refused before it reaches the database.
     app.error = None;
-    app.schema_pending = Some(vec!["ALTER TABLE table_0 ADD c INT".into()]);
-    app.apply_action(Action::ApplySchema);
+    let table = app.active().unwrap().schema.tables[0].clone();
+    app.apply_action(Action::DropTable(table));
     assert!(app.schema_pending.is_none());
     assert_eq!(app.busy, Busy::Idle);
     assert!(app.error.as_deref().unwrap_or("").contains("read-only"));
@@ -1596,6 +1598,38 @@ fn header_filter_action_targets_the_selected_column() {
     assert_eq!(app.tab().filter.conditions[0].column, 2);
 }
 
+#[test]
+fn toggle_filter_requires_a_result_and_cmd_f_flips_it() {
+    let mut app = DbGuiApp::construct();
+    app.apply_action(Action::ToggleFilter);
+    assert!(
+        !app.tab().filter.visible,
+        "no result means there is nothing to filter"
+    );
+
+    let (ctx, mut app) = grid_nav_app(3, 3);
+    app.apply_action(Action::ToggleFilter);
+    assert!(app.tab().filter.visible);
+    app.apply_action(Action::ToggleFilter);
+    assert!(!app.tab().filter.visible);
+
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::F, egui::Modifiers::COMMAND)],
+    );
+    assert!(
+        app.tab().filter.visible,
+        "Cmd/Ctrl+F must open the result filter"
+    );
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::F, egui::Modifiers::COMMAND)],
+    );
+    assert!(!app.tab().filter.visible);
+}
+
 /// A new app always has exactly one tab, and `active()` resolves through the active tab's
 /// connection binding.
 #[test]
@@ -2146,6 +2180,8 @@ fn live_log_can_close_from_its_header_and_reopen_from_the_title_bar() {
     harness.run_steps(2);
     assert!(harness.query_by_label("Live log").is_none());
 
+    harness.get_by_label("Layout").click();
+    harness.run_steps(2);
     harness.get_by_label("Live log panel").click();
     harness.run_steps(2);
     harness.get_by_label("Live log");
@@ -3149,6 +3185,11 @@ fn structure_rows_use_data_grid_delete_keys() {
     let schema = fake_schema(1, 3);
     let table = schema.tables[0].clone();
     let db: std::sync::Arc<dyn dbcore::Database> = std::sync::Arc::new(DummyDb);
+    app.connections.clear();
+    let mut cfg = dbcore::ConnectionConfig::new(dbcore::DbKind::Sqlite);
+    cfg.id = "c1".into();
+    cfg.production = true;
+    app.connections.push(cfg);
     app.active_connections.push(ActiveConnection {
         config_id: "c1".into(),
         name: "one".into(),
@@ -3204,10 +3245,11 @@ fn structure_rows_use_data_grid_delete_keys() {
         vec![key(egui::Key::S, egui::Modifiers::COMMAND)],
     );
     assert!(
-        app.schema_pending.is_some(),
-        "Cmd/Ctrl+S previews schema changes like Data-grid edits"
+        app.danger_pending.is_some(),
+        "Cmd/Ctrl+S reviews schema changes in Production Guardian"
     );
-    app.apply_action(Action::CancelSchema);
+    app.apply_action(Action::CancelDangerQuery);
+    assert!(app.tab().schema_editor.is_some());
 
     if let Some(ObjectEditor::Table(editor)) = app.tab_mut().schema_editor.as_mut() {
         editor.columns[1].name = "discard_me".into();
@@ -3418,7 +3460,7 @@ fn render_and_snapshot(mut app: DbGuiApp, name: &str, expand_groups: bool) {
         });
     harness.run_steps(4);
     if expand_groups {
-        for label in ["Views (1)", "Triggers (1)"] {
+        for label in ["Views", "Triggers"] {
             if harness.query_by_label(label).is_some() {
                 harness.get_by_label(label).click();
                 harness.run_steps(4);
@@ -3723,6 +3765,7 @@ fn snapshot_saved_queries_tab() {
             sql: sql.into(),
             conn_id: None,
             conn_name: None,
+            folder: None,
             created_at: "2026-07-16T00:00:00Z".into(),
         });
     }
@@ -4441,6 +4484,7 @@ fn probe_saved_queries_tab() {
             sql: format!("SELECT {i} FROM t WHERE x = {i}"),
             conn_id: None,
             conn_name: Some("test-conn".into()),
+            folder: None,
             created_at: "2026-06-24T00:00:00Z".into(),
         });
     }
@@ -4495,6 +4539,10 @@ fn connect_fake(app: &mut DbGuiApp, schema: SchemaTree) {
 fn full_erd_can_be_edited_and_forward_engineered() {
     let mut app = DbGuiApp::construct();
     app.connections.clear();
+    let mut cfg = dbcore::ConnectionConfig::new(dbcore::DbKind::Sqlite);
+    cfg.id = "c1".into();
+    cfg.production = true;
+    app.connections.push(cfg);
     connect_fake(&mut app, fake_schema_with_fk());
 
     app.apply_action(Action::ShowDatabaseDiagram);
@@ -4533,16 +4581,12 @@ fn full_erd_can_be_edited_and_forward_engineered() {
     );
 
     app.apply_action(Action::ForwardEngineerErd);
-    let ddl = app
-        .schema_pending
+    let pending = app
+        .danger_pending
         .as_ref()
-        .expect("DDL preview was not staged");
-    assert!(ddl
-        .iter()
-        .any(|statement| statement.contains("CREATE TABLE \"accounts\"")));
-    assert!(ddl
-        .iter()
-        .any(|statement| statement.contains("REFERENCES \"accounts\"")));
+        .expect("forward-engineer DDL must be guarded");
+    assert!(pending.sql.contains("CREATE TABLE \"accounts\""));
+    assert!(pending.sql.contains("REFERENCES \"accounts\""));
 }
 
 /// A result over `field_0..field_{n-1}` (matching [`fake_schema`]'s column names) with one row.
@@ -5054,6 +5098,249 @@ fn sidebar_history_tab_owns_the_cache() {
         app.history_cache.is_empty(),
         "leaving the History tab drops the cache"
     );
+}
+
+fn history_entry(sql: &str) -> dbcore::history::HistoryEntry {
+    dbcore::history::HistoryEntry {
+        at: "2026-08-19T07:00:00Z".into(),
+        conn_id: "c1".into(),
+        conn_name: "local".into(),
+        sql: sql.into(),
+        ok: true,
+        error: None,
+        rows: Some(1),
+        elapsed_ms: 1.0,
+    }
+}
+
+fn connected_sqlite_app() -> DbGuiApp {
+    let mut app = DbGuiApp::construct();
+    app.connections.clear();
+    let mut cfg = dbcore::ConnectionConfig::new(dbcore::DbKind::Sqlite);
+    cfg.id = "c1".into();
+    app.connections.push(cfg);
+    app.active_connections.push(ActiveConnection {
+        config_id: "c1".into(),
+        name: "local".into(),
+        db: std::sync::Arc::new(DummyDb),
+        databases: Vec::new(),
+        schema: fake_schema(1, 1),
+    });
+    app.tab_mut().conn_id = Some("c1".into());
+    app
+}
+
+#[test]
+fn run_history_sql_opens_a_query_tab_and_executes() {
+    let mut app = connected_sqlite_app();
+    app.tab_mut().kind = crate::components::QueryTabKind::Table;
+    app.tab_mut().title = "users".into();
+    app.tab_mut().sql = "SELECT * FROM users".into();
+    app.settings_open = true;
+    app.history_cache.push(history_entry("SELECT 42"));
+
+    app.apply_action(Action::RunHistorySql(0));
+
+    assert!(!app.settings_open);
+    assert_eq!(app.tabs.len(), 2, "table tab must stay, query tab is added");
+    assert_eq!(app.tabs[0].sql, "SELECT * FROM users");
+    assert_eq!(app.tabs[0].kind, crate::components::QueryTabKind::Table);
+    assert_eq!(app.tab().kind, crate::components::QueryTabKind::Query);
+    assert_eq!(app.tab().sql, "SELECT 42");
+    assert_eq!(app.busy, Busy::Querying);
+}
+
+#[test]
+fn run_history_sql_reuses_a_blank_query_tab() {
+    let mut app = connected_sqlite_app();
+    app.history_cache.push(history_entry("SELECT 7"));
+
+    app.apply_action(Action::RunHistorySql(0));
+
+    assert_eq!(app.tabs.len(), 1);
+    assert_eq!(app.tab().kind, crate::components::QueryTabKind::Query);
+    assert_eq!(app.tab().sql, "SELECT 7");
+    assert_eq!(app.busy, Busy::Querying);
+}
+
+#[test]
+fn use_history_sql_from_a_table_tab_opens_a_query_tab() {
+    let mut app = connected_sqlite_app();
+    app.tab_mut().kind = crate::components::QueryTabKind::Table;
+    app.tab_mut().title = "users".into();
+    app.tab_mut().sql = "SELECT * FROM users".into();
+    app.history_cache.push(history_entry("SELECT 1"));
+
+    app.apply_action(Action::UseHistorySql(0));
+
+    assert_eq!(app.tabs.len(), 2);
+    assert_eq!(app.tabs[0].sql, "SELECT * FROM users");
+    assert_eq!(app.tab().kind, crate::components::QueryTabKind::Query);
+    assert_eq!(app.tab().sql, "SELECT 1");
+    assert_eq!(app.busy, Busy::Idle, "insert does not run");
+}
+
+fn saved_query(name: &str, sql: &str) -> dbcore::Favorite {
+    dbcore::Favorite {
+        id: "fav-1".into(),
+        name: name.into(),
+        sql: sql.into(),
+        conn_id: Some("c1".into()),
+        conn_name: Some("local".into()),
+        folder: None,
+        created_at: "2026-08-19T07:00:00Z".into(),
+    }
+}
+
+#[test]
+fn run_favorite_opens_a_query_tab_and_executes() {
+    let mut app = connected_sqlite_app();
+    app.tab_mut().kind = crate::components::QueryTabKind::Table;
+    app.tab_mut().title = "users".into();
+    app.tab_mut().sql = "SELECT * FROM users".into();
+    app.favorites_cache
+        .push(saved_query("forty two", "SELECT 42"));
+
+    app.apply_action(Action::RunFavorite(0));
+
+    assert_eq!(app.tabs.len(), 2, "table tab must stay, query tab is added");
+    assert_eq!(app.tabs[0].sql, "SELECT * FROM users");
+    assert_eq!(app.tab().kind, crate::components::QueryTabKind::Query);
+    assert_eq!(app.tab().sql, "SELECT 42");
+    assert_eq!(app.busy, Busy::Querying);
+}
+
+#[test]
+fn use_favorite_from_a_table_tab_opens_a_query_tab() {
+    let mut app = connected_sqlite_app();
+    app.tab_mut().kind = crate::components::QueryTabKind::Table;
+    app.tab_mut().title = "users".into();
+    app.tab_mut().sql = "SELECT * FROM users".into();
+    app.favorites_cache.push(saved_query("one", "SELECT 1"));
+
+    app.apply_action(Action::UseFavorite(0));
+
+    assert_eq!(app.tabs.len(), 2);
+    assert_eq!(app.tabs[0].sql, "SELECT * FROM users");
+    assert_eq!(app.tab().kind, crate::components::QueryTabKind::Query);
+    assert_eq!(app.tab().sql, "SELECT 1");
+    assert_eq!(app.busy, Busy::Idle, "open does not run");
+}
+
+#[test]
+fn saved_queries_group_into_folders_and_move() {
+    let mut app = DbGuiApp::construct();
+    app.favorites_cache.push(saved_query("Sac", "SELECT 1"));
+    app.apply_action(Action::NewFavoriteFolder { move_id: None });
+    if let Some(draft) = app.folder_pending.as_mut() {
+        draft.name = "Reports".into();
+    }
+    app.apply_action(Action::ConfirmFavoriteFolder);
+    assert_eq!(app.favorite_folders, ["Reports"]);
+    assert_eq!(app.favorites_cache[0].folder, None);
+
+    app.apply_action(Action::MoveFavorite {
+        idx: 0,
+        folder: Some("Reports".into()),
+    });
+    assert_eq!(app.favorites_cache[0].folder.as_deref(), Some("Reports"));
+
+    let groups = dbcore::favorites::grouped(&app.favorites_cache, &app.favorite_folders, "", true);
+    assert_eq!(groups[0].0, "Reports");
+    assert_eq!(groups[0].1, vec![0]);
+}
+
+#[test]
+fn named_query_folder_can_be_renamed_and_deleted() {
+    let mut app = DbGuiApp::construct();
+    app.favorites_cache.push(saved_query("Sac", "SELECT 1"));
+    app.apply_action(Action::NewFavoriteFolder {
+        move_id: Some("fav-1".into()),
+    });
+    if let Some(draft) = app.folder_pending.as_mut() {
+        draft.name = "Reports".into();
+    }
+    app.apply_action(Action::ConfirmFavoriteFolder);
+    assert_eq!(app.favorite_folders, ["Reports"]);
+    assert_eq!(app.favorites_cache[0].folder.as_deref(), Some("Reports"));
+
+    app.apply_action(Action::RenameFavoriteFolder("Reports".into()));
+    if let Some(draft) = app.folder_pending.as_mut() {
+        draft.name = "Ops".into();
+    }
+    app.apply_action(Action::ConfirmFavoriteFolder);
+    assert_eq!(app.favorite_folders, ["Ops"]);
+    assert_eq!(app.favorites_cache[0].folder.as_deref(), Some("Ops"));
+
+    app.apply_action(Action::DeleteFavoriteFolder("Ops".into()));
+    assert!(app.favorite_folders.is_empty());
+    assert_eq!(app.favorites_cache[0].folder, None);
+}
+
+#[test]
+fn ungrouped_query_folder_cannot_be_renamed_or_deleted() {
+    let mut app = DbGuiApp::construct();
+    app.favorites_cache.push(saved_query("Sac", "SELECT 1"));
+    app.apply_action(Action::RenameFavoriteFolder(
+        dbcore::favorites::UNGROUPED.into(),
+    ));
+    assert!(
+        app.folder_pending.is_none(),
+        "Ungrouped is not a real folder"
+    );
+    app.apply_action(Action::DeleteFavoriteFolder(
+        dbcore::favorites::UNGROUPED.into(),
+    ));
+    assert_eq!(app.favorites_cache[0].folder, None);
+    assert_eq!(app.favorites_cache.len(), 1);
+}
+
+#[test]
+fn saved_query_folders_and_queries_can_be_reordered_by_drop() {
+    let mut app = DbGuiApp::construct();
+    app.favorites_cache.push(saved_query("One", "SELECT 1"));
+    app.favorites_cache.push(saved_query("Two", "SELECT 2"));
+    app.favorites_cache[0].id = "q1".into();
+    app.favorites_cache[1].id = "q2".into();
+    app.apply_action(Action::NewFavoriteFolder { move_id: None });
+    if let Some(draft) = app.folder_pending.as_mut() {
+        draft.name = "Reports".into();
+    }
+    app.apply_action(Action::ConfirmFavoriteFolder);
+    app.apply_action(Action::NewFavoriteFolder { move_id: None });
+    if let Some(draft) = app.folder_pending.as_mut() {
+        draft.name = "Ops".into();
+    }
+    app.apply_action(Action::ConfirmFavoriteFolder);
+    assert_eq!(app.favorite_folders, ["Reports", "Ops"]);
+
+    app.apply_action(Action::ReorderFavoriteFolder {
+        source: "Reports".into(),
+        target: "Ops".into(),
+        after: true,
+    });
+    assert_eq!(app.favorite_folders, ["Ops", "Reports"]);
+
+    app.apply_action(Action::DropFavoriteOnFolder {
+        id: "q1".into(),
+        folder: Some("Reports".into()),
+    });
+    assert_eq!(app.favorites_cache[1].id, "q1");
+    assert_eq!(app.favorites_cache[1].folder.as_deref(), Some("Reports"));
+
+    app.apply_action(Action::DropFavoriteOnQuery {
+        source_id: "q2".into(),
+        target_id: "q1".into(),
+        after: true,
+    });
+    assert_eq!(
+        app.favorites_cache
+            .iter()
+            .map(|q| q.id.as_str())
+            .collect::<Vec<_>>(),
+        ["q1", "q2"]
+    );
+    assert_eq!(app.favorites_cache[1].folder.as_deref(), Some("Reports"));
 }
 
 #[test]

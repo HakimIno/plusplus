@@ -186,7 +186,12 @@ pub fn previous_word(chars: &[char], pos: usize) -> Option<String> {
         }
         return None;
     }
-    Some(chars[i..end].iter().collect::<String>().to_ascii_uppercase())
+    Some(
+        chars[i..end]
+            .iter()
+            .collect::<String>()
+            .to_ascii_uppercase(),
+    )
 }
 
 /// Walk back over a comma-separated identifier list to the keyword that opened it.

@@ -53,7 +53,12 @@ fn load_at(path: &Path) -> Result<Vec<Bookmark>> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(CoreError::Config(format!("bookmarks {}: {e}", path.display()))),
+        Err(e) => {
+            return Err(CoreError::Config(format!(
+                "bookmarks {}: {e}",
+                path.display()
+            )))
+        }
     };
     // A corrupt file shouldn't brick the feature — degrade to an empty list.
     Ok(serde_json::from_str(&text).unwrap_or_default())
@@ -61,12 +66,7 @@ fn load_at(path: &Path) -> Result<Vec<Bookmark>> {
 
 /// Toggle a table's pinned state within `items`: remove it if already present, otherwise
 /// append it. Returns `true` if the table is pinned after the call.
-pub fn toggle(
-    items: &mut Vec<Bookmark>,
-    conn_id: &str,
-    schema: Option<&str>,
-    table: &str,
-) -> bool {
+pub fn toggle(items: &mut Vec<Bookmark>, conn_id: &str, schema: Option<&str>, table: &str) -> bool {
     if let Some(pos) = items.iter().position(|b| b.matches(conn_id, schema, table)) {
         items.remove(pos);
         false
@@ -81,12 +81,7 @@ pub fn toggle(
 }
 
 /// Whether a given table is pinned within `items`.
-pub fn is_pinned(
-    items: &[Bookmark],
-    conn_id: &str,
-    schema: Option<&str>,
-    table: &str,
-) -> bool {
+pub fn is_pinned(items: &[Bookmark], conn_id: &str, schema: Option<&str>, table: &str) -> bool {
     items.iter().any(|b| b.matches(conn_id, schema, table))
 }
 

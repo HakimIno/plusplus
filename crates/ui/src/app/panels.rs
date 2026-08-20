@@ -1,6 +1,6 @@
 use super::{
     result_status, schema_table_key, Action, ActiveConnection, Busy, ConnField, ConnTestState,
-    DbGuiApp, PageNav, ProductionGuardContinuation, QueryEditorPlacement, QueryTab,
+    DbGuiApp, PageNav, ProductionGuardContinuation, QueryEditorPlacement, QueryTab, SavedQueryDrag,
     SchemaTableDrag, SettingsSection, SidebarTab, TabView, MAX_FETCH_ROWS,
     MAX_RESULT_MEMORY_BUDGET_MB, MIN_RESULT_MEMORY_BUDGET_MB,
 };
@@ -343,6 +343,294 @@ fn first_line(sql: &str) -> &str {
     sql.lines().find(|l| !l.trim().is_empty()).unwrap_or("")
 }
 
+/// Shared sidebar-tree metrics so Items and Queries read as one language.
+const TREE_ROW_H: f32 = 26.0;
+const TREE_CHILD_INDENT: f32 = 28.0;
+const TREE_GUIDE_INSET: f32 = 22.0;
+const TREE_ICON: f32 = 16.0;
+
+fn paint_tree_row_fill(ui: &egui::Ui, row_rect: egui::Rect, selected: bool, hovered: bool) {
+    if !ui.is_rect_visible(row_rect) {
+        return;
+    }
+    let radius = egui::CornerRadius::same(7);
+    if selected {
+        ui.painter()
+            .rect_filled(row_rect, radius, palette::SELECTION());
+    } else if hovered {
+        ui.painter()
+            .rect_filled(row_rect, radius, palette::SURFACE_HOVER());
+    }
+}
+
+fn paint_tree_guide(ui: &egui::Ui, folder_rect: egui::Rect, body_rect: egui::Rect) {
+    let guide_x = folder_rect.left() + TREE_GUIDE_INSET;
+    ui.painter().vline(
+        guide_x,
+        egui::Rangef::new(
+            body_rect.top(),
+            (body_rect.bottom() - 4.0).max(body_rect.top()),
+        ),
+        egui::Stroke::new(1.0, palette::BORDER()),
+    );
+}
+
+fn paint_drop_line(ui: &egui::Ui, row_rect: egui::Rect, after: bool) {
+    if !ui.is_rect_visible(row_rect) {
+        return;
+    }
+    let y = if after {
+        row_rect.bottom()
+    } else {
+        row_rect.top()
+    };
+    ui.painter().hline(
+        row_rect.x_range(),
+        y,
+        egui::Stroke::new(2.0, palette::ACCENT()),
+    );
+}
+
+fn drop_after(ui: &egui::Ui, row_rect: egui::Rect) -> bool {
+    ui.ctx()
+        .pointer_interact_pos()
+        .is_some_and(|pointer| pointer.y > row_rect.center().y)
+}
+
+/// File-style leaf in the sidebar tree: full-width hover pill, indented icon + name.
+fn tree_file_row(
+    ui: &mut egui::Ui,
+    indent: f32,
+    icon: egui::ImageSource<'static>,
+    icon_color: egui::Color32,
+    name: &str,
+    selected: bool,
+    sense: egui::Sense,
+) -> (egui::Rect, egui::Response) {
+    let (row_rect, row_resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), TREE_ROW_H), sense);
+    paint_tree_row_fill(ui, row_rect, selected, row_resp.hovered());
+    let content = egui::Rect::from_min_max(
+        egui::pos2(row_rect.left() + indent, row_rect.top()),
+        row_rect.max,
+    );
+    ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let (icon_rect, _) =
+                ui.allocate_exact_size(egui::vec2(16.0, TREE_ROW_H), egui::Sense::hover());
+            egui::Image::new(icon).tint(icon_color).paint_at(
+                ui,
+                egui::Rect::from_center_size(icon_rect.center(), egui::Vec2::splat(TREE_ICON)),
+            );
+            ui.add(
+                egui::Label::new(egui::RichText::new(name).color(palette::TEXT()))
+                    .truncate()
+                    .selectable(false)
+                    .sense(egui::Sense::hover()),
+            );
+        });
+    });
+    (row_rect, row_resp)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CalloutEdit {
+    Idle,
+    Confirm,
+    Cancel,
+}
+
+/// Side callout for renaming a saved query or folder: sits to the right of `anchor`
+/// with a caret pointing back at the row. Not inline, not a modal.
+fn rename_callout(
+    ui: &mut egui::Ui,
+    anchor: &egui::Response,
+    name: &mut String,
+    hint: &str,
+) -> CalloutEdit {
+    const ARROW: f32 = 8.0;
+    let popup_id = anchor.id.with("rename_callout");
+    let focus_id = popup_id.with("focused");
+    let frame = egui::Frame::popup(ui.style())
+        .fill(palette::PANEL())
+        .stroke(egui::Stroke::new(1.0, palette::BORDER_STRONG()))
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin::same(10));
+
+    let mut confirm = false;
+    let mut cancel = false;
+    let shown = egui::Popup::from_response(anchor)
+        .id(popup_id)
+        .align(egui::RectAlign::RIGHT)
+        .align_alternatives(&[egui::RectAlign::LEFT])
+        .gap(ARROW + 1.0)
+        .width(268.0)
+        .frame(frame)
+        .open(true)
+        .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
+        .layout(egui::Layout::top_down(egui::Align::Min))
+        .show(|ui| {
+            ui.set_width(248.0);
+            ui.label(
+                egui::RichText::new("Rename")
+                    .small()
+                    .color(palette::TEXT_WEAK()),
+            );
+            ui.add_space(4.0);
+            let resp = components::text_input(ui, name, hint, ui.available_width());
+            let already_focused = ui
+                .ctx()
+                .data(|data| data.get_temp::<bool>(focus_id).unwrap_or(false));
+            if !already_focused {
+                resp.request_focus();
+                ui.ctx().data_mut(|data| data.insert_temp(focus_id, true));
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                confirm = true;
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                cancel = true;
+            }
+            ui.add_space(8.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if components::button(ui, icons::close(), "Cancel", true).clicked() {
+                    cancel = true;
+                }
+                if components::primary_button(ui, icons::save(), "Save", true).clicked() {
+                    confirm = true;
+                }
+            });
+        });
+
+    if let Some(inner) = shown {
+        paint_callout_arrow(
+            ui.ctx(),
+            inner.response.layer_id,
+            inner.response.rect,
+            anchor.rect,
+        );
+        if !confirm && !cancel {
+            let pointer_clicked = ui.input(|i| i.pointer.primary_released());
+            if pointer_clicked {
+                if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                    let in_popup = inner.response.rect.expand(ARROW).contains(pos);
+                    let in_row = anchor.rect.contains(pos);
+                    if !in_popup && !in_row {
+                        cancel = true;
+                    }
+                }
+            }
+        }
+    }
+    if confirm {
+        ui.ctx().data_mut(|data| data.remove::<bool>(focus_id));
+        CalloutEdit::Confirm
+    } else if cancel {
+        ui.ctx().data_mut(|data| data.remove::<bool>(focus_id));
+        CalloutEdit::Cancel
+    } else {
+        CalloutEdit::Idle
+    }
+}
+
+/// Hover preview beside a sidebar row: same chrome as the rename callout (panel fill,
+/// strong border, caret pointing at the anchor).
+fn sql_preview_callout(
+    ui: &mut egui::Ui,
+    anchor: &egui::Response,
+    title: &str,
+    sql: &str,
+    meta: Option<&str>,
+) {
+    const ARROW: f32 = 8.0;
+    let sql = sql.trim();
+    if sql.is_empty() {
+        return;
+    }
+    let frame = egui::Frame::popup(ui.style())
+        .fill(palette::PANEL())
+        .stroke(egui::Stroke::new(1.0, palette::BORDER_STRONG()))
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin::same(10));
+
+    let mut tooltip = egui::Tooltip::for_enabled(anchor);
+    tooltip.popup = tooltip
+        .popup
+        .align(egui::RectAlign::RIGHT)
+        .align_alternatives(&[egui::RectAlign::LEFT])
+        .gap(ARROW + 1.0)
+        .width(340.0)
+        .frame(frame)
+        .layout(egui::Layout::top_down(egui::Align::Min));
+
+    let shown = tooltip.show(|ui| {
+        ui.set_max_width(320.0);
+        ui.label(egui::RichText::new(title).color(palette::TEXT()).strong());
+        ui.add_space(6.0);
+        let mut font = egui::TextStyle::Monospace.resolve(ui.style());
+        font.size = (font.size - 1.5).max(10.0);
+        let mut job = crate::highlight::highlight_sql(sql, font);
+        job.wrap.max_width = ui.available_width().max(40.0);
+        job.wrap.max_rows = 14;
+        ui.add(egui::Label::new(job).selectable(false));
+        if let Some(meta) = meta.filter(|m| !m.is_empty()) {
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(meta)
+                    .small()
+                    .color(palette::TEXT_FAINT()),
+            );
+        }
+    });
+    if let Some(inner) = shown {
+        paint_callout_arrow(
+            ui.ctx(),
+            inner.response.layer_id,
+            inner.response.rect,
+            anchor.rect,
+        );
+    }
+}
+
+fn paint_callout_arrow(
+    ctx: &egui::Context,
+    layer: egui::LayerId,
+    popup: egui::Rect,
+    anchor: egui::Rect,
+) {
+    let on_right = popup.center().x >= anchor.center().x;
+    let y = anchor
+        .center()
+        .y
+        .clamp(popup.top() + 12.0, popup.bottom() - 12.0);
+    let (tip, base_a, base_b) = if on_right {
+        let x = popup.left();
+        (
+            egui::pos2(x - 7.0, y),
+            egui::pos2(x + 0.5, y - 6.5),
+            egui::pos2(x + 0.5, y + 6.5),
+        )
+    } else {
+        let x = popup.right();
+        (
+            egui::pos2(x + 7.0, y),
+            egui::pos2(x - 0.5, y - 6.5),
+            egui::pos2(x - 0.5, y + 6.5),
+        )
+    };
+    let painter = ctx.layer_painter(layer);
+    painter.add(egui::Shape::convex_polygon(
+        vec![tip, base_a, base_b],
+        palette::PANEL(),
+        egui::Stroke::NONE,
+    ));
+    let stroke = egui::Stroke::new(1.0, palette::BORDER_STRONG());
+    painter.line_segment([tip, base_a], stroke);
+    painter.line_segment([tip, base_b], stroke);
+}
+
 fn connection_color_to_egui(color: dbcore::ConnectionColor) -> egui::Color32 {
     egui::Color32::from_rgb(color.r, color.g, color.b)
 }
@@ -392,10 +680,6 @@ impl DbGuiApp {
                 );
                 title_bar::handle_chrome_response(ui, &bar_resp);
                 let connected = self.active().is_some();
-                let has_result = self
-                    .tabs
-                    .get(self.active_query_tab)
-                    .is_some_and(|tab| tab.result.is_some());
                 let breadcrumb = self.breadcrumb_text();
 
                 // Side clusters are drawn first and size themselves from their contents;
@@ -416,19 +700,6 @@ impl DbGuiApp {
                             && connected
                         {
                             actions.push(Action::Disconnect);
-                        }
-                        if has_result {
-                            components::toolbar_sep(ui);
-                            if components::toolbar_icon_button(
-                                ui,
-                                icons::filter(),
-                                "Filter results",
-                            )
-                            .clicked()
-                            {
-                                let visible = self.tab().filter.visible;
-                                self.tab_mut().filter.visible = !visible;
-                            }
                         }
                     },
                 );
@@ -453,56 +724,16 @@ impl DbGuiApp {
                         }
                         #[cfg(not(target_os = "macos"))]
                         title_bar::group_separator(ui);
-                        if components::layout_toggle(
+                        components::layout_menu(
                             ui,
-                            self.show_details_panel,
-                            components::LayoutSide::Details,
-                            "Details panel",
-                        )
-                        .clicked()
-                        {
-                            self.show_details_panel = !self.show_details_panel;
-                        }
-                        if components::layout_toggle(
-                            ui,
-                            self.show_schema_panel,
-                            components::LayoutSide::Schema,
-                            "Schema panel",
-                        )
-                        .clicked()
-                        {
-                            self.show_schema_panel = !self.show_schema_panel;
-                        }
-                        if components::layout_toggle(
-                            ui,
-                            self.show_query_console,
-                            components::LayoutSide::Query,
-                            "Query console",
-                        )
-                        .clicked()
-                        {
-                            self.show_query_console = !self.show_query_console;
-                        }
-                        if components::layout_toggle(
-                            ui,
-                            self.show_live_log,
-                            components::LayoutSide::LiveLog,
-                            "Live log panel",
-                        )
-                        .clicked()
-                        {
-                            self.show_live_log = !self.show_live_log;
-                        }
-                        if components::layout_toggle(
-                            ui,
-                            self.show_connection_tabs,
-                            components::LayoutSide::Connections,
-                            "Connection tabs",
-                        )
-                        .clicked()
-                        {
-                            self.show_connection_tabs = !self.show_connection_tabs;
-                        }
+                            &mut components::LayoutChrome {
+                                connections: &mut self.show_connection_tabs,
+                                schema: &mut self.show_schema_panel,
+                                details: &mut self.show_details_panel,
+                                query: &mut self.show_query_console,
+                                live_log: &mut self.show_live_log,
+                            },
+                        );
                     },
                 );
 
@@ -805,20 +1036,54 @@ impl DbGuiApp {
         });
     }
 
+    /// Result filter toggle, styled like the pager keys. Lives next to page navigation
+    /// rather than in the window title bar. `active` follows the open filter strip.
+    fn result_filter_button(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        if self.tab().result.is_none() {
+            return;
+        }
+        let shortcut = ui.ctx().format_shortcut(&egui::KeyboardShortcut::new(
+            egui::Modifiers::COMMAND,
+            egui::Key::F,
+        ));
+        let hint = format!("Filter results  ({shortcut})");
+        if components::soft_icon_button_state(
+            ui,
+            icons::filter(),
+            &hint,
+            true,
+            self.tab().filter.visible,
+        )
+        .clicked()
+        {
+            actions.push(Action::ToggleFilter);
+        }
+    }
+
     /// Server-side pager, right-aligned in the view-mode bar. The centre control opens a
     /// compact Limit/Offset popover; values remain local until Go/Enter so editing never
     /// fires a query per keystroke. Page flips re-run only the requested server-side window.
     fn pager(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let tab = self.tab();
-        if tab.result.is_none()
-            || (tab.edits.source.is_none() && tab.edits.pending_source.is_none())
-        {
+        let show_filter = tab.result.is_some();
+        let page = tab
+            .result
+            .is_some()
+            .then(|| dbcore::parse_page_window(&tab.sql))
+            .flatten()
+            .and_then(|win| {
+                let limit = win.limit.filter(|&l| l > 0)?;
+                (tab.edits.source.is_some() || tab.edits.pending_source.is_some())
+                    .then_some((win, limit))
+            });
+        if page.is_none() && !show_filter {
             return;
         }
-        let Some(win) = dbcore::parse_page_window(&tab.sql) else {
-            return;
-        };
-        let Some(limit) = win.limit.filter(|&l| l > 0) else {
+        let Some((win, limit)) = page else {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(4.0);
+                self.result_filter_button(ui, actions);
+            });
             return;
         };
         let idle = self.busy == Busy::Idle;
@@ -859,13 +1124,15 @@ impl DbGuiApp {
             components::soft_icon_button(ui, src, hint, enabled && idle).clicked()
         };
 
-        // Right-to-left puts Next at the outer edge, matching the familiar ‹ sliders › shape.
+        // Right-to-left puts Next at the outer edge: ‹ filter ›, matching the familiar
+        // pager cluster. Filter sits between the arrows so it lives with the result, not
+        // the window title bar.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(4.0);
             if nav_button(ui, true, has_more, "Next page") {
                 actions.push(Action::Page(PageNav::Next));
             }
-
+            self.result_filter_button(ui, actions);
             let pager_hint = format!(
                 "Limit {} · Offset {}",
                 group_digits(limit),
@@ -2714,25 +2981,23 @@ impl DbGuiApp {
     }
 
     /// The History tab: the clear-all control above the executed-statement list.
+    /// The History tab: search plus clear-all, then the executed-statement list.
     fn sidebar_history(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         ui.horizontal(|ui| {
-            components::section_header(ui, "History");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if components::icon_button(ui, icons::trash(), "Delete the entire history")
-                    .clicked()
-                {
-                    actions.push(Action::ClearHistory);
-                }
-            });
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let trash_w = 28.0;
+            let search_w = (ui.available_width() - trash_w).max(80.0);
+            components::icon_text_input(
+                ui,
+                &mut self.history_filter,
+                "Search history…",
+                icons::search(),
+                search_w,
+            );
+            if components::icon_button(ui, icons::trash(), "Delete the entire history").clicked() {
+                actions.push(Action::ClearHistory);
+            }
         });
-        ui.add_space(4.0);
-        components::icon_text_input(
-            ui,
-            &mut self.history_filter,
-            "Search history…",
-            icons::search(),
-            ui.available_width(),
-        );
         ui.add_space(6.0);
         self.history_list(ui, actions);
     }
@@ -2822,7 +3087,6 @@ impl DbGuiApp {
         actions: &mut Vec<Action>,
     ) {
         use egui::collapsing_header::CollapsingState;
-        const ROW_H: f32 = 26.0;
 
         // Selected = this table is what the active tab is currently showing.
         let selected = self.tab().edits.source.as_ref().is_some_and(|s| {
@@ -2833,8 +3097,10 @@ impl DbGuiApp {
         let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, false);
 
         let full_w = ui.available_width();
-        let (row_rect, row_resp) =
-            ui.allocate_exact_size(egui::vec2(full_w, ROW_H), egui::Sense::click_and_drag());
+        let (row_rect, row_resp) = ui.allocate_exact_size(
+            egui::vec2(full_w, TREE_ROW_H),
+            egui::Sense::click_and_drag(),
+        );
         // Keep the row's height in the outer scroll area, but avoid building its icons,
         // interactions, and menus when a collapsed table is outside the viewport. Large schemas
         // commonly contain thousands of tables, so this removes most per-frame widget work.
@@ -2857,20 +3123,8 @@ impl DbGuiApp {
             let compatible =
                 source.conn_id == active.config_id && source.pinned == pinned && !same_table;
             if compatible && ui.is_rect_visible(row_rect) {
-                let after = ui
-                    .ctx()
-                    .pointer_interact_pos()
-                    .is_some_and(|pointer| pointer.y > row_rect.center().y);
-                let y = if after {
-                    row_rect.bottom()
-                } else {
-                    row_rect.top()
-                };
-                ui.painter().hline(
-                    row_rect.x_range(),
-                    y,
-                    egui::Stroke::new(2.0, palette::ACCENT()),
-                );
+                let after = drop_after(ui, row_rect);
+                paint_drop_line(ui, row_rect, after);
                 if let Some(source) = row_resp.dnd_release_payload::<SchemaTableDrag>() {
                     actions.push(Action::MoveSchemaTable {
                         conn_id: active.config_id.clone(),
@@ -2884,17 +3138,7 @@ impl DbGuiApp {
             }
         }
 
-        // Pill background: a soft accent-tinted selection fill when selected (no border), a
-        // plain raised fill on hover.
-        if ui.is_rect_visible(row_rect) {
-            let r = egui::CornerRadius::same(7);
-            if selected {
-                ui.painter().rect_filled(row_rect, r, palette::SELECTION());
-            } else if row_resp.hovered() {
-                ui.painter()
-                    .rect_filled(row_rect, r, palette::SURFACE_HOVER());
-            }
-        }
+        paint_tree_row_fill(ui, row_rect, selected, row_resp.hovered());
 
         // Row content, painted on top of the pill. The chevron and the star are their own
         // interactive widgets layered above `row_resp`, so they capture their own clicks while
@@ -2908,7 +3152,7 @@ impl DbGuiApp {
 
                     // Disclosure chevron follows the shared Hugeicons stroke language.
                     let (chev_rect, chev_resp) =
-                        ui.allocate_exact_size(egui::vec2(12.0, ROW_H), egui::Sense::click());
+                        ui.allocate_exact_size(egui::vec2(12.0, TREE_ROW_H), egui::Sense::click());
                     let chevron = if state.openness(ui.ctx()) < 0.5 {
                         icons::arrow_right()
                     } else {
@@ -2935,10 +3179,13 @@ impl DbGuiApp {
                         palette::ACCENT()
                     };
                     let (icon_rect, _) =
-                        ui.allocate_exact_size(egui::vec2(16.0, ROW_H), egui::Sense::hover());
+                        ui.allocate_exact_size(egui::vec2(16.0, TREE_ROW_H), egui::Sense::hover());
                     egui::Image::new(icons::table()).tint(icon_color).paint_at(
                         ui,
-                        egui::Rect::from_center_size(icon_rect.center(), egui::vec2(15.0, 15.0)),
+                        egui::Rect::from_center_size(
+                            icon_rect.center(),
+                            egui::Vec2::splat(TREE_ICON),
+                        ),
                     );
 
                     // Split the strip left of the row edge: the pin sits flush right, the name
@@ -2949,7 +3196,7 @@ impl DbGuiApp {
                     ui.allocate_rect(rest, egui::Sense::hover());
                     let star_rect = egui::Rect::from_min_size(
                         egui::pos2(rest.right() - 20.0, rest.top()),
-                        egui::vec2(20.0, ROW_H),
+                        egui::vec2(20.0, TREE_ROW_H),
                     );
                     let label_rect = egui::Rect::from_min_max(
                         rest.min,
@@ -3047,27 +3294,16 @@ impl DbGuiApp {
         if toggle_open {
             state.toggle(ui);
         }
-        // Children (columns / indexes / FKs) as a proper tree: indented well past the parent
-        // and connected by a subtle vertical guide line, so the nesting reads at a glance.
-        const CHILD_INDENT: f32 = 28.0;
-        let guide_x = row_rect.left() + 17.0;
+        // Children stay full-width like Saved Queries: the hover pill is a row, the icon+name
+        // sit past the chevron, and a hairline spine ties them to the parent.
         let body = state.show_body_unindented(ui, |ui| {
-            ui.horizontal_top(|ui| {
-                ui.add_space(CHILD_INDENT);
-                ui.vertical(|ui| {
-                    ui.add_space(1.0);
-                    schema_table_body(ui, table);
-                    ui.add_space(1.0);
-                });
-            });
+            ui.spacing_mut().item_spacing.y = 1.0;
+            ui.add_space(1.0);
+            schema_table_body(ui, table);
+            ui.add_space(1.0);
         });
         if let Some(inner) = body {
-            let rect = inner.response.rect;
-            ui.painter().vline(
-                guide_x,
-                egui::Rangef::new(rect.top(), (rect.bottom() - 5.0).max(rect.top())),
-                egui::Stroke::new(1.0, palette::BORDER()),
-            );
+            paint_tree_guide(ui, row_rect, inner.response.rect);
         }
     }
 
@@ -3082,7 +3318,7 @@ impl DbGuiApp {
         let filter = self.schema_filter.to_lowercase();
         let matches = |name: &str| filter.is_empty() || name.to_lowercase().contains(&filter);
 
-        // ── Views: collapsible like tables (columns as children), click to preview rows. ──
+        // ── Views: a folder of file-style rows, matching Saved Queries. ──
         let views: Vec<&dbcore::ViewInfo> = active
             .schema
             .views
@@ -3090,87 +3326,56 @@ impl DbGuiApp {
             .filter(|v| matches(&v.name))
             .collect();
         if !views.is_empty() {
-            object_group(ui, "views_group", "Views", views.len(), |ui| {
-                for view in views {
-                    let id =
-                        ui.make_persistent_id(("view", view.schema.as_deref(), view.name.as_str()));
-                    let (_t, header, _b) =
-                        egui::collapsing_header::CollapsingState::load_with_default_open(
-                            ui.ctx(),
-                            id,
-                            false,
-                        )
-                        .show_header(ui, |ui| {
-                            let kind = crate::components::QueryTabKind::View;
-                            icons::show_colored(ui, kind.icon(), 15.0, kind.color());
-                            ui.add_space(2.0);
-                            let label = if view.materialized {
-                                format!("{} · materialized", view.name)
-                            } else {
-                                view.name.clone()
-                            };
-                            components::truncated_label(
+            object_group(ui, "views_group", "Views", false, |ui| {
+                virtualized_object_rows(ui, &views, |ui, index, view| {
+                    let tab_kind = crate::components::QueryTabKind::View;
+                    let label = if view.materialized {
+                        format!("{} · materialized", view.name)
+                    } else {
+                        view.name.clone()
+                    };
+                    ui.push_id(
+                        ("view", index, view.schema.as_deref(), view.name.as_str()),
+                        |ui| {
+                            let row = object_leaf_row(
                                 ui,
+                                tab_kind.icon(),
+                                tab_kind.color(),
                                 &label,
-                                None,
-                                false,
-                                egui::Sense::click(),
-                            )
-                        })
-                        .body(|ui| {
-                            for col in &view.columns {
-                                ui.horizontal(|ui| {
-                                    icons::show_weak(ui, icons::column(), 13.0);
-                                    ui.add_space(2.0);
-                                    components::truncated_label(
-                                        ui,
-                                        &col.name,
-                                        None,
-                                        false,
-                                        egui::Sense::hover(),
-                                    );
-                                    components::truncated_label(
-                                        ui,
-                                        &col.data_type,
-                                        Some(&col.data_type),
-                                        true,
-                                        egui::Sense::hover(),
-                                    );
+                                "Click to preview rows · right-click for actions",
+                            );
+                            row.context_menu(|ui| {
+                                ui.set_min_width(170.0);
+                                if components::button(ui, icons::edit(), "Edit View…", true)
+                                    .clicked()
+                                {
+                                    actions.push(Action::OpenEditView((*view).clone()));
+                                    ui.close();
+                                }
+                                if components::button(ui, icons::trash(), "Drop View…", true)
+                                    .on_hover_text("Delete this view")
+                                    .clicked()
+                                {
+                                    actions.push(Action::DropView((*view).clone()));
+                                    ui.close();
+                                }
+                            });
+                            if row.clicked() || row.double_clicked() {
+                                let source = crate::edit::EditSource {
+                                    schema: view.schema.clone(),
+                                    table: view.name.clone(),
+                                    pk_cols: Vec::new(),
+                                };
+                                actions.push(Action::OpenTable {
+                                    sql: kind.preview_query(&view.qualified(kind), 100),
+                                    source,
+                                    pin: row.double_clicked(),
+                                    kind: tab_kind,
                                 });
                             }
-                        });
-                    let resp = header
-                        .inner
-                        .on_hover_text("Click to preview rows · right-click for actions");
-                    resp.context_menu(|ui| {
-                        ui.set_min_width(170.0);
-                        if components::button(ui, icons::edit(), "Edit View…", true).clicked() {
-                            actions.push(Action::OpenEditView(view.clone()));
-                            ui.close();
-                        }
-                        if components::button(ui, icons::trash(), "Drop View…", true)
-                            .on_hover_text("Delete this view")
-                            .clicked()
-                        {
-                            actions.push(Action::DropView(view.clone()));
-                            ui.close();
-                        }
-                    });
-                    if resp.clicked() || resp.double_clicked() {
-                        let source = crate::edit::EditSource {
-                            schema: view.schema.clone(),
-                            table: view.name.clone(),
-                            // Views have no primary key, so the preview grid stays read-only.
-                            pk_cols: Vec::new(),
-                        };
-                        actions.push(Action::OpenTable {
-                            sql: kind.preview_query(&view.qualified(kind), 100),
-                            source,
-                            pin: resp.double_clicked(),
-                            kind: crate::components::QueryTabKind::View,
-                        });
-                    }
-                }
+                        },
+                    );
+                });
             });
         }
 
@@ -3188,7 +3393,7 @@ impl DbGuiApp {
             if routines.is_empty() {
                 continue;
             }
-            object_group(ui, key, title, routines.len(), |ui| {
+            object_group(ui, key, title, false, |ui| {
                 virtualized_object_rows(ui, &routines, |ui, index, r| {
                     let signature = r.signature();
                     let tab_kind = match r.kind {
@@ -3247,7 +3452,7 @@ impl DbGuiApp {
             .filter(|t| matches(&t.name))
             .collect();
         if !triggers.is_empty() {
-            object_group(ui, "trig_group", "Triggers", triggers.len(), |ui| {
+            object_group(ui, "trig_group", "Triggers", false, |ui| {
                 virtualized_object_rows(ui, &triggers, |ui, index, t| {
                     let tab_kind = crate::components::QueryTabKind::Trigger;
                     ui.push_id(
@@ -3296,7 +3501,7 @@ impl DbGuiApp {
     }
 
     /// The TablePlus-style filter strip directly above the grid. Only shown when toggled on
-    /// and a result with columns is loaded. Edits mutate `self.filter` directly; an Apply or
+    /// and a result with columns is loaded. Edits mutate `self.filter` directly; Apply or
     /// Clear rebuilds the view.
     pub(super) fn filter_bar(&mut self, root: &mut egui::Ui) {
         let idx = self.active_query_tab;
@@ -3318,6 +3523,12 @@ impl DbGuiApp {
         let mut event: Option<FilterEvent> = None;
         egui::Panel::top("filter_bar")
             .resizable(false)
+            .frame(
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(6, 4))
+                    .fill(palette::PANEL()),
+            )
+            .show_separator_line(true)
             .show_inside(root, |ui| {
                 event = filter::ui(ui, &mut self.tabs[idx].filter, &col_names);
             });
@@ -3404,6 +3615,9 @@ impl DbGuiApp {
                             false,
                         );
                         self.tabs[idx].view = modes[choice];
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            self.result_filter_button(ui, actions);
+                        });
                         return;
                     }
                     if !editable_table {
@@ -3420,6 +3634,9 @@ impl DbGuiApp {
                             false,
                         );
                         self.tabs[idx].view = modes[choice];
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            self.result_filter_button(ui, actions);
+                        });
                         return;
                     }
                     // Staged row-edit history only applies to the Data surface. Keep these
@@ -4753,9 +4970,9 @@ impl DbGuiApp {
         }
     }
 
-    /// The query-history list (newest first): each executed statement with its connection,
-    /// time, duration, and outcome. Rendered inside the sidebar's History tab. (The
-    /// append-only compliance record is separate — see `dbcore::audit`.)
+    /// The query-history list (newest first): date groups, then time + highlighted SQL.
+    /// Rendered inside the sidebar's History tab. (The append-only compliance record is
+    /// separate — see `dbcore::audit`.)
     fn history_list(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         if self.history_cache.is_empty() {
             ui.label(egui::RichText::new("No queries recorded yet.").color(palette::TEXT_WEAK()));
@@ -4770,120 +4987,106 @@ impl DbGuiApp {
             return;
         }
 
-        let font = egui::TextStyle::Monospace.resolve(ui.style());
+        let mut font = egui::TextStyle::Monospace.resolve(ui.style());
+        font.size = (font.size - 1.5).max(10.0);
         egui::ScrollArea::vertical()
             .id_salt("history_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
                 for (day_index, day) in days.iter().enumerate() {
-                    let count = day.entries.len();
-                    let title = format!(
-                        "{}  ·  {count} {}",
-                        day.label,
-                        if count == 1 { "entry" } else { "entries" }
-                    );
-                    egui::CollapsingHeader::new(
-                        egui::RichText::new(title)
-                            .monospace()
-                            .strong()
-                            .color(palette::TEXT()),
-                    )
-                    .id_salt(("history_day", &day.key))
-                    .default_open(day_index == 0)
-                    .show(ui, |ui| {
+                    let id_key = format!("history_day:{}", day.key);
+                    let label = day.label.clone();
+                    object_group(ui, &id_key, &label, day_index == 0, |ui| {
+                        ui.spacing_mut().item_spacing.y = 12.0;
                         for &idx in &day.entries {
                             let entry = &self.history_cache[idx];
                             let (_, _, clock) = history_moment(&entry.at);
+                            let sql = entry.sql.clone();
+                            let error = entry.error.clone();
+                            let rows = entry.rows;
+                            let elapsed_ms = entry.elapsed_ms;
+                            let width = (ui.available_width() - TREE_CHILD_INDENT).max(40.0);
 
-                            ui.add_space(3.0);
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new(clock)
-                                        .small()
-                                        .strong()
-                                        .color(palette::TEXT_WEAK()),
-                                );
-                                let (status, color) = if entry.ok {
-                                    ("ok", egui::Color32::from_rgb(58, 178, 108))
-                                } else {
-                                    ("err", palette::DANGER())
-                                };
-                                ui.label(egui::RichText::new(status).small().strong().color(color));
-                                ui.label(
-                                    egui::RichText::new(&entry.conn_name)
-                                        .small()
-                                        .color(palette::TEXT_FAINT()),
-                                );
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if components::Btn::new("Use")
-                                            .show(ui)
-                                            .on_hover_text("Put this SQL into the active tab")
-                                            .clicked()
-                                        {
-                                            actions.push(Action::UseHistorySql(idx));
+                            let row_resp = ui
+                                .horizontal_top(|ui| {
+                                    ui.add_space(TREE_CHILD_INDENT);
+                                    ui.vertical(|ui| {
+                                        ui.set_min_width(width);
+                                        ui.set_max_width(width);
+                                        ui.spacing_mut().item_spacing.y = 3.0;
+                                        ui.label(
+                                            egui::RichText::new(&clock)
+                                                .small()
+                                                .monospace()
+                                                .color(palette::TEXT_FAINT()),
+                                        );
+                                        let mut job =
+                                            crate::highlight::highlight_sql(&sql, font.clone());
+                                        job.wrap.max_width = ui.available_width().max(40.0);
+                                        job.wrap.max_rows = 12;
+                                        ui.add(
+                                            egui::Label::new(job)
+                                                .selectable(false)
+                                                .sense(egui::Sense::hover()),
+                                        );
+                                        if let Some(error) = &error {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(error)
+                                                        .small()
+                                                        .color(palette::DANGER()),
+                                                )
+                                                .truncate()
+                                                .selectable(false)
+                                                .sense(egui::Sense::hover()),
+                                            );
                                         }
-                                        if components::Btn::new("Copy").show(ui).clicked() {
-                                            ui.ctx().copy_text(entry.sql.clone());
-                                        }
-                                        if components::Btn::new("Save")
-                                            .show(ui)
-                                            .on_hover_text("Save as a favorite")
-                                            .clicked()
-                                        {
-                                            actions.push(Action::SaveFavoriteFromHistory(idx));
-                                        }
-                                    },
-                                );
+                                    });
+                                })
+                                .response
+                                .interact(egui::Sense::click())
+                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                            let meta = format!(
+                                "{} rows · {:.0} ms",
+                                rows.map_or_else(|| "—".to_string(), |n| n.to_string()),
+                                elapsed_ms
+                            );
+                            sql_preview_callout(ui, &row_resp, &clock, &sql, Some(&meta));
+                            row_resp.context_menu(|ui| {
+                                history_entry_menu(ui, idx, &sql, actions);
                             });
-
-                            let detail = match &entry.error {
-                                Some(e) => format!("{} — {e}", first_line(&entry.sql)),
-                                None => first_line(&entry.sql).to_string(),
-                            };
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(detail).font(font.clone()).color(
-                                        if entry.ok {
-                                            palette::TEXT_WEAK()
-                                        } else {
-                                            palette::DANGER()
-                                        },
-                                    ),
-                                )
-                                .truncate(),
-                            )
-                            .on_hover_text(format!(
-                                "{}\n\n{} rows · {:.0} ms",
-                                entry.sql,
-                                entry
-                                    .rows
-                                    .map_or_else(|| "—".to_string(), |rows| rows.to_string()),
-                                entry.elapsed_ms
-                            ));
-                            ui.separator();
+                            if row_resp.clicked() {
+                                actions.push(Action::UseHistorySql(idx));
+                            }
                         }
                     });
                 }
             });
     }
 
-    /// The Queries tab: filter box above the saved-query list. A row loads its SQL into the
-    /// editor on click (hover pill, like schema rows); rename/copy/delete sit behind a
-    /// hover-revealed ⋮ menu so the resting state stays quiet.
+    /// The Queries tab: search above a folder tree of named queries. Rows show only the
+    /// query name (SQL stays in the editor / a hover tooltip). Click opens a Query tab;
+    /// folders and move/rename/delete sit on the right-click menu.
     fn favorites_tab(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        components::section_header(ui, "Saved Queries");
-        components::icon_text_input(
-            ui,
-            &mut self.favorites_filter,
-            "filter queries…",
-            icons::filter(),
-            ui.available_width(),
-        );
-        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let plus_w = 28.0;
+            let search_w = (ui.available_width() - plus_w).max(80.0);
+            components::icon_text_input(
+                ui,
+                &mut self.favorites_filter,
+                "Search for query…",
+                icons::search(),
+                search_w,
+            );
+            if components::icon_button(ui, icons::plus(), "New folder").clicked() {
+                actions.push(Action::NewFavoriteFolder { move_id: None });
+            }
+        });
+        ui.add_space(6.0);
 
-        if self.favorites_cache.is_empty() {
+        if self.favorites_cache.is_empty() && self.favorite_folders.is_empty() {
             components::empty_state(
                 ui,
                 icons::star(),
@@ -4893,192 +5096,322 @@ impl DbGuiApp {
             return;
         }
 
-        let needle = self.favorites_filter.trim().to_lowercase();
-        let mono = egui::TextStyle::Monospace.resolve(ui.style());
-        let body = egui::TextStyle::Body.resolve(ui.style());
-        let body_h = ui.text_style_height(&egui::TextStyle::Body);
-        let mono_h = ui.text_style_height(&egui::TextStyle::Monospace);
+        let keep_empty = self.favorites_filter.trim().is_empty();
+        let groups = dbcore::favorites::grouped(
+            &self.favorites_cache,
+            &self.favorite_folders,
+            &self.favorites_filter,
+            keep_empty,
+        );
+        if groups.is_empty() {
+            ui.label(
+                egui::RichText::new("No queries match the search.").color(palette::TEXT_FAINT()),
+            );
+            return;
+        }
 
-        let mut any_shown = false;
         egui::ScrollArea::vertical()
             .id_salt("saved_queries_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                for idx in 0..self.favorites_cache.len() {
-                    let fav = &self.favorites_cache[idx];
-                    if !needle.is_empty()
-                        && !fav.name.to_lowercase().contains(&needle)
-                        && !fav.sql.to_lowercase().contains(&needle)
-                    {
-                        continue;
-                    }
-                    any_shown = true;
-                    let name = fav.name.clone();
-                    let sql = fav.sql.clone();
-                    let preview = first_line(&sql).to_string();
-                    let fav_id = fav.id.clone();
-
-                    let is_renaming_this = self
-                        .favorite_pending
-                        .as_ref()
-                        .and_then(|d| d.editing_id.as_ref())
-                        .is_some_and(|id| id == &fav.id);
-                    if is_renaming_this {
-                        egui::Frame::new()
-                            .inner_margin(egui::Margin::symmetric(10, 8))
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    if let Some(draft) = self.favorite_pending.as_mut() {
-                                        let w = (ui.available_width() - 150.0).max(180.0);
-                                        let resp =
-                                            components::text_input(ui, &mut draft.name, "", w);
-                                        resp.request_focus();
-                                        if resp.lost_focus()
-                                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                                        {
-                                            actions.push(Action::ConfirmSaveFavorite);
-                                        } else if resp.lost_focus()
-                                            && ui.input(|i| i.key_pressed(egui::Key::Escape))
-                                        {
-                                            actions.push(Action::CancelSaveFavorite);
-                                        }
-                                    }
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            ui.spacing_mut().item_spacing.x = 6.0;
-                                            if components::Btn::new("Cancel").show(ui).clicked() {
-                                                actions.push(Action::CancelSaveFavorite);
-                                            }
-                                            if components::Btn::new("Save").show(ui).clicked() {
-                                                actions.push(Action::ConfirmSaveFavorite);
-                                            }
-                                        },
-                                    );
-                                });
-                            });
-                        continue;
-                    }
-
-                    // A query saved without a title carries its own SQL as its name — show
-                    // that once, as one monospace line, instead of the same text twice.
-                    let name_is_sql = name.trim() == preview.trim();
-                    let row_h = if name_is_sql {
-                        mono_h + 16.0
-                    } else {
-                        body_h + 3.0 + mono_h + 16.0
-                    };
-
-                    let (rect, row_resp) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), row_h),
-                        egui::Sense::click(),
-                    );
-                    // ⋮ hit-zone flush right; its slot is always reserved so the text never
-                    // reflows when the icon fades in on hover.
-                    let dots_rect = egui::Rect::from_center_size(
-                        egui::pos2(rect.right() - 16.0, rect.center().y),
-                        egui::vec2(20.0, 20.0),
-                    );
-                    let dots_resp = ui.interact(
-                        dots_rect,
-                        ui.make_persistent_id(("fav_menu", fav_id.as_str())),
-                        egui::Sense::click(),
-                    );
-
-                    let hovered = row_resp.hovered() || dots_resp.hovered();
-                    if ui.is_rect_visible(rect) {
-                        if hovered {
-                            ui.painter().rect_filled(
-                                rect,
-                                egui::CornerRadius::same(7),
-                                palette::SURFACE_HOVER(),
-                            );
-                        }
-                        let text_left = rect.left() + 10.0;
-                        let clip = egui::Rect::from_min_max(
-                            egui::pos2(text_left, rect.top()),
-                            egui::pos2(dots_rect.left() - 4.0, rect.bottom()),
-                        );
-                        let painter = ui.painter().with_clip_rect(clip);
-                        if name_is_sql {
-                            painter.text(
-                                egui::pos2(text_left, rect.center().y),
-                                egui::Align2::LEFT_CENTER,
-                                &preview,
-                                mono.clone(),
-                                palette::TEXT(),
-                            );
-                        } else {
-                            painter.text(
-                                egui::pos2(text_left, rect.top() + 8.0),
-                                egui::Align2::LEFT_TOP,
-                                &name,
-                                body.clone(),
-                                palette::TEXT(),
-                            );
-                            painter.text(
-                                egui::pos2(text_left, rect.bottom() - 8.0),
-                                egui::Align2::LEFT_BOTTOM,
-                                &preview,
-                                mono.clone(),
-                                palette::TEXT_WEAK(),
-                            );
-                        }
-                        if hovered {
-                            let color = if dots_resp.hovered() {
-                                palette::TEXT()
-                            } else {
-                                palette::TEXT_FAINT()
-                            };
-                            egui::Image::new(icons::more_vert()).tint(color).paint_at(
-                                ui,
-                                egui::Rect::from_center_size(
-                                    dots_rect.center(),
-                                    egui::vec2(16.0, 16.0),
-                                ),
-                            );
-                        }
-                    }
-
-                    let row_resp = row_resp
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .on_hover_text(&sql);
-                    if row_resp.clicked() {
-                        actions.push(Action::UseFavorite(idx));
-                    }
-
-                    egui::Popup::menu(&dots_resp)
-                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                        .show(|ui| {
-                            ui.set_min_width(140.0);
-                            if ui.button("Open in Editor").clicked() {
-                                actions.push(Action::UseFavorite(idx));
-                                ui.close();
-                            }
-                            ui.separator();
-                            if ui.button("Rename").clicked() {
-                                actions.push(Action::RenameFavorite(idx));
-                                ui.close();
-                            }
-                            if ui.button("Copy").clicked() {
-                                ui.ctx().copy_text(sql.clone());
-                                ui.close();
-                            }
-                            if ui.button("Delete").clicked() {
-                                actions.push(Action::DeleteFavorite(idx));
-                                ui.close();
-                            }
-                        });
-                }
-                if !any_shown {
-                    ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new("No queries match the filter.")
-                            .color(palette::TEXT_FAINT()),
-                    );
+                ui.spacing_mut().item_spacing.y = 1.0;
+                for (folder, idxs) in groups {
+                    self.favorite_folder_block(ui, &folder, &idxs, actions);
                 }
             });
+    }
+
+    fn favorite_folder_block(
+        &mut self,
+        ui: &mut egui::Ui,
+        folder: &str,
+        idxs: &[usize],
+        actions: &mut Vec<Action>,
+    ) {
+        use egui::collapsing_header::CollapsingState;
+        let ungrouped = folder.eq_ignore_ascii_case(dbcore::favorites::UNGROUPED);
+        let id = ui.make_persistent_id(("fav_folder", folder));
+        let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, true);
+
+        let renaming_this = self
+            .folder_pending
+            .as_ref()
+            .and_then(|draft| draft.from.as_deref())
+            .is_some_and(|from| from.eq_ignore_ascii_case(folder));
+        let sense = if ungrouped || renaming_this {
+            egui::Sense::click()
+        } else {
+            egui::Sense::click_and_drag()
+        };
+        let (row_rect, row_resp) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), TREE_ROW_H), sense);
+        let dots_rect = egui::Rect::from_center_size(
+            egui::pos2(row_rect.right() - 16.0, row_rect.center().y),
+            egui::vec2(20.0, 20.0),
+        );
+        let dots_resp = ui.interact(
+            dots_rect,
+            ui.make_persistent_id(("fav_folder_menu", folder)),
+            egui::Sense::click(),
+        );
+        let hovered = row_resp.hovered()
+            || dots_resp.hovered()
+            || row_resp.context_menu_opened()
+            || dots_resp.context_menu_opened();
+        paint_tree_row_fill(ui, row_rect, false, hovered);
+
+        if !ungrouped && !renaming_this {
+            row_resp.dnd_set_drag_payload(SavedQueryDrag::Folder(folder.to_string()));
+        }
+        if let Some(source) = row_resp.dnd_hover_payload::<SavedQueryDrag>() {
+            match source.as_ref() {
+                SavedQueryDrag::Folder(source_name)
+                    if !ungrouped && !source_name.eq_ignore_ascii_case(folder) =>
+                {
+                    let after = drop_after(ui, row_rect);
+                    paint_drop_line(ui, row_rect, after);
+                    if let Some(released) = row_resp.dnd_release_payload::<SavedQueryDrag>() {
+                        if let SavedQueryDrag::Folder(source_name) = released.as_ref() {
+                            actions.push(Action::ReorderFavoriteFolder {
+                                source: source_name.clone(),
+                                target: folder.to_string(),
+                                after,
+                            });
+                        }
+                    }
+                }
+                SavedQueryDrag::Query(_) => {
+                    paint_tree_row_fill(ui, row_rect, true, true);
+                    if let Some(released) = row_resp.dnd_release_payload::<SavedQueryDrag>() {
+                        if let SavedQueryDrag::Query(id) = released.as_ref() {
+                            actions.push(Action::DropFavoriteOnFolder {
+                                id: id.clone(),
+                                folder: if ungrouped {
+                                    None
+                                } else {
+                                    Some(folder.to_string())
+                                },
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut toggle_open = row_resp.clicked()
+            && !row_resp.double_clicked()
+            && !dots_resp.clicked()
+            && !renaming_this
+            && !row_resp.dragged();
+        ui.scope_builder(
+            egui::UiBuilder::new().max_rect(row_rect.shrink2(egui::vec2(6.0, 0.0))),
+            |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    let (chev_rect, chev_resp) =
+                        ui.allocate_exact_size(egui::vec2(12.0, TREE_ROW_H), egui::Sense::click());
+                    let chevron = if state.openness(ui.ctx()) < 0.5 {
+                        icons::arrow_right()
+                    } else {
+                        icons::chevron_down()
+                    };
+                    egui::Image::new(chevron)
+                        .fit_to_exact_size(egui::Vec2::splat(12.0))
+                        .tint(palette::TEXT_FAINT())
+                        .paint_at(
+                            ui,
+                            egui::Rect::from_center_size(
+                                chev_rect.center(),
+                                egui::Vec2::splat(12.0),
+                            ),
+                        );
+                    if chev_resp.clicked() && !renaming_this {
+                        toggle_open = true;
+                    }
+                    let (icon_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(16.0, TREE_ROW_H), egui::Sense::hover());
+                    egui::Image::new(icons::folder())
+                        .tint(palette::ACCENT())
+                        .paint_at(
+                            ui,
+                            egui::Rect::from_center_size(
+                                icon_rect.center(),
+                                egui::Vec2::splat(TREE_ICON),
+                            ),
+                        );
+
+                    let rest = ui.available_rect_before_wrap();
+                    ui.allocate_rect(rest, egui::Sense::hover());
+                    let label_right = if ungrouped {
+                        rest.right()
+                    } else {
+                        (dots_rect.left() - 4.0).max(rest.left())
+                    };
+                    let label_rect =
+                        egui::Rect::from_min_max(rest.min, egui::pos2(label_right, rest.bottom()));
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(label_rect)
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                        |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(folder).color(palette::TEXT()),
+                                )
+                                .truncate()
+                                .selectable(false),
+                            );
+                        },
+                    );
+                    if !ungrouped && hovered && ui.is_rect_visible(dots_rect) {
+                        let color = if dots_resp.hovered() {
+                            palette::TEXT()
+                        } else {
+                            palette::TEXT_FAINT()
+                        };
+                        egui::Image::new(icons::more_vert()).tint(color).paint_at(
+                            ui,
+                            egui::Rect::from_center_size(
+                                dots_rect.center(),
+                                egui::vec2(16.0, 16.0),
+                            ),
+                        );
+                    }
+                });
+            },
+        );
+
+        let row_resp = if ungrouped {
+            row_resp.on_hover_text("Drop queries here to ungroup. Create a folder with +.")
+        } else {
+            row_resp.on_hover_text(
+                "Drag to reorder · drop queries here · double-click to rename · ⋮ to delete",
+            )
+        };
+        if !ungrouped {
+            if row_resp.double_clicked() && !renaming_this {
+                actions.push(Action::RenameFavoriteFolder(folder.to_string()));
+            }
+            row_resp.context_menu(|ui| {
+                favorite_folder_menu(ui, folder, actions);
+            });
+            egui::Popup::menu(&dots_resp)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| {
+                    favorite_folder_menu(ui, folder, actions);
+                });
+        }
+        if renaming_this {
+            if let Some(draft) = self.folder_pending.as_mut() {
+                match rename_callout(ui, &row_resp, &mut draft.name, "Folder name") {
+                    CalloutEdit::Confirm => actions.push(Action::ConfirmFavoriteFolder),
+                    CalloutEdit::Cancel => actions.push(Action::CancelFavoriteFolder),
+                    CalloutEdit::Idle => {}
+                }
+            }
+        }
+
+        if toggle_open {
+            state.toggle(ui);
+        }
+        if idxs.is_empty() {
+            return;
+        }
+        // Same nesting language as Items: children stay full-width so the hover/selection
+        // pill reads as a row, while the icon+name sit past the folder chevron.
+        let body = state.show_body_unindented(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            ui.add_space(1.0);
+            for &idx in idxs {
+                self.favorite_query_row(ui, idx, TREE_CHILD_INDENT, actions);
+            }
+            ui.add_space(1.0);
+        });
+        if let Some(inner) = body {
+            paint_tree_guide(ui, row_rect, inner.response.rect);
+        }
+    }
+
+    fn favorite_query_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        idx: usize,
+        tree_indent: f32,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(fav) = self.favorites_cache.get(idx) else {
+            return;
+        };
+        let name = fav.name.clone();
+        let sql = fav.sql.clone();
+        let fav_id = fav.id.clone();
+        let selected = self.favorites_selected.as_deref() == Some(fav_id.as_str());
+
+        let is_renaming_this = self
+            .favorite_pending
+            .as_ref()
+            .and_then(|d| d.editing_id.as_ref())
+            .is_some_and(|id| id == &fav_id);
+
+        let icon_color = if selected {
+            palette::TEXT()
+        } else {
+            palette::TEXT_WEAK()
+        };
+        let sense = if is_renaming_this {
+            egui::Sense::click()
+        } else {
+            egui::Sense::click_and_drag()
+        };
+        let (row_rect, row_resp) = tree_file_row(
+            ui,
+            tree_indent,
+            icons::file(),
+            icon_color,
+            &name,
+            selected,
+            sense,
+        );
+        if !is_renaming_this {
+            row_resp.dnd_set_drag_payload(SavedQueryDrag::Query(fav_id.clone()));
+            if let Some(source) = row_resp.dnd_hover_payload::<SavedQueryDrag>() {
+                if let SavedQueryDrag::Query(source_id) = source.as_ref() {
+                    if source_id != &fav_id {
+                        let after = drop_after(ui, row_rect);
+                        paint_drop_line(ui, row_rect, after);
+                        if let Some(released) = row_resp.dnd_release_payload::<SavedQueryDrag>() {
+                            if let SavedQueryDrag::Query(source_id) = released.as_ref() {
+                                actions.push(Action::DropFavoriteOnQuery {
+                                    source_id: source_id.clone(),
+                                    target_id: fav_id.clone(),
+                                    after,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let folders = self.favorite_folders.clone();
+        let row_resp = row_resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+        if !is_renaming_this && !row_resp.dragged() {
+            sql_preview_callout(ui, &row_resp, &name, &sql, None);
+        }
+        row_resp.context_menu(|ui| {
+            favorite_entry_menu(ui, idx, &sql, &fav_id, &folders, actions);
+        });
+        if is_renaming_this {
+            if let Some(draft) = self.favorite_pending.as_mut() {
+                match rename_callout(ui, &row_resp, &mut draft.name, "Query name") {
+                    CalloutEdit::Confirm => actions.push(Action::ConfirmSaveFavorite),
+                    CalloutEdit::Cancel => actions.push(Action::CancelSaveFavorite),
+                    CalloutEdit::Idle => {}
+                }
+            }
+        } else if row_resp.clicked() && !row_resp.dragged() {
+            actions.push(Action::UseFavorite(idx));
+        }
     }
 
     /// Modal showing the SQL that will be executed, with Commit and Cancel buttons.
@@ -5146,22 +5479,18 @@ impl DbGuiApp {
         }
     }
 
-    /// Small modal to name a query when saving (or renaming) a favorite. Enter or Save
+    /// Small modal to name a query when saving a favorite. Enter or Save
     /// commits; Escape / Cancel / closing the window dismisses it.
+    /// Renaming an existing query uses the side callout on the row instead.
     pub(super) fn favorite_name_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let Some(draft) = self.favorite_pending.as_ref() else {
             return;
         };
-        let is_rename = draft.editing_id.is_some();
-        if is_rename {
-            return; // Renaming is done inline in the Saved queries tab.
+        if draft.editing_id.is_some() {
+            return;
         }
         let preview = first_line(&draft.sql).to_string();
-        let title = if is_rename {
-            "Rename favorite"
-        } else {
-            "Save query to favorites"
-        };
+        let title = "Save query to favorites";
 
         let mut open = true;
         let mut submit = false;
@@ -5208,6 +5537,54 @@ impl DbGuiApp {
         }
     }
 
+    /// Name a new folder, or rename an existing one.
+    pub(super) fn favorite_folder_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(draft) = self.folder_pending.as_ref() else {
+            return;
+        };
+        if draft.from.is_some() {
+            return; // Rename uses the side callout on the folder row.
+        }
+        let title = "New folder";
+        let mut open = true;
+        let mut submit = false;
+        let mut cancel = false;
+        components::dialog_window(title)
+            .open(&mut open)
+            .resizable(false)
+            .default_size([360.0, 0.0])
+            .frame(components::dialog_frame(ctx))
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new("Name").color(palette::TEXT_WEAK()));
+                if let Some(draft) = self.folder_pending.as_mut() {
+                    let w = ui.available_width();
+                    let resp = components::text_input(ui, &mut draft.name, "Reports", w);
+                    resp.request_focus();
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        submit = true;
+                    }
+                }
+                components::dialog_footer(ui, |ui| {
+                    if components::primary_button(ui, icons::save(), "Save", true).clicked() {
+                        submit = true;
+                    }
+                    if components::button(ui, icons::close(), "Cancel", true).clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if submit {
+            actions.push(Action::ConfirmFavoriteFolder);
+        } else if cancel || !open {
+            actions.push(Action::CancelFavoriteFolder);
+        }
+    }
+
     /// Production Guardian review: immutable target context, read-only preflight evidence,
     /// risk per statement, and typed confirmation for Critical operations.
     pub(super) fn danger_confirm_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
@@ -5224,7 +5601,7 @@ impl DbGuiApp {
         components::dialog_window(title)
             .open(&mut open)
             .resizable(true)
-            .default_size([640.0, 460.0])
+            .default_size([560.0, 420.0])
             .frame(components::dialog_frame(ctx))
             .show(ctx, |ui| {
                 let database = if pending.database.is_empty() {
@@ -5232,38 +5609,38 @@ impl DbGuiApp {
                 } else {
                     &pending.database
                 };
-                ui.label(
-                    egui::RichText::new(format!("{}  /  {database}", pending.connection_name))
-                        .color(palette::TEXT_WEAK()),
-                );
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    icons::show_weak(ui, icons::database(), 14.0);
+                    ui.label(
+                        egui::RichText::new(&pending.connection_name).color(palette::TEXT_WEAK()),
+                    );
+                    ui.label(egui::RichText::new("/").color(palette::TEXT_FAINT()));
+                    ui.label(egui::RichText::new(database).color(palette::TEXT_WEAK()));
+                });
                 ui.add_space(10.0);
 
-                let font = egui::TextStyle::Monospace.resolve(ui.style());
+                let mut sql_font = egui::TextStyle::Monospace.resolve(ui.style());
+                sql_font.size = (sql_font.size - 1.5).max(10.0);
                 egui::ScrollArea::vertical()
                     .id_salt("danger_confirm_scroll")
-                    .max_height(300.0)
+                    .max_height(260.0)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 8.0;
                         for (i, stmt) in pending.statements.iter().enumerate() {
-                            if i > 0 {
-                                ui.add_space(6.0);
-                                ui.separator();
-                                ui.add_space(6.0);
-                            }
                             let preflight =
                                 pending.preflights.as_ref().and_then(|items| items.get(i));
                             let risk = pending.preflights.as_ref().map(|_| pending.risk(i));
                             let (risk_label, risk_color) = match risk {
-                                Some(dbcore::safety::RiskLevel::Low) => {
-                                    ("Low risk", palette::SUCCESS())
-                                }
+                                Some(dbcore::safety::RiskLevel::Low) => ("Low", palette::SUCCESS()),
                                 Some(dbcore::safety::RiskLevel::Medium) => {
-                                    ("Medium risk", palette::WARNING())
+                                    ("Medium", palette::WARNING())
                                 }
                                 Some(dbcore::safety::RiskLevel::Critical) => {
                                     ("Critical", palette::DANGER())
                                 }
-                                None => ("Checking…", palette::TEXT_WEAK()),
+                                None => ("Checking", palette::TEXT_WEAK()),
                             };
                             let target = if stmt.targets.is_empty() {
                                 "unknown target".to_string()
@@ -5271,121 +5648,204 @@ impl DbGuiApp {
                                 stmt.targets.join(", ")
                             };
 
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label(
-                                    egui::RichText::new(format!("{}  {target}", stmt.kind.label()))
-                                        .strong(),
-                                );
-                                ui.label(egui::RichText::new(risk_label).color(risk_color));
-                            });
-
-                            ui.horizontal_wrapped(|ui| {
-                                match preflight {
-                                    Some(preflight) => {
-                                        let rows = preflight
-                                            .affected_rows
-                                            .map(|rows| format!("{rows} rows affected"))
-                                            .or_else(|| {
-                                                preflight.plan.as_ref().and_then(|plan| {
-                                                    plan.estimated_rows.map(|rows| {
-                                                        format!("~{rows} rows estimated")
-                                                    })
-                                                })
-                                            })
-                                            .unwrap_or_else(|| "Impact unknown".to_string());
-                                        ui.label(rows);
-                                    }
-                                    None => {
-                                        ui.spinner();
-                                        ui.label("Checking impact…");
-                                    }
-                                }
-                                if stmt.missing_where {
-                                    ui.colored_label(palette::DANGER(), "· No WHERE clause");
-                                }
-                                if preflight
-                                    .and_then(|item| item.plan.as_ref())
-                                    .is_some_and(|plan| plan.full_scan)
-                                {
-                                    ui.colored_label(palette::DANGER(), "· Full table scan");
-                                }
-                            });
-
-                            ui.add_space(4.0);
-                            let job = crate::highlight::highlight_sql(&stmt.sql, font.clone());
                             egui::Frame::new()
-                                .fill(palette::CODE_BG())
-                                .inner_margin(egui::Margin::same(8))
-                                .corner_radius(4)
+                                .fill(palette::SURFACE())
+                                .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                                .corner_radius(egui::CornerRadius::same(10))
+                                .inner_margin(egui::Margin::same(10))
                                 .show(ui, |ui| {
-                                    ui.label(job);
-                                });
-
-                            let has_details = stmt.analysis_warning.is_some()
-                                || preflight.is_some_and(|item| {
-                                    item.plan.is_some() || !item.warnings.is_empty()
-                                });
-                            if has_details {
-                                egui::CollapsingHeader::new(
-                                    egui::RichText::new("Details")
-                                        .small()
-                                        .color(palette::TEXT_WEAK()),
-                                )
-                                .id_salt(("production_guard_details", i))
-                                .show(ui, |ui| {
-                                    if let Some(warning) = &stmt.analysis_warning {
-                                        ui.label(warning);
-                                    }
-                                    if let Some(plan) =
-                                        preflight.and_then(|item| item.plan.as_ref())
-                                    {
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.label("Query plan:");
-                                            ui.label(
-                                                plan.scan_type
-                                                    .as_deref()
-                                                    .unwrap_or("scan type unavailable"),
-                                            );
-                                            if let Some(index) = &plan.index {
-                                                ui.label(format!("· index {index}"));
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 8.0;
+                                        components::type_badge(
+                                            ui,
+                                            stmt.kind.label(),
+                                            palette::ACCENT(),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(&target).color(palette::TEXT()),
+                                        );
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                components::type_badge(ui, risk_label, risk_color);
+                                            },
+                                        );
+                                    });
+                                    ui.add_space(6.0);
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 8.0;
+                                        match preflight {
+                                            Some(preflight) => {
+                                                let rows = preflight
+                                                    .affected_rows
+                                                    .map(|rows| format!("{rows} rows affected"))
+                                                    .or_else(|| {
+                                                        preflight.plan.as_ref().and_then(|plan| {
+                                                            plan.estimated_rows.map(|rows| {
+                                                                format!("~{rows} rows estimated")
+                                                            })
+                                                        })
+                                                    })
+                                                    .unwrap_or_else(|| {
+                                                        "Impact unknown".to_string()
+                                                    });
+                                                ui.label(
+                                                    egui::RichText::new(rows)
+                                                        .small()
+                                                        .color(palette::TEXT_FAINT()),
+                                                );
                                             }
-                                            if let Some(rows) = plan.estimated_rows {
-                                                ui.label(format!("· estimated rows {rows}"));
+                                            None => {
+                                                ui.spinner();
+                                                ui.label(
+                                                    egui::RichText::new("Checking impact…")
+                                                        .small()
+                                                        .color(palette::TEXT_FAINT()),
+                                                );
+                                            }
+                                        }
+                                        if stmt.missing_where {
+                                            components::type_badge(
+                                                ui,
+                                                "No WHERE",
+                                                palette::DANGER(),
+                                            );
+                                        }
+                                        if preflight
+                                            .and_then(|item| item.plan.as_ref())
+                                            .is_some_and(|plan| plan.full_scan)
+                                        {
+                                            components::type_badge(
+                                                ui,
+                                                "Full scan",
+                                                palette::DANGER(),
+                                            );
+                                        }
+                                    });
+
+                                    ui.add_space(8.0);
+                                    let mut job = crate::highlight::highlight_sql(
+                                        &stmt.sql,
+                                        sql_font.clone(),
+                                    );
+                                    job.wrap.max_width = ui.available_width().max(40.0);
+                                    egui::Frame::new()
+                                        .fill(palette::CODE_BG())
+                                        .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                                        .corner_radius(egui::CornerRadius::same(8))
+                                        .inner_margin(egui::Margin::symmetric(10, 8))
+                                        .show(ui, |ui| {
+                                            ui.set_width(ui.available_width());
+                                            ui.add(egui::Label::new(job).wrap().selectable(false));
+                                        });
+
+                                    let has_details = stmt.analysis_warning.is_some()
+                                        || preflight.is_some_and(|item| {
+                                            item.plan.is_some() || !item.warnings.is_empty()
+                                        });
+                                    if has_details {
+                                        ui.add_space(4.0);
+                                        egui::CollapsingHeader::new(
+                                            egui::RichText::new("Details")
+                                                .small()
+                                                .color(palette::TEXT_WEAK()),
+                                        )
+                                        .id_salt(("production_guard_details", i))
+                                        .show(ui, |ui| {
+                                            if let Some(warning) = &stmt.analysis_warning {
+                                                ui.label(
+                                                    egui::RichText::new(warning)
+                                                        .small()
+                                                        .color(palette::TEXT_WEAK()),
+                                                );
+                                            }
+                                            if let Some(plan) =
+                                                preflight.and_then(|item| item.plan.as_ref())
+                                            {
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "Plan · {}{}{}",
+                                                        plan.scan_type
+                                                            .as_deref()
+                                                            .unwrap_or("scan type unavailable"),
+                                                        plan.index
+                                                            .as_deref()
+                                                            .map(|index| format!(
+                                                                " · index {index}"
+                                                            ))
+                                                            .unwrap_or_default(),
+                                                        plan.estimated_rows
+                                                            .map(|rows| format!(" · ~{rows} rows"))
+                                                            .unwrap_or_default(),
+                                                    ))
+                                                    .small()
+                                                    .color(palette::TEXT_FAINT()),
+                                                );
+                                            }
+                                            if let Some(preflight) = preflight {
+                                                for warning in &preflight.warnings {
+                                                    ui.label(
+                                                        egui::RichText::new(warning)
+                                                            .small()
+                                                            .color(palette::WARNING()),
+                                                    );
+                                                }
                                             }
                                         });
                                     }
-                                    if let Some(preflight) = preflight {
-                                        for warning in &preflight.warnings {
-                                            ui.label(warning);
-                                        }
-                                    }
                                 });
-                            }
                         }
                     });
 
                 if let Some(phrase) = pending.confirmation_phrase() {
-                    ui.add_space(8.0);
-                    ui.label(format!("Type {phrase:?} to confirm"));
+                    ui.add_space(12.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.label(egui::RichText::new("Type").color(palette::TEXT_WEAK()));
+                        egui::Frame::new()
+                            .fill(palette::SELECTION())
+                            .corner_radius(egui::CornerRadius::same(4))
+                            .inner_margin(egui::Margin::symmetric(6, 2))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(phrase)
+                                        .monospace()
+                                        .color(palette::TEXT()),
+                                );
+                            });
+                        ui.label(egui::RichText::new("to confirm").color(palette::TEXT_WEAK()));
+                    });
+                    ui.add_space(6.0);
                     let mut confirmation = pending.confirmation.clone();
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut confirmation)
-                                .font(egui::TextStyle::Monospace)
-                                .desired_width(f32::INFINITY),
-                        )
-                        .changed()
-                    {
+                    let resp =
+                        components::text_input(ui, &mut confirmation, phrase, ui.available_width());
+                    let focus_id = ui.id().with("danger_confirm_focus");
+                    let already_focused = ui
+                        .ctx()
+                        .data(|data| data.get_temp::<bool>(focus_id).unwrap_or(false));
+                    if !already_focused {
+                        resp.request_focus();
+                        ui.ctx().data_mut(|data| data.insert_temp(focus_id, true));
+                    }
+                    if resp.changed() {
                         actions.push(Action::SetDangerConfirmation(confirmation));
                     }
                 }
 
                 components::dialog_footer(ui, |ui| {
                     let can_act = self.busy == Busy::Idle && pending.can_confirm();
-                    if components::primary_button(ui, icons::play(), "Run", can_act)
-                        .on_hover_text("Execute against the production connection")
-                        .clicked()
-                    {
+                    let critical = pending.confirmation_phrase().is_some();
+                    let run = if critical {
+                        components::Btn::danger("Run")
+                            .icon(icons::play())
+                            .enabled(can_act)
+                            .tooltip("Execute against the production connection")
+                            .show(ui)
+                    } else {
+                        components::primary_button(ui, icons::play(), "Run", can_act)
+                            .on_hover_text("Execute against the production connection")
+                    };
+                    if run.clicked() {
                         actions.push(Action::ConfirmDangerQuery);
                     }
                     if components::button(ui, icons::close(), "Cancel", true).clicked() {
@@ -6224,14 +6684,15 @@ impl DbGuiApp {
                 }
                 components::dialog_footer(ui, |ui| {
                     let testing = matches!(editor.test_state, ConnTestState::Testing(_));
-                    if components::button(ui, icons::connect(), "Test", !testing).clicked() {
-                        actions.push(Action::TestConnection);
-                    }
+                    // Footer paints right-to-left: first widget is rightmost (Save).
                     if components::button(ui, icons::save(), "Save", true).clicked() {
                         actions.push(Action::SaveConnection);
                     }
                     if components::button(ui, icons::close(), "Cancel", true).clicked() {
                         actions.push(Action::CancelDialog);
+                    }
+                    if components::button(ui, icons::connect(), "Test", !testing).clicked() {
+                        actions.push(Action::TestConnection);
                     }
                 });
             });
@@ -6244,7 +6705,7 @@ impl DbGuiApp {
 
     /// The schema editor (Create/Edit Table), rendered inline in the central panel —
     /// it takes the grid's place like the Data/Structure views rather than floating as
-    /// a dialog. Only the DDL preview remains a modal (it's a confirm step).
+    /// a dialog. Applying DDL on a production connection opens Guardian review.
     fn schema_editor_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let idx = self.active_query_tab;
         let editing_existing_table = matches!(
@@ -6290,69 +6751,9 @@ impl DbGuiApp {
             }
         });
     }
-
-    // ─── Schema DDL preview dialog ────────────────────────────────────────────
-
-    pub(super) fn schema_preview_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
-        let Some(stmts) = self.schema_pending.clone() else {
-            return;
-        };
-
-        let title = format!("Preview Migration — {} Statement(s)", stmts.len());
-        let mut open = true;
-        components::dialog_window(title)
-            .open(&mut open)
-            .resizable(true)
-            .default_size([660.0, 460.0])
-            .frame(components::dialog_frame(ctx))
-            .show(ctx, |ui| {
-                ui.label(
-                    egui::RichText::new(
-                        "Review the generated DDL before applying. \
-                         All statements run as a single transaction.",
-                    )
-                    .color(palette::TEXT_WEAK()),
-                );
-                ui.add_space(8.0);
-
-                let font = egui::TextStyle::Monospace.resolve(ui.style());
-                egui::ScrollArea::vertical()
-                    .id_salt("schema_ddl_scroll")
-                    .max_height(320.0)
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        for (i, stmt) in stmts.iter().enumerate() {
-                            if i > 0 {
-                                ui.add_space(4.0);
-                                ui.separator();
-                                ui.add_space(4.0);
-                            }
-                            let job = crate::highlight::highlight_sql(stmt, font.clone());
-                            ui.label(job);
-                        }
-                    });
-
-                components::dialog_footer(ui, |ui| {
-                    let can_act = self.busy == Busy::Idle;
-                    if components::primary_button(ui, icons::save(), "Apply Migration", can_act)
-                        .on_hover_text("Execute all DDL statements in a single transaction")
-                        .clicked()
-                    {
-                        actions.push(Action::ApplySchema);
-                    }
-                    if components::button(ui, icons::close(), "Back", true).clicked() {
-                        actions.push(Action::CancelSchema);
-                    }
-                });
-            });
-
-        if !open {
-            actions.push(Action::CancelSchema);
-        }
-    }
 }
 
-/// The header (title + Preview SQL / Cancel buttons) shared by every object editor. Returns
+/// The header (title + Apply / Cancel buttons) shared by every object editor. Returns
 /// nothing; the buttons push actions directly.
 fn object_editor_header(ui: &mut egui::Ui, actions: &mut Vec<Action>, title: &str) {
     ui.add_space(10.0);
@@ -6365,7 +6766,10 @@ fn object_editor_header(ui: &mut egui::Ui, actions: &mut Vec<Action>, title: &st
         );
         // Action buttons on the right of the header, where the eye lands first.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if components::primary_button(ui, icons::code(), "Preview SQL", true).clicked() {
+            if components::primary_button(ui, icons::play(), "Apply", true)
+                .on_hover_text("Apply the generated DDL as a single transaction")
+                .clicked()
+            {
                 actions.push(Action::GenerateSchema);
             }
             ui.add_space(6.0);
@@ -6897,50 +7301,188 @@ fn routine_editor_view(
         });
 }
 
+/// Right-click actions for one saved-query folder.
+fn favorite_folder_menu(ui: &mut egui::Ui, folder: &str, actions: &mut Vec<Action>) {
+    ui.set_min_width(180.0);
+    if components::button(ui, icons::edit(), "Rename Folder", true).clicked() {
+        actions.push(Action::RenameFavoriteFolder(folder.to_string()));
+        ui.close();
+    }
+    if components::button(ui, icons::trash(), "Delete Folder", true).clicked() {
+        actions.push(Action::DeleteFavoriteFolder(folder.to_string()));
+        ui.close();
+    }
+}
+
+/// Right-click actions for one Saved Queries row.
+fn favorite_entry_menu(
+    ui: &mut egui::Ui,
+    idx: usize,
+    sql: &str,
+    fav_id: &str,
+    folders: &[String],
+    actions: &mut Vec<Action>,
+) {
+    ui.set_min_width(180.0);
+    if components::button(ui, icons::play(), "Run", true).clicked() {
+        actions.push(Action::RunFavorite(idx));
+        ui.close();
+    }
+    if components::button(ui, icons::edit(), "Open in Editor", true).clicked() {
+        actions.push(Action::UseFavorite(idx));
+        ui.close();
+    }
+    ui.separator();
+    if components::button(ui, icons::code(), "Copy", true).clicked() {
+        ui.ctx().copy_text(sql.to_string());
+        ui.close();
+    }
+    if components::button(ui, icons::edit(), "Rename", true).clicked() {
+        actions.push(Action::RenameFavorite(idx));
+        ui.close();
+    }
+    components::menu_button(ui, icons::folder(), "Move to", |ui| {
+        if ui.button(dbcore::favorites::UNGROUPED).clicked() {
+            actions.push(Action::MoveFavorite { idx, folder: None });
+            ui.close();
+        }
+        for folder in folders {
+            if ui.button(folder).clicked() {
+                actions.push(Action::MoveFavorite {
+                    idx,
+                    folder: Some(folder.clone()),
+                });
+                ui.close();
+            }
+        }
+        ui.separator();
+        if ui.button("New Folder…").clicked() {
+            actions.push(Action::NewFavoriteFolder {
+                move_id: Some(fav_id.to_string()),
+            });
+            ui.close();
+        }
+    });
+    ui.separator();
+    if components::button(ui, icons::trash(), "Delete", true).clicked() {
+        actions.push(Action::DeleteFavorite(idx));
+        ui.close();
+    }
+}
+
+/// Right-click actions for one History row, matching the TablePlus history menu.
+fn history_entry_menu(ui: &mut egui::Ui, idx: usize, sql: &str, actions: &mut Vec<Action>) {
+    ui.set_min_width(200.0);
+    if components::button(ui, icons::play(), "Run", true).clicked() {
+        actions.push(Action::RunHistorySql(idx));
+        ui.close();
+    }
+    ui.separator();
+    if components::button(ui, icons::code(), "Copy", true).clicked() {
+        ui.ctx().copy_text(sql.to_string());
+        ui.close();
+    }
+    if components::button(ui, icons::save(), "Save As…", true).clicked() {
+        actions.push(Action::SaveHistorySqlAs(idx));
+        ui.close();
+    }
+    ui.separator();
+    if components::button(ui, icons::edit(), "Insert into SQL Editor", true).clicked() {
+        actions.push(Action::UseHistorySql(idx));
+        ui.close();
+    }
+    ui.separator();
+    if components::button(ui, icons::arrow_up_right(), reveal_history_label(), true).clicked() {
+        actions.push(Action::RevealHistoryFile);
+        ui.close();
+    }
+    ui.separator();
+    if components::button(ui, icons::star(), "Add to Queries", true).clicked() {
+        actions.push(Action::SaveFavoriteFromHistory(idx));
+        ui.close();
+    }
+    ui.separator();
+    if components::button(ui, icons::trash(), "Delete", true).clicked() {
+        actions.push(Action::DeleteHistory(idx));
+        ui.close();
+    }
+    if ui.button("Clear all History").clicked() {
+        actions.push(Action::ClearHistory);
+        ui.close();
+    }
+}
+
+fn reveal_history_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Show in Finder"
+    } else if cfg!(target_os = "windows") {
+        "Show in Explorer"
+    } else {
+        "Show in folder"
+    }
+}
+
 /// The expandable body of a table row in the explorer: its columns (PK marked), then any
 /// indexes and foreign keys. Shared by the "Pinned" group and the main table list.
 fn schema_table_body(ui: &mut egui::Ui, table: &dbcore::TableInfo) {
     for col in &table.columns {
-        ui.horizontal(|ui| {
-            let glyph = if col.primary_key {
-                icons::key()
-            } else {
-                icons::column()
-            };
-            icons::show_weak(ui, glyph, 13.0);
-            ui.add_space(2.0);
-            components::truncated_label(ui, &col.name, None, false, egui::Sense::hover());
-            let nn = if col.nullable { "" } else { " · not null" };
-            let meta = format!("{}{nn}", col.data_type);
-            components::truncated_label(ui, &meta, Some(&meta), true, egui::Sense::hover());
-        });
+        let glyph = if col.primary_key {
+            icons::key()
+        } else {
+            icons::column()
+        };
+        let nn = if col.nullable { "" } else { " · not null" };
+        let meta = format!("{}{nn}", col.data_type);
+        let (_, resp) = tree_file_row(
+            ui,
+            TREE_CHILD_INDENT,
+            glyph,
+            palette::TEXT_WEAK(),
+            &col.name,
+            false,
+            egui::Sense::hover(),
+        );
+        let _ = resp.on_hover_text(meta);
     }
     if !table.indexes.is_empty() {
-        ui.add_space(3.0);
         for idx in &table.indexes {
-            ui.horizontal(|ui| {
-                icons::show_weak(ui, icons::index(), 13.0);
-                ui.add_space(2.0);
-                let u = if idx.unique { "unique " } else { "" };
-                let detail = format!("{u}{} ({})", idx.name, idx.columns.join(", "));
-                components::truncated_label(ui, &detail, Some(&detail), true, egui::Sense::hover());
-            });
+            let u = if idx.unique { "unique " } else { "" };
+            let detail = format!("{u}{} ({})", idx.name, idx.columns.join(", "));
+            let (_, resp) = tree_file_row(
+                ui,
+                TREE_CHILD_INDENT,
+                icons::index(),
+                palette::TEXT_WEAK(),
+                &idx.name,
+                false,
+                egui::Sense::hover(),
+            );
+            let _ = resp.on_hover_text(detail);
         }
     }
     if !table.foreign_keys.is_empty() {
-        ui.add_space(3.0);
         for fk in &table.foreign_keys {
-            ui.horizontal(|ui| {
-                icons::show_weak(ui, icons::connect(), 13.0);
-                ui.add_space(2.0);
-                let detail = fk.display();
-                let hover = if fk.name.is_empty() {
-                    format!("{detail} · on delete {}", fk.on_delete)
-                } else {
-                    format!("{} · {detail} · on delete {}", fk.name, fk.on_delete)
-                };
-                components::truncated_label(ui, &detail, Some(&hover), true, egui::Sense::hover());
-            });
+            let detail = fk.display();
+            let hover = if fk.name.is_empty() {
+                format!("{detail} · on delete {}", fk.on_delete)
+            } else {
+                format!("{} · {detail} · on delete {}", fk.name, fk.on_delete)
+            };
+            let name = if fk.name.is_empty() {
+                detail.clone()
+            } else {
+                fk.name.clone()
+            };
+            let (_, resp) = tree_file_row(
+                ui,
+                TREE_CHILD_INDENT,
+                icons::connect(),
+                palette::TEXT_WEAK(),
+                &name,
+                false,
+                egui::Sense::hover(),
+            );
+            let _ = resp.on_hover_text(hover);
         }
     }
 }
@@ -7035,26 +7577,80 @@ fn table_actions_menu(
     }
 }
 
-/// A collapsible group header ("Views (3)", "Triggers (1)", …) for a class of schema objects
-/// in the sidebar tree, with `body` rendering its rows. Collapsed by default to keep the tree
-/// compact when a database has many objects; clicking anywhere on the header toggles it.
+/// A collapsible folder group matching Saved Queries: chevron, folder icon, 26px hover pill.
 fn object_group(
     ui: &mut egui::Ui,
     id_key: &str,
     title: &str,
-    count: usize,
+    default_open: bool,
     body: impl FnOnce(&mut egui::Ui),
 ) {
-    egui::CollapsingHeader::new(
-        egui::RichText::new(format!("{title} ({count})"))
-            .color(palette::TEXT_WEAK())
-            .size(12.0),
-    )
-    .id_salt(id_key)
-    .show(ui, body);
+    use egui::collapsing_header::CollapsingState;
+    let id = ui.make_persistent_id(("obj_group", id_key));
+    let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, default_open);
+
+    let (row_rect, row_resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), TREE_ROW_H),
+        egui::Sense::click(),
+    );
+    paint_tree_row_fill(ui, row_rect, false, row_resp.hovered());
+    let mut toggle_open = row_resp.clicked();
+    ui.scope_builder(
+        egui::UiBuilder::new().max_rect(row_rect.shrink2(egui::vec2(6.0, 0.0))),
+        |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let (chev_rect, chev_resp) =
+                    ui.allocate_exact_size(egui::vec2(12.0, TREE_ROW_H), egui::Sense::click());
+                let chevron = if state.openness(ui.ctx()) < 0.5 {
+                    icons::arrow_right()
+                } else {
+                    icons::chevron_down()
+                };
+                egui::Image::new(chevron)
+                    .fit_to_exact_size(egui::Vec2::splat(12.0))
+                    .tint(palette::TEXT_FAINT())
+                    .paint_at(
+                        ui,
+                        egui::Rect::from_center_size(chev_rect.center(), egui::Vec2::splat(12.0)),
+                    );
+                if chev_resp.clicked() {
+                    toggle_open = true;
+                }
+                let (icon_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(16.0, TREE_ROW_H), egui::Sense::hover());
+                egui::Image::new(icons::folder())
+                    .tint(palette::ACCENT())
+                    .paint_at(
+                        ui,
+                        egui::Rect::from_center_size(
+                            icon_rect.center(),
+                            egui::Vec2::splat(TREE_ICON),
+                        ),
+                    );
+                ui.add(
+                    egui::Label::new(egui::RichText::new(title).color(palette::TEXT()))
+                        .truncate()
+                        .selectable(false),
+                );
+            });
+        },
+    );
+    if toggle_open {
+        state.toggle(ui);
+    }
+    let shown = state.show_body_unindented(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 1.0;
+        ui.add_space(1.0);
+        body(ui);
+        ui.add_space(1.0);
+    });
+    if let Some(inner) = shown {
+        paint_tree_guide(ui, row_rect, inner.response.rect);
+    }
 }
 
-const OBJECT_ROW_HEIGHT: f32 = 22.0;
+const OBJECT_ROW_HEIGHT: f32 = TREE_ROW_H;
 
 /// Reserve the full height of a large object list, but build widgets only for rows intersecting
 /// the outer schema scroll area's clip rectangle. This keeps expanding a group with thousands of
@@ -7121,23 +7717,17 @@ fn object_leaf_row(
     name: &str,
     detail: &str,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width().max(0.0), OBJECT_ROW_HEIGHT),
+    tree_file_row(
+        ui,
+        TREE_CHILD_INDENT,
+        icon,
+        color,
+        name,
+        false,
         egui::Sense::click(),
-    );
-    if ui.is_rect_visible(rect) {
-        ui.scope_builder(
-            egui::UiBuilder::new()
-                .max_rect(rect)
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-            |ui| {
-                icons::show_colored(ui, icon, 14.0, color);
-                ui.add_space(2.0);
-                components::truncated_label(ui, name, None, false, egui::Sense::hover());
-            },
-        );
-    }
-    response.on_hover_text(detail)
+    )
+    .1
+    .on_hover_text(detail)
 }
 
 #[cfg(test)]
@@ -7486,11 +8076,11 @@ impl DbGuiApp {
                     ui.add_space(10.0);
                     if components::primary_button(
                         ui,
-                        icons::code(),
+                        icons::play(),
                         "Forward Engineer",
                         !erd.design.tables.is_empty(),
                     )
-                    .on_hover_text("Preview target-dialect DDL before creating this schema")
+                    .on_hover_text("Apply this design as DDL on the connected database")
                     .clicked()
                     {
                         actions.push(Action::ForwardEngineerErd);

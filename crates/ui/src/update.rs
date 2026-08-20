@@ -145,7 +145,10 @@ fn release_asset_name(version: &str) -> String {
 
 #[cfg(not(any(
     target_os = "macos",
-    all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64"))
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
 )))]
 fn release_asset_name(version: &str) -> String {
     format!("plusplus-{version}-unsupported")
@@ -318,9 +321,7 @@ async fn verify_download(
     client: &reqwest::Client,
 ) -> Result<(), String> {
     if signature_url.trim().is_empty() {
-        return Err(
-            "this release is not signed — refusing to install an unverified update".into(),
-        );
+        return Err("this release is not signed — refusing to install an unverified update".into());
     }
     let minisig = client
         .get(signature_url)

@@ -325,7 +325,10 @@ mod tests {
             assert_eq!(EditorKind::Bool.parse_strict(s).unwrap(), Value::Bool(true));
         }
         for s in ["false", "FALSE", "0", "f", "no"] {
-            assert_eq!(EditorKind::Bool.parse_strict(s).unwrap(), Value::Bool(false));
+            assert_eq!(
+                EditorKind::Bool.parse_strict(s).unwrap(),
+                Value::Bool(false)
+            );
         }
         assert!(EditorKind::Bool.parse_strict("maybe").is_err());
     }

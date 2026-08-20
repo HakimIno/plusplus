@@ -183,6 +183,7 @@ impl DbGuiApp {
                     sql: draft.sql,
                     conn_id: draft.conn_id,
                     conn_name: draft.conn_name,
+                    folder: None,
                     created_at: dbcore::history::now_rfc3339(),
                 });
                 // Reveal the sidebar's Queries tab so the just-saved query is visible
@@ -193,13 +194,150 @@ impl DbGuiApp {
         }
         self.persist_favorites();
     }
+
+    fn remember_favorite_folder(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty()
+            || name.eq_ignore_ascii_case(dbcore::favorites::UNGROUPED)
+            || self
+                .favorite_folders
+                .iter()
+                .any(|folder| folder.eq_ignore_ascii_case(name))
+        {
+            return;
+        }
+        self.favorite_folders.push(name.to_string());
+    }
+
+    pub(super) fn move_favorite(&mut self, idx: usize, folder: Option<String>) {
+        let Some(id) = self.favorites_cache.get(idx).map(|fav| fav.id.clone()) else {
+            return;
+        };
+        self.drop_favorite_on_folder(&id, folder.as_deref());
+    }
+
+    pub(super) fn drop_favorite_on_folder(&mut self, id: &str, folder: Option<&str>) {
+        if !self.favorites_cache.iter().any(|fav| fav.id == id) {
+            return;
+        }
+        if let Some(name) = folder {
+            self.remember_favorite_folder(name);
+        }
+        dbcore::favorites::move_query_to_folder(&mut self.favorites_cache, id, folder);
+        self.persist_favorites();
+        self.status_msg = "Query moved".to_string();
+    }
+
+    pub(super) fn drop_favorite_on_query(&mut self, source_id: &str, target_id: &str, after: bool) {
+        if source_id == target_id {
+            return;
+        }
+        dbcore::favorites::reorder_query(&mut self.favorites_cache, source_id, target_id, after);
+        if let Some(folder) = self
+            .favorites_cache
+            .iter()
+            .find(|fav| fav.id == source_id)
+            .and_then(|fav| fav.folder.clone())
+        {
+            self.remember_favorite_folder(&folder);
+        }
+        self.persist_favorites();
+        self.status_msg = "Query moved".to_string();
+    }
+
+    pub(super) fn reorder_favorite_folder(&mut self, source: &str, target: &str, after: bool) {
+        dbcore::favorites::reorder_folder(&mut self.favorite_folders, source, target, after);
+        self.persist_favorites();
+        self.status_msg = "Folder moved".to_string();
+    }
+
+    pub(super) fn delete_favorite_folder(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() || name.eq_ignore_ascii_case(dbcore::favorites::UNGROUPED) {
+            return;
+        }
+        self.favorite_folders
+            .retain(|folder| !folder.eq_ignore_ascii_case(name));
+        for fav in &mut self.favorites_cache {
+            if fav
+                .folder
+                .as_deref()
+                .is_some_and(|folder| folder.eq_ignore_ascii_case(name))
+            {
+                fav.folder = None;
+            }
+        }
+        self.persist_favorites();
+        self.status_msg = format!("Folder \"{name}\" removed");
+    }
+
+    pub(super) fn confirm_favorite_folder(&mut self) {
+        let Some(draft) = self.folder_pending.take() else {
+            return;
+        };
+        let name = draft.name.trim().to_string();
+        if name.is_empty() || name.eq_ignore_ascii_case(dbcore::favorites::UNGROUPED) {
+            self.status_msg = "Folder needs a name".to_string();
+            return;
+        }
+        if let Some(from) = draft.from {
+            if from.eq_ignore_ascii_case(dbcore::favorites::UNGROUPED) {
+                return;
+            }
+            if from.eq_ignore_ascii_case(&name) {
+                return;
+            }
+            if self
+                .favorite_folders
+                .iter()
+                .any(|folder| folder.eq_ignore_ascii_case(&name))
+            {
+                self.status_msg = format!("Folder \"{name}\" already exists");
+                return;
+            }
+            let mut renamed = false;
+            for folder in &mut self.favorite_folders {
+                if folder.eq_ignore_ascii_case(&from) {
+                    *folder = name.clone();
+                    renamed = true;
+                }
+            }
+            if !renamed {
+                self.favorite_folders.push(name.clone());
+            }
+            for fav in &mut self.favorites_cache {
+                if fav
+                    .folder
+                    .as_deref()
+                    .is_some_and(|folder| folder.eq_ignore_ascii_case(&from))
+                {
+                    fav.folder = Some(name.clone());
+                }
+            }
+            self.persist_favorites();
+            self.status_msg = "Folder renamed".to_string();
+            return;
+        }
+        self.remember_favorite_folder(&name);
+        if let Some(id) = draft.move_id {
+            if let Some(fav) = self.favorites_cache.iter_mut().find(|fav| fav.id == id) {
+                fav.folder = Some(name.clone());
+            }
+        }
+        self.persist_favorites();
+        self.status_msg = format!("Folder \"{name}\" saved");
+    }
+
     /// Mirror the in-memory favorites to disk. Best effort; skipped under test so unit tests
     /// never touch the user's favorites file.
     pub(super) fn persist_favorites(&mut self) {
         if cfg!(test) {
             return;
         }
-        if let Err(e) = dbcore::favorites::save(&self.favorites_cache) {
+        if let Err(e) = dbcore::favorites::save(&dbcore::favorites::FavoritesStore {
+            folders: self.favorite_folders.clone(),
+            queries: self.favorites_cache.clone(),
+        }) {
             self.error = Some(format!("Could not save favorites: {e}"));
         }
     }

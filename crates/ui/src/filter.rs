@@ -6,8 +6,8 @@
 //! `(column, operator, value)` triple plus an on/off toggle; conditions combine with either
 //! "match all" (AND) or "match any" (OR), mirroring TablePlus's filter bar.
 //!
-//! The UI ([`ui`]) renders one row per condition — `[✓] column ▾  operator ▾  value  Apply
-//! − +` — followed by a toolbar with the All/Any switch and Clear / Apply All. It returns a
+//! The UI ([`ui`]) renders one compact row per condition — `[✓] column ▾ operator ▾ value − +`
+//! — followed by a toolbar with the All/Any switch and Clear / Apply All. It returns a
 //! [`FilterEvent`] when the user asks to (re)apply or clear, which the app turns into a
 //! `recompute_view`.
 
@@ -353,141 +353,137 @@ pub fn passing_rows(result: &QueryResult, state: &FilterState) -> Vec<usize> {
 /// returns a [`FilterEvent`] when the user presses Apply / Clear (or hits Enter in a value
 /// box). `columns` are the result's column names, used for the column dropdown.
 pub fn ui(ui: &mut egui::Ui, state: &mut FilterState, columns: &[String]) -> Option<FilterEvent> {
-    use crate::style::palette;
+    use crate::style::{palette, CONTROL_H};
 
     let mut event: Option<FilterEvent> = None;
     // Deferred structural edits — we can't mutate the Vec while iterating it.
     let mut remove_at: Option<usize> = None;
     let mut add_after: Option<usize> = None;
 
-    ui.add_space(4.0);
+    ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
 
     let n = state.conditions.len();
+    let row_w = ui.available_width();
     for (i, cond) in state.conditions.iter_mut().enumerate() {
-        ui.horizontal(|ui| {
-            ui.add_space(2.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(row_w, CONTROL_H),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                crate::components::accent_checkbox(ui, true, &mut cond.enabled, None)
+                    .on_hover_text("Enable / disable this condition");
 
-            // On/off toggle — same accent checkbox as the schema editor table.
-            crate::components::accent_checkbox(ui, true, &mut cond.enabled, None)
-                .on_hover_text("Enable / disable this condition");
+                egui::ComboBox::from_id_salt(("filter_col", i))
+                    .width(128.0)
+                    .selected_text(columns.get(cond.column).map(String::as_str).unwrap_or("—"))
+                    .show_ui(ui, |ui| {
+                        for (c, name) in columns.iter().enumerate() {
+                            ui.selectable_value(&mut cond.column, c, name);
+                        }
+                    });
 
-            // Column picker.
-            egui::ComboBox::from_id_salt(("filter_col", i))
-                .width(150.0)
-                .selected_text(columns.get(cond.column).map(String::as_str).unwrap_or("—"))
-                .show_ui(ui, |ui| {
-                    for (c, name) in columns.iter().enumerate() {
-                        ui.selectable_value(&mut cond.column, c, name);
+                egui::ComboBox::from_id_salt(("filter_op", i))
+                    .width(108.0)
+                    .selected_text(cond.op.label())
+                    .show_ui(ui, |ui| {
+                        for (gi, group) in FilterOp::GROUPS.iter().enumerate() {
+                            if gi > 0 {
+                                ui.separator();
+                            }
+                            for &op in *group {
+                                ui.selectable_value(&mut cond.op, op, op.label())
+                                    .on_hover_text(op.description());
+                            }
+                        }
+                    });
+
+                // Right-to-left so + / − / Apply sit on the trailing edge and the value
+                // box stretches into whatever width remains, the same on every row.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if crate::components::Btn::ghost_icon(crate::icons::plus())
+                        .tooltip("Add condition")
+                        .show(ui)
+                        .clicked()
+                    {
+                        add_after = Some(i);
+                    }
+                    if crate::components::Btn::ghost_icon(crate::icons::minus())
+                        .tooltip("Remove condition")
+                        .enabled(n > 1)
+                        .show(ui)
+                        .clicked()
+                    {
+                        remove_at = Some(i);
+                    }
+                    if crate::components::Btn::ghost_icon(crate::icons::filter())
+                        .tooltip("Apply")
+                        .show(ui)
+                        .clicked()
+                    {
+                        event = Some(FilterEvent::Apply);
+                    }
+
+                    let needs_value = cond.op.needs_value();
+                    let width = ui.available_width();
+                    let resp = ui
+                        .add_enabled_ui(needs_value, |ui| {
+                            let hint = if needs_value {
+                                cond.op.value_hint()
+                            } else {
+                                ""
+                            };
+                            crate::components::text_input(ui, &mut cond.value, hint, width)
+                        })
+                        .inner;
+                    if needs_value
+                        && resp.lost_focus()
+                        && ui.input(|inp| inp.key_pressed(egui::Key::Enter))
+                    {
+                        event = Some(FilterEvent::Apply);
                     }
                 });
+            },
+        );
+    }
 
-            // Operator picker — symbols/keywords grouped with separators (see `GROUPS`).
-            egui::ComboBox::from_id_salt(("filter_op", i))
-                .width(160.0)
-                .selected_text(cond.op.label())
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), CONTROL_H),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.add(
+                egui::Image::new(crate::icons::filter())
+                    .fit_to_exact_size(egui::Vec2::splat(14.0))
+                    .tint(palette::TEXT_WEAK()),
+            )
+            .on_hover_text("How conditions combine");
+            let mut conj = state.conjunction;
+            egui::ComboBox::from_id_salt("filter_conj")
+                .width(56.0)
+                .selected_text(match conj {
+                    Conjunction::All => "All",
+                    Conjunction::Any => "Any",
+                })
                 .show_ui(ui, |ui| {
-                    for (gi, group) in FilterOp::GROUPS.iter().enumerate() {
-                        if gi > 0 {
-                            ui.separator();
-                        }
-                        for &op in *group {
-                            ui.selectable_value(&mut cond.op, op, op.label())
-                                .on_hover_text(op.description());
-                        }
-                    }
+                    ui.selectable_value(&mut conj, Conjunction::All, "All");
+                    ui.selectable_value(&mut conj, Conjunction::Any, "Any");
                 });
+            if conj != state.conjunction {
+                state.conjunction = conj;
+                event = Some(FilterEvent::Apply);
+            }
 
-            // The add/remove controls are laid out from the right; the value box then fills the
-            // gap between the operator dropdown and the buttons. Putting them in one
-            // right-to-left scope is what lets the value stretch.
-            let btn = egui::vec2(28.0, crate::style::CONTROL_H);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add(
-                        egui::Button::image(
-                            egui::Image::new(crate::icons::plus())
-                                .fit_to_exact_size(egui::Vec2::splat(14.0))
-                                .tint(crate::style::palette::TEXT()),
-                        )
-                        .min_size(btn),
-                    )
-                    .on_hover_text("Add condition")
+                if crate::components::primary_button(ui, crate::icons::filter(), "Apply All", true)
+                    .on_hover_text("Apply every enabled condition")
                     .clicked()
-                {
-                    add_after = Some(i);
-                }
-                if ui
-                    .add_enabled(
-                        n > 1,
-                        egui::Button::image(
-                            egui::Image::new(crate::icons::minus())
-                                .fit_to_exact_size(egui::Vec2::splat(14.0))
-                                .tint(crate::style::palette::TEXT()),
-                        )
-                        .min_size(btn),
-                    )
-                    .on_hover_text("Remove condition")
-                    .clicked()
-                {
-                    remove_at = Some(i);
-                }
-                ui.add_space(2.0);
-
-                // Value box — fills the remaining width at the shared control height. Disabled
-                // for null/empty operators; Enter applies, matching TablePlus.
-                let needs_value = cond.op.needs_value();
-                let width = ui.available_width();
-                let resp = ui
-                    .add_enabled_ui(needs_value, |ui| {
-                        let hint = if needs_value { cond.op.value_hint() } else { "" };
-                        crate::components::text_input(ui, &mut cond.value, hint, width)
-                    })
-                    .inner;
-                if needs_value
-                    && resp.lost_focus()
-                    && ui.input(|inp| inp.key_pressed(egui::Key::Enter))
                 {
                     event = Some(FilterEvent::Apply);
                 }
+                if crate::components::Btn::new("Clear").show(ui).clicked() {
+                    event = Some(FilterEvent::Clear);
+                }
             });
-        });
-        ui.add_space(3.0);
-    }
-
-    // Toolbar: All/Any switch on the left, Clear / Apply on the right.
-    ui.horizontal(|ui| {
-        ui.add_space(2.0);
-        ui.colored_label(palette::TEXT_FAINT(), "match");
-        let mut conj = state.conjunction;
-        egui::ComboBox::from_id_salt("filter_conj")
-            .width(64.0)
-            .selected_text(match conj {
-                Conjunction::All => "all",
-                Conjunction::Any => "any",
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut conj, Conjunction::All, "all");
-                ui.selectable_value(&mut conj, Conjunction::Any, "any");
-            });
-        if conj != state.conjunction {
-            state.conjunction = conj;
-            event = Some(FilterEvent::Apply);
-        }
-        ui.colored_label(palette::TEXT_FAINT(), "of the following");
-
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if crate::components::primary_button(ui, crate::icons::filter(), "Apply All", true)
-                .on_hover_text("Apply filter  (Enter)")
-                .clicked()
-            {
-                event = Some(FilterEvent::Apply);
-            }
-            if ui.button("Clear").clicked() {
-                event = Some(FilterEvent::Clear);
-            }
-        });
-    });
-    ui.add_space(4.0);
+        },
+    );
 
     // Apply deferred structural edits.
     if let Some(i) = add_after {
@@ -692,9 +688,17 @@ mod tests {
         ));
         // Once a value is typed, it filters again (and a value op still skips NULLs).
         let typed = vec![cond(0, FilterOp::Contains, "x")];
-        assert!(matches_row(&[Value::Text("xyz".into())], &typed, Conjunction::All));
+        assert!(matches_row(
+            &[Value::Text("xyz".into())],
+            &typed,
+            Conjunction::All
+        ));
         assert!(!matches_row(&[Value::Null], &typed, Conjunction::All));
         // A no-value operator (is null) stays effective with an empty value box.
-        assert!(matches_row(&[Value::Null], &[cond(0, FilterOp::IsNull, "")], Conjunction::All));
+        assert!(matches_row(
+            &[Value::Null],
+            &[cond(0, FilterOp::IsNull, "")],
+            Conjunction::All
+        ));
     }
 }

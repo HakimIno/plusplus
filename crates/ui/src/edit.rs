@@ -399,7 +399,10 @@ impl Edits {
 
     /// Flip a boolean cell and stage the result immediately (no text editor needed).
     pub fn toggle_bool(&mut self, row: usize, col: usize, original: &Value) {
-        let current = self.staged(row, col).map(as_bool).unwrap_or(as_bool(original));
+        let current = self
+            .staged(row, col)
+            .map(as_bool)
+            .unwrap_or(as_bool(original));
         self.stage(row, col, Value::Bool(!current), original);
     }
 
@@ -422,11 +425,7 @@ impl Edits {
     /// Whether `(row, col)` is being edited *and* `origin` is the view that opened the
     /// editor — i.e. the view that should render it.
     pub fn is_active_from(&self, row: usize, col: usize, origin: EditOrigin) -> bool {
-        self.is_active(row, col)
-            && self
-                .active
-                .as_ref()
-                .is_some_and(|a| a.origin == origin)
+        self.is_active(row, col) && self.active.as_ref().is_some_and(|a| a.origin == origin)
     }
 
     /// Commit the active editor into the staged set, typing the input by its column kind. If
@@ -780,7 +779,11 @@ pub fn settle_active(edits: &mut Edits, result: &dbcore::QueryResult) {
 /// dropping it silently would lose the typed value). Seeds from the staged value if present,
 /// else the original.
 pub fn begin_cell_edit(edits: &mut Edits, result: &dbcore::QueryResult, raw: usize, col: usize) {
-    if edits.active.as_ref().is_some_and(|a| (a.row, a.col) != (raw, col)) {
+    if edits
+        .active
+        .as_ref()
+        .is_some_and(|a| (a.row, a.col) != (raw, col))
+    {
         settle_active(edits, result);
     }
     let seed = edits
@@ -943,7 +946,11 @@ mod tests {
         assert!(e.can_redo());
 
         assert!(e.redo());
-        assert_eq!(e.staged(0, 0), Some(&Value::Int(5)), "redo re-applies the edit");
+        assert_eq!(
+            e.staged(0, 0),
+            Some(&Value::Int(5)),
+            "redo re-applies the edit"
+        );
         assert!(!e.can_redo());
     }
 
@@ -954,7 +961,11 @@ mod tests {
         e.stage(0, 0, Value::Int(5), &Value::Int(1));
         e.stage(0, 0, Value::Int(9), &Value::Int(1));
         assert!(e.undo());
-        assert_eq!(e.staged(0, 0), Some(&Value::Int(5)), "back to the first edit");
+        assert_eq!(
+            e.staged(0, 0),
+            Some(&Value::Int(5)),
+            "back to the first edit"
+        );
         assert!(e.undo());
         assert_eq!(e.staged(0, 0), None, "back to the stored value");
     }
@@ -1047,14 +1058,23 @@ mod tests {
         e.remove_new_row(r1);
         assert_eq!(e.new_rows, 2);
         assert_eq!(e.staged(NEW_ROW_BASE, 0), Some(&Value::Text("a".into())));
-        assert_eq!(e.staged(NEW_ROW_BASE + 1, 0), Some(&Value::Text("c".into())));
+        assert_eq!(
+            e.staged(NEW_ROW_BASE + 1, 0),
+            Some(&Value::Text("c".into()))
+        );
 
         // Undo brings "b" back in the middle, sliding "c" back up.
         assert!(e.undo());
         assert_eq!(e.new_rows, 3);
         assert_eq!(e.staged(NEW_ROW_BASE, 0), Some(&Value::Text("a".into())));
-        assert_eq!(e.staged(NEW_ROW_BASE + 1, 0), Some(&Value::Text("b".into())));
-        assert_eq!(e.staged(NEW_ROW_BASE + 2, 0), Some(&Value::Text("c".into())));
+        assert_eq!(
+            e.staged(NEW_ROW_BASE + 1, 0),
+            Some(&Value::Text("b".into()))
+        );
+        assert_eq!(
+            e.staged(NEW_ROW_BASE + 2, 0),
+            Some(&Value::Text("c".into()))
+        );
     }
 
     #[test]

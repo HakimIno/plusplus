@@ -19,9 +19,9 @@ fn sql_colors() -> SqlColors {
     let t = crate::theme::current();
     SqlColors {
         keyword: t.accent,
-        string: t.success,
+        string: mix(t.danger, t.warning, 0.4),
         number: t.warning,
-        comment: t.text_faint,
+        comment: t.success,
         punct: mix(t.accent, t.text_weak, if t.is_dark { 0.62 } else { 0.45 }),
         ident: t.text,
     }

@@ -49,7 +49,8 @@ pub(crate) fn paint_table_header_cell(ui: &mut egui::Ui) {
         return;
     }
     let t = crate::theme::current();
-    ui.painter().rect_filled(rect, egui::CornerRadius::ZERO, t.panel);
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::ZERO, t.panel);
     ui.painter()
         .hline(rect.x_range(), rect.bottom(), Stroke::new(1.0, t.border));
 }

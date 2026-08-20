@@ -251,18 +251,13 @@ function ProductShot({
   priority?: boolean;
 }) {
   return (
-    <Card className="overflow-hidden p-0" variant="secondary">
-      <div className="flex h-9 items-center gap-1.5 border-b border-border px-3">
-        <span className="size-2 rounded-full bg-muted/40" />
-        <span className="size-2 rounded-full bg-muted/40" />
-        <span className="size-2 rounded-full bg-muted/40" />
-      </div>
+    <Card className="overflow-hidden p-0 bg-none" >
       <Image
         src={src}
         alt={alt}
         width={width}
         height={height}
-        className="h-auto w-full"
+        className="h-auto w-full rounded-xl"
         priority={priority}
       />
     </Card>
@@ -344,8 +339,8 @@ export default async function Home({
 
   return (
     <main id="top" className="min-h-screen bg-background text-foreground">
-      <header className="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-xl">
-        <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-5 sm:px-6">
+      <header className="sticky top-0 z-50  bg-background/80 backdrop-blur-xl">
+        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-5 sm:px-6">
           <Brand />
           <nav
             aria-label="Primary"
@@ -421,7 +416,7 @@ export default async function Home({
 
           <div className="product-frame mx-auto mt-14 max-w-5xl">
             <ProductShot
-              src="/screenshots/erd.png"
+              src="/screenshots/image1.png"
               alt="plusplus entity relationship diagram"
               width={2720}
               height={1700}
@@ -510,7 +505,7 @@ export default async function Home({
 
           <div className="mt-12">
             <ProductShot
-              src="/screenshots/query-grid.png"
+              src="/screenshots/image2.png"
               alt="plusplus query editor and result grid"
               width={2400}
               height={1500}
@@ -564,7 +559,7 @@ export default async function Home({
 
           <div className="mt-12">
             <ProductShot
-              src="/screenshots/table-editor.png"
+              src="/screenshots/image3.png"
               alt="plusplus table editor with staged edits"
               width={1180}
               height={760}
@@ -615,46 +610,6 @@ export default async function Home({
               Create a custom theme
               <Link.Icon />
             </Link>
-          </div>
-        </div>
-      </section>
-
-      <Separator />
-
-      <section className="py-20 sm:py-28">
-        <div className="mx-auto grid max-w-6xl items-center gap-12 px-5 sm:px-6 lg:grid-cols-2 lg:gap-16">
-          <Card className="overflow-hidden p-2" variant="secondary">
-            <Image
-              src="/dmg-background.svg"
-              alt="plusplus macOS installer artwork"
-              width={660}
-              height={400}
-              className="h-auto w-full rounded-xl"
-            />
-          </Card>
-          <div>
-            <p className="text-sm font-medium text-accent">Native runtime</p>
-            <h2 className="font-display mt-3 text-3xl font-semibold tracking-tight sm:text-4xl">
-              Built for your machine, not a browser tab
-            </h2>
-            <p className="mt-4 text-base leading-7 text-muted">
-              Queries, counts, and exports run away from the UI thread. A
-              virtualized, server-paged grid keeps large tables responsive.
-            </p>
-            <ul className="mt-7 space-y-3">
-              {[
-                "OS keychain credentials",
-                "Server-paged result grid",
-                "Local history and audit logs",
-              ].map((item) => (
-                <li key={item} className="flex items-center gap-3 text-sm font-medium">
-                  <span className="inline-flex size-5 items-center justify-center rounded-full bg-success/20 text-success">
-                    <HugeiconsIcon icon={Tick02Icon} size={12} aria-hidden="true" />
-                  </span>
-                  {item}
-                </li>
-              ))}
-            </ul>
           </div>
         </div>
       </section>

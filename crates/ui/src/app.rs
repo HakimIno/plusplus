@@ -63,6 +63,13 @@ struct SchemaTableDrag {
     pinned: bool,
 }
 
+/// Payload for drag-and-drop in the Saved Queries tree.
+#[derive(Clone)]
+enum SavedQueryDrag {
+    Folder(String),
+    Query(String),
+}
+
 /// Messages sent from background tasks back to the UI thread.
 enum AppMessage {
     /// The transport/authentication handshake finished. Schema metadata and the database list
@@ -311,6 +318,15 @@ struct FavoriteDraft {
     conn_name: Option<String>,
     /// `Some(id)` when renaming an existing favorite; `None` when creating a new one.
     editing_id: Option<String>,
+}
+
+/// In-progress folder name dialog: create, rename, or create-and-move a saved query.
+struct FolderDraft {
+    name: String,
+    /// When set, this dialog renames `from` rather than creating a folder.
+    from: Option<String>,
+    /// When set, confirming also moves this favorite into the folder.
+    move_id: Option<String>,
 }
 
 /// How many records of the file the import dialog shows before the user commits. Kept small:
@@ -1043,18 +1059,52 @@ enum Action {
     SetSidebarTab(SidebarTab),
     /// Open the name dialog to save the active tab's SQL as a favorite.
     SaveCurrentAsFavorite,
-    /// Open the name dialog to save a history entry (by cache index) as a favorite.
-    SaveFavoriteFromHistory(usize),
     /// Open the name dialog to rename an existing favorite (by cache index).
     RenameFavorite(usize),
     /// Commit the favorite name dialog (create or rename).
     ConfirmSaveFavorite,
     /// Close the favorite name dialog without saving.
     CancelSaveFavorite,
-    /// Load a favorite's SQL into the active tab (by cache index).
+    /// Load a favorite's SQL into a Query tab (opening one when the current tab is not).
     UseFavorite(usize),
+    /// Open a Query tab for a favorite and run it.
+    RunFavorite(usize),
     /// Delete a favorite (by cache index).
     DeleteFavorite(usize),
+    /// Open the new-folder dialog. `move_id` assigns that query to the folder on confirm.
+    NewFavoriteFolder {
+        move_id: Option<String>,
+    },
+    /// Open the rename-folder dialog for an existing folder.
+    RenameFavoriteFolder(String),
+    /// Remove a folder; queries inside it become Ungrouped.
+    DeleteFavoriteFolder(String),
+    /// Commit the folder name dialog.
+    ConfirmFavoriteFolder,
+    /// Close the folder name dialog without saving.
+    CancelFavoriteFolder,
+    /// Move a saved query into `folder` (`None` = Ungrouped).
+    MoveFavorite {
+        idx: usize,
+        folder: Option<String>,
+    },
+    /// Reorder one named folder relative to another.
+    ReorderFavoriteFolder {
+        source: String,
+        target: String,
+        after: bool,
+    },
+    /// Drop a query onto a folder header (`None` = Ungrouped).
+    DropFavoriteOnFolder {
+        id: String,
+        folder: Option<String>,
+    },
+    /// Drop a query beside another query (adopts that query's folder).
+    DropFavoriteOnQuery {
+        source_id: String,
+        target_id: String,
+        after: bool,
+    },
     /// Rebuild the open ER diagram from the current schema (after DDL / re-introspection).
     RefreshErd,
     /// Open the complete current schema as an editable portable design.
@@ -1077,8 +1127,18 @@ enum Action {
     SetErdDepth(usize),
     /// Wipe the on-disk query history.
     ClearHistory,
-    /// Put a history entry's SQL into the active tab's editor.
+    /// Put a history entry's SQL into a Query tab (opening one when the current tab is not).
     UseHistorySql(usize),
+    /// Open a Query tab for a history entry and run it.
+    RunHistorySql(usize),
+    /// Save a history entry's SQL to a `.sql` file.
+    SaveHistorySqlAs(usize),
+    /// Open the name dialog to save a history entry as a favorite.
+    SaveFavoriteFromHistory(usize),
+    /// Remove one history entry (by cache index) from memory and disk.
+    DeleteHistory(usize),
+    /// Reveal the history file in Finder / Explorer / the file manager.
+    RevealHistoryFile,
     DismissWelcome,
     BrowseSqlitePath,
     BrowseSslCaCert,
@@ -1117,6 +1177,8 @@ enum Action {
     ClearSort,
     /// Header menu: reveal the filter bar and target a condition at this result column.
     FilterColumn(usize),
+    /// Show or hide the result filter bar (pager control and Cmd/Ctrl+F).
+    ToggleFilter,
     /// Pager: jump to another page of a paged table tab. Rewrites the tab's LIMIT/OFFSET
     /// in place (the SQL editor always shows what runs) and re-runs the query.
     Page(PageNav),
@@ -1172,11 +1234,11 @@ enum Action {
     OpenNewTable,
     /// Open the schema editor to modify an existing table.
     OpenEditTable(TableInfo),
-    /// Stage a `CREATE TABLE … AS`/clone migration for a sidebar table (opens the DDL preview).
+    /// Apply a `CREATE TABLE … AS`/clone migration for a sidebar table.
     CloneTable(TableInfo),
-    /// Stage a `TRUNCATE`/empty-rows migration for a sidebar table (opens the DDL preview).
+    /// Apply a `TRUNCATE`/empty-rows migration for a sidebar table.
     TruncateTable(TableInfo),
-    /// Stage a `DROP TABLE` migration for a sidebar table (opens the DDL preview).
+    /// Apply a `DROP TABLE` migration for a sidebar table.
     DropTable(TableInfo),
     /// Pin/unpin a table in the schema explorer (toggles its "Pinned" bookmark for the
     /// active connection). Carries the table's schema and bare name.
@@ -1197,27 +1259,25 @@ enum Action {
     OpenNewView,
     /// Open the object editor to modify an existing view.
     OpenEditView(dbcore::ViewInfo),
-    /// Stage a `DROP VIEW` migration for a sidebar view (opens the DDL preview).
+    /// Apply a `DROP VIEW` migration for a sidebar view.
     DropView(dbcore::ViewInfo),
     /// Open the object editor to create a brand-new trigger.
     OpenNewTrigger,
     /// Open the object editor to modify an existing trigger.
     OpenEditTrigger(dbcore::TriggerInfo),
-    /// Stage a `DROP TRIGGER` migration for a sidebar trigger (opens the DDL preview).
+    /// Apply a `DROP TRIGGER` migration for a sidebar trigger.
     DropTrigger(dbcore::TriggerInfo),
     /// Open the object editor to create a new function or procedure.
     OpenNewRoutine(dbcore::RoutineKind),
     /// Open the object editor to modify an existing function or procedure.
     OpenEditRoutine(dbcore::RoutineInfo),
-    /// Stage a `DROP FUNCTION/PROCEDURE` migration (opens the DDL preview).
+    /// Apply a `DROP FUNCTION/PROCEDURE` migration.
     DropRoutine(dbcore::RoutineInfo),
-    /// Validate editor state and move to the DDL-preview dialog.
+    /// Build DDL from the object editor and apply it (Guardian reviews production).
     GenerateSchema,
-    /// User confirmed the DDL preview: execute the statements and re-introspect.
-    ApplySchema,
     /// Restore the live table definition while keeping Structure/Indexes open.
     DiscardSchemaChanges,
-    /// Close the schema editor / DDL preview without applying.
+    /// Close the schema editor without applying.
     CancelSchema,
     /// Open the in-app update dialog.
     OpenUpdateDialog,
@@ -1395,6 +1455,11 @@ pub struct DbGuiApp {
     /// All saved queries, kept in memory and mirrored to `favorites.json` on every change.
     /// Loaded once at startup so the Saved queries tab count is immediately correct.
     favorites_cache: Vec<dbcore::Favorite>,
+    /// Named folders shown in the Queries sidebar, including empty ones. Queries with no
+    /// folder sit under Ungrouped, which is not stored here.
+    favorite_folders: Vec<String>,
+    /// Id of the last clicked saved query, used to paint the selection pill.
+    favorites_selected: Option<String>,
     /// Pinned tables, kept in memory and mirrored to `bookmarks.json` on every change. Loaded
     /// once at startup so pinned entries sort to the top of the schema explorer from launch.
     bookmarks: Vec<dbcore::Bookmark>,
@@ -1403,6 +1468,8 @@ pub struct DbGuiApp {
     /// Whether the Saved queries tab is active inside the SQL editor panel.
     /// Open name-this-favorite dialog. `None` = closed.
     favorite_pending: Option<FavoriteDraft>,
+    /// Open new/rename-folder dialog. `None` = closed.
+    folder_pending: Option<FolderDraft>,
     /// Open ER diagram (takes over the central panel, like the schema editor).
     /// A snapshot of the schema it was built from; not persisted.
     // --- layout ---
@@ -1459,7 +1526,9 @@ impl DbGuiApp {
 
         // Load saved queries so the Favorites toolbar count is right from launch. Also kept
         // out of `construct` so tests don't read the user's favorites file.
-        app.favorites_cache = dbcore::favorites::load().unwrap_or_default();
+        let favorites = dbcore::favorites::load().unwrap_or_default();
+        app.favorite_folders = favorites.folders;
+        app.favorites_cache = favorites.queries;
 
         // Load pinned tables so they sort to the top of the explorer from launch. Kept out
         // of `construct` so tests don't read the user's bookmarks file.
@@ -1617,9 +1686,12 @@ impl DbGuiApp {
             live_log: Vec::new(),
             // Loaded from disk in `new` (this builder stays config-dir-free for tests).
             favorites_cache: Vec::new(),
+            favorite_folders: Vec::new(),
+            favorites_selected: None,
             bookmarks: Vec::new(),
             schema_table_order,
             favorite_pending: None,
+            folder_pending: None,
             show_welcome,
             update: crate::update::UpdatePhase::Idle,
             update_dialog_open: false,
@@ -1812,7 +1884,9 @@ impl DbGuiApp {
             }
             SidebarTab::Queries => {
                 if !cfg!(test) {
-                    self.favorites_cache = dbcore::favorites::load().unwrap_or_default();
+                    let store = dbcore::favorites::load().unwrap_or_default();
+                    self.favorite_folders = store.folders;
+                    self.favorites_cache = store.queries;
                 }
             }
             SidebarTab::Items => {}

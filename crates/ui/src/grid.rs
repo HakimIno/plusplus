@@ -34,6 +34,12 @@ struct GridColumnView {
     widths: Vec<Option<f32>>,
     fit_content_next_frame: Option<usize>,
     reset_widths_next_frame: bool,
+    /// Column names the current `widths` were measured against. A new result with a
+    /// different schema must re-fit; TableBuilder only honours `Column::initial` after reset.
+    fitted_for: Vec<String>,
+    /// Whether those widths were measured with at least one data row. An empty first paint
+    /// would otherwise lock in header-only widths when the rows arrive a frame later.
+    fitted_with_rows: bool,
 }
 
 fn column_view_id(grid_id: u64) -> egui::Id {
@@ -424,20 +430,37 @@ pub fn results_grid(
     if column_view.hidden.len() >= ncols {
         column_view.hidden.clear();
     }
+
+    let col_names: Vec<String> = result.columns.iter().map(|c| c.name.clone()).collect();
+    let schema_changed = column_view.fitted_for != col_names;
+    let gained_rows = !column_view.fitted_with_rows && !result.rows.is_empty();
+    if schema_changed || gained_rows {
+        column_view.widths = vec![None; ncols];
+        column_view.fitted_for = col_names;
+        column_view.reset_widths_next_frame = true;
+    }
+    if !result.rows.is_empty() {
+        column_view.fitted_with_rows = true;
+    }
+
     let fit_content_col =
         std::mem::take(&mut column_view.fit_content_next_frame).filter(|&col| col < ncols);
     if let Some(col) = fit_content_col {
         column_view.widths[col] = fitted_column_width(ui, result, col);
+        column_view.reset_widths_next_frame = true;
     }
-    let reset_widths = std::mem::take(&mut column_view.reset_widths_next_frame);
     // New/reset grids start at their natural widths instead of giving every column the same
     // arbitrary width. This is cached in the per-grid view so measuring text is a one-frame
-    // cost; manual resizing remains owned by egui_extras' table state afterwards.
+    // cost; manual resizing remains owned by egui_extras' table state afterwards — so any
+    // time we change `widths` we must also reset that table state or `Column::initial` is
+    // ignored.
     for col in 0..ncols {
         if column_view.widths[col].is_none() {
             column_view.widths[col] = fitted_column_width(ui, result, col);
+            column_view.reset_widths_next_frame = true;
         }
     }
+    let reset_widths = std::mem::take(&mut column_view.reset_widths_next_frame);
     let visible_cols: Vec<usize> = (0..ncols)
         .filter(|col| !column_view.hidden.contains(col))
         .collect();
@@ -485,7 +508,6 @@ pub fn results_grid(
                     &visible_cols,
                     &column_widths,
                     reset_widths,
-                    fit_content_col,
                 );
                 // Horizontal keep-visible for keyboard cursor moves. This request must
                 // be issued *here* — inside this horizontal ScrollArea but outside the
@@ -585,7 +607,6 @@ fn build_grid(
     visible_cols: &[usize],
     column_widths: &[Option<f32>],
     reset_widths: bool,
-    fit_content_col: Option<usize>,
 ) {
     let fill_id = egui::Id::new(("results_grid_fill_handle", grid_id));
     let mut fill_drag = ui.data_mut(|d| d.get_temp::<FillDrag>(fill_id));
@@ -615,14 +636,12 @@ fn build_grid(
         .column(Column::exact(gutter_w)); // gutter (not resizable)
     for &col in visible_cols {
         let width = column_widths[col].unwrap_or(FALLBACK_COL_W);
-        let mut column = Column::initial(width)
-            .at_least(64.0)
-            .clip(true)
-            .resizable(true);
-        if fit_content_col == Some(col) {
-            column = column.range(egui::Rangef::new(width, width));
-        }
-        builder = builder.column(column);
+        builder = builder.column(
+            Column::initial(width)
+                .at_least(64.0)
+                .clip(true)
+                .resizable(true),
+        );
     }
     if reset_widths {
         builder.reset();
@@ -1575,6 +1594,99 @@ mod tests {
         });
 
         assert!(width.unwrap() < 200.0);
+    }
+
+    fn paint_grid(ctx: &egui::Context, result: &QueryResult, grid_id: u64) -> Vec<Option<f32>> {
+        let order: Vec<usize> = (0..result.rows.len()).collect();
+        let mut edits = Edits::default();
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 400.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show_inside(ui, |ui| {
+                    let _ = results_grid(
+                        ui,
+                        result,
+                        &order,
+                        None,
+                        &Selection::default(),
+                        &mut edits,
+                        false,
+                        grid_id,
+                        None,
+                        &EmojiAtlas::default(),
+                        &[],
+                    );
+                });
+            },
+        );
+        ctx.data(|d| {
+            d.get_temp::<GridColumnView>(column_view_id(grid_id))
+                .expect("grid caches fitted widths")
+                .widths
+        })
+    }
+
+    #[test]
+    fn a_new_result_on_the_same_grid_refits_column_widths() {
+        let ctx = egui::Context::default();
+        let short = QueryResult {
+            columns: vec![ColumnMeta {
+                name: "id".into(),
+                type_name: "INTEGER".into(),
+            }],
+            rows: vec![vec![Value::Int(1)]],
+            ..QueryResult::default()
+        };
+        let long = QueryResult {
+            columns: vec![ColumnMeta {
+                name: "description".into(),
+                type_name: "TEXT".into(),
+            }],
+            rows: vec![vec![Value::Text(
+                "a considerably longer description value".into(),
+            )]],
+            ..QueryResult::default()
+        };
+
+        let short_w = paint_grid(&ctx, &short, 88)[0].unwrap();
+        let long_w = paint_grid(&ctx, &long, 88)[0].unwrap();
+        assert!(
+            long_w > short_w,
+            "replacing the result must re-fit: short={short_w}, long={long_w}"
+        );
+    }
+
+    #[test]
+    fn empty_then_loaded_rows_refit_header_only_widths() {
+        let ctx = egui::Context::default();
+        let empty = QueryResult {
+            columns: vec![ColumnMeta {
+                name: "note".into(),
+                type_name: "TEXT".into(),
+            }],
+            rows: vec![],
+            ..QueryResult::default()
+        };
+        let loaded = QueryResult {
+            columns: empty.columns.clone(),
+            rows: vec![vec![Value::Text(
+                "a considerably longer description value".into(),
+            )]],
+            ..QueryResult::default()
+        };
+
+        let empty_w = paint_grid(&ctx, &empty, 89)[0].unwrap();
+        let loaded_w = paint_grid(&ctx, &loaded, 89)[0].unwrap();
+        assert!(
+            loaded_w > empty_w,
+            "rows arriving after an empty first paint must re-fit: empty={empty_w}, loaded={loaded_w}"
+        );
     }
 
     fn collect_clash_text(shapes: &[egui::epaint::ClippedShape], out: &mut Vec<String>) {

@@ -761,11 +761,7 @@ mod tests {
                 source: 2,
             },
         ];
-        let record: Record = vec![
-            Some("7".into()),
-            Some("ignored".into()),
-            Some("yes".into()),
-        ];
+        let record: Record = vec![Some("7".into()), Some("ignored".into()), Some("yes".into())];
         let vals = coerce_row(&record, &targets, ImportFormat::Csv, 1).unwrap();
         assert_eq!(vals, vec![Value::Int(7), Value::Bool(true)]);
 
@@ -807,7 +803,11 @@ mod tests {
         // MySQL: backtick identifiers.
         let sql =
             build_insert_batches(DbKind::MySql, None, "users", &["id", "name"], &rows).unwrap();
-        assert!(sql[0].starts_with("INSERT INTO `users` (`id`, `name`)"), "{}", sql[0]);
+        assert!(
+            sql[0].starts_with("INSERT INTO `users` (`id`, `name`)"),
+            "{}",
+            sql[0]
+        );
     }
 
     #[test]
@@ -835,7 +835,9 @@ mod tests {
 
     #[test]
     fn batches_refuse_a_file_over_the_transaction_row_cap() {
-        let rows: Vec<Vec<Value>> = (0..MAX_IMPORT_ROWS + 1).map(|_| vec![Value::Int(1)]).collect();
+        let rows: Vec<Vec<Value>> = (0..MAX_IMPORT_ROWS + 1)
+            .map(|_| vec![Value::Int(1)])
+            .collect();
         let err = build_insert_batches(DbKind::Sqlite, None, "t", &["id"], &rows).unwrap_err();
         assert!(err.to_string().contains("split the file"), "{err}");
     }

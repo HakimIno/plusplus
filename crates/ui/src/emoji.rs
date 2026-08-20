@@ -194,7 +194,10 @@ impl EmojiAtlas {
         {
             return None;
         }
-        let size = [image.placement.width as usize, image.placement.height as usize];
+        let size = [
+            image.placement.width as usize,
+            image.placement.height as usize,
+        ];
         let color = egui::ColorImage::from_rgba_unmultiplied(size, &image.data);
         Some(ctx.load_texture(
             format!("emoji-{grapheme}"),

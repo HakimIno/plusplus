@@ -15,6 +15,8 @@ pub(crate) fn dialog_frame(ctx: &egui::Context) -> egui::Frame {
     egui::Frame::window(&style).inner_margin(Margin::symmetric(12, 4))
 }
 
+/// Footer bar with a top border. Buttons are right-aligned; the first widget added is
+/// the rightmost (put the primary action first, then cancel / secondary).
 pub(crate) fn dialog_footer(ui: &mut egui::Ui, add_buttons: impl FnOnce(&mut egui::Ui)) {
     let t = crate::theme::current();
     let margin = ui.style().spacing.window_margin;
@@ -27,19 +29,28 @@ pub(crate) fn dialog_footer(ui: &mut egui::Ui, add_buttons: impl FnOnce(&mut egu
     let (row_rect, _) = ui.allocate_exact_size(egui::vec2(body_w, bar_h), egui::Sense::hover());
     let paint_rect = egui::Rect::from_min_size(
         row_rect.min - egui::vec2(margin.leftf(), 0.0),
-        egui::vec2(row_rect.width() + bleed_x, row_rect.height() + margin.bottomf()),
+        egui::vec2(
+            row_rect.width() + bleed_x,
+            row_rect.height() + margin.bottomf(),
+        ),
     );
     if ui.is_rect_visible(paint_rect) {
         let mut round = ui.style().visuals.window_corner_radius;
         round.nw = 0;
         round.ne = 0;
         ui.painter().rect_filled(paint_rect, round, t.base);
-        ui.painter()
-            .hline(paint_rect.x_range(), paint_rect.top(), Stroke::new(1.0, t.border));
+        ui.painter().hline(
+            paint_rect.x_range(),
+            paint_rect.top(),
+            Stroke::new(1.0, t.border),
+        );
     }
 
     ui.scope_builder(egui::UiBuilder::new().max_rect(row_rect), |ui| {
-        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        // Right-to-left so the first widget in `add_buttons` (the primary action) sits
+        // at the far right. A trailing gap keeps the cluster off the resize grip.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_space(12.0);
             ui.spacing_mut().item_spacing.x = 6.0;
             add_buttons(ui);
         });

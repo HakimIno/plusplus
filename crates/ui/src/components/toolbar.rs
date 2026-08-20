@@ -4,34 +4,163 @@ use crate::icons;
 use crate::style::palette;
 
 const TOOLBAR_ICON_GAP: f32 = 0.0;
+const LAYOUT_TILE: egui::Vec2 = egui::vec2(46.0, 34.0);
+const LAYOUT_GAP: f32 = 8.0;
 
-/// Small layout toggle (sidebar on/off) used in the unified title bar.
-pub(crate) fn layout_toggle(
-    ui: &mut egui::Ui,
-    active: bool,
-    side: LayoutSide,
-    hover: &str,
-) -> egui::Response {
-    let src = match side {
-        LayoutSide::Connections => icons::layout_connections(),
-        LayoutSide::Schema => icons::layout_schema(),
-        LayoutSide::Details => icons::layout_details(),
-        LayoutSide::Query => icons::layout_query(),
-        LayoutSide::LiveLog => icons::layout_log(),
-    };
-    let resp = super::soft_icon_button_state(ui, src, hover, true, active);
-
-    ui.add_space(TOOLBAR_ICON_GAP);
-    resp
+fn layout_grid_width() -> f32 {
+    LAYOUT_TILE.x * 3.0 + LAYOUT_GAP * 2.0
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum LayoutSide {
-    Connections,
-    Schema,
-    Details,
-    Query,
-    LiveLog,
+/// Visibility of the workspace chrome toggled from the title-bar Layout menu.
+pub(crate) struct LayoutChrome<'a> {
+    pub connections: &'a mut bool,
+    pub schema: &'a mut bool,
+    pub details: &'a mut bool,
+    pub query: &'a mut bool,
+    pub live_log: &'a mut bool,
+}
+
+/// One title-bar icon that opens a layout popover: a macOS-style grid of panel glyphs.
+pub(crate) fn layout_menu(ui: &mut egui::Ui, chrome: &mut LayoutChrome<'_>) {
+    let btn = super::soft_icon_button(ui, icons::layout_schema(), "Layout", true);
+    ui.add_space(TOOLBAR_ICON_GAP);
+
+    let popup_id = btn.id.with("layout_menu");
+    let grid_w = layout_grid_width();
+    let popup_frame = egui::Frame::popup(ui.style())
+        .fill(palette::PANEL())
+        .stroke(egui::Stroke::new(1.0, palette::BORDER_STRONG()))
+        .corner_radius(egui::CornerRadius::same(14))
+        .inner_margin(egui::Margin::symmetric(10, 10));
+    let popup = egui::Popup::from_toggle_button_response(&btn)
+        .id(popup_id)
+        .align(egui::RectAlign::BOTTOM)
+        .align_alternatives(&[])
+        .gap(9.0)
+        .width(grid_w)
+        .frame(popup_frame)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .layout(egui::Layout::top_down(egui::Align::Min))
+        .show(|ui| {
+            ui.set_width(grid_w);
+            layout_section(ui, "Panels");
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = LAYOUT_GAP;
+                layout_tile(
+                    ui,
+                    icons::layout_schema(),
+                    "Schema",
+                    "Schema panel",
+                    chrome.schema,
+                );
+                layout_tile(
+                    ui,
+                    icons::layout_details(),
+                    "Details",
+                    "Details panel",
+                    chrome.details,
+                );
+                layout_tile(
+                    ui,
+                    icons::layout_connections(),
+                    "Connections",
+                    "Connection tabs",
+                    chrome.connections,
+                );
+            });
+            ui.add_space(8.0);
+            let y = ui.cursor().top();
+            ui.painter().hline(
+                ui.max_rect().x_range(),
+                y,
+                egui::Stroke::new(1.0, palette::BORDER()),
+            );
+            ui.add_space(10.0);
+            layout_section(ui, "Editor");
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = LAYOUT_GAP;
+                layout_tile(
+                    ui,
+                    icons::layout_query(),
+                    "Query console",
+                    "Query console",
+                    chrome.query,
+                );
+                layout_tile(
+                    ui,
+                    icons::layout_log(),
+                    "Live log",
+                    "Live log panel",
+                    chrome.live_log,
+                );
+            });
+        });
+
+    if let Some(response) = popup {
+        let rect = response.response.rect;
+        let anchor_x = btn
+            .rect
+            .center()
+            .x
+            .clamp(rect.left() + 10.0, rect.right() - 10.0);
+        let left = egui::pos2(anchor_x - 8.0, rect.top() + 1.0);
+        let right = egui::pos2(anchor_x + 8.0, rect.top() + 1.0);
+        let tip = egui::pos2(anchor_x, rect.top() - 8.0);
+        let painter = ui.ctx().layer_painter(response.response.layer_id);
+        painter.add(egui::Shape::convex_polygon(
+            vec![left, right, tip],
+            palette::PANEL(),
+            egui::Stroke::NONE,
+        ));
+        let stroke = egui::Stroke::new(1.0, palette::BORDER_STRONG());
+        painter.line_segment([left, tip], stroke);
+        painter.line_segment([tip, right], stroke);
+    }
+}
+
+fn layout_section(ui: &mut egui::Ui, title: &str) {
+    ui.label(
+        egui::RichText::new(title)
+            .size(12.0)
+            .color(palette::TEXT_WEAK()),
+    );
+    ui.add_space(8.0);
+}
+
+fn layout_tile(
+    ui: &mut egui::Ui,
+    icon: egui::ImageSource<'static>,
+    tooltip: &str,
+    a11y: &str,
+    on: &mut bool,
+) {
+    let (rect, resp) = ui.allocate_exact_size(LAYOUT_TILE, egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, *on, a11y));
+    let resp = resp.on_hover_text(tooltip);
+    if resp.clicked() {
+        *on = !*on;
+    }
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let radius = egui::CornerRadius::same(8);
+    let accent = palette::ACCENT();
+    let (fill, tint) = if *on {
+        (
+            egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 28),
+            accent,
+        )
+    } else if resp.hovered() {
+        (palette::SURFACE_HOVER(), palette::TEXT())
+    } else {
+        (egui::Color32::TRANSPARENT, palette::TEXT_FAINT())
+    };
+    ui.painter().rect_filled(rect, radius, fill);
+    let glyph = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(22.0));
+    egui::Image::new(icon)
+        .fit_to_exact_size(glyph.size())
+        .tint(tint)
+        .paint_at(ui, glyph);
 }
 
 /// Outline accent button for the title-bar update affordance.
@@ -238,6 +367,7 @@ pub(crate) fn beautify_button(
 }
 
 /// Hairline separator between toolbar icon groups.
+#[allow(dead_code)]
 pub(crate) fn toolbar_sep(ui: &mut egui::Ui) {
     let h = 12.0;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(5.0, h), egui::Sense::hover());

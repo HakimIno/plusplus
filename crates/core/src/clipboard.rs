@@ -162,7 +162,15 @@ mod tests {
             "INSERT INTO \"public\".\"users\" (\"id\", \"name\") VALUES\n  (1, 'O''Brien'),\n  (2, NULL);"
         );
         // MySQL uses backtick identifiers.
-        let my = copy_rows(CopyFormat::Insert, &c, &refs(&r), DbKind::MySql, None, "users").unwrap();
+        let my = copy_rows(
+            CopyFormat::Insert,
+            &c,
+            &refs(&r),
+            DbKind::MySql,
+            None,
+            "users",
+        )
+        .unwrap();
         assert!(my.starts_with("INSERT INTO `users` (`id`, `name`) VALUES"));
     }
 
@@ -170,13 +178,24 @@ mod tests {
     fn insert_refuses_binary_values() {
         let columns = cols(&["blob"]);
         let rows = vec![vec![Value::Bytes(vec![1, 2, 3])]];
-        assert!(
-            copy_rows(CopyFormat::Insert, &columns, &refs(&rows), DbKind::Sqlite, None, "t")
-                .is_none()
-        );
+        assert!(copy_rows(
+            CopyFormat::Insert,
+            &columns,
+            &refs(&rows),
+            DbKind::Sqlite,
+            None,
+            "t"
+        )
+        .is_none());
         // …but CSV/JSON still work (binary falls back to a placeholder there).
-        assert!(
-            copy_rows(CopyFormat::Csv, &columns, &refs(&rows), DbKind::Sqlite, None, "t").is_some()
-        );
+        assert!(copy_rows(
+            CopyFormat::Csv,
+            &columns,
+            &refs(&rows),
+            DbKind::Sqlite,
+            None,
+            "t"
+        )
+        .is_some());
     }
 }

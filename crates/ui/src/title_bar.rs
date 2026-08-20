@@ -173,20 +173,21 @@ fn window_button(ui: &mut Ui, kind: WindowButton, hover: &str) -> egui::Response
         match kind {
             WindowButton::Minimize => {
                 let y = c.y + 4.0;
-                ui.painter().line_segment(
-                    [egui::pos2(c.x - 4.5, y), egui::pos2(c.x + 4.5, y)],
-                    stroke,
-                );
+                ui.painter()
+                    .line_segment([egui::pos2(c.x - 4.5, y), egui::pos2(c.x + 4.5, y)], stroke);
             }
             WindowButton::Maximize => {
                 let r = Rect::from_center_size(c, egui::vec2(9.0, 8.0));
-                ui.painter()
-                    .rect_stroke(r, CornerRadius::same(1), stroke, egui::StrokeKind::Inside);
+                ui.painter().rect_stroke(
+                    r,
+                    CornerRadius::same(1),
+                    stroke,
+                    egui::StrokeKind::Inside,
+                );
             }
             WindowButton::Restore => {
                 let back = Rect::from_center_size(c + egui::vec2(2.0, -2.0), egui::vec2(8.0, 7.0));
-                let front =
-                    Rect::from_center_size(c + egui::vec2(-1.5, 1.5), egui::vec2(8.0, 7.0));
+                let front = Rect::from_center_size(c + egui::vec2(-1.5, 1.5), egui::vec2(8.0, 7.0));
                 ui.painter().rect_stroke(
                     back,
                     CornerRadius::same(1),
@@ -269,6 +270,7 @@ pub fn window_controls(ui: &mut Ui) {
     }
 
     if window_button(ui, WindowButton::Minimize, "Minimize").clicked() {
-        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
     }
 }

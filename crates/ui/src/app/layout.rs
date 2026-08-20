@@ -102,8 +102,8 @@ impl DbGuiApp {
                 self.tab().schema_editor.as_ref(),
                 Some(crate::schema::ObjectEditor::Table(_))
             );
-        // Cmd/Ctrl+S previews whichever grid is being edited: row DML in Data, table DDL in
-        // Structure/Indexes. Both remain review-before-commit workflows.
+        // Cmd/Ctrl+S commits whichever grid is being edited: row DML in Data, table DDL in
+        // Structure/Indexes. Production connections still review through Guardian.
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
             actions.push(if editing_table_schema {
                 Action::GenerateSchema
@@ -315,11 +315,10 @@ impl DbGuiApp {
             actions.push(Action::CloseTab(self.active_query_tab));
         }
         // Cmd/Ctrl+F toggles the filter bar (when there's a result to filter); Esc hides it.
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F))
-            && self.tab().result.is_some()
+        if self.tab().result.is_some()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F))
         {
-            let visible = self.tab().filter.visible;
-            self.tab_mut().filter.visible = !visible;
+            actions.push(Action::ToggleFilter);
         }
         if self.tab().filter.visible && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.tab_mut().filter.visible = false;
@@ -383,9 +382,9 @@ impl DbGuiApp {
         self.connection_dialog(&ctx, &mut actions);
         self.commit_preview_dialog(&ctx, &mut actions);
         self.favorite_name_dialog(&ctx, &mut actions);
+        self.favorite_folder_dialog(&ctx, &mut actions);
         self.danger_confirm_dialog(&ctx, &mut actions);
         self.import_dialog(&ctx, &mut actions);
-        self.schema_preview_dialog(&ctx, &mut actions);
         self.update_dialog(&ctx, &mut actions);
         self.whats_new_dialog(&ctx, &mut actions);
 

@@ -45,6 +45,8 @@ icon_fns! {
     key        => "../assets/icons/key.svg",
     index      => "../assets/icons/index.svg",
     filter     => "../assets/icons/filter.svg",
+    folder     => "../assets/icons/folder.svg",
+    file       => "../assets/icons/file.svg",
     fit        => "../assets/icons/fit.svg",
     history    => "../assets/icons/history.svg",
     relayout   => "../assets/icons/relayout.svg",

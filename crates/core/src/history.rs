@@ -63,6 +63,11 @@ pub fn clear() -> Result<()> {
     clear_at(&history_path()?)
 }
 
+/// Replace the on-disk history with `entries` (oldest first), used after deleting one item.
+pub fn replace_all(entries: &[HistoryEntry]) -> Result<()> {
+    write_all_at(&history_path()?, entries)
+}
+
 fn io_err(path: &Path, e: std::io::Error) -> CoreError {
     CoreError::Config(format!("history {}: {e}", path.display()))
 }
@@ -92,15 +97,26 @@ fn append_at(path: &Path, entry: &HistoryEntry) -> Result<()> {
     drop(file);
     if len > COMPACT_BYTES {
         let keep = load_at(path, MAX_ENTRIES)?;
-        let mut buf = Vec::new();
-        for e in &keep {
-            serde_json::to_writer(&mut buf, e)?;
-            buf.push(b'\n');
-        }
-        let tmp = path.with_extension("jsonl.tmp");
-        std::fs::write(&tmp, &buf).map_err(|e| io_err(path, e))?;
-        std::fs::rename(&tmp, path).map_err(|e| io_err(path, e))?;
+        write_all_at(path, &keep)?;
     }
+    Ok(())
+}
+
+fn write_all_at(path: &Path, entries: &[HistoryEntry]) -> Result<()> {
+    if entries.is_empty() {
+        return clear_at(path);
+    }
+    let mut buf = Vec::new();
+    for entry in entries {
+        serde_json::to_writer(&mut buf, entry)?;
+        buf.push(b'\n');
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| io_err(path, e))?;
+    }
+    let tmp = path.with_extension("jsonl.tmp");
+    std::fs::write(&tmp, &buf).map_err(|e| io_err(path, e))?;
+    std::fs::rename(&tmp, path).map_err(|e| io_err(path, e))?;
     Ok(())
 }
 
@@ -183,11 +199,33 @@ mod tests {
     }
 
     #[test]
+    fn replace_all_drops_one_entry_and_rewrites() {
+        let path = temp_history_path();
+        for i in 0..3 {
+            append_at(&path, &entry(&format!("SELECT {i}"), true)).unwrap();
+        }
+        let mut keep = load_at(&path, 10).unwrap();
+        keep.remove(1);
+        write_all_at(&path, &keep).unwrap();
+        let left = load_at(&path, 10).unwrap();
+        assert_eq!(
+            left.iter().map(|e| e.sql.as_str()).collect::<Vec<_>>(),
+            ["SELECT 0", "SELECT 2"]
+        );
+        write_all_at(&path, &[]).unwrap();
+        assert!(load_at(&path, 10).unwrap().is_empty());
+        let _ = clear_at(&path);
+    }
+
+    #[test]
     fn torn_line_is_skipped_not_fatal() {
         let path = temp_history_path();
         append_at(&path, &entry("SELECT 1", true)).unwrap();
         // Simulate a crash mid-append: garbage trailing line.
-        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         f.write_all(b"{\"at\":\"torn").unwrap();
         drop(f);
         append_at(&path, &entry("SELECT 2", true)).unwrap();

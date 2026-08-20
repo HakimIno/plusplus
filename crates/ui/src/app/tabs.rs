@@ -19,6 +19,32 @@ impl DbGuiApp {
         self.error = None;
         self.workspace_dirty = true;
     }
+
+    /// Land history SQL in a Query tab instead of overwriting a table/diagram/designer tab.
+    ///
+    /// `reuse_current_query` is for Insert into SQL Editor: a Query tab already in use is
+    /// overwritten. Run only reuses a blank untitled query tab so an in-progress query is
+    /// left alone.
+    pub(super) fn present_sql_in_query_tab(&mut self, sql: String, reuse_current_query: bool) {
+        self.settings_open = false;
+        let can_reuse = self.tabs.get(self.active_query_tab).is_some_and(|tab| {
+            tab.kind == crate::components::QueryTabKind::Query
+                && tab.schema_editor.is_none()
+                && tab.diagram.is_none()
+                && (reuse_current_query
+                    || (tab.title.is_empty() && tab.sql.trim().is_empty() && tab.result.is_none()))
+        });
+        if !can_reuse {
+            self.new_tab();
+        }
+        let tab = self.tab_mut();
+        tab.kind = crate::components::QueryTabKind::Query;
+        tab.schema_editor = None;
+        tab.diagram = None;
+        tab.sql = sql;
+        tab.folds.clear();
+        self.workspace_dirty = true;
+    }
     /// Database provider bound to this tab, whether the connection is currently live or only
     /// present in the saved connection list.
     pub(super) fn tab_db_kind(&self, idx: usize) -> Option<dbcore::DbKind> {

@@ -50,8 +50,10 @@ fn fix_titlebar_click_through(cc: &eframe::CreationContext<'_>) {
     unsafe {
         let view: &AnyObject = appkit.ns_view.cast::<AnyObject>().as_ref();
         let superclass = view.class();
-        let Ok(name) = CString::new(format!("{}_NoTitlebarDrag", superclass.name().to_string_lossy()))
-        else {
+        let Ok(name) = CString::new(format!(
+            "{}_NoTitlebarDrag",
+            superclass.name().to_string_lossy()
+        )) else {
             return;
         };
         // Register once; reuse on subsequent windows.
@@ -91,7 +93,11 @@ fn install_crash_logger() {
                 thread.name().unwrap_or("unnamed"),
             );
             use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
                 let _ = f.write_all(entry.as_bytes());
             }
         }
@@ -103,8 +109,6 @@ fn main() -> eframe::Result<()> {
     install_crash_logger();
     let icon = eframe::icon_data::from_png_bytes(APP_ICON).expect("valid app icon PNG");
 
-
-    
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 820.0])
         .with_min_inner_size([800.0, 500.0])

@@ -447,7 +447,10 @@ mod tests {
         let err =
             SshTunnel::open_verified(&cfg, Some("wrong-password"), vec![kh.clone()], kh.clone())
                 .await;
-        assert!(matches!(err, Err(CoreError::Ssh(_))), "bad password must fail");
+        assert!(
+            matches!(err, Err(CoreError::Ssh(_))),
+            "bad password must fail"
+        );
 
         let mut blank = cfg.clone();
         blank.ssh_host.clear();
@@ -467,8 +470,13 @@ mod tests {
 
         // Pre-record a *different* key for this bastion's host:port (a rogue/changed key).
         let kh = temp_known_hosts();
-        russh::keys::known_hosts::learn_known_hosts_path("127.0.0.1", ssh_port, &host_pubkey(9), &kh)
-            .unwrap();
+        russh::keys::known_hosts::learn_known_hosts_path(
+            "127.0.0.1",
+            ssh_port,
+            &host_pubkey(9),
+            &kh,
+        )
+        .unwrap();
 
         let opened =
             SshTunnel::open_verified(&cfg, Some("hunter2"), vec![kh.clone()], kh.clone()).await;
@@ -494,8 +502,13 @@ mod tests {
         ));
 
         // Record the key; now the same key matches and a different one conflicts.
-        russh::keys::known_hosts::learn_known_hosts_path("bastion.example", 2222, &host_pubkey(7), &kh)
-            .unwrap();
+        russh::keys::known_hosts::learn_known_hosts_path(
+            "bastion.example",
+            2222,
+            &host_pubkey(7),
+            &kh,
+        )
+        .unwrap();
         assert!(matches!(
             check_host_key("bastion.example", 2222, &host_pubkey(7), &paths),
             HostKeyCheck::Match

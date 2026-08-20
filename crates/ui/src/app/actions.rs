@@ -137,17 +137,6 @@ impl DbGuiApp {
                     });
                 }
             }
-            Action::SaveFavoriteFromHistory(i) => {
-                if let Some(entry) = self.history_cache.get(i) {
-                    self.favorite_pending = Some(FavoriteDraft {
-                        name: default_favorite_name(&entry.sql),
-                        sql: entry.sql.clone(),
-                        conn_id: Some(entry.conn_id.clone()),
-                        conn_name: Some(entry.conn_name.clone()),
-                        editing_id: None,
-                    });
-                }
-            }
             Action::RenameFavorite(i) => {
                 if let Some(fav) = self.favorites_cache.get(i) {
                     self.favorite_pending = Some(FavoriteDraft {
@@ -163,17 +152,67 @@ impl DbGuiApp {
             Action::CancelSaveFavorite => self.favorite_pending = None,
             Action::UseFavorite(i) => {
                 if let Some(fav) = self.favorites_cache.get(i) {
-                    self.tab_mut().sql = fav.sql.clone();
-                    self.workspace_dirty = true;
+                    self.favorites_selected = Some(fav.id.clone());
+                    let sql = fav.sql.clone();
+                    self.present_sql_in_query_tab(sql, true);
+                }
+            }
+            Action::RunFavorite(i) => {
+                if let Some(fav) = self.favorites_cache.get(i) {
+                    self.favorites_selected = Some(fav.id.clone());
+                    let sql = fav.sql.clone();
+                    self.present_sql_in_query_tab(sql, false);
+                    self.apply_action(Action::RunQuery);
                 }
             }
             Action::DeleteFavorite(i) => {
                 if i < self.favorites_cache.len() {
+                    let id = self.favorites_cache[i].id.clone();
                     self.favorites_cache.remove(i);
+                    if self.favorites_selected.as_deref() == Some(id.as_str()) {
+                        self.favorites_selected = None;
+                    }
                     self.persist_favorites();
                     self.status_msg = "Favorite deleted".to_string();
                 }
             }
+            Action::NewFavoriteFolder { move_id } => {
+                self.folder_pending = Some(FolderDraft {
+                    name: String::new(),
+                    from: None,
+                    move_id,
+                });
+            }
+            Action::RenameFavoriteFolder(from) => {
+                if from
+                    .trim()
+                    .eq_ignore_ascii_case(dbcore::favorites::UNGROUPED)
+                {
+                    return;
+                }
+                self.folder_pending = Some(FolderDraft {
+                    name: from.clone(),
+                    from: Some(from),
+                    move_id: None,
+                });
+            }
+            Action::DeleteFavoriteFolder(name) => self.delete_favorite_folder(&name),
+            Action::ConfirmFavoriteFolder => self.confirm_favorite_folder(),
+            Action::CancelFavoriteFolder => self.folder_pending = None,
+            Action::MoveFavorite { idx, folder } => self.move_favorite(idx, folder),
+            Action::ReorderFavoriteFolder {
+                source,
+                target,
+                after,
+            } => self.reorder_favorite_folder(&source, &target, after),
+            Action::DropFavoriteOnFolder { id, folder } => {
+                self.drop_favorite_on_folder(&id, folder.as_deref())
+            }
+            Action::DropFavoriteOnQuery {
+                source_id,
+                target_id,
+                after,
+            } => self.drop_favorite_on_query(&source_id, &target_id, after),
             Action::RefreshErd => self.refresh_diagram_tab(self.active_query_tab),
             Action::ShowDatabaseDiagram => {
                 let metadata_loading = self.active().is_some_and(|active| {
@@ -283,10 +322,7 @@ impl DbGuiApp {
                         self.error =
                             Some("Add at least one table before forward engineering.".into());
                     }
-                    Ok(statements) => {
-                        self.schema_pending = Some(statements);
-                        self.error = None;
-                    }
+                    Ok(statements) => self.stage_schema_ddl(statements),
                     Err(error) => self.error = Some(error),
                 }
             }
@@ -446,10 +482,55 @@ impl DbGuiApp {
             Action::UseHistorySql(i) => {
                 if let Some(entry) = self.history_cache.get(i) {
                     let sql = entry.sql.clone();
-                    self.tab_mut().sql = sql;
-                    self.workspace_dirty = true;
+                    self.present_sql_in_query_tab(sql, true);
                 }
             }
+            Action::RunHistorySql(i) => {
+                if let Some(entry) = self.history_cache.get(i) {
+                    let sql = entry.sql.clone();
+                    self.present_sql_in_query_tab(sql, false);
+                    self.apply_action(Action::RunQuery);
+                }
+            }
+            Action::SaveHistorySqlAs(i) => {
+                let Some(entry) = self.history_cache.get(i) else {
+                    return;
+                };
+                let file_name = default_sql_filename(&entry.sql);
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter("SQL", &["sql"])
+                    .set_file_name(&file_name)
+                    .save_file()
+                else {
+                    return;
+                };
+                match std::fs::write(&path, &entry.sql) {
+                    Ok(()) => self.status_msg = format!("Saved {}", path.display()),
+                    Err(error) => self.error = Some(format!("Could not save SQL: {error}")),
+                }
+            }
+            Action::SaveFavoriteFromHistory(i) => {
+                if let Some(entry) = self.history_cache.get(i) {
+                    self.favorite_pending = Some(FavoriteDraft {
+                        name: default_favorite_name(&entry.sql),
+                        sql: entry.sql.clone(),
+                        conn_id: Some(entry.conn_id.clone()),
+                        conn_name: Some(entry.conn_name.clone()),
+                        editing_id: None,
+                    });
+                }
+            }
+            Action::DeleteHistory(i) => {
+                if i < self.history_cache.len() {
+                    self.history_cache.remove(i);
+                    if let Err(error) = dbcore::history::replace_all(&self.history_cache) {
+                        self.error = Some(format!("Could not update history: {error}"));
+                    } else {
+                        self.status_msg = "History entry deleted".to_string();
+                    }
+                }
+            }
+            Action::RevealHistoryFile => reveal_history_file(self),
             Action::DismissWelcome => {
                 self.show_welcome = false;
                 self.persist_settings();
@@ -626,6 +707,9 @@ impl DbGuiApp {
                         // cancelling Guardian cannot reveal the legacy preview underneath it.
                         self.commit_pending = None;
                     }
+                    if matches!(pending.continuation, ProductionGuardContinuation::Schema) {
+                        self.schema_pending = None;
+                    }
                 }
                 self.status_msg = "Production query cancelled".to_string();
             }
@@ -656,6 +740,13 @@ impl DbGuiApp {
                     };
                     filter.conditions.push(condition);
                 }
+            }
+            Action::ToggleFilter => {
+                if self.tab().result.is_none() {
+                    return;
+                }
+                let visible = self.tab().filter.visible;
+                self.tab_mut().filter.visible = !visible;
             }
             Action::Page(nav) => self.page_nav(nav),
             Action::SetPageWindow { limit, offset } => self.set_page_window(limit, offset),
@@ -747,13 +838,12 @@ impl DbGuiApp {
             Action::DropView(view) => {
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
                 self.tab_mut().schema_editor = None;
-                self.schema_pending = Some(vec![dbcore::build_drop_view_sql(
+                self.stage_schema_ddl(vec![dbcore::build_drop_view_sql(
                     kind,
                     view.schema.as_deref(),
                     &view.name,
                     view.materialized,
                 )]);
-                self.error = None;
             }
             Action::OpenNewTrigger => {
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
@@ -789,13 +879,12 @@ impl DbGuiApp {
             Action::DropTrigger(trg) => {
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
                 self.tab_mut().schema_editor = None;
-                self.schema_pending = Some(vec![dbcore::build_drop_trigger_sql(
+                self.stage_schema_ddl(vec![dbcore::build_drop_trigger_sql(
                     kind,
                     trg.schema.as_deref(),
                     &trg.name,
                     &trg.table,
                 )]);
-                self.error = None;
             }
             Action::OpenNewRoutine(routine_kind) => {
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
@@ -818,45 +907,41 @@ impl DbGuiApp {
             Action::DropRoutine(routine) => {
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
                 self.tab_mut().schema_editor = None;
-                self.schema_pending = Some(vec![dbcore::build_drop_routine_sql(
+                self.stage_schema_ddl(vec![dbcore::build_drop_routine_sql(
                     kind,
                     routine.schema.as_deref(),
                     &routine.name,
                     routine.kind,
                     &routine.params,
                 )]);
-                self.error = None;
             }
             Action::CloneTable(table) => {
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
                 self.tab_mut().schema_editor = None;
-                self.schema_pending = Some(dbcore::build_clone_table_sql(
+                self.stage_schema_ddl(dbcore::build_clone_table_sql(
                     kind,
                     table.schema.as_deref(),
                     &table.name,
                     &format!("{}_copy", table.name),
                 ));
-                self.error = None;
             }
             Action::TruncateTable(table) => {
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
                 self.tab_mut().schema_editor = None;
-                self.schema_pending = Some(vec![dbcore::build_truncate_table_sql(
+                self.stage_schema_ddl(vec![dbcore::build_truncate_table_sql(
                     kind,
                     table.schema.as_deref(),
                     &table.name,
                 )]);
-                self.error = None;
             }
             Action::DropTable(table) => {
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
                 self.tab_mut().schema_editor = None;
-                self.schema_pending = Some(vec![dbcore::build_drop_table_sql(
+                self.stage_schema_ddl(vec![dbcore::build_drop_table_sql(
                     kind,
                     table.schema.as_deref(),
                     &table.name,
                 )]);
-                self.error = None;
             }
             Action::ToggleBookmark { schema, table } => {
                 // Bookmarks are keyed by the active connection's config id; ignore the toggle
@@ -922,42 +1007,11 @@ impl DbGuiApp {
                     return;
                 };
                 match editor.build_ddl() {
-                    Ok(stmts) => {
-                        self.schema_pending = Some(stmts);
-                        self.error = None;
-                    }
+                    Ok(stmts) => self.stage_schema_ddl(stmts),
                     Err(msg) => {
                         self.error = Some(msg);
                     }
                 }
-            }
-            Action::ApplySchema => {
-                if self.tab_connection_is_read_only(self.active_query_tab) {
-                    self.schema_pending = None;
-                    self.refuse_read_only("schema changes can't be applied.");
-                    return;
-                }
-                let idx = self.active_query_tab;
-                if self.tab_connection_is_production(idx) {
-                    let Some(statements) = self.schema_pending.as_ref() else {
-                        return;
-                    };
-                    let sql = statements.join("\n");
-                    let Some(kind) = self.active().map(|active| active.db.kind()) else {
-                        return;
-                    };
-                    let found = dbcore::safety::dangerous_statements(kind, &sql);
-                    if !found.is_empty() {
-                        self.start_production_guard(
-                            idx,
-                            sql,
-                            found,
-                            ProductionGuardContinuation::Schema,
-                        );
-                        return;
-                    }
-                }
-                self.apply_schema_confirmed();
             }
             Action::DiscardSchemaChanges => {
                 let idx = self.active_query_tab;
@@ -1048,7 +1102,39 @@ impl DbGuiApp {
         true
     }
 
-    /// Execute DDL that has already passed read-only checks, preview, and (for production)
+    /// Stage generated or sidebar DDL and apply it. Production connections open Guardian
+    /// review instead of a separate preview dialog.
+    fn stage_schema_ddl(&mut self, statements: Vec<String>) {
+        self.schema_pending = Some(statements);
+        self.error = None;
+        self.apply_schema();
+    }
+
+    fn apply_schema(&mut self) {
+        if self.tab_connection_is_read_only(self.active_query_tab) {
+            self.schema_pending = None;
+            self.refuse_read_only("schema changes can't be applied.");
+            return;
+        }
+        let idx = self.active_query_tab;
+        if self.tab_connection_is_production(idx) {
+            let Some(statements) = self.schema_pending.as_ref() else {
+                return;
+            };
+            let sql = statements.join("\n");
+            let Some(kind) = self.active().map(|active| active.db.kind()) else {
+                return;
+            };
+            let found = dbcore::safety::dangerous_statements(kind, &sql);
+            if !found.is_empty() {
+                self.start_production_guard(idx, sql, found, ProductionGuardContinuation::Schema);
+                return;
+            }
+        }
+        self.apply_schema_confirmed();
+    }
+
+    /// Execute DDL that has already passed read-only checks and (for production)
     /// Production Guardian. Kept separate so Guardian confirmation cannot recurse into itself.
     fn apply_schema_confirmed(&mut self) {
         if self.tab_connection_is_read_only(self.active_query_tab) {
@@ -1083,4 +1169,63 @@ impl DbGuiApp {
             });
         });
     }
+}
+
+fn default_sql_filename(sql: &str) -> String {
+    let stem: String = default_favorite_name(sql)
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let stem = stem.trim_matches('_');
+    if stem.is_empty() {
+        "query.sql".into()
+    } else {
+        format!("{stem}.sql")
+    }
+}
+
+fn reveal_history_file(app: &mut DbGuiApp) {
+    let path = match dbcore::history::history_path() {
+        Ok(path) => path,
+        Err(error) => {
+            app.error = Some(error.to_string());
+            return;
+        }
+    };
+    let target = if path.exists() {
+        path
+    } else {
+        path.parent().unwrap_or(path.as_path()).to_path_buf()
+    };
+    if let Err(error) = reveal_in_file_manager(&target) {
+        app.error = Some(format!("Could not show history file: {error}"));
+    }
+}
+
+fn reveal_in_file_manager(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .spawn()?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .spawn()?;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let dir = path.parent().unwrap_or(path);
+        std::process::Command::new("xdg-open").arg(dir).spawn()?;
+    }
+    Ok(())
 }
