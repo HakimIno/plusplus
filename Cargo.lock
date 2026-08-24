@@ -4452,14 +4452,14 @@ dependencies = [
 
 [[package]]
 name = "plusplus-analysis"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "plusplus-core",
 ]
 
 [[package]]
 name = "plusplus-app"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "eframe",
  "egui",
@@ -4472,7 +4472,7 @@ dependencies = [
 
 [[package]]
 name = "plusplus-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "bb8",
@@ -4500,7 +4500,7 @@ dependencies = [
 
 [[package]]
 name = "plusplus-ui"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "arboard",
  "async-trait",

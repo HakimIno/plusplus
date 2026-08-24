@@ -431,12 +431,21 @@ pub fn results_grid(
         column_view.hidden.clear();
     }
 
-    let col_names: Vec<String> = result.columns.iter().map(|c| c.name.clone()).collect();
-    let schema_changed = column_view.fitted_for != col_names;
+    let schema_changed = column_view.fitted_for.len() != result.columns.len()
+        || column_view
+            .fitted_for
+            .iter()
+            .zip(&result.columns)
+            .any(|(cached, current)| cached != &current.name);
     let gained_rows = !column_view.fitted_with_rows && !result.rows.is_empty();
     if schema_changed || gained_rows {
         column_view.widths = vec![None; ncols];
-        column_view.fitted_for = col_names;
+        if schema_changed {
+            column_view.fitted_for.clear();
+            column_view
+                .fitted_for
+                .extend(result.columns.iter().map(|column| column.name.clone()));
+        }
         column_view.reset_widths_next_frame = true;
     }
     if !result.rows.is_empty() {

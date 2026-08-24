@@ -84,7 +84,7 @@ impl dbcore::RowSink for UiQuerySink {
             ));
         }
         let row_bytes = std::mem::size_of::<Vec<dbcore::Value>>()
-            + row.len() * std::mem::size_of::<dbcore::Value>()
+            + std::mem::size_of_val(row)
             + row
                 .iter()
                 .map(|value| {
@@ -614,7 +614,7 @@ impl DbGuiApp {
         let Some(sql) = dbcore::with_page_window(kind, &self.tabs[idx].sql, limit, offset) else {
             return;
         };
-        self.tabs[idx].sql = sql;
+        self.tabs[idx].replace_sql(sql);
         // The rewrite preserves the simple-select shape, so the result stays editable.
         self.tabs[idx].edits.pending_source = self.derive_edit_source(idx);
         self.workspace_dirty = true;

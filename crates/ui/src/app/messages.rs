@@ -414,15 +414,16 @@ impl DbGuiApp {
                         continue;
                     };
                     let append = stream.append;
-                    let columns = stream.columns.clone();
+                    // Continuation pages already have their schema in the visible result; avoid
+                    // cloning every column name/type for each streamed row batch.
+                    let columns = if append && tab.result.is_some() {
+                        Vec::new()
+                    } else {
+                        stream.columns.clone()
+                    };
                     let batch_len = rows.len();
                     if append {
-                        let result = tab.result.get_or_insert_with(|| QueryResult {
-                            columns,
-                            ..QueryResult::default()
-                        });
-                        result.rows.extend(rows);
-                        tab.recompute_view();
+                        tab.append_result_rows(columns, rows);
                         if let Some(stream) = tab.stream.as_mut() {
                             stream.received_rows += batch_len;
                         }
@@ -560,7 +561,6 @@ impl DbGuiApp {
                                 || page.limit.is_some_and(|limit| rows_loaded < limit);
                             let status = result_status(result);
                             tab.query_error = None;
-                            tab.recompute_view();
                             if is_active {
                                 self.status_msg = status;
                                 self.error = None;

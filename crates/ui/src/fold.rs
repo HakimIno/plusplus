@@ -13,7 +13,7 @@
 //! — the widest one, matching how editors offer a single chevron per line.
 
 use std::collections::BTreeSet;
-use std::ops::Range;
+use std::{borrow::Cow, ops::Range};
 
 /// The construct a fold covers. Kept alongside each region for the editor's tooling (and to
 /// keep the detection rules readable); the collapsed marker looks the same for all of them.
@@ -541,21 +541,23 @@ pub type Shift = (usize, isize);
 /// snapshots of the *displayed* string, which carry markers instead of the text they hide.
 /// Those are refused and reported through [`Self::finish`], so the app can open every fold
 /// and let the next undo run against the real text.
-pub struct Buffer<'a> {
-    source: &'a mut String,
-    display: String,
-    gaps: Vec<Gap>,
+pub struct Buffer<'source, 'view> {
+    source: &'source mut String,
+    /// Borrow the cached folded view while idle. The first actual edit promotes these fields
+    /// to owned storage, avoiding a full SQL clone on every repaint.
+    display: Cow<'view, str>,
+    gaps: Cow<'view, [Gap]>,
     shifts: Vec<Shift>,
     refused_bulk: bool,
 }
 
-impl<'a> Buffer<'a> {
+impl<'source, 'view> Buffer<'source, 'view> {
     /// Wrap `source`, showing `view` (which must have been built from that same text).
-    pub fn new(source: &'a mut String, view: &View) -> Self {
+    pub fn new(source: &'source mut String, view: &'view View) -> Self {
         Self {
             source,
-            display: view.text.clone(),
-            gaps: view.gaps.clone(),
+            display: Cow::Borrowed(&view.text),
+            gaps: Cow::Borrowed(&view.gaps),
             shifts: Vec::new(),
             refused_bulk: false,
         }
@@ -570,7 +572,7 @@ impl<'a> Buffer<'a> {
     /// Move every gap that sits after an edit at `display`/`source` by `delta` chars, and
     /// record the edit for the fold anchors.
     fn shift(&mut self, display: usize, source: usize, delta: isize) {
-        for gap in &mut self.gaps {
+        for gap in self.gaps.to_mut() {
             if gap.display >= display {
                 gap.display = gap.display.saturating_add_signed(delta);
                 gap.source = gap.source.saturating_add_signed(delta);
@@ -586,7 +588,7 @@ fn byte_of(s: &str, char_index: usize) -> usize {
         .map_or(s.len(), |(byte, _)| byte)
 }
 
-impl egui::TextBuffer for Buffer<'_> {
+impl egui::TextBuffer for Buffer<'_, '_> {
     fn is_mutable(&self) -> bool {
         true
     }
@@ -600,7 +602,7 @@ impl egui::TextBuffer for Buffer<'_> {
         let byte = byte_of(self.source, source);
         self.source.insert_str(byte, text);
         let byte = byte_of(&self.display, char_index);
-        self.display.insert_str(byte, text);
+        self.display.to_mut().insert_str(byte, text);
         let count = text.chars().count();
         self.shift(char_index, source, count as isize);
         count
@@ -615,16 +617,17 @@ impl egui::TextBuffer for Buffer<'_> {
         // Markers wholly inside the deleted span go with it: their hidden text was just
         // removed from the source, so the fold has nothing left to cover.
         self.gaps
+            .to_mut()
             .retain(|g| g.display < range.start || g.display >= range.end);
 
         let bytes = byte_of(self.source, from)..byte_of(self.source, to);
         self.source.replace_range(bytes, "");
         let bytes = byte_of(&self.display, range.start)..byte_of(&self.display, range.end);
-        self.display.replace_range(bytes, "");
+        self.display.to_mut().replace_range(bytes, "");
 
         let display_delta = -((range.end - range.start) as isize);
         let source_delta = -((to - from) as isize);
-        for gap in &mut self.gaps {
+        for gap in self.gaps.to_mut() {
             if gap.display >= range.end {
                 gap.display = gap.display.saturating_add_signed(display_delta);
                 gap.source = gap.source.saturating_add_signed(source_delta);
@@ -647,8 +650,8 @@ impl egui::TextBuffer for Buffer<'_> {
             let before = self.source.chars().count() as isize;
             self.source.clear();
             self.source.push_str(text);
-            self.display.clear();
-            self.display.push_str(text);
+            self.display.to_mut().clear();
+            self.display.to_mut().push_str(text);
             self.shifts
                 .push((0, text.chars().count() as isize - before));
         } else {
@@ -662,11 +665,11 @@ impl egui::TextBuffer for Buffer<'_> {
     fn type_id(&self) -> std::any::TypeId {
         // `TypeId::of` needs a `'static` type; the borrowed lifetime is irrelevant to the
         // identity egui uses this for (downcasting a `dyn TextBuffer`).
-        std::any::TypeId::of::<Buffer<'static>>()
+        std::any::TypeId::of::<Buffer<'static, 'static>>()
     }
 }
 
-impl Buffer<'_> {
+impl Buffer<'_, '_> {
     fn to_source_index(&self, display: usize) -> usize {
         to_source(&self.gaps, display, false)
     }

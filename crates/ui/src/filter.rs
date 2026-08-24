@@ -12,6 +12,7 @@
 //! `recompute_view`.
 
 use dbcore::{QueryResult, Value};
+use std::ops::Range;
 
 /// A comparison operator for a single filter condition. Ordering operators (`>`, `<`, …)
 /// and `BETWEEN` compare numerically when both sides parse as numbers and fall back to text
@@ -210,15 +211,17 @@ pub enum FilterEvent {
 
 /// Does `row` satisfy the `conditions` under `conj`? Only *effective* conditions count (see
 /// [`Condition::is_effective`]); with none, every row passes (an empty filter is a no-op).
+#[cfg(test)]
 pub fn matches_row(row: &[Value], conditions: &[Condition], conj: Conjunction) -> bool {
-    let mut active = conditions.iter().filter(|c| c.is_effective()).peekable();
-    if active.peek().is_none() {
+    let prepared: Vec<_> = conditions
+        .iter()
+        .filter(|condition| condition.is_effective())
+        .map(PreparedCondition::new)
+        .collect();
+    if prepared.is_empty() {
         return true;
     }
-    match conj {
-        Conjunction::All => active.all(|c| cell_matches(row.get(c.column), c)),
-        Conjunction::Any => active.any(|c| cell_matches(row.get(c.column), c)),
-    }
+    matches_prepared(row, &prepared, conj)
 }
 
 /// The numeric value of a cell for ordering comparisons, if it has one.
@@ -232,12 +235,11 @@ fn numeric(v: &Value) -> Option<f64> {
     }
 }
 
-/// Order `v` against the string `s`: numerically when both parse as numbers, else
-/// case-insensitive lexicographic. `None` only for incomparable floats (NaN).
-fn compare(v: &Value, s: &str) -> Option<std::cmp::Ordering> {
-    match (numeric(v), s.trim().parse::<f64>()) {
-        (Some(a), Ok(b)) => a.partial_cmp(&b),
-        _ => Some(v.display().to_lowercase().cmp(&s.trim().to_lowercase())),
+/// Lowercase a cell without first cloning text values through `Value::display`.
+fn lower_display(v: &Value) -> String {
+    match v {
+        Value::Text(text) => text.to_lowercase(),
+        _ => v.display().to_lowercase(),
     }
 }
 
@@ -254,34 +256,85 @@ fn two_bounds(s: &str) -> Option<(String, String)> {
     (!a.is_empty() && !b.is_empty()).then(|| (a.to_string(), b.to_string()))
 }
 
-/// Whether `v` equals the string `s` (numeric when both are numbers, else case-insensitive).
-fn value_equals(v: &Value, s: &str) -> bool {
-    match (numeric(v), s.trim().parse::<f64>()) {
-        (Some(a), Ok(b)) => a == b,
-        _ => v.display().to_lowercase() == s.trim().to_lowercase(),
+struct PreparedOperand {
+    lower: String,
+    numeric: Option<f64>,
+}
+
+impl PreparedOperand {
+    fn new(value: &str) -> Self {
+        let value = value.trim();
+        Self {
+            lower: value.to_lowercase(),
+            numeric: value.parse::<f64>().ok(),
+        }
     }
 }
 
-/// Evaluate one condition against one (possibly missing) cell.
-fn cell_matches(cell: Option<&Value>, c: &Condition) -> bool {
+struct PreparedCondition<'a> {
+    condition: &'a Condition,
+    value: PreparedOperand,
+    bounds: Option<(PreparedOperand, PreparedOperand)>,
+    items: Vec<PreparedOperand>,
+}
+
+impl<'a> PreparedCondition<'a> {
+    fn new(condition: &'a Condition) -> Self {
+        let bounds = if matches!(condition.op, FilterOp::Between | FilterOp::NotBetween) {
+            two_bounds(&condition.value)
+                .map(|(lo, hi)| (PreparedOperand::new(&lo), PreparedOperand::new(&hi)))
+        } else {
+            None
+        };
+        let items = if matches!(condition.op, FilterOp::In | FilterOp::NotIn) {
+            condition
+                .value
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(PreparedOperand::new)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Self {
+            condition,
+            value: PreparedOperand::new(&condition.value),
+            bounds,
+            items,
+        }
+    }
+}
+
+fn compare_prepared(v: &Value, rhs: &PreparedOperand) -> Option<std::cmp::Ordering> {
+    match (numeric(v), rhs.numeric) {
+        (Some(a), Some(b)) => a.partial_cmp(&b),
+        _ => Some(lower_display(v).cmp(&rhs.lower)),
+    }
+}
+
+fn equals_prepared(v: &Value, rhs: &PreparedOperand) -> bool {
+    match (numeric(v), rhs.numeric) {
+        (Some(a), Some(b)) => a == b,
+        _ => lower_display(v) == rhs.lower,
+    }
+}
+
+fn cell_matches_prepared(cell: Option<&Value>, prepared: &PreparedCondition<'_>) -> bool {
     let Some(v) = cell else { return false };
+    let c = prepared.condition;
     use FilterOp::*;
 
     match c.op {
         IsNull => return v.is_null(),
         IsNotNull => return !v.is_null(),
+        _ if v.is_null() => return false,
         _ => {}
     }
 
-    // NULL never matches a value-based operator (you want `is null` for that).
-    if v.is_null() {
-        return false;
-    }
-
     match c.op {
-        // Ordering: numeric when possible, lexicographic otherwise.
         Greater | Less | GreaterEq | LessEq => {
-            let Some(ord) = compare(v, &c.value) else {
+            let Some(ord) = compare_prepared(v, &prepared.value) else {
                 return false;
             };
             match c.op {
@@ -292,11 +345,10 @@ fn cell_matches(cell: Option<&Value>, c: &Condition) -> bool {
                 _ => unreachable!(),
             }
         }
-        // Inclusive range; an unparseable range matches nothing (and `NOT BETWEEN` everything).
         Between | NotBetween => {
-            let within = two_bounds(&c.value).is_some_and(|(lo, hi)| {
-                matches!(compare(v, &lo), Some(o) if o.is_ge())
-                    && matches!(compare(v, &hi), Some(o) if o.is_le())
+            let within = prepared.bounds.as_ref().is_some_and(|(lo, hi)| {
+                matches!(compare_prepared(v, lo), Some(order) if order.is_ge())
+                    && matches!(compare_prepared(v, hi), Some(order) if order.is_le())
             });
             if c.op == Between {
                 within
@@ -304,46 +356,73 @@ fn cell_matches(cell: Option<&Value>, c: &Condition) -> bool {
                 !within
             }
         }
-        // Membership in a comma-separated list (blank items ignored).
         In | NotIn => {
-            let found = c
-                .value
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .any(|item| value_equals(v, item));
+            let found = prepared.items.iter().any(|item| equals_prepared(v, item));
             if c.op == In {
                 found
             } else {
                 !found
             }
         }
-        // Text operators: case-insensitive.
         Contains | NotContains | Equals | NotEquals | BeginsWith | EndsWith => {
-            let hay = v.display().to_lowercase();
-            let needle = c.value.to_lowercase();
-            match c.op {
-                Contains => hay.contains(&needle),
-                NotContains => !hay.contains(&needle),
-                Equals => value_equals(v, &c.value),
-                NotEquals => !value_equals(v, &c.value),
-                BeginsWith => hay.starts_with(&needle),
-                EndsWith => hay.ends_with(&needle),
+            let hay = lower_display(v);
+            let matches = match c.op {
+                Contains | NotContains => hay.contains(&prepared.value.lower),
+                Equals | NotEquals => equals_prepared(v, &prepared.value),
+                BeginsWith => hay.starts_with(&prepared.value.lower),
+                EndsWith => hay.ends_with(&prepared.value.lower),
                 _ => unreachable!(),
+            };
+            if matches!(c.op, NotContains | NotEquals) {
+                !matches
+            } else {
+                matches
             }
         }
         IsNull | IsNotNull => unreachable!("handled above"),
     }
 }
 
+fn matches_prepared(
+    row: &[Value],
+    prepared: &[PreparedCondition<'_>],
+    conjunction: Conjunction,
+) -> bool {
+    match conjunction {
+        Conjunction::All => prepared
+            .iter()
+            .all(|condition| cell_matches_prepared(row.get(condition.condition.column), condition)),
+        Conjunction::Any => prepared
+            .iter()
+            .any(|condition| cell_matches_prepared(row.get(condition.condition.column), condition)),
+    }
+}
+
 /// Compute the display order for `result`: the indices of rows passing the filter. The
 /// caller applies any active sort on top of this.
 pub fn passing_rows(result: &QueryResult, state: &FilterState) -> Vec<usize> {
-    if !state.is_active() {
-        return (0..result.rows.len()).collect();
+    passing_rows_in(result, state, 0..result.rows.len())
+}
+
+/// Filter only a newly appended range. This keeps lazy pagination linear: each row is tested
+/// once instead of rebuilding the display order for every streaming batch.
+pub fn passing_rows_in(
+    result: &QueryResult,
+    state: &FilterState,
+    range: Range<usize>,
+) -> Vec<usize> {
+    let range = range.start.min(result.rows.len())..range.end.min(result.rows.len());
+    let prepared: Vec<_> = state
+        .conditions
+        .iter()
+        .filter(|condition| condition.is_effective())
+        .map(PreparedCondition::new)
+        .collect();
+    if prepared.is_empty() {
+        return range.collect();
     }
-    (0..result.rows.len())
-        .filter(|&r| matches_row(&result.rows[r], &state.conditions, state.conjunction))
+    range
+        .filter(|&row| matches_prepared(&result.rows[row], &prepared, state.conjunction))
         .collect()
 }
 
@@ -649,6 +728,39 @@ mod tests {
             &[cond(0, FilterOp::Between, "50")],
             Conjunction::All
         ));
+    }
+
+    #[test]
+    fn prepared_result_filter_matches_single_row_semantics() {
+        let result = QueryResult {
+            rows: vec![
+                row(&[Value::Text("Cat".into()), Value::Int(7)]),
+                row(&[Value::Text("dog".into()), Value::Int(50)]),
+                row(&[Value::Null, Value::Int(101)]),
+            ],
+            ..QueryResult::default()
+        };
+        for condition in [
+            cond(0, FilterOp::Contains, "at"),
+            cond(0, FilterOp::In, "DOG, bird"),
+            cond(1, FilterOp::Between, "7, 50"),
+            cond(1, FilterOp::Greater, "50"),
+            cond(0, FilterOp::IsNull, ""),
+        ] {
+            let state = FilterState {
+                conditions: vec![condition.clone()],
+                ..FilterState::default()
+            };
+            let expected: Vec<_> = result
+                .rows
+                .iter()
+                .enumerate()
+                .filter_map(|(index, row)| {
+                    matches_row(row, &state.conditions, state.conjunction).then_some(index)
+                })
+                .collect();
+            assert_eq!(passing_rows(&result, &state), expected);
+        }
     }
 
     #[test]

@@ -163,6 +163,7 @@ impl DbGuiApp {
                 self.history_cache
                     .drain(..self.history_cache.len() - dbcore::history::MAX_ENTRIES);
             }
+            self.mark_history_changed();
         }
     }
 }

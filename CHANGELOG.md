@@ -3,6 +3,14 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
+## 0.4.1 — 2026-08-24
+
+- Made the SQL editor, History sidebar, and streaming query results cheaper on every frame by caching fold and layout work, grouping history once, and appending streamed rows instead of rebuilding the whole grid.
+- Cached SQL highlighting in History, Saved Queries, and production-guard previews so those panels stay responsive while scrolling.
+- Stopped the active-tab water animation from repainting the window continuously after a tab is selected.
+- Prepared result-filter conditions once per view instead of re-parsing them for every row.
+- Dropped debug info from the DuckDB C++ engine in dev builds so `target/` does not balloon with multi-GB object files.
+
 ## 0.4.0 — 2026-08-19
 
 - Restyled the History sidebar to match a date-grouped log: collapsible day folders with

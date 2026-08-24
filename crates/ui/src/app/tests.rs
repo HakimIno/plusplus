@@ -1587,6 +1587,32 @@ fn filter_recomputes_view() {
 }
 
 #[test]
+fn streaming_append_filters_only_new_rows_and_preserves_existing_order() {
+    let mut app = DbGuiApp::construct();
+    let tab = app.tab_mut();
+    tab.set_result(fake_result(4, 2));
+    tab.filter.conditions = vec![crate::filter::Condition {
+        enabled: true,
+        column: 0,
+        op: crate::filter::FilterOp::Less,
+        value: "8".into(),
+    }];
+    tab.recompute_view();
+    assert_eq!(tab.row_order, vec![0, 1, 2, 3]);
+
+    tab.append_result_rows(
+        Vec::new(),
+        vec![
+            vec![Value::Int(6), Value::Int(99)],
+            vec![Value::Int(8), Value::Int(100)],
+        ],
+    );
+
+    assert_eq!(tab.result.as_ref().unwrap().row_count(), 6);
+    assert_eq!(tab.row_order, vec![0, 1, 2, 3, 4]);
+}
+
+#[test]
 fn header_filter_action_targets_the_selected_column() {
     let mut app = DbGuiApp::construct();
     app.tab_mut().set_result(fake_result(3, 3));

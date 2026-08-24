@@ -87,7 +87,7 @@ impl DbGuiApp {
                 ctx.request_repaint_after(std::time::Duration::from_millis(1600));
             }
             if self.busy != Busy::Idle || self.update.is_busy() {
-                ctx.request_repaint_after(std::time::Duration::from_millis(80));
+                ctx.request_repaint_after(std::time::Duration::from_millis(16));
             }
             return;
         }
@@ -428,7 +428,7 @@ impl DbGuiApp {
 
         // Keep background progress and incoming query rows responsive.
         if self.busy != Busy::Idle || self.update.is_busy() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(80));
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
     }
 }

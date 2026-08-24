@@ -5,6 +5,7 @@
 //! so they can blink without touching the artwork.
 
 use egui::{Color32, Pos2, Sense, Stroke, Vec2};
+use std::time::Duration;
 
 /// Eye centres as fractions of [`empty-chameleon.png`].
 const EYES: [(f32, f32); 2] = [(0.5878, 0.3190), (0.8443, 0.3003)];
@@ -47,6 +48,16 @@ fn with_alpha(color: Color32, alpha: f32) -> Color32 {
         color.b(),
         (alpha.clamp(0.0, 1.0) * 255.0).round() as u8,
     )
+}
+
+/// Sleep until the next visible change. During a blink we target 60 fps; between blinks the
+/// mascot costs no frames and wakes exactly when the next blink starts.
+fn repaint_delay(t: f64, blink: f32, next_blink: f64) -> Duration {
+    if blink > 0.0 || t >= next_blink {
+        Duration::from_millis(16)
+    } else {
+        Duration::from_secs_f64((next_blink - t).max(0.016))
+    }
 }
 
 /// Draw the empty-state mascot, centred in the available area.
@@ -123,9 +134,9 @@ pub fn show(ui: &mut egui::Ui) {
 
         paint_pupils(&painter, img_rect, tint, lid);
 
+        let repaint_after = repaint_delay(t, pet.blink, pet.next_blink);
         ui.data_mut(|d| d.insert_temp(id, pet));
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(33));
+        ui.ctx().request_repaint_after(repaint_after);
     });
 }
 
@@ -145,5 +156,21 @@ fn paint_pupils(painter: &egui::Painter, img: egui::Rect, color: Color32, lid: f
                 stroke,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idle_pet_sleeps_until_the_next_blink() {
+        assert_eq!(repaint_delay(1.0, 0.0, 4.5), Duration::from_secs_f64(3.5));
+    }
+
+    #[test]
+    fn blinking_pet_targets_sixty_fps() {
+        assert_eq!(repaint_delay(4.5, 0.25, 4.5), Duration::from_millis(16));
+        assert_eq!(repaint_delay(4.5, 0.0, 4.5), Duration::from_millis(16));
     }
 }

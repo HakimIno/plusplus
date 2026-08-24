@@ -1,8 +1,8 @@
 use super::{
-    result_status, schema_table_key, Action, ActiveConnection, Busy, ConnField, ConnTestState,
-    DbGuiApp, PageNav, ProductionGuardContinuation, QueryEditorPlacement, QueryTab, SavedQueryDrag,
-    SchemaTableDrag, SettingsSection, SidebarTab, TabView, MAX_FETCH_ROWS,
-    MAX_RESULT_MEMORY_BUDGET_MB, MIN_RESULT_MEMORY_BUDGET_MB,
+    result_status, Action, ActiveConnection, Busy, ConnField, ConnTestState, DbGuiApp, PageNav,
+    ProductionGuardContinuation, QueryEditorPlacement, QueryTab, SavedQueryDrag, SchemaTableDrag,
+    SettingsSection, SidebarTab, TabView, MAX_FETCH_ROWS, MAX_RESULT_MEMORY_BUDGET_MB,
+    MIN_RESULT_MEMORY_BUDGET_MB,
 };
 use crate::components;
 use crate::filter::{self, FilterEvent};
@@ -571,7 +571,7 @@ fn sql_preview_callout(
         ui.add_space(6.0);
         let mut font = egui::TextStyle::Monospace.resolve(ui.style());
         font.size = (font.size - 1.5).max(10.0);
-        let mut job = crate::highlight::highlight_sql(sql, font);
+        let mut job = crate::highlight::highlight_sql_cached(ui.ctx(), sql, font);
         job.wrap.max_width = ui.available_width().max(40.0);
         job.wrap.max_rows = 14;
         ui.add(egui::Label::new(job).selectable(false));
@@ -1472,33 +1472,56 @@ impl DbGuiApp {
                                 let avail = ui.available_height();
                                 let rows = (avail / row_height).floor().max(5.0) as usize;
 
-                                // What can fold in the live text, and the collapsed view the editor
-                                // actually works on. Both are rebuilt every frame, so they can never
-                                // drift from the SQL. Folds whose region no longer exists (the text
-                                // was edited out from under them) drop here.
+                                // Fold parsing and text layout are cached per tab. Taking the cache
+                                // out temporarily lets the editor mutate `sql` while the derived view
+                                // stays borrowed locally; it goes back before this frame ends.
                                 let idx = self.active_query_tab;
-                                let regions = crate::fold::regions(&self.tabs[idx].sql);
-                                self.tabs[idx]
-                                    .folds
-                                    .retain(|anchor| regions.iter().any(|r| r.anchor == *anchor));
-                                let view = crate::fold::View::build(
-                                    &self.tabs[idx].sql,
-                                    &regions,
-                                    &self.tabs[idx].folds,
-                                );
-                                let markers = view.markers();
+                                let mut editor_cache =
+                                    std::mem::take(&mut self.tabs[idx].sql_editor_cache);
+                                let QueryTab {
+                                    sql_revision,
+                                    sql,
+                                    folds,
+                                    ..
+                                } = &mut self.tabs[idx];
+                                editor_cache.refresh(*sql_revision, sql, folds);
+                                let color_key = crate::highlight::sql_colors();
+                                let view_text = editor_cache.view.text.as_str();
+                                let markers = editor_cache.markers.as_slice();
+                                let layout_cache = &mut editor_cache.layout;
                                 let mut layouter =
                                     |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+                                        let cacheable = buf.as_str() == view_text;
+                                        if cacheable {
+                                            if let Some(cached) =
+                                                layout_cache.as_ref().filter(|c| {
+                                                    c.colors == color_key
+                                                        && c.font == font
+                                                        && c.wrap_width_bits == wrap_width.to_bits()
+                                                })
+                                            {
+                                                return cached.galley.clone();
+                                            }
+                                        }
                                         let mut job = crate::highlight::highlight_sql_folded(
                                             buf.as_str(),
                                             font.clone(),
-                                            &markers,
+                                            markers,
                                         );
                                         job.wrap.max_width = wrap_width;
-                                        ui.ctx().fonts_mut(|f| f.layout_job(job))
+                                        let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
+                                        if cacheable {
+                                            *layout_cache = Some(super::SqlEditorLayoutCache {
+                                                colors: color_key,
+                                                font: font.clone(),
+                                                wrap_width_bits: wrap_width.to_bits(),
+                                                galley: galley.clone(),
+                                            });
+                                        }
+                                        galley
                                     };
 
-                                let line_count = view.source_lines.len();
+                                let line_count = editor_cache.view.source_lines.len();
                                 let digits =
                                     self.tabs[idx].sql.lines().count().max(1).to_string().len();
                                 let digit_width = ui.fonts_mut(|fonts| {
@@ -1532,7 +1555,7 @@ impl DbGuiApp {
                                         // keystroke back onto the tab's real SQL.
                                         let mut buffer = crate::fold::Buffer::new(
                                             &mut self.tabs[idx].sql,
-                                            &view,
+                                            &editor_cache.view,
                                         );
                                         let output = egui::TextEdit::multiline(&mut buffer)
                                             .code_editor()
@@ -1574,8 +1597,8 @@ impl DbGuiApp {
                                 self.fold_gutter(
                                     ui,
                                     gutter_rect,
-                                    &view,
-                                    &regions,
+                                    &editor_cache.view,
+                                    &editor_cache.regions,
                                     &output.galley,
                                     output.galley_pos,
                                     &font,
@@ -1590,12 +1613,12 @@ impl DbGuiApp {
                                 // Clicking the `⋯ N lines` stand-in opens what it hides — the
                                 // caret lands inside the marker, which is answer enough.
                                 if resp.clicked() {
-                                    let hidden = output
-                                        .cursor_range
-                                        .and_then(|r| view.marker_hiding(r.primary.index));
+                                    let hidden = output.cursor_range.and_then(|r| {
+                                        editor_cache.view.marker_hiding(r.primary.index)
+                                    });
                                     if let Some(at) = hidden {
                                         if let Some(region) =
-                                            regions.iter().find(|r| r.hide.start == at)
+                                            editor_cache.regions.iter().find(|r| r.hide.start == at)
                                         {
                                             self.tabs[idx].folds.remove(&region.anchor);
                                         }
@@ -1609,6 +1632,7 @@ impl DbGuiApp {
                                     let tab = self.tab_mut();
                                     tab.edits.source = None;
                                     tab.preview = false;
+                                    tab.mark_sql_changed();
                                     self.workspace_dirty = true;
                                 }
 
@@ -1617,7 +1641,8 @@ impl DbGuiApp {
                                 // reasons about the real SQL, so the caret is mapped out of the
                                 // folded view first. The rect stays on screen, where it belongs.
                                 let cursor = output.cursor_range.map(|r| r.primary);
-                                let cursor_char = cursor.map(|c| view.to_source(c.index));
+                                let cursor_char =
+                                    cursor.map(|c| editor_cache.view.to_source(c.index));
                                 let cursor_rect = cursor.map(|c| {
                                     output
                                         .galley
@@ -1637,8 +1662,8 @@ impl DbGuiApp {
                                         self.toggle_line_comment(
                                             &ctx,
                                             editor_id,
-                                            view.to_source(chars.start)
-                                                ..view.to_source_end(chars.end),
+                                            editor_cache.view.to_source(chars.start)
+                                                ..editor_cache.view.to_source_end(chars.end),
                                         );
                                         true
                                     });
@@ -1673,8 +1698,9 @@ impl DbGuiApp {
                                     output.galley_pos,
                                     text_changed,
                                     cursor_char,
-                                    &view,
+                                    &editor_cache.view,
                                 );
+                                self.tabs[idx].sql_editor_cache = editor_cache;
                             });
                     });
             });
@@ -1861,7 +1887,8 @@ impl DbGuiApp {
                                         );
                                     });
 
-                                    let mut job = crate::highlight::highlight_sql(
+                                    let mut job = crate::highlight::highlight_sql_cached(
+                                        ui.ctx(),
                                         entry.sql.trim(),
                                         font.clone(),
                                     );
@@ -2202,6 +2229,7 @@ impl DbGuiApp {
             return;
         }
         tab.sql.insert_str(byte_cursor, remainder);
+        tab.mark_sql_changed();
         tab.edits.source = None;
         tab.preview = false;
         self.workspace_dirty = true;
@@ -2258,6 +2286,7 @@ impl DbGuiApp {
 
         let tab = &mut self.tabs[idx];
         tab.sql.replace_range(byte_range, &out);
+        tab.mark_sql_changed();
         tab.edits.source = None;
         tab.preview = false;
         self.workspace_dirty = true;
@@ -2457,6 +2486,7 @@ impl DbGuiApp {
             return;
         }
         tab.sql.replace_range(byte_start..byte_cursor, &suggestion);
+        tab.mark_sql_changed();
         tab.edits.source = None;
         tab.preview = false;
         self.workspace_dirty = true;
@@ -3032,41 +3062,51 @@ impl DbGuiApp {
         // One continuous list: pinned tables always sort to the top, while the saved custom
         // order controls positions within the pinned and unpinned groups.
         let custom_order = self.schema_table_order.get(conn_id);
-        let mut tables: Vec<&dbcore::TableInfo> = active
+        let custom_ranks: std::collections::HashMap<(&str, &str), usize> = custom_order
+            .into_iter()
+            .flat_map(|order| order.iter().enumerate())
+            .filter_map(|(rank, key)| {
+                key.split_once('\0')
+                    .map(|(schema, table)| ((schema, table), rank))
+            })
+            .collect();
+        let bookmark_ranks: std::collections::HashMap<(Option<&str>, &str), usize> = self
+            .bookmarks
+            .iter()
+            .enumerate()
+            .filter(|(_, bookmark)| bookmark.conn_id == conn_id)
+            .map(|(rank, bookmark)| ((bookmark.schema.as_deref(), bookmark.table.as_str()), rank))
+            .collect();
+        let mut tables: Vec<(&dbcore::TableInfo, bool, usize, usize)> = active
             .schema
             .tables
             .iter()
             .filter(|table| visible(table))
+            .map(|table| {
+                let bookmark_key = (table.schema.as_deref(), table.name.as_str());
+                let custom_key = (
+                    table.schema.as_deref().unwrap_or_default(),
+                    table.name.as_str(),
+                );
+                let bookmark_rank = bookmark_ranks
+                    .get(&bookmark_key)
+                    .copied()
+                    .unwrap_or(usize::MAX);
+                let custom_rank = custom_ranks.get(&custom_key).copied().unwrap_or(usize::MAX);
+                (
+                    table,
+                    bookmark_rank != usize::MAX,
+                    custom_rank,
+                    bookmark_rank,
+                )
+            })
             .collect();
-        tables.sort_by_key(|table| {
-            let is_pinned = dbcore::bookmarks::is_pinned(
-                &self.bookmarks,
-                conn_id,
-                table.schema.as_deref(),
-                &table.name,
-            );
-            let key = schema_table_key(table.schema.as_deref(), &table.name);
-            let custom_rank = custom_order
-                .and_then(|order| order.iter().position(|item| item == &key))
-                .unwrap_or(usize::MAX);
-            let bookmark_rank = self
-                .bookmarks
-                .iter()
-                .position(|bookmark| {
-                    bookmark.matches(conn_id, table.schema.as_deref(), &table.name)
-                })
-                .unwrap_or(usize::MAX);
-            (!is_pinned, custom_rank, bookmark_rank)
+        tables.sort_by_key(|(_, pinned, custom_rank, bookmark_rank)| {
+            (!*pinned, *custom_rank, *bookmark_rank)
         });
 
-        for table in tables {
-            let is_pinned = dbcore::bookmarks::is_pinned(
-                &self.bookmarks,
-                conn_id,
-                table.schema.as_deref(),
-                &table.name,
-            );
-            self.schema_table_row(ui, active, table, is_pinned, "tbl", actions);
+        for (table, pinned, _, _) in tables {
+            self.schema_table_row(ui, active, table, pinned, "tbl", actions);
         }
 
         // Views, functions, procedures, and triggers follow the tables.
@@ -4979,8 +5019,15 @@ impl DbGuiApp {
             return;
         }
 
-        let days = grouped_history(&self.history_cache, &self.history_filter);
-        if days.is_empty() {
+        let mut view_cache = std::mem::take(&mut self.history_view_cache);
+        if view_cache.revision != self.history_revision || view_cache.filter != self.history_filter
+        {
+            view_cache.days = grouped_history(&self.history_cache, &self.history_filter);
+            view_cache.revision = self.history_revision;
+            view_cache.filter.clone_from(&self.history_filter);
+        }
+        if view_cache.days.is_empty() {
+            self.history_view_cache = view_cache;
             ui.label(
                 egui::RichText::new("No history matches this search.").color(palette::TEXT_WEAK()),
             );
@@ -4994,7 +5041,7 @@ impl DbGuiApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 4.0;
-                for (day_index, day) in days.iter().enumerate() {
+                for (day_index, day) in view_cache.days.iter().enumerate() {
                     let id_key = format!("history_day:{}", day.key);
                     let label = day.label.clone();
                     object_group(ui, &id_key, &label, day_index == 0, |ui| {
@@ -5021,8 +5068,11 @@ impl DbGuiApp {
                                                 .monospace()
                                                 .color(palette::TEXT_FAINT()),
                                         );
-                                        let mut job =
-                                            crate::highlight::highlight_sql(&sql, font.clone());
+                                        let mut job = crate::highlight::highlight_sql_cached(
+                                            ui.ctx(),
+                                            &sql,
+                                            font.clone(),
+                                        );
                                         job.wrap.max_width = ui.available_width().max(40.0);
                                         job.wrap.max_rows = 12;
                                         ui.add(
@@ -5063,6 +5113,7 @@ impl DbGuiApp {
                     });
                 }
             });
+        self.history_view_cache = view_cache;
     }
 
     /// The Queries tab: search above a folder tree of named queries. Rows show only the
@@ -5455,7 +5506,11 @@ impl DbGuiApp {
                                 ui.separator();
                                 ui.add_space(4.0);
                             }
-                            let job = crate::highlight::highlight_sql(stmt, font.clone());
+                            let job = crate::highlight::highlight_sql_cached(
+                                ui.ctx(),
+                                stmt,
+                                font.clone(),
+                            );
                             ui.label(job);
                         }
                     });
@@ -5724,7 +5779,8 @@ impl DbGuiApp {
                                     });
 
                                     ui.add_space(8.0);
-                                    let mut job = crate::highlight::highlight_sql(
+                                    let mut job = crate::highlight::highlight_sql_cached(
+                                        ui.ctx(),
                                         &stmt.sql,
                                         sql_font.clone(),
                                     );

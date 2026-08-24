@@ -239,15 +239,14 @@ fn tick_tab_select(ui: &egui::Ui, id: egui::Id, selected: bool) -> f32 {
     ease_out_cubic(anim.progress)
 }
 
-/// Water-like motion behind the active tab: two sine layers of different wavelength drift in
-/// opposite directions and are filled from their crest down to the chip's bottom edge. Drawn
-/// as a triangle strip because a wave outline is not convex, so `convex_polygon` would tear.
-/// `t` is `input.time`; `intensity` (0..1) fades the layers in/out with selection.
+/// Water-like motion behind the active tab: two sine layers slide into place during the finite
+/// selection transition. `phase_t` follows that transition rather than the wall clock, so a
+/// settled tab is completely idle instead of repainting the whole window forever.
 fn paint_tab_waves(
     painter: &egui::Painter,
     rect: egui::Rect,
     accent: egui::Color32,
-    t: f32,
+    phase_t: f32,
     intensity: f32,
 ) {
     let intensity = intensity.clamp(0.0, 1.0);
@@ -268,7 +267,7 @@ fn paint_tab_waves(
         let mut mesh = egui::Mesh::default();
         for i in 0..=steps {
             let x = rect.left() + rect.width() * i as f32 / steps as f32;
-            let phase = (x + t * speed) / wavelength * std::f32::consts::TAU;
+            let phase = (x + phase_t * speed) / wavelength * std::f32::consts::TAU;
             let idx = mesh.vertices.len() as u32;
             mesh.colored_vertex(egui::pos2(x, baseline + phase.sin() * amp), color);
             mesh.colored_vertex(egui::pos2(x, rect.bottom()), color);
@@ -278,15 +277,6 @@ fn paint_tab_waves(
             }
         }
         painter.add(egui::Shape::mesh(mesh));
-    }
-}
-
-/// ~30 fps is plenty for a background drift and keeps the window from repainting at the
-/// display's full rate just to move two sine curves. A backgrounded window stops asking
-/// altogether — the waves simply hold their phase until it is focused again.
-fn request_wave_repaint(ctx: &egui::Context) {
-    if ctx.input(|i| i.focused) {
-        ctx.request_repaint_after(std::time::Duration::from_millis(33));
     }
 }
 
@@ -320,14 +310,7 @@ fn paint_tab_chip(
         painter.hline(rect.x_range(), rect.top(), stroke);
     }
     if select_t > 0.01 {
-        paint_tab_waves(
-            painter,
-            rect,
-            palette::ACCENT(),
-            ui.input(|i| i.time) as f32,
-            select_t,
-        );
-        request_wave_repaint(ui.ctx());
+        paint_tab_waves(painter, rect, palette::ACCENT(), select_t * 12.0, select_t);
     }
 
     let icon_color = tab_icon_color(kind, select_t);
@@ -569,14 +552,7 @@ pub(crate) fn settings_tab_item(ui: &mut egui::Ui) -> QueryTabResponse {
             se: 0,
         };
         ui.painter().rect_filled(rect, rounding, palette::SURFACE());
-        paint_tab_waves(
-            ui.painter(),
-            rect,
-            palette::ACCENT(),
-            ui.input(|i| i.time) as f32,
-            1.0,
-        );
-        request_wave_repaint(ui.ctx());
+        paint_tab_waves(ui.painter(), rect, palette::ACCENT(), 12.0, 1.0);
 
         let badge = egui::Rect::from_center_size(
             egui::pos2(rect.left() + pad + 7.0, rect.center().y),

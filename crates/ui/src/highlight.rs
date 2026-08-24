@@ -6,7 +6,8 @@
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, FontId};
 
-struct SqlColors {
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+pub(crate) struct SqlColors {
     keyword: Color32,
     string: Color32,
     number: Color32,
@@ -15,7 +16,7 @@ struct SqlColors {
     ident: Color32,
 }
 
-fn sql_colors() -> SqlColors {
+pub(crate) fn sql_colors() -> SqlColors {
     let t = crate::theme::current();
     SqlColors {
         keyword: t.accent,
@@ -28,11 +29,6 @@ fn sql_colors() -> SqlColors {
 }
 
 use crate::style::mix;
-
-/// Build a coloured layout job for `text`, using `font` for every run.
-pub fn highlight_sql(text: &str, font: FontId) -> LayoutJob {
-    highlight_runs(text, font, &[])
-}
 
 /// Highlight `text`, rendering the char ranges in `placeholders` as inert markers rather than
 /// as SQL. The editor uses this for the `⋯ N lines` stand-ins that [`crate::fold`] splices in
@@ -47,8 +43,45 @@ pub fn highlight_sql_folded(
     highlight_runs(text, font, placeholders)
 }
 
-fn highlight_runs(text: &str, font: FontId, placeholders: &[std::ops::Range<usize>]) -> LayoutJob {
+#[derive(Default)]
+struct Highlighter;
+
+impl egui::cache::ComputerMut<(&str, &FontId, &[std::ops::Range<usize>], SqlColors), LayoutJob>
+    for Highlighter
+{
+    fn compute(
+        &mut self,
+        (text, font, placeholders, colors): (&str, &FontId, &[std::ops::Range<usize>], SqlColors),
+    ) -> LayoutJob {
+        highlight_runs_with_colors(text, font.clone(), placeholders, colors)
+    }
+}
+
+type HighlightCache = egui::cache::FrameCache<LayoutJob, Highlighter>;
+
+/// Memoized variant for read-only SQL labels (history, favorites, previews). Entries survive
+/// only while used on consecutive frames, so closed panels release their text automatically.
+pub fn highlight_sql_cached(ctx: &egui::Context, text: &str, font: FontId) -> LayoutJob {
     let colors = sql_colors();
+    ctx.memory_mut(|memory| {
+        memory
+            .caches
+            .cache::<HighlightCache>()
+            .get((text, &font, &[], colors))
+            .clone()
+    })
+}
+
+fn highlight_runs(text: &str, font: FontId, placeholders: &[std::ops::Range<usize>]) -> LayoutJob {
+    highlight_runs_with_colors(text, font, placeholders, sql_colors())
+}
+
+fn highlight_runs_with_colors(
+    text: &str,
+    font: FontId,
+    placeholders: &[std::ops::Range<usize>],
+    colors: SqlColors,
+) -> LayoutJob {
     let mut job = LayoutJob::default();
     if placeholders.is_empty() {
         append_sql(&mut job, text, &font, &colors);

@@ -474,6 +474,7 @@ impl DbGuiApp {
                     self.error = Some(format!("Could not clear history: {e}"));
                 } else {
                     self.history_cache.clear();
+                    self.mark_history_changed();
                     self.status_msg = "Query history cleared".to_string();
                 }
             }
@@ -523,6 +524,7 @@ impl DbGuiApp {
             Action::DeleteHistory(i) => {
                 if i < self.history_cache.len() {
                     self.history_cache.remove(i);
+                    self.mark_history_changed();
                     if let Err(error) = dbcore::history::replace_all(&self.history_cache) {
                         self.error = Some(format!("Could not update history: {error}"));
                     } else {

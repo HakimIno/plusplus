@@ -41,7 +41,7 @@ impl DbGuiApp {
         tab.kind = crate::components::QueryTabKind::Query;
         tab.schema_editor = None;
         tab.diagram = None;
-        tab.sql = sql;
+        tab.replace_sql(sql);
         tab.folds.clear();
         self.workspace_dirty = true;
     }

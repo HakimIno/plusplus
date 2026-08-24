@@ -522,6 +522,77 @@ struct QueryStreamUi {
     received_rows: usize,
 }
 
+struct SqlEditorLayoutCache {
+    colors: crate::highlight::SqlColors,
+    font: egui::FontId,
+    wrap_width_bits: u32,
+    galley: Arc<egui::Galley>,
+}
+
+/// Derived SQL-editor state. It is bounded to one entry per open tab and invalidated whenever
+/// the source SQL or fold set changes, so scrolling another panel does not repeatedly rescan and
+/// highlight an unchanged query.
+struct SqlEditorCache {
+    sql_revision: u64,
+    sql_len: usize,
+    folds: std::collections::BTreeSet<usize>,
+    regions: Vec<crate::fold::Region>,
+    view: crate::fold::View,
+    markers: Vec<std::ops::Range<usize>>,
+    layout: Option<SqlEditorLayoutCache>,
+}
+
+struct HistoryViewCache {
+    revision: u64,
+    filter: String,
+    days: Vec<panels::HistoryDay>,
+}
+
+impl Default for HistoryViewCache {
+    fn default() -> Self {
+        Self {
+            revision: u64::MAX,
+            filter: String::new(),
+            days: Vec::new(),
+        }
+    }
+}
+
+impl Default for SqlEditorCache {
+    fn default() -> Self {
+        Self {
+            sql_revision: u64::MAX,
+            sql_len: 0,
+            folds: std::collections::BTreeSet::new(),
+            regions: Vec::new(),
+            view: crate::fold::View::default(),
+            markers: Vec::new(),
+            layout: None,
+        }
+    }
+}
+
+impl SqlEditorCache {
+    fn refresh(
+        &mut self,
+        sql_revision: u64,
+        sql: &str,
+        folds: &mut std::collections::BTreeSet<usize>,
+    ) {
+        if self.sql_revision == sql_revision && self.sql_len == sql.len() && self.folds == *folds {
+            return;
+        }
+        self.regions = crate::fold::regions(sql);
+        folds.retain(|anchor| self.regions.iter().any(|region| region.anchor == *anchor));
+        self.view = crate::fold::View::build(sql, &self.regions, folds);
+        self.markers = self.view.markers();
+        self.sql_revision = sql_revision;
+        self.sql_len = sql.len();
+        self.folds = folds.clone();
+        self.layout = None;
+    }
+}
+
 /// One query tab: an independent SQL editor with its own result, view state, and the
 /// connection it runs against. Tabs are global (a single row above the editor) but each
 /// remembers its own `conn_id`, so switching tabs switches the active connection too.
@@ -540,6 +611,9 @@ struct QueryTab {
     /// Saved-connection id this tab runs against (`None` ⇒ unbound).
     conn_id: Option<String>,
     sql: String,
+    /// Incremented whenever production code changes `sql`; drives the bounded editor cache.
+    sql_revision: u64,
+    sql_editor_cache: SqlEditorCache,
     /// Collapsed regions of `sql`, held by the char offset of the folded region's first line
     /// (see [`crate::fold`]). Edits move these along with the text; a region that stops being
     /// foldable drops out. Deliberately not part of the saved workspace: a fold is a way of
@@ -602,6 +676,8 @@ impl QueryTab {
             preview: false,
             conn_id: None,
             sql: String::new(),
+            sql_revision: 0,
+            sql_editor_cache: SqlEditorCache::default(),
             folds: std::collections::BTreeSet::new(),
             editor_size: None,
             query_error: None,
@@ -623,6 +699,17 @@ impl QueryTab {
             diagram: None,
             design_edit_index: None,
         }
+    }
+
+    fn replace_sql(&mut self, sql: String) {
+        if self.sql != sql {
+            self.sql = sql;
+            self.mark_sql_changed();
+        }
+    }
+
+    fn mark_sql_changed(&mut self) {
+        self.sql_revision = self.sql_revision.wrapping_add(1);
     }
 
     /// Install a freshly returned result and rebuild the display order.
@@ -667,6 +754,40 @@ impl QueryTab {
         self.selection.clamp(
             self.row_order.len() + self.edits.new_rows,
             result.column_count(),
+        );
+    }
+
+    /// Append a streaming continuation without rescanning rows that are already displayed.
+    /// Sorted results still take the conservative full-rebuild path, though automatic paging
+    /// currently pauses while a sort is active.
+    fn append_result_rows(
+        &mut self,
+        columns: Vec<dbcore::ColumnMeta>,
+        rows: Vec<Vec<dbcore::Value>>,
+    ) {
+        let result = self.result.get_or_insert_with(|| QueryResult {
+            columns,
+            ..QueryResult::default()
+        });
+        let first = result.rows.len();
+        result.rows.extend(rows);
+        if self.sort.is_some() {
+            self.recompute_view();
+            return;
+        }
+        let end = self
+            .result
+            .as_ref()
+            .map_or(first, |result| result.rows.len());
+        let appended = filter::passing_rows_in(
+            self.result.as_ref().expect("result was installed above"),
+            &self.filter,
+            first..end,
+        );
+        self.row_order.extend(appended);
+        self.selection.clamp(
+            self.row_order.len() + self.edits.new_rows,
+            self.result.as_ref().map_or(0, QueryResult::column_count),
         );
     }
 
@@ -1449,6 +1570,8 @@ pub struct DbGuiApp {
     /// rows while it is.
     sidebar_tab: SidebarTab,
     history_cache: Vec<dbcore::history::HistoryEntry>,
+    history_revision: u64,
+    history_view_cache: HistoryViewCache,
     /// Session-only statements shown in the SQL console's Live log. Unlike query history this
     /// stays available when on-disk history is disabled and is discarded when the app exits.
     live_log: Vec<dbcore::history::HistoryEntry>,
@@ -1682,6 +1805,8 @@ impl DbGuiApp {
             update_check_enabled,
             sidebar_tab: SidebarTab::default(),
             history_cache: Vec::new(),
+            history_revision: 0,
+            history_view_cache: HistoryViewCache::default(),
             history_filter: String::new(),
             live_log: Vec::new(),
             // Loaded from disk in `new` (this builder stays config-dir-free for tests).
@@ -1745,6 +1870,13 @@ impl DbGuiApp {
         &mut self.tabs[self.active_query_tab]
     }
 
+    fn mark_history_changed(&mut self) {
+        self.history_revision = self.history_revision.wrapping_add(1);
+        if self.history_cache.is_empty() {
+            self.history_view_cache = HistoryViewCache::default();
+        }
+    }
+
     /// Path string for the unified title-bar breadcrumb.
     fn breadcrumb_text(&self) -> String {
         let Some(active) = self.active() else {
@@ -1789,7 +1921,7 @@ impl DbGuiApp {
         }
         let pretty = crate::format::beautify(&tab.sql, kind, prefs);
         if pretty != tab.sql {
-            tab.sql = pretty;
+            tab.replace_sql(pretty);
             // Only whitespace/keyword-case changed, so the result grid still matches the
             // SQL — staged edits and editability are deliberately left untouched.
             self.workspace_dirty = true;
@@ -1881,6 +2013,7 @@ impl DbGuiApp {
             SidebarTab::History => {
                 self.history_cache =
                     dbcore::history::load(dbcore::history::MAX_ENTRIES).unwrap_or_default();
+                self.mark_history_changed();
             }
             SidebarTab::Queries => {
                 if !cfg!(test) {
@@ -1893,6 +2026,7 @@ impl DbGuiApp {
         }
         if tab != SidebarTab::History {
             self.history_cache = Vec::new();
+            self.mark_history_changed();
         }
         self.sidebar_tab = tab;
     }
