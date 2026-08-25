@@ -11,6 +11,7 @@ mod emoji;
 mod erd;
 mod filter;
 mod fold;
+mod fonts;
 mod format;
 mod ghost;
 mod grid;
@@ -33,75 +34,23 @@ pub use app::DbGuiApp;
 pub const HEADING_FAMILY: &str = "heading";
 
 /// Raw bytes of the fonts the app embeds.
-pub struct AppFonts<'a> {
+#[derive(Clone, Copy)]
+pub struct AppFonts {
     /// Inter Regular — the primary UI font.
-    pub ui_regular: &'a [u8],
+    pub ui_regular: &'static [u8],
     /// Inter Semibold — the weight for the [`HEADING_FAMILY`] family.
-    pub ui_semibold: &'a [u8],
+    pub ui_semibold: &'static [u8],
     /// JetBrains Mono Regular — SQL/code font.
-    pub code_regular: &'a [u8],
+    pub code_regular: &'static [u8],
     /// Anuphan Regular — Thai fallback for proportional and monospace families.
-    pub thai_regular: &'a [u8],
+    pub thai_regular: &'static [u8],
     /// Anuphan Semibold — Thai weight for the [`HEADING_FAMILY`] family.
-    pub thai_semibold: &'a [u8],
+    pub thai_semibold: &'static [u8],
     /// GNU Unifont — broad Unicode fallback used only when the fonts above lack a glyph.
-    pub universal_regular: &'a [u8],
+    pub universal_regular: &'static [u8],
 }
 
 /// Install the primary UI/code fonts followed by Thai and broad Unicode fallbacks.
 pub fn install_fonts(ctx: &egui::Context, app_fonts: &AppFonts) {
-    use egui::{FontData, FontDefinitions, FontFamily};
-    use std::sync::Arc;
-
-    let mut fonts = FontDefinitions::default();
-
-    fonts.font_data.insert(
-        "inter".to_owned(),
-        Arc::new(FontData::from_owned(app_fonts.ui_regular.to_vec())),
-    );
-    fonts.font_data.insert(
-        "inter_semibold".to_owned(),
-        Arc::new(FontData::from_owned(app_fonts.ui_semibold.to_vec())),
-    );
-    fonts.font_data.insert(
-        "jetbrains_mono".to_owned(),
-        Arc::new(FontData::from_owned(app_fonts.code_regular.to_vec())),
-    );
-    fonts.font_data.insert(
-        "thai".to_owned(),
-        Arc::new(FontData::from_owned(app_fonts.thai_regular.to_vec())),
-    );
-    fonts.font_data.insert(
-        "thai_semibold".to_owned(),
-        Arc::new(FontData::from_owned(app_fonts.thai_semibold.to_vec())),
-    );
-    fonts.font_data.insert(
-        "unifont".to_owned(),
-        Arc::new(FontData::from_owned(app_fonts.universal_regular.to_vec())),
-    );
-
-    // Inter leads the proportional family; Anuphan trails as the Thai fallback.
-    let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
-    proportional.insert(0, "inter".to_owned());
-    proportional.push("thai".to_owned());
-    proportional.push("unifont".to_owned());
-
-    let monospace = fonts.families.entry(FontFamily::Monospace).or_default();
-    monospace.insert(0, "jetbrains_mono".to_owned());
-    monospace.push("thai".to_owned());
-    monospace.push("unifont".to_owned());
-
-    // A heavier family for headings: Inter Semibold first, Anuphan Semibold for Thai.
-    fonts.families.insert(
-        FontFamily::Name(HEADING_FAMILY.into()),
-        vec![
-            "inter_semibold".to_owned(),
-            "thai_semibold".to_owned(),
-            "inter".to_owned(),
-            "thai".to_owned(),
-            "unifont".to_owned(),
-        ],
-    );
-
-    ctx.set_fonts(fonts);
+    fonts::install(ctx, *app_fonts, None, None).expect("embedded fonts are valid");
 }

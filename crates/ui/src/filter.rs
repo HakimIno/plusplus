@@ -432,7 +432,7 @@ pub fn passing_rows_in(
 /// returns a [`FilterEvent`] when the user presses Apply / Clear (or hits Enter in a value
 /// box). `columns` are the result's column names, used for the column dropdown.
 pub fn ui(ui: &mut egui::Ui, state: &mut FilterState, columns: &[String]) -> Option<FilterEvent> {
-    use crate::style::{palette, CONTROL_H};
+    use crate::style::CONTROL_H;
 
     let mut event: Option<FilterEvent> = None;
     // Deferred structural edits — we can't mutate the Vec while iterating it.
@@ -451,14 +451,17 @@ pub fn ui(ui: &mut egui::Ui, state: &mut FilterState, columns: &[String]) -> Opt
                 crate::components::accent_checkbox(ui, true, &mut cond.enabled, None)
                     .on_hover_text("Enable / disable this condition");
 
-                egui::ComboBox::from_id_salt(("filter_col", i))
-                    .width(128.0)
-                    .selected_text(columns.get(cond.column).map(String::as_str).unwrap_or("—"))
-                    .show_ui(ui, |ui| {
-                        for (c, name) in columns.iter().enumerate() {
-                            ui.selectable_value(&mut cond.column, c, name);
-                        }
-                    });
+                if let Some(Some(column)) = crate::components::searchable_combo_box(
+                    ui,
+                    ("filter_col", i),
+                    columns.get(cond.column).map(String::as_str).unwrap_or("—"),
+                    128.0,
+                    columns,
+                    Some(cond.column),
+                    None,
+                ) {
+                    cond.column = column;
+                }
 
                 egui::ComboBox::from_id_salt(("filter_op", i))
                     .width(108.0)
@@ -528,12 +531,6 @@ pub fn ui(ui: &mut egui::Ui, state: &mut FilterState, columns: &[String]) -> Opt
         egui::vec2(ui.available_width(), CONTROL_H),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
-            ui.add(
-                egui::Image::new(crate::icons::filter())
-                    .fit_to_exact_size(egui::Vec2::splat(14.0))
-                    .tint(palette::TEXT_WEAK()),
-            )
-            .on_hover_text("How conditions combine");
             let mut conj = state.conjunction;
             egui::ComboBox::from_id_salt("filter_conj")
                 .width(56.0)

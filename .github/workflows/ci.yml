@@ -8,8 +8,9 @@ name: CI
 # Website-only changes skip it; those are covered by website-ci.yml. No `push: main`
 # trigger — PRs already gate merges, and tags re-run this suite via `workflow_call`
 # from release.yml, so a main+tag push would otherwise double the test matrix. The
-# path filters apply to `pull_request` only; a `workflow_call` from a release always
-# runs the full suite regardless of what the tagged commit touched.
+# path filters apply to `pull_request` only. A release calls this workflow once
+# per OS so packaging can start after Linux tests pass, while macOS/Windows
+# tests still block publish.
 on:
   pull_request:
     paths-ignore:
@@ -18,15 +19,30 @@ on:
       - "**.md"
       - ".github/workflows/website-*.yml"
   workflow_call:
+    inputs:
+      runners:
+        description: JSON array of GitHub-hosted runner labels
+        type: string
+        default: '["ubuntu-latest", "macos-latest", "windows-latest"]'
+      run-clippy:
+        description: Run the non-blocking clippy job
+        type: boolean
+        default: true
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # `inputs.runners` keeps parallel release calls (linux/macos/windows) from
+  # cancelling each other; they share github.workflow + github.ref.
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.runners || 'all' }}
   # Superseded pull-request runs are disposable; a release run is not.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
 
 jobs:
   test:
@@ -36,7 +52,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: ${{ fromJSON(inputs.runners || '["ubuntu-latest", "macos-latest", "windows-latest"]') }}
 
     steps:
       - uses: actions/checkout@v4
@@ -45,7 +61,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.os }}
+          key: ci-${{ matrix.os }}
+
+      # Windows Defender scanning every object file in target/ is a well-known
+      # multi-x slowdown for MSVC + C++ (DuckDB) compiles on hosted runners.
+      - name: Exclude the build tree from Windows Defender
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE
+          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
 
       - name: Install native build dependencies
         if: runner.os == 'Linux'
@@ -54,23 +80,27 @@ jobs:
       # egui_kittest links wgpu, so the UI crate's tests expect a display server to exist
       # even though the snapshot tests that actually render are #[ignore]d. xvfb satisfies
       # that on a headless runner without having to weaken the suite.
+      # --profile ci skips opt-level 2 on vendored C/C++ (see Cargo.toml).
       - name: Run tests
         if: runner.os == 'Linux'
-        run: xvfb-run -a cargo test --workspace --locked
+        run: xvfb-run -a cargo test --workspace --locked --profile ci
 
       # --locked keeps CI honest about Cargo.lock: the tested dependency graph is exactly
       # the committed one, not whatever resolved fresh on the runner today.
       - name: Run tests
         if: runner.os != 'Linux'
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --profile ci
 
-      # Compile the benchmark harness on every supported platform without taking noisy
-      # wall-clock measurements on shared PR runners.
+      # Compile-check the Criterion harness once, on Linux. Repeating it on macOS
+      # and Windows recompiles DuckDB + Criterion for no extra coverage — the
+      # scheduled benchmark.yml workflow is what actually measures.
       - name: Compile performance benchmarks
-        run: cargo test -p plusplus-core --bench core_hot_paths --no-run --locked
+        if: runner.os == 'Linux'
+        run: cargo test -p plusplus-core --bench core_hot_paths --no-run --locked --profile ci
 
   clippy:
     name: Clippy
+    if: ${{ inputs.run-clippy != false }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     # Reports but does not block yet: the tree currently has 10 clippy warnings (dead code
@@ -89,10 +119,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: clippy
+          key: clippy-ci
 
       - name: Install native build dependencies
         run: scripts/linux-deps.sh
 
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked --profile ci -- -D warnings

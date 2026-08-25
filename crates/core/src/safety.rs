@@ -53,9 +53,24 @@ pub fn evaluate_sql(
         return SqlSafetyDecision::Block(writes);
     }
     if guardian_enabled {
-        return SqlSafetyDecision::Confirm(dangerous_statements(kind, sql));
+        let statements = statements_requiring_confirmation(kind, sql);
+        return if statements.is_empty() {
+            SqlSafetyDecision::Allow
+        } else {
+            SqlSafetyDecision::Confirm(statements)
+        };
     }
     SqlSafetyDecision::Allow
+}
+
+/// Statements that merit an interruptive Guardian review. A parsed, append-only INSERT is
+/// allowed: it adds data without altering existing rows. Replacement/upsert forms remain
+/// guarded, as does any INSERT the parser could not analyze confidently.
+pub fn statements_requiring_confirmation(kind: DbKind, sql: &str) -> Vec<DangerousStatement> {
+    dangerous_statements(kind, sql)
+        .into_iter()
+        .filter(|statement| !statement.is_append_only_insert())
+        .collect()
 }
 
 /// Production Guardian's final severity after static analysis and safe preflight queries.
@@ -132,6 +147,18 @@ pub struct DangerousStatement {
 }
 
 impl DangerousStatement {
+    fn is_append_only_insert(&self) -> bool {
+        if self.kind != DangerKind::Insert || self.analysis_warning.is_some() {
+            return false;
+        }
+        let sql = self.sql.to_ascii_lowercase();
+        !sql.trim_start().starts_with("replace")
+            && !sql.contains(" or replace ")
+            && !sql.contains(" on duplicate key update")
+            && !(sql.contains(" on conflict") && sql.contains(" do update"))
+            && !sql.contains(" overwrite ")
+    }
+
     /// Static severity before the database contributes an exact count or estimated plan rows.
     pub fn base_risk(&self) -> RiskLevel {
         if self.analysis_warning.is_some()
@@ -1106,7 +1133,7 @@ mod tests {
     }
 
     #[test]
-    fn one_policy_blocks_read_only_reviews_guarded_and_allows_development() {
+    fn one_policy_blocks_read_only_allows_append_only_inserts_and_reviews_overwrites() {
         let sql = "INSERT INTO audit_log VALUES (1)";
         assert!(matches!(
             evaluate_sql(DbKind::Postgres, sql, false, false),
@@ -1114,8 +1141,7 @@ mod tests {
         ));
         assert!(matches!(
             evaluate_sql(DbKind::Postgres, sql, true, false),
-            SqlSafetyDecision::Confirm(statements)
-                if statements.len() == 1 && statements[0].kind == DangerKind::Insert
+            SqlSafetyDecision::Allow
         ));
         assert!(matches!(
             evaluate_sql(DbKind::Postgres, sql, true, true),
@@ -1125,5 +1151,26 @@ mod tests {
             evaluate_sql(DbKind::Postgres, "SELECT 1", true, true),
             SqlSafetyDecision::Allow
         ));
+
+        for (kind, sql) in [
+            (DbKind::Sqlite, "INSERT OR REPLACE INTO t VALUES (1)"),
+            (
+                DbKind::Postgres,
+                "INSERT INTO t VALUES (1) ON CONFLICT (id) DO UPDATE SET value = 'new'",
+            ),
+            (
+                DbKind::MySql,
+                "INSERT INTO t VALUES (1) ON DUPLICATE KEY UPDATE value = 'new'",
+            ),
+        ] {
+            assert!(
+                matches!(
+                    evaluate_sql(kind, sql, true, false),
+                    SqlSafetyDecision::Confirm(statements)
+                        if statements.len() == 1 && statements[0].kind == DangerKind::Insert
+                ),
+                "overwrite form was not guarded: {sql}"
+            );
+        }
     }
 }

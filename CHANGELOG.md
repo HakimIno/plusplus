@@ -3,6 +3,14 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
+## 0.4.2 — 2026-08-25
+
+- Redesigned New Connection around a provider picker, then a focused details form with optional appearance, safety, SSL, and SSH controls.
+- Added Settings typography so imported OpenType fonts can replace the interface and SQL/grid faces.
+- Tightened the SQL autocomplete popup with kind icons, better on-screen placement, and clipped labels.
+- Production Guardian no longer interrupts append-only INSERT; REPLACE, ON CONFLICT UPDATE, and ON DUPLICATE KEY still require confirmation.
+- Speed up CI and release packaging with a non-optimizing test profile, and start building installers after Linux tests pass while macOS and Windows tests still block publish.
+
 ## 0.4.1 — 2026-08-24
 
 - Made the SQL editor, History sidebar, and streaming query results cheaper on every frame by caching fold and layout work, grouping history once, and appending streamed rows instead of rebuilding the whole grid.

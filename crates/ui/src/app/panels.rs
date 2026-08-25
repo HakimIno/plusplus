@@ -66,11 +66,18 @@ fn history_moment(timestamp: &str) -> (String, String, String) {
 pub(super) fn grouped_history(
     entries: &[dbcore::history::HistoryEntry],
     filter: &str,
+    conn_id: Option<&str>,
 ) -> Vec<HistoryDay> {
+    let Some(conn_id) = conn_id else {
+        return Vec::new();
+    };
     let filter = filter.trim().to_lowercase();
     let mut days: Vec<HistoryDay> = Vec::new();
     for idx in (0..entries.len()).rev() {
         let entry = &entries[idx];
+        if entry.conn_id != conn_id {
+            continue;
+        }
         let (key, label, _) = history_moment(&entry.at);
         if !filter.is_empty()
             && !entry.sql.to_lowercase().contains(&filter)
@@ -96,6 +103,48 @@ pub(super) fn grouped_history(
         }
     }
     days
+}
+
+/// Group saved queries for one connection while preserving indices into the full cache.
+/// Favorites from older versions have no connection id, so they remain globally visible.
+pub(super) fn grouped_favorites_for_connection(
+    queries: &[dbcore::Favorite],
+    folders: &[String],
+    filter: &str,
+    keep_empty: bool,
+    conn_id: Option<&str>,
+) -> Vec<(String, Vec<usize>)> {
+    let global_indices: Vec<usize> = queries
+        .iter()
+        .enumerate()
+        .filter(|(_, query)| match conn_id {
+            Some(conn_id) => query
+                .conn_id
+                .as_deref()
+                .is_none_or(|saved_conn_id| saved_conn_id == conn_id),
+            None => query.conn_id.is_none(),
+        })
+        .map(|(idx, _)| idx)
+        .collect();
+    let scoped_queries: Vec<dbcore::Favorite> = global_indices
+        .iter()
+        .map(|&idx| queries[idx].clone())
+        .collect();
+
+    dbcore::favorites::grouped(&scoped_queries, folders, filter, keep_empty)
+        .into_iter()
+        // Folder names are stored globally for backward compatibility. An empty group here
+        // means that the folder belongs only to another connection, so it must not leak into
+        // the current connection's Queries tree.
+        .filter(|(_, local_indices)| !local_indices.is_empty())
+        .map(|(folder, local_indices)| {
+            let indices = local_indices
+                .into_iter()
+                .map(|local_idx| global_indices[local_idx])
+                .collect();
+            (folder, indices)
+        })
+        .collect()
 }
 
 /// Width of the SQL gutter's fold chevron column, in points.
@@ -336,6 +385,21 @@ fn status_text_input(
     with_field_status(ui, status, |ui| {
         components::text_input(ui, text, hint, width)
     })
+}
+
+fn connection_form_label(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(96.0, style::CONTROL_H), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.painter().text(
+            rect.right_center(),
+            egui::Align2::RIGHT_CENTER,
+            text,
+            egui::TextStyle::Body.resolve(ui.style()),
+            palette::TEXT(),
+        );
+    }
+    response
 }
 
 /// First non-empty line of a SQL string, for one-line list displays.
@@ -1729,7 +1793,13 @@ impl DbGuiApp {
     /// Session-only stream of statements completed for the connection bound to this tab.
     /// It shares the SQL console instead of becoming another workspace/sidebar destination:
     /// the editor answers "what will run", while this panel answers "what just ran".
-    pub(super) fn live_log_panel(&mut self, root: &mut egui::Ui, tab_id: u64) {
+    pub(super) fn live_log_panel(
+        &mut self,
+        root: &mut egui::Ui,
+        tab_id: u64,
+        include_mode_bar: bool,
+        actions: &mut Vec<Action>,
+    ) {
         let conn_id = self
             .tabs
             .iter()
@@ -1744,171 +1814,187 @@ impl DbGuiApp {
         let available = root.available_height();
         // On a compact bottom-docked table console, default to the title strip so the SQL
         // editor keeps enough room to type. A generously-sized console opens the stream.
-        let default_size = if available >= 220.0 {
+        let log_default_size = if available >= 220.0 {
             LIVE_LOG_DEFAULT_H
         } else {
             LIVE_LOG_HEADER_H
         };
-        let max_size = live_log_max_size(available);
+        let mode_bar_height = if include_mode_bar { 38.0 } else { 0.0 };
+        let default_size = log_default_size + mode_bar_height;
+        let min_size = LIVE_LOG_HEADER_H + mode_bar_height;
+        let max_size = live_log_max_size(available).max(min_size);
 
-        egui::Panel::bottom(egui::Id::new(("live_log", tab_id)))
-            .resizable(true)
-            .default_size(default_size)
-            .min_size(LIVE_LOG_HEADER_H)
-            .max_size(max_size)
-            .frame(
-                egui::Frame::new()
-                    .fill(palette::CODE_BG())
-                    .stroke(egui::Stroke::new(1.0, palette::BORDER()))
-                    .inner_margin(egui::Margin::ZERO),
-            )
-            .show_inside(root, |ui| {
-                let mut clear = false;
-                let mut close = false;
-                let (header_rect, _) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), LIVE_LOG_HEADER_H),
-                    egui::Sense::hover(),
-                );
-                ui.painter()
-                    .rect_filled(header_rect, egui::CornerRadius::ZERO, palette::PANEL());
-                ui.painter().hline(
-                    header_rect.x_range(),
-                    header_rect.bottom(),
-                    egui::Stroke::new(1.0, palette::BORDER()),
-                );
-                ui.scope_builder(
-                    egui::UiBuilder::new()
-                        .max_rect(header_rect.shrink2(egui::vec2(8.0, 2.0)))
-                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                    |ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        icons::show_colored(ui, icons::history(), 14.0, palette::ACCENT());
-                        ui.label(egui::RichText::new("Live log").strong().size(12.0));
-                        ui.label(
-                            egui::RichText::new(if count == 1 {
-                                "1 entry".to_string()
-                            } else {
-                                format!("{count} entries")
-                            })
-                            .small()
-                            .color(palette::TEXT_FAINT()),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if components::Btn::ghost_icon(icons::close())
-                                .tooltip("Close Live log")
-                                .show(ui)
-                                .clicked()
-                            {
-                                close = true;
-                            }
-                            if components::Btn::ghost_icon(icons::trash())
-                                .enabled(count > 0)
-                                .tooltip("Clear this connection's live log")
-                                .show(ui)
-                                .clicked()
-                            {
-                                clear = true;
-                            }
-                        });
-                    },
-                );
-
-                if close {
-                    self.show_live_log = false;
-                    return;
-                }
-                if clear {
-                    if let Some(conn_id) = &conn_id {
-                        self.live_log.retain(|entry| &entry.conn_id != conn_id);
-                    } else {
-                        self.live_log.clear();
+        let panel_response =
+            egui::Panel::bottom(egui::Id::new(("live_log", tab_id, include_mode_bar)))
+                .resizable(true)
+                .default_size(default_size)
+                .min_size(min_size)
+                .max_size(max_size)
+                .frame(
+                    egui::Frame::new()
+                        .fill(palette::CODE_BG())
+                        .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                        .inner_margin(egui::Margin::ZERO),
+                )
+                .show_inside(root, |ui| {
+                    if include_mode_bar {
+                        self.view_mode_bar(ui, QueryEditorPlacement::Top, actions);
                     }
-                }
-                if ui.available_height() < 8.0 {
-                    return;
-                }
+                    let mut clear = false;
+                    let mut close = false;
+                    let (header_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), LIVE_LOG_HEADER_H),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().rect_filled(
+                        header_rect,
+                        egui::CornerRadius::ZERO,
+                        palette::PANEL(),
+                    );
+                    ui.painter().hline(
+                        header_rect.x_range(),
+                        header_rect.bottom(),
+                        egui::Stroke::new(1.0, palette::BORDER()),
+                    );
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(header_rect.shrink2(egui::vec2(8.0, 2.0)))
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                        |ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            icons::show_colored(ui, icons::history(), 14.0, palette::ACCENT());
+                            ui.label(egui::RichText::new("Live log").strong().size(12.0));
+                            ui.label(
+                                egui::RichText::new(if count == 1 {
+                                    "1 entry".to_string()
+                                } else {
+                                    format!("{count} entries")
+                                })
+                                .small()
+                                .color(palette::TEXT_FAINT()),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if components::Btn::ghost_icon(icons::close())
+                                        .tooltip("Close Live log")
+                                        .show(ui)
+                                        .clicked()
+                                    {
+                                        close = true;
+                                    }
+                                    if components::Btn::ghost_icon(icons::trash())
+                                        .enabled(count > 0)
+                                        .tooltip("Clear this connection's live log")
+                                        .show(ui)
+                                        .clicked()
+                                    {
+                                        clear = true;
+                                    }
+                                },
+                            );
+                        },
+                    );
 
-                let font = egui::FontId::new(11.5, egui::FontFamily::Monospace);
-                egui::ScrollArea::vertical()
-                    .id_salt(("live_log_scroll", tab_id))
-                    .auto_shrink([false, false])
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        let mut entries = self.live_log.iter().filter(visible).peekable();
-                        if entries.peek().is_none() {
-                            egui::Frame::new()
-                                .inner_margin(egui::Margin::symmetric(10, 8))
-                                .show(ui, |ui| {
-                                    ui.label(
-                                        egui::RichText::new("Run a query to see it here")
-                                            .small()
-                                            .color(palette::TEXT_FAINT()),
-                                    );
-                                });
-                            return;
+                    if close {
+                        self.show_live_log = false;
+                        return;
+                    }
+                    if clear {
+                        if let Some(conn_id) = &conn_id {
+                            self.live_log.retain(|entry| &entry.conn_id != conn_id);
+                        } else {
+                            self.live_log.clear();
                         }
+                    }
+                    if ui.available_height() < 8.0 {
+                        return;
+                    }
 
-                        while let Some(entry) = entries.next() {
-                            egui::Frame::new()
-                                .inner_margin(egui::Margin::symmetric(10, 6))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        let status = if entry.ok { "--" } else { "-- error" };
-                                        let color = if entry.ok {
-                                            palette::SUCCESS()
-                                        } else {
-                                            palette::DANGER()
-                                        };
+                    let font = egui::FontId::new(11.5, egui::FontFamily::Monospace);
+                    egui::ScrollArea::vertical()
+                        .id_salt(("live_log_scroll", tab_id))
+                        .auto_shrink([false, false])
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            let mut entries = self.live_log.iter().filter(visible).peekable();
+                            if entries.peek().is_none() {
+                                egui::Frame::new()
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
                                         ui.label(
-                                            egui::RichText::new(format!(
-                                                "{status} {}",
-                                                live_log_clock(&entry.at)
-                                            ))
-                                            .font(font.clone())
-                                            .color(color),
-                                        );
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                let rows = entry
-                                                    .rows
-                                                    .map(|rows| format!("{rows} rows · "))
-                                                    .unwrap_or_default();
-                                                ui.label(
-                                                    egui::RichText::new(format!(
-                                                        "{rows}{:.0} ms",
-                                                        entry.elapsed_ms
-                                                    ))
-                                                    .small()
-                                                    .color(palette::TEXT_FAINT()),
-                                                );
-                                            },
+                                            egui::RichText::new("Run a query to see it here")
+                                                .small()
+                                                .color(palette::TEXT_FAINT()),
                                         );
                                     });
-
-                                    let mut job = crate::highlight::highlight_sql_cached(
-                                        ui.ctx(),
-                                        entry.sql.trim(),
-                                        font.clone(),
-                                    );
-                                    job.wrap.max_width = ui.available_width().max(40.0);
-                                    ui.add(egui::Label::new(job).wrap())
-                                        .on_hover_text(entry.sql.trim());
-                                    if let Some(error) = &entry.error {
-                                        ui.label(
-                                            egui::RichText::new(format!("Error: {error}"))
-                                                .small()
-                                                .color(palette::DANGER()),
-                                        );
-                                    }
-                                });
-                            if entries.peek().is_some() {
-                                ui.separator();
+                                return;
                             }
-                        }
-                    });
-            });
+
+                            while let Some(entry) = entries.next() {
+                                egui::Frame::new()
+                                    .inner_margin(egui::Margin::symmetric(10, 6))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            let status = if entry.ok { "--" } else { "-- error" };
+                                            let color = if entry.ok {
+                                                palette::SUCCESS()
+                                            } else {
+                                                palette::DANGER()
+                                            };
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "{status} {}",
+                                                    live_log_clock(&entry.at)
+                                                ))
+                                                .font(font.clone())
+                                                .color(color),
+                                            );
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    let rows = entry
+                                                        .rows
+                                                        .map(|rows| format!("{rows} rows · "))
+                                                        .unwrap_or_default();
+                                                    ui.label(
+                                                        egui::RichText::new(format!(
+                                                            "{rows}{:.0} ms",
+                                                            entry.elapsed_ms
+                                                        ))
+                                                        .small()
+                                                        .color(palette::TEXT_FAINT()),
+                                                    );
+                                                },
+                                            );
+                                        });
+
+                                        let mut job = crate::highlight::highlight_sql_cached(
+                                            ui.ctx(),
+                                            entry.sql.trim(),
+                                            font.clone(),
+                                        );
+                                        job.wrap.max_width = ui.available_width().max(40.0);
+                                        ui.add(egui::Label::new(job).wrap())
+                                            .on_hover_text(entry.sql.trim());
+                                        if let Some(error) = &entry.error {
+                                            ui.label(
+                                                egui::RichText::new(format!("Error: {error}"))
+                                                    .small()
+                                                    .color(palette::DANGER()),
+                                            );
+                                        }
+                                    });
+                                if entries.peek().is_some() {
+                                    ui.separator();
+                                }
+                            }
+                        });
+                });
+        panel_response.response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Panel, true, "Live log dock")
+        });
     }
 
     /// Paint the SQL editor's gutter — line numbers and fold chevrons — and apply a click on
@@ -2555,45 +2641,51 @@ impl DbGuiApp {
                 // full-width, so it tracks the panel as it is resized.
                 // `auto_shrink([false, _])` keeps the inner ui at the panel width.
                 let query = details_filter.trim().to_lowercase();
-                egui::ScrollArea::vertical()
+                let columns: Vec<usize> = res
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, col)| query.is_empty() || col.name.to_lowercase().contains(&query))
+                    .map(|(c, _)| c)
+                    .collect();
+                let scroll = egui::ScrollArea::vertical()
                     .id_salt("details_scroll")
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        for (c, col) in res.columns.iter().enumerate() {
-                            if !query.is_empty() && !col.name.to_lowercase().contains(&query) {
-                                continue;
-                            }
-                            let kind = edits.col_kind(c);
-                            ui.add_space(6.0);
-                            // Header: column name on the left, a colour-coded type badge
-                            // pinned to the right edge so types scan as a column.
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new(&col.name)
-                                        .strong()
-                                        .color(palette::TEXT()),
-                                );
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        components::type_badge(ui, &col.type_name, kind_color(kind))
-                                    },
-                                );
-                            });
-                            let value = &res.rows[row_idx][c];
-                            details_value_box(
+                    .auto_shrink([false, true]);
+
+                if details_date_pick.is_some() {
+                    // The inline calendar has variable height, so keep normal layout while it
+                    // is open. The common path below stays fixed-height and virtualized.
+                    scroll.show(ui, |ui| {
+                        for &c in &columns {
+                            details_field(
                                 ui,
                                 edits,
-                                kind,
                                 row_idx,
                                 c,
-                                value,
+                                &res.columns[c],
+                                &res.rows[row_idx][c],
                                 editable,
                                 details_date_pick,
                             );
-                            ui.add_space(4.0);
                         }
                     });
+                } else {
+                    scroll.show_rows(ui, DETAILS_FIELD_H, columns.len(), |ui, range| {
+                        for item in range {
+                            let c = columns[item];
+                            details_field(
+                                ui,
+                                edits,
+                                row_idx,
+                                c,
+                                &res.columns[c],
+                                &res.rows[row_idx][c],
+                                editable,
+                                details_date_pick,
+                            );
+                        }
+                    });
+                }
             });
     }
 
@@ -3010,9 +3102,18 @@ impl DbGuiApp {
         }
     }
 
-    /// The History tab: the clear-all control above the executed-statement list.
-    /// The History tab: search plus clear-all, then the executed-statement list.
+    /// The History tab: connection scope, search, then the executed-statement list.
     fn sidebar_history(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let connection = self
+            .active_connection_config()
+            .map(|config| (config.name.clone(), config.kind));
+        sidebar_connection_scope(
+            ui,
+            connection
+                .as_ref()
+                .map(|(name, kind)| (name.as_str(), *kind)),
+        );
+        ui.add_space(5.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let trash_w = 28.0;
@@ -3024,7 +3125,9 @@ impl DbGuiApp {
                 icons::search(),
                 search_w,
             );
-            if components::icon_button(ui, icons::trash(), "Delete the entire history").clicked() {
+            let clear =
+                components::icon_button(ui, icons::trash(), "Delete history for this connection");
+            if clear.clicked() && connection.is_some() {
                 actions.push(Action::ClearHistory);
             }
         });
@@ -4540,6 +4643,10 @@ impl DbGuiApp {
 
         let mut reload_themes = false;
         let mut chosen = self.theme.clone();
+        let mut ui_font = self.ui_font.clone();
+        let mut code_font = self.code_font.clone();
+        let mut import_font = false;
+        let custom_fonts = self.custom_fonts.clone();
         let mut section = self.settings_section;
         let mut history_enabled = self.history_enabled;
         let mut audit_enabled = self.audit_enabled;
@@ -4910,6 +5017,137 @@ impl DbGuiApp {
                                         });
                                     });
 
+                                    ui.add_space(24.0);
+                                    ui.label(
+                                        egui::RichText::new("Typography")
+                                            .size(13.0)
+                                            .strong()
+                                            .color(palette::TEXT_WEAK()),
+                                    );
+                                    ui.add_space(3.0);
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "Choose separate fonts for the interface and code. Imported fonts stay on this device.",
+                                        )
+                                        .size(12.0)
+                                        .color(palette::TEXT_WEAK()),
+                                    );
+                                    ui.add_space(12.0);
+
+                                    egui::Frame::new()
+                                        .fill(palette::PANEL())
+                                        .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                                        .corner_radius(egui::CornerRadius::same(14))
+                                        .inner_margin(egui::Margin::same(16))
+                                        .show(ui, |ui| {
+                                            ui.set_width(content_w - 32.0);
+
+                                            for (id, title, description, selection, default) in [
+                                                (
+                                                    "interface_font",
+                                                    "Interface font",
+                                                    "Menus, labels, headings and controls",
+                                                    &mut ui_font,
+                                                    "Inter (built in)",
+                                                ),
+                                                (
+                                                    "code_font",
+                                                    "Editor & data font",
+                                                    "SQL, values and code-like metadata",
+                                                    &mut code_font,
+                                                    "JetBrains Mono (built in)",
+                                                ),
+                                            ] {
+                                                ui.horizontal(|ui| {
+                                                    ui.vertical(|ui| {
+                                                        ui.set_width(230.0);
+                                                        ui.label(
+                                                            egui::RichText::new(title)
+                                                                .size(13.0)
+                                                                .color(palette::TEXT()),
+                                                        );
+                                                        ui.label(
+                                                            egui::RichText::new(description)
+                                                                .size(11.0)
+                                                                .color(palette::TEXT_FAINT()),
+                                                        );
+                                                    });
+                                                    let selected = selection
+                                                        .as_deref()
+                                                        .and_then(|key| {
+                                                            custom_fonts
+                                                                .iter()
+                                                                .find(|font| font.key == key)
+                                                        })
+                                                        .map_or(default, |font| font.label.as_str());
+                                                    egui::ComboBox::from_id_salt(id)
+                                                        .width(250.0)
+                                                        .selected_text(selected)
+                                                        .show_ui(ui, |ui| {
+                                                            ui.selectable_value(
+                                                                selection,
+                                                                None,
+                                                                default,
+                                                            );
+                                                            for font in &custom_fonts {
+                                                                ui.selectable_value(
+                                                                    selection,
+                                                                    Some(font.key.clone()),
+                                                                    &font.label,
+                                                                );
+                                                            }
+                                                        });
+                                                });
+                                                if id == "interface_font" {
+                                                    ui.add_space(10.0);
+                                                    ui.separator();
+                                                    ui.add_space(10.0);
+                                                }
+                                            }
+
+                                            ui.add_space(14.0);
+                                            egui::Frame::new()
+                                                .fill(palette::SURFACE())
+                                                .corner_radius(egui::CornerRadius::same(9))
+                                                .inner_margin(egui::Margin::symmetric(12, 9))
+                                                .show(ui, |ui| {
+                                                    ui.set_width(ui.available_width());
+                                                    ui.label(
+                                                        egui::RichText::new(
+                                                            "Aa  Database workspace  ·  กข  ภาษาไทย",
+                                                        )
+                                                        .font(egui::FontId::proportional(13.0))
+                                                        .color(palette::TEXT()),
+                                                    );
+                                                    ui.label(
+                                                        egui::RichText::new(
+                                                            "SELECT customer_id, total FROM orders;",
+                                                        )
+                                                        .font(egui::FontId::monospace(12.0))
+                                                        .color(palette::TEXT_WEAK()),
+                                                    );
+                                                });
+
+                                            ui.add_space(12.0);
+                                            ui.horizontal(|ui| {
+                                                if components::Btn::new("Import font…")
+                                                    .show(ui)
+                                                    .on_hover_text(
+                                                        "Copy a .ttf or .otf file into the plusplus font library",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    import_font = true;
+                                                }
+                                                ui.add_space(4.0);
+                                                ui.label(
+                                                    egui::RichText::new("TTF or OTF · up to 32 MiB")
+                                                        .size(11.0)
+                                                        .color(palette::TEXT_FAINT()),
+                                                );
+                                            });
+                                        });
+
                                     }
                                     SettingsSection::Privacy => {
                                 ui.add_space(30.0);
@@ -4996,6 +5234,48 @@ impl DbGuiApp {
             self.set_theme(&ctx, chosen);
         }
 
+        if ui_font != self.ui_font || code_font != self.code_font {
+            let previous_ui = self.ui_font.clone();
+            let previous_code = self.code_font.clone();
+            self.ui_font = ui_font;
+            self.code_font = code_font;
+            match self.apply_fonts(&ctx) {
+                Ok(()) => self.persist_settings(),
+                Err(error) => {
+                    self.ui_font = previous_ui;
+                    self.code_font = previous_code;
+                    let _ = self.apply_fonts(&ctx);
+                    self.error = Some(format!("Could not load font: {error}"));
+                }
+            }
+        }
+        if import_font {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("OpenType font", &["ttf", "otf"])
+                .pick_file()
+            {
+                match crate::fonts::import(&path) {
+                    Ok(font) => {
+                        self.custom_fonts = crate::fonts::list_imported();
+                        self.ui_font = Some(font.key);
+                        match self.apply_fonts(&ctx) {
+                            Ok(()) => {
+                                self.persist_settings();
+                                self.status_msg = format!("Imported {}", font.label);
+                                self.error = None;
+                            }
+                            Err(error) => {
+                                self.ui_font = None;
+                                let _ = self.apply_fonts(&ctx);
+                                self.error = Some(format!("Could not load font: {error}"));
+                            }
+                        }
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
+        }
+
         let preferences_changed = history_enabled != self.history_enabled
             || audit_enabled != self.audit_enabled
             || update_check_enabled != self.update_check_enabled
@@ -5014,23 +5294,37 @@ impl DbGuiApp {
     /// Rendered inside the sidebar's History tab. (The append-only compliance record is
     /// separate — see `dbcore::audit`.)
     fn history_list(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        if self.history_cache.is_empty() {
-            ui.label(egui::RichText::new("No queries recorded yet.").color(palette::TEXT_WEAK()));
+        let conn_id = self.tab().conn_id.clone();
+        if conn_id.is_none() {
+            ui.label(
+                egui::RichText::new("Select a connection to view its history.")
+                    .color(palette::TEXT_WEAK()),
+            );
             return;
         }
 
         let mut view_cache = std::mem::take(&mut self.history_view_cache);
-        if view_cache.revision != self.history_revision || view_cache.filter != self.history_filter
+        if view_cache.revision != self.history_revision
+            || view_cache.filter != self.history_filter
+            || view_cache.connection != conn_id
         {
-            view_cache.days = grouped_history(&self.history_cache, &self.history_filter);
+            view_cache.days = grouped_history(
+                &self.history_cache,
+                &self.history_filter,
+                conn_id.as_deref(),
+            );
             view_cache.revision = self.history_revision;
             view_cache.filter.clone_from(&self.history_filter);
+            view_cache.connection.clone_from(&conn_id);
         }
         if view_cache.days.is_empty() {
             self.history_view_cache = view_cache;
-            ui.label(
-                egui::RichText::new("No history matches this search.").color(palette::TEXT_WEAK()),
-            );
+            let message = if self.history_filter.trim().is_empty() {
+                "No history for this connection."
+            } else {
+                "No history matches this search."
+            };
+            ui.label(egui::RichText::new(message).color(palette::TEXT_WEAK()));
             return;
         }
 
@@ -5120,6 +5414,16 @@ impl DbGuiApp {
     /// query name (SQL stays in the editor / a hover tooltip). Click opens a Query tab;
     /// folders and move/rename/delete sit on the right-click menu.
     fn favorites_tab(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let connection = self
+            .active_connection_config()
+            .map(|config| (config.name.clone(), config.kind));
+        sidebar_connection_scope(
+            ui,
+            connection
+                .as_ref()
+                .map(|(name, kind)| (name.as_str(), *kind)),
+        );
+        ui.add_space(5.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let plus_w = 28.0;
@@ -5137,27 +5441,21 @@ impl DbGuiApp {
         });
         ui.add_space(6.0);
 
-        if self.favorites_cache.is_empty() && self.favorite_folders.is_empty() {
-            components::empty_state(
-                ui,
-                icons::star(),
-                "No saved queries",
-                "Write a query in the editor, then save it to reuse here",
-            );
-            return;
-        }
-
         let keep_empty = self.favorites_filter.trim().is_empty();
-        let groups = dbcore::favorites::grouped(
+        let groups = grouped_favorites_for_connection(
             &self.favorites_cache,
             &self.favorite_folders,
             &self.favorites_filter,
             keep_empty,
+            self.tab().conn_id.as_deref(),
         );
         if groups.is_empty() {
-            ui.label(
-                egui::RichText::new("No queries match the search.").color(palette::TEXT_FAINT()),
-            );
+            let message = if self.favorites_filter.trim().is_empty() {
+                "No saved queries for this connection."
+            } else {
+                "No queries match the search."
+            };
+            ui.label(egui::RichText::new(message).color(palette::TEXT_FAINT()));
             return;
         }
 
@@ -5648,15 +5946,15 @@ impl DbGuiApp {
         };
 
         let title = if pending.statements.len() == 1 {
-            "Run on production?".to_string()
+            "Review production change".to_string()
         } else {
-            format!("Run {} statements on production?", pending.statements.len())
+            format!("Review {} production changes", pending.statements.len())
         };
         let mut open = true;
         components::dialog_window(title)
             .open(&mut open)
             .resizable(true)
-            .default_size([560.0, 420.0])
+            .default_size([560.0, 340.0])
             .frame(components::dialog_frame(ctx))
             .show(ctx, |ui| {
                 let database = if pending.database.is_empty() {
@@ -5673,13 +5971,18 @@ impl DbGuiApp {
                     ui.label(egui::RichText::new("/").color(palette::TEXT_FAINT()));
                     ui.label(egui::RichText::new(database).color(palette::TEXT_WEAK()));
                 });
+                ui.label(
+                    egui::RichText::new("Review the target and impact before this change runs.")
+                        .small()
+                        .color(palette::TEXT_FAINT()),
+                );
                 ui.add_space(10.0);
 
                 let mut sql_font = egui::TextStyle::Monospace.resolve(ui.style());
                 sql_font.size = (sql_font.size - 1.5).max(10.0);
                 egui::ScrollArea::vertical()
                     .id_salt("danger_confirm_scroll")
-                    .max_height(260.0)
+                    .max_height(220.0)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 8.0;
@@ -5778,22 +6081,32 @@ impl DbGuiApp {
                                         }
                                     });
 
-                                    ui.add_space(8.0);
-                                    let mut job = crate::highlight::highlight_sql_cached(
-                                        ui.ctx(),
-                                        &stmt.sql,
-                                        sql_font.clone(),
-                                    );
-                                    job.wrap.max_width = ui.available_width().max(40.0);
-                                    egui::Frame::new()
-                                        .fill(palette::CODE_BG())
-                                        .stroke(egui::Stroke::new(1.0, palette::BORDER()))
-                                        .corner_radius(egui::CornerRadius::same(8))
-                                        .inner_margin(egui::Margin::symmetric(10, 8))
-                                        .show(ui, |ui| {
-                                            ui.set_width(ui.available_width());
-                                            ui.add(egui::Label::new(job).wrap().selectable(false));
-                                        });
+                                    ui.add_space(4.0);
+                                    egui::CollapsingHeader::new(
+                                        egui::RichText::new("Review SQL")
+                                            .small()
+                                            .color(palette::TEXT_WEAK()),
+                                    )
+                                    .id_salt(("production_guard_sql", i))
+                                    .show(ui, |ui| {
+                                        let mut job = crate::highlight::highlight_sql_cached(
+                                            ui.ctx(),
+                                            &stmt.sql,
+                                            sql_font.clone(),
+                                        );
+                                        job.wrap.max_width = ui.available_width().max(40.0);
+                                        egui::Frame::new()
+                                            .fill(palette::CODE_BG())
+                                            .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                                            .corner_radius(egui::CornerRadius::same(8))
+                                            .inner_margin(egui::Margin::symmetric(10, 8))
+                                            .show(ui, |ui| {
+                                                ui.set_width(ui.available_width());
+                                                ui.add(
+                                                    egui::Label::new(job).wrap().selectable(false),
+                                                );
+                                            });
+                                    });
 
                                     let has_details = stmt.analysis_warning.is_some()
                                         || preflight.is_some_and(|item| {
@@ -5857,7 +6170,9 @@ impl DbGuiApp {
                     ui.add_space(12.0);
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
-                        ui.label(egui::RichText::new("Type").color(palette::TEXT_WEAK()));
+                        ui.label(
+                            egui::RichText::new("Confirm by typing").color(palette::TEXT_WEAK()),
+                        );
                         egui::Frame::new()
                             .fill(palette::SELECTION())
                             .corner_radius(egui::CornerRadius::same(4))
@@ -5869,7 +6184,6 @@ impl DbGuiApp {
                                         .color(palette::TEXT()),
                                 );
                             });
-                        ui.label(egui::RichText::new("to confirm").color(palette::TEXT_WEAK()));
                     });
                     ui.add_space(6.0);
                     let mut confirmation = pending.confirmation.clone();
@@ -5892,13 +6206,13 @@ impl DbGuiApp {
                     let can_act = self.busy == Busy::Idle && pending.can_confirm();
                     let critical = pending.confirmation_phrase().is_some();
                     let run = if critical {
-                        components::Btn::danger("Run")
+                        components::Btn::danger("Run change")
                             .icon(icons::play())
                             .enabled(can_act)
                             .tooltip("Execute against the production connection")
                             .show(ui)
                     } else {
-                        components::primary_button(ui, icons::play(), "Run", can_act)
+                        components::primary_button(ui, icons::play(), "Run change", can_act)
                             .on_hover_text("Execute against the production connection")
                     };
                     if run.clicked() {
@@ -6116,35 +6430,18 @@ impl DbGuiApp {
                                     // name has no business being 700px, so cap it — the space to
                                     // its right stays empty on purpose.
                                     let combo_w = (ui.available_width() - 4.0).clamp(180.0, 320.0);
-                                    egui::ComboBox::from_id_salt(("import_map", i))
-                                        .width(combo_w)
-                                        .selected_text(selected)
-                                        .show_ui(ui, |ui| {
-                                            if ui
-                                                .selectable_label(
-                                                    source.is_none(),
-                                                    egui::RichText::new("Skip")
-                                                        .color(palette::TEXT_WEAK()),
-                                                )
-                                                .clicked()
-                                            {
-                                                actions.push(Action::SetImportMapping {
-                                                    target: i,
-                                                    source: None,
-                                                });
-                                            }
-                                            for (s, header) in draft.headers.iter().enumerate() {
-                                                if ui
-                                                    .selectable_label(source == Some(s), header)
-                                                    .clicked()
-                                                {
-                                                    actions.push(Action::SetImportMapping {
-                                                        target: i,
-                                                        source: Some(s),
-                                                    });
-                                                }
-                                            }
-                                        });
+                                    if let Some(source) = components::searchable_combo_box(
+                                        ui,
+                                        ("import_map", i),
+                                        selected,
+                                        combo_w,
+                                        &draft.headers,
+                                        source,
+                                        Some("Skip"),
+                                    ) {
+                                        actions
+                                            .push(Action::SetImportMapping { target: i, source });
+                                    }
                                     ui.end_row();
                                 }
                             });
@@ -6279,7 +6576,9 @@ impl DbGuiApp {
         let Some(editor) = &mut self.editor else {
             return;
         };
-        let title = if editor.is_new {
+        let title = if editor.selecting_provider {
+            "Choose a database"
+        } else if editor.is_new {
             "New Connection"
         } else {
             "Edit Connection"
@@ -6292,431 +6591,573 @@ impl DbGuiApp {
             .show(ctx, |ui| {
                 let test_state = editor.test_state.clone();
                 let mut form_changed = false;
-                egui::Grid::new("conn_form")
-                    .num_columns(2)
-                    .spacing([8.0, 8.0])
+
+                if editor.selecting_provider {
+                    ui.set_min_width(536.0);
+
+                    ui.add_space(10.0);
+
+                    egui::Grid::new("connection_provider_grid")
+                        .num_columns(4)
+                        .spacing([8.0, 8.0])
+                        .show(ui, |ui| {
+                            for (index, kind) in [
+                                dbcore::DbKind::Postgres,
+                                dbcore::DbKind::MySql,
+                                dbcore::DbKind::MariaDb,
+                                dbcore::DbKind::SqlServer,
+                                dbcore::DbKind::Sqlite,
+                                dbcore::DbKind::DuckDb,
+                                dbcore::DbKind::Cassandra,
+                                dbcore::DbKind::ScyllaDb,
+                            ]
+                            .into_iter()
+                            .enumerate()
+                            {
+                                if components::db_kind_card(ui, kind).clicked() {
+                                    editor.config.kind = kind;
+                                    editor.config.port = kind.default_port();
+                                    editor.test_state = ConnTestState::Untested;
+                                    editor.selecting_provider = false;
+                                }
+                                if (index + 1) % 4 == 0 {
+                                    ui.end_row();
+                                }
+                            }
+                        });
+
+                    components::dialog_footer(ui, |ui| {
+                        if components::button(ui, icons::close(), "Cancel", true).clicked() {
+                            actions.push(Action::CancelDialog);
+                        }
+                    });
+                    return;
+                }
+
+                ui.set_min_width(600.0);
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::Image::new(icons::db_kind_icon(editor.config.kind))
+                            .fit_to_exact_size(egui::Vec2::splat(28.0))
+                            .tint(icons::db_kind_icon_tint(editor.config.kind)),
+                    );
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new(editor.config.kind.label())
+                                .size(13.0)
+                                .color(palette::TEXT()),
+                        );
+                        ui.label(
+                            egui::RichText::new("Connection details")
+                                .size(10.5)
+                                .color(palette::TEXT_FAINT()),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if components::button(ui, icons::arrow_left(), "Change", true).clicked() {
+                            editor.selecting_provider = true;
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(6.0);
+
+                ui.label(
+                    egui::RichText::new("GENERAL")
+                        .size(10.0)
+                        .color(palette::TEXT_FAINT()),
+                );
+                ui.add_space(3.0);
+                egui::Frame::new()
+                    .fill(palette::SURFACE())
+                    .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
-                        let field_w = 240.0;
-
-                        ui.label("Name");
-                        form_changed |= status_text_input(
-                            ui,
-                            &mut editor.config.name,
-                            "",
-                            field_w,
-                            field_test_status(&test_state, ConnField::Name),
-                        )
-                        .changed();
-                        ui.end_row();
-
-                        ui.label("Icon");
-                        ui.horizontal(|ui| {
-                            for icon in dbcore::ConnectionIcon::ALL {
-                                let selected = editor.config.icon == icon;
-                                let resp =
-                                    icons::connection_icon_picker_button(ui, icon, selected, 32.0);
-                                if resp.clicked() {
-                                    editor.config.icon = icon;
-                                    form_changed = true;
-                                }
-                            }
-                        });
-                        ui.end_row();
-
-                        ui.label("Type");
-                        let previous_kind = editor.config.kind;
-                        components::db_kind_combo(ui, &mut editor.config.kind, "kind", field_w);
-                        if editor.config.kind != previous_kind {
-                            editor.config.port = editor.config.kind.default_port();
-                            form_changed = true;
-                        }
-                        ui.end_row();
-
-                        ui.label("Title bar color");
-                        ui.horizontal(|ui| {
-                            let mut color = editor
-                                .config
-                                .title_bar_color
-                                .map(connection_color_to_egui)
-                                .unwrap_or_else(palette::ACCENT);
-                            if egui::color_picker::color_edit_button_srgba(
-                                ui,
-                                &mut color,
-                                egui::color_picker::Alpha::Opaque,
-                            )
-                            .changed()
-                            {
-                                editor.config.title_bar_color =
-                                    Some(egui_to_connection_color(color));
-                                form_changed = true;
-                            }
-                            if editor.config.title_bar_color.is_none() {
-                                ui.label("Default");
-                            }
-                            if ui.button("Clear").clicked()
-                                && editor.config.title_bar_color.take().is_some()
-                            {
-                                form_changed = true;
-                            }
-                        });
-                        ui.end_row();
-
-                        ui.label("Safety profile");
-                        let previous_profile = editor.config.safety_profile;
-                        egui::ComboBox::from_id_salt("safety_profile")
-                            .selected_text(editor.config.safety_profile.label())
-                            .width(field_w)
-                            .show_ui(ui, |ui| {
-                                for profile in dbcore::SafetyProfile::ALL {
-                                    ui.selectable_value(
-                                        &mut editor.config.safety_profile,
-                                        profile,
-                                        profile.label(),
-                                    )
-                                    .on_hover_text(profile.description());
-                                }
-                            });
-                        if editor.config.safety_profile != previous_profile {
-                            editor
-                                .config
-                                .set_safety_profile(editor.config.safety_profile);
-                            form_changed = true;
-                        }
-                        ui.end_row();
-
-                        ui.label("");
-                        ui.vertical(|ui| {
-                            ui.set_max_width(field_w);
-                            ui.label(
-                                egui::RichText::new(editor.config.safety_profile.description())
-                                    .size(11.0)
-                                    .color(palette::TEXT_WEAK()),
-                            );
-                            ui.horizontal_wrapped(|ui| {
-                                ui.spacing_mut().item_spacing.x = 4.0;
-                                ui.label(egui::RichText::new("Protection").size(11.0));
-                                let guardian_on = editor.config.is_production();
-                                ui.label(
-                                    egui::RichText::new(if guardian_on {
-                                        "Guardian: On"
-                                    } else {
-                                        "Guardian: Off"
-                                    })
-                                    .size(11.0)
-                                    .color(if guardian_on {
-                                        palette::SUCCESS()
-                                    } else {
-                                        palette::TEXT_FAINT()
-                                    }),
-                                );
-                                ui.label(egui::RichText::new("·").color(palette::TEXT_FAINT()));
-                                let read_only_on = editor.config.is_read_only();
-                                ui.label(
-                                    egui::RichText::new(if read_only_on {
-                                        "Read-only: On"
-                                    } else {
-                                        "Read-only: Off"
-                                    })
-                                    .size(11.0)
-                                    .color(if read_only_on {
-                                        palette::SUCCESS()
-                                    } else {
-                                        palette::TEXT_FAINT()
-                                    }),
-                                );
-                            });
-                        });
-                        ui.end_row();
-
-                        if editor.config.safety_profile == dbcore::SafetyProfile::Custom {
-                            ui.label("Production");
-                            form_changed |= ui
-                                .checkbox(
-                                    &mut editor.config.production,
-                                    "Confirm destructive queries",
-                                )
-                                .on_hover_text(
-                                    "UPDATE, DELETE, DROP, TRUNCATE, ALTER, and MERGE must \
-                                     be confirmed in a dialog before they run",
+                        egui::Grid::new("conn_general")
+                            .num_columns(2)
+                            .spacing([12.0, 8.0])
+                            .show(ui, |ui| {
+                                connection_form_label(ui, "Name");
+                                form_changed |= status_text_input(
+                                    ui,
+                                    &mut editor.config.name,
+                                    "",
+                                    440.0,
+                                    field_test_status(&test_state, ConnField::Name),
                                 )
                                 .changed();
-                            ui.end_row();
+                                ui.end_row();
+                            });
+                    });
 
-                            ui.label("Read-only");
-                            form_changed |= ui
-                                .checkbox(&mut editor.config.read_only, "Block all writes")
-                                .on_hover_text(
-                                    "Only reads (SELECT, SHOW, EXPLAIN, …) are allowed to \
+                ui.add_space(10.0);
+                ui.label(
+                    egui::RichText::new("CONNECTION")
+                        .size(10.0)
+                        .color(palette::TEXT_FAINT()),
+                );
+                ui.add_space(3.0);
+                egui::Frame::new()
+                    .fill(palette::SURFACE())
+                    .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin::symmetric(12, 10))
+                    .show(ui, |ui| {
+                        egui::Grid::new("conn_form")
+                            .num_columns(2)
+                            .spacing([12.0, 8.0])
+                            .show(ui, |ui| {
+                                let field_w = 440.0;
+
+                                if editor.show_advanced {
+                                    connection_form_label(ui, "Icon");
+                                    ui.horizontal(|ui| {
+                                        for icon in dbcore::ConnectionIcon::ALL {
+                                            let selected = editor.config.icon == icon;
+                                            let resp = icons::connection_icon_picker_button(
+                                                ui, icon, selected, 32.0,
+                                            );
+                                            if resp.clicked() {
+                                                editor.config.icon = icon;
+                                                form_changed = true;
+                                            }
+                                        }
+                                    });
+                                    ui.end_row();
+
+                                    connection_form_label(ui, "Title bar color");
+                                    ui.horizontal(|ui| {
+                                        let mut color = editor
+                                            .config
+                                            .title_bar_color
+                                            .map(connection_color_to_egui)
+                                            .unwrap_or_else(palette::ACCENT);
+                                        if egui::color_picker::color_edit_button_srgba(
+                                            ui,
+                                            &mut color,
+                                            egui::color_picker::Alpha::Opaque,
+                                        )
+                                        .changed()
+                                        {
+                                            editor.config.title_bar_color =
+                                                Some(egui_to_connection_color(color));
+                                            form_changed = true;
+                                        }
+                                        if editor.config.title_bar_color.is_none() {
+                                            ui.label("Default");
+                                        }
+                                        if ui.button("Clear").clicked()
+                                            && editor.config.title_bar_color.take().is_some()
+                                        {
+                                            form_changed = true;
+                                        }
+                                    });
+                                    ui.end_row();
+
+                                    connection_form_label(ui, "Safety profile");
+                                    let previous_profile = editor.config.safety_profile;
+                                    egui::ComboBox::from_id_salt("safety_profile")
+                                        .selected_text(editor.config.safety_profile.label())
+                                        .width(field_w)
+                                        .show_ui(ui, |ui| {
+                                            for profile in dbcore::SafetyProfile::ALL {
+                                                ui.selectable_value(
+                                                    &mut editor.config.safety_profile,
+                                                    profile,
+                                                    profile.label(),
+                                                )
+                                                .on_hover_text(profile.description());
+                                            }
+                                        });
+                                    if editor.config.safety_profile != previous_profile {
+                                        editor
+                                            .config
+                                            .set_safety_profile(editor.config.safety_profile);
+                                        form_changed = true;
+                                    }
+                                    ui.end_row();
+
+                                    connection_form_label(ui, "");
+                                    ui.vertical(|ui| {
+                                        ui.set_max_width(field_w);
+                                        ui.label(
+                                            egui::RichText::new(
+                                                editor.config.safety_profile.description(),
+                                            )
+                                            .size(11.0)
+                                            .color(palette::TEXT_WEAK()),
+                                        );
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 4.0;
+                                            ui.label(egui::RichText::new("Protection").size(11.0));
+                                            let guardian_on = editor.config.is_production();
+                                            ui.label(
+                                                egui::RichText::new(if guardian_on {
+                                                    "Guardian: On"
+                                                } else {
+                                                    "Guardian: Off"
+                                                })
+                                                .size(11.0)
+                                                .color(if guardian_on {
+                                                    palette::SUCCESS()
+                                                } else {
+                                                    palette::TEXT_FAINT()
+                                                }),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new("·")
+                                                    .color(palette::TEXT_FAINT()),
+                                            );
+                                            let read_only_on = editor.config.is_read_only();
+                                            ui.label(
+                                                egui::RichText::new(if read_only_on {
+                                                    "Read-only: On"
+                                                } else {
+                                                    "Read-only: Off"
+                                                })
+                                                .size(11.0)
+                                                .color(if read_only_on {
+                                                    palette::SUCCESS()
+                                                } else {
+                                                    palette::TEXT_FAINT()
+                                                }),
+                                            );
+                                        });
+                                    });
+                                    ui.end_row();
+
+                                    if editor.config.safety_profile == dbcore::SafetyProfile::Custom
+                                    {
+                                        connection_form_label(ui, "Production");
+                                        form_changed |= ui
+                                    .checkbox(
+                                        &mut editor.config.production,
+                                        "Confirm destructive queries",
+                                    )
+                                    .on_hover_text(
+                                        "UPDATE, DELETE, DROP, TRUNCATE, ALTER, and MERGE must \
+                                     be confirmed in a dialog before they run",
+                                    )
+                                    .changed();
+                                        ui.end_row();
+
+                                        connection_form_label(ui, "Read-only");
+                                        form_changed |= ui
+                                    .checkbox(&mut editor.config.read_only, "Block all writes")
+                                    .on_hover_text(
+                                        "Only reads (SELECT, SHOW, EXPLAIN, …) are allowed to \
                                      run; in-grid editing and schema changes are refused. \
                                      Where the database supports it the session itself is \
                                      opened read-only, so even writes hidden inside \
                                      functions are rejected by the server. Takes effect on \
                                      the next connect.",
-                                )
-                                .changed();
-                            ui.end_row();
-                        }
-
-                        if editor.config.kind.is_server() {
-                            ui.label("Host");
-                            form_changed |= status_text_input(
-                                ui,
-                                &mut editor.config.host,
-                                "",
-                                field_w,
-                                field_test_status(&test_state, ConnField::Host),
-                            )
-                            .changed();
-                            ui.end_row();
-
-                            ui.label("Port");
-                            form_changed |= with_field_status(
-                                ui,
-                                field_test_status(&test_state, ConnField::Port),
-                                |ui| {
-                                    ui.add_sized(
-                                        egui::vec2(80.0, style::CONTROL_H),
-                                        egui::DragValue::new(&mut editor.config.port),
                                     )
-                                },
-                            )
-                            .changed();
-                            ui.end_row();
+                                    .changed();
+                                        ui.end_row();
+                                    }
+                                }
 
-                            ui.label("User");
-                            form_changed |= status_text_input(
-                                ui,
-                                &mut editor.config.user,
-                                "",
-                                field_w,
-                                field_test_status(&test_state, ConnField::User),
-                            )
-                            .changed();
-                            ui.end_row();
+                                if editor.config.kind.is_server() {
+                                    connection_form_label(ui, "Host");
+                                    ui.horizontal(|ui| {
+                                        form_changed |= status_text_input(
+                                            ui,
+                                            &mut editor.config.host,
+                                            "",
+                                            292.0,
+                                            field_test_status(&test_state, ConnField::Host),
+                                        )
+                                        .changed();
+                                        ui.add_space(8.0);
+                                        ui.label("Port");
+                                        form_changed |= with_field_status(
+                                            ui,
+                                            field_test_status(&test_state, ConnField::Port),
+                                            |ui| {
+                                                ui.add_sized(
+                                                    egui::vec2(84.0, style::CONTROL_H),
+                                                    egui::DragValue::new(&mut editor.config.port),
+                                                )
+                                            },
+                                        )
+                                        .changed();
+                                    });
+                                    ui.end_row();
 
-                            ui.label("Password");
-                            form_changed |= with_field_status(
-                                ui,
-                                field_test_status(&test_state, ConnField::Password),
-                                |ui| {
-                                    components::password_input(
+                                    connection_form_label(ui, "User");
+                                    form_changed |= status_text_input(
                                         ui,
-                                        &mut editor.password,
+                                        &mut editor.config.user,
                                         "",
                                         field_w,
+                                        field_test_status(&test_state, ConnField::User),
                                     )
-                                },
-                            )
-                            .changed();
-                            ui.end_row();
+                                    .changed();
+                                    ui.end_row();
 
-                            // CQL groups tables into keyspaces, not databases; label the
-                            // field with the term the user expects to type there.
-                            ui.label(if editor.config.kind.is_cql() {
-                                "Keyspace"
-                            } else {
-                                "Database"
-                            });
-                            form_changed |= status_text_input(
-                                ui,
-                                &mut editor.config.database,
-                                "",
-                                field_w,
-                                field_test_status(&test_state, ConnField::Database),
-                            )
-                            .changed();
-                            ui.end_row();
-
-                            ui.label("SSL mode");
-                            let previous_ssl = editor.config.ssl_mode;
-                            egui::ComboBox::from_id_salt("ssl_mode")
-                                .selected_text(editor.config.ssl_mode.label())
-                                .show_ui(ui, |ui| {
-                                    for mode in dbcore::SslMode::ALL {
-                                        ui.selectable_value(
-                                            &mut editor.config.ssl_mode,
-                                            mode,
-                                            mode.label(),
-                                        );
-                                    }
-                                });
-                            form_changed |= editor.config.ssl_mode != previous_ssl;
-                            ui.end_row();
-
-                            // Flag the modes that don't verify the server's identity, so the
-                            // weaker choices read as a deliberate trade-off rather than a default.
-                            if let Some(warning) = editor.config.ssl_mode.security_warning() {
-                                ui.label("");
-                                ui.horizontal_wrapped(|ui| {
-                                    icons::show_colored(
+                                    connection_form_label(ui, "Password");
+                                    form_changed |= with_field_status(
                                         ui,
-                                        icons::warning(),
-                                        12.0,
-                                        palette::WARNING(),
+                                        field_test_status(&test_state, ConnField::Password),
+                                        |ui| {
+                                            components::password_input(
+                                                ui,
+                                                &mut editor.password,
+                                                "",
+                                                field_w,
+                                            )
+                                        },
+                                    )
+                                    .changed();
+                                    ui.end_row();
+
+                                    // CQL groups tables into keyspaces, not databases; label the
+                                    // field with the term the user expects to type there.
+                                    connection_form_label(
+                                        ui,
+                                        if editor.config.kind.is_cql() {
+                                            "Keyspace"
+                                        } else {
+                                            "Database"
+                                        },
                                     );
-                                    ui.label(
-                                        egui::RichText::new(warning)
-                                            .size(11.0)
-                                            .color(palette::WARNING()),
-                                    );
-                                });
-                                ui.end_row();
-                            }
-
-                            if editor.config.ssl_mode.verifies_certificate() {
-                                ui.label("CA certificate");
-                                ui.horizontal(|ui| {
                                     form_changed |= status_text_input(
                                         ui,
-                                        &mut editor.config.ssl_ca_cert,
-                                        "System trust store",
+                                        &mut editor.config.database,
+                                        "",
                                         field_w,
-                                        None,
+                                        field_test_status(&test_state, ConnField::Database),
                                     )
                                     .changed();
-                                    if ui.button("Browse…").clicked() {
-                                        actions.push(Action::BrowseSslCaCert);
-                                    }
-                                });
-                                ui.end_row();
-                            }
+                                    ui.end_row();
 
-                            if editor.config.kind.supports_client_cert()
-                                && editor.config.ssl_mode != dbcore::SslMode::Disable
-                            {
-                                ui.label("Client certificate");
-                                ui.horizontal(|ui| {
-                                    form_changed |= status_text_input(
-                                        ui,
-                                        &mut editor.config.ssl_client_cert,
-                                        "None",
-                                        field_w,
-                                        None,
-                                    )
-                                    .changed();
-                                    if ui.button("Browse…").clicked() {
-                                        actions.push(Action::BrowseSslClientCert);
-                                    }
-                                });
-                                ui.end_row();
+                                    if editor.show_advanced {
+                                        connection_form_label(ui, "SSL mode");
+                                        let previous_ssl = editor.config.ssl_mode;
+                                        egui::ComboBox::from_id_salt("ssl_mode")
+                                            .selected_text(editor.config.ssl_mode.label())
+                                            .show_ui(ui, |ui| {
+                                                for mode in dbcore::SslMode::ALL {
+                                                    ui.selectable_value(
+                                                        &mut editor.config.ssl_mode,
+                                                        mode,
+                                                        mode.label(),
+                                                    );
+                                                }
+                                            });
+                                        form_changed |= editor.config.ssl_mode != previous_ssl;
+                                        ui.end_row();
 
-                                ui.label("Client key");
-                                ui.horizontal(|ui| {
-                                    form_changed |= status_text_input(
-                                        ui,
-                                        &mut editor.config.ssl_client_key,
-                                        "None",
-                                        field_w,
-                                        None,
-                                    )
-                                    .changed();
-                                    if ui.button("Browse…").clicked() {
-                                        actions.push(Action::BrowseSslClientKey);
-                                    }
-                                });
-                                ui.end_row();
-                            }
+                                        // Flag the modes that don't verify the server's identity, so the
+                                        // weaker choices read as a deliberate trade-off rather than a default.
+                                        if let Some(warning) =
+                                            editor.config.ssl_mode.security_warning()
+                                        {
+                                            connection_form_label(ui, "");
+                                            ui.horizontal_wrapped(|ui| {
+                                                icons::show_colored(
+                                                    ui,
+                                                    icons::warning(),
+                                                    12.0,
+                                                    palette::WARNING(),
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new(warning)
+                                                        .size(11.0)
+                                                        .color(palette::WARNING()),
+                                                );
+                                            });
+                                            ui.end_row();
+                                        }
 
-                            ui.label("SSH tunnel");
-                            form_changed |= ui
-                                .checkbox(
-                                    &mut editor.config.ssh_enabled,
-                                    "Connect through a bastion host",
-                                )
-                                .on_hover_text(
-                                    "Host and port above are then resolved from the \
+                                        if editor.config.ssl_mode.verifies_certificate() {
+                                            connection_form_label(ui, "CA certificate");
+                                            ui.horizontal(|ui| {
+                                                form_changed |= status_text_input(
+                                                    ui,
+                                                    &mut editor.config.ssl_ca_cert,
+                                                    "System trust store",
+                                                    field_w,
+                                                    None,
+                                                )
+                                                .changed();
+                                                if ui.button("Browse…").clicked() {
+                                                    actions.push(Action::BrowseSslCaCert);
+                                                }
+                                            });
+                                            ui.end_row();
+                                        }
+
+                                        if editor.config.kind.supports_client_cert()
+                                            && editor.config.ssl_mode != dbcore::SslMode::Disable
+                                        {
+                                            connection_form_label(ui, "Client certificate");
+                                            ui.horizontal(|ui| {
+                                                form_changed |= status_text_input(
+                                                    ui,
+                                                    &mut editor.config.ssl_client_cert,
+                                                    "None",
+                                                    field_w,
+                                                    None,
+                                                )
+                                                .changed();
+                                                if ui.button("Browse…").clicked() {
+                                                    actions.push(Action::BrowseSslClientCert);
+                                                }
+                                            });
+                                            ui.end_row();
+
+                                            connection_form_label(ui, "Client key");
+                                            ui.horizontal(|ui| {
+                                                form_changed |= status_text_input(
+                                                    ui,
+                                                    &mut editor.config.ssl_client_key,
+                                                    "None",
+                                                    field_w,
+                                                    None,
+                                                )
+                                                .changed();
+                                                if ui.button("Browse…").clicked() {
+                                                    actions.push(Action::BrowseSslClientKey);
+                                                }
+                                            });
+                                            ui.end_row();
+                                        }
+
+                                        connection_form_label(ui, "SSH tunnel");
+                                        form_changed |= ui
+                                            .checkbox(
+                                                &mut editor.config.ssh_enabled,
+                                                "Connect through a bastion host",
+                                            )
+                                            .on_hover_text(
+                                                "Host and port above are then resolved from the \
                                      bastion, not from this machine",
-                                )
-                                .changed();
-                            ui.end_row();
+                                            )
+                                            .changed();
+                                        ui.end_row();
 
-                            if editor.config.ssh_enabled {
-                                ui.label("SSH host");
-                                form_changed |= status_text_input(
-                                    ui,
-                                    &mut editor.config.ssh_host,
-                                    "bastion.example.com",
-                                    field_w,
-                                    None,
-                                )
-                                .changed();
-                                ui.end_row();
+                                        if editor.config.ssh_enabled {
+                                            connection_form_label(ui, "SSH host");
+                                            form_changed |= status_text_input(
+                                                ui,
+                                                &mut editor.config.ssh_host,
+                                                "bastion.example.com",
+                                                field_w,
+                                                None,
+                                            )
+                                            .changed();
+                                            ui.end_row();
 
-                                ui.label("SSH port");
-                                form_changed |= ui
-                                    .add_sized(
-                                        egui::vec2(80.0, style::CONTROL_H),
-                                        egui::DragValue::new(&mut editor.config.ssh_port),
-                                    )
-                                    .changed();
-                                ui.end_row();
+                                            connection_form_label(ui, "SSH port");
+                                            form_changed |= ui
+                                                .add_sized(
+                                                    egui::vec2(80.0, style::CONTROL_H),
+                                                    egui::DragValue::new(
+                                                        &mut editor.config.ssh_port,
+                                                    ),
+                                                )
+                                                .changed();
+                                            ui.end_row();
 
-                                ui.label("SSH user");
-                                form_changed |= status_text_input(
-                                    ui,
-                                    &mut editor.config.ssh_user,
-                                    "",
-                                    field_w,
-                                    None,
-                                )
-                                .changed();
-                                ui.end_row();
+                                            connection_form_label(ui, "SSH user");
+                                            form_changed |= status_text_input(
+                                                ui,
+                                                &mut editor.config.ssh_user,
+                                                "",
+                                                field_w,
+                                                None,
+                                            )
+                                            .changed();
+                                            ui.end_row();
 
-                                ui.label("SSH key");
-                                ui.horizontal(|ui| {
-                                    form_changed |= status_text_input(
-                                        ui,
-                                        &mut editor.config.ssh_key_path,
-                                        "None — use password",
-                                        field_w,
-                                        None,
-                                    )
-                                    .changed();
-                                    if ui.button("Browse…").clicked() {
-                                        actions.push(Action::BrowseSshKey);
+                                            connection_form_label(ui, "SSH key");
+                                            ui.horizontal(|ui| {
+                                                form_changed |= status_text_input(
+                                                    ui,
+                                                    &mut editor.config.ssh_key_path,
+                                                    "None — use password",
+                                                    field_w,
+                                                    None,
+                                                )
+                                                .changed();
+                                                if ui.button("Browse…").clicked() {
+                                                    actions.push(Action::BrowseSshKey);
+                                                }
+                                            });
+                                            ui.end_row();
+
+                                            connection_form_label(
+                                                ui,
+                                                if editor.config.ssh_key_path.trim().is_empty() {
+                                                    "SSH password"
+                                                } else {
+                                                    "Key passphrase"
+                                                },
+                                            );
+                                            form_changed |= components::password_input(
+                                                ui,
+                                                &mut editor.ssh_password,
+                                                "",
+                                                field_w,
+                                            )
+                                            .changed();
+                                            ui.end_row();
+                                        }
                                     }
-                                });
-                                ui.end_row();
-
-                                ui.label(if editor.config.ssh_key_path.trim().is_empty() {
-                                    "SSH password"
                                 } else {
-                                    "Key passphrase"
-                                });
-                                form_changed |= components::password_input(
-                                    ui,
-                                    &mut editor.ssh_password,
-                                    "",
-                                    field_w,
-                                )
-                                .changed();
-                                ui.end_row();
-                            }
-                        } else {
-                            ui.label("File");
-                            ui.horizontal(|ui| {
-                                let (path, hint) = if editor.config.kind == dbcore::DbKind::DuckDb {
-                                    (&mut editor.config.duckdb_path, "/path/to/analytics.duckdb")
-                                } else {
-                                    (&mut editor.config.sqlite_path, "/path/to/database.sqlite")
-                                };
-                                form_changed |= status_text_input(
-                                    ui,
-                                    path,
-                                    hint,
-                                    field_w,
-                                    field_test_status(&test_state, ConnField::SqlitePath),
-                                )
-                                .changed();
-                                if ui.button("Browse…").clicked() {
-                                    actions.push(Action::BrowseSqlitePath);
+                                    connection_form_label(ui, "File");
+                                    ui.horizontal(|ui| {
+                                        let (path, hint) =
+                                            if editor.config.kind == dbcore::DbKind::DuckDb {
+                                                (
+                                                    &mut editor.config.duckdb_path,
+                                                    "/path/to/analytics.duckdb",
+                                                )
+                                            } else {
+                                                (
+                                                    &mut editor.config.sqlite_path,
+                                                    "/path/to/database.sqlite",
+                                                )
+                                            };
+                                        form_changed |= status_text_input(
+                                            ui,
+                                            path,
+                                            hint,
+                                            350.0,
+                                            field_test_status(&test_state, ConnField::SqlitePath),
+                                        )
+                                        .changed();
+                                        if ui.button("Browse…").clicked() {
+                                            actions.push(Action::BrowseSqlitePath);
+                                        }
+                                    });
+                                    ui.end_row();
                                 }
                             });
-                            ui.end_row();
-                        }
                     });
 
                 ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let label = if editor.show_advanced {
+                        "Hide advanced"
+                    } else {
+                        "Advanced settings"
+                    };
+                    if components::button(ui, icons::settings(), label, true).clicked() {
+                        editor.show_advanced = !editor.show_advanced;
+                    }
+                    if !editor.show_advanced {
+                        ui.label(
+                            egui::RichText::new("Appearance, safety, SSL & SSH")
+                                .size(10.5)
+                                .color(palette::TEXT_FAINT()),
+                        );
+                    }
+                });
+                ui.add_space(2.0);
                 match &editor.test_state {
                     ConnTestState::Testing(_) => {
                         ui.horizontal(|ui| {
@@ -7113,13 +7554,21 @@ fn trigger_editor_view(
                 } else {
                     editor.table.clone()
                 };
-                egui::ComboBox::from_id_salt("trig_table")
-                    .selected_text(selected)
-                    .show_ui(ui, |ui| {
-                        for t in editor.tables.clone() {
-                            ui.selectable_value(&mut editor.table, t.clone(), t);
-                        }
-                    });
+                let current = editor
+                    .tables
+                    .iter()
+                    .position(|table| table == &editor.table);
+                if let Some(Some(table)) = components::searchable_combo_box(
+                    ui,
+                    "trig_table",
+                    &selected,
+                    180.0,
+                    &editor.tables,
+                    current,
+                    None,
+                ) {
+                    editor.table.clone_from(&editor.tables[table]);
+                }
             });
             ui.add_space(6.0);
 
@@ -7462,10 +7911,35 @@ fn history_entry_menu(ui: &mut egui::Ui, idx: usize, sql: &str, actions: &mut Ve
         actions.push(Action::DeleteHistory(idx));
         ui.close();
     }
-    if ui.button("Clear all History").clicked() {
+    if ui.button("Clear connection history").clicked() {
         actions.push(Action::ClearHistory);
         ui.close();
     }
+}
+
+fn sidebar_connection_scope(ui: &mut egui::Ui, connection: Option<(&str, dbcore::DbKind)>) {
+    ui.horizontal(|ui| match connection {
+        Some((name, kind)) => {
+            ui.add(
+                egui::Image::new(icons::db_kind_icon(kind))
+                    .fit_to_exact_size(egui::Vec2::splat(14.0))
+                    .tint(icons::db_kind_icon_tint(kind)),
+            );
+            ui.label(
+                egui::RichText::new(name)
+                    .size(11.5)
+                    .strong()
+                    .color(palette::TEXT_WEAK()),
+            );
+        }
+        None => {
+            ui.label(
+                egui::RichText::new("No connection selected")
+                    .size(11.5)
+                    .color(palette::TEXT_FAINT()),
+            );
+        }
+    });
 }
 
 fn reveal_history_label() -> &'static str {
@@ -8590,6 +9064,103 @@ fn kind_color(kind: crate::edit::EditorKind) -> egui::Color32 {
 ///
 /// Height of a Details-panel value box (display and edit modes share this).
 const DETAILS_VALUE_H: f32 = 26.0;
+/// Fixed height of one name/type/value field. A stable height lets `ScrollArea::show_rows`
+/// build only the fields intersecting the viewport, even for very wide result schemas.
+const DETAILS_FIELD_H: f32 = 64.0;
+/// More than can fit in the panel, but bounded so a multi-megabyte JSON/text cell does not
+/// get cloned and shaped in full on every frame.
+const DETAILS_PREVIEW_CHARS: usize = 256;
+
+#[allow(clippy::too_many_arguments)]
+fn details_field(
+    ui: &mut egui::Ui,
+    edits: &mut crate::edit::Edits,
+    row_idx: usize,
+    c: usize,
+    col: &dbcore::ColumnMeta,
+    value: &dbcore::Value,
+    editable: bool,
+    date_pick: &mut Option<(usize, usize)>,
+) {
+    let kind = edits.col_kind(c);
+    let row_h = if *date_pick == Some((row_idx, c)) {
+        DETAILS_FIELD_H + ui.spacing().interact_size.y + ui.spacing().item_spacing.y + 2.0
+    } else {
+        DETAILS_FIELD_H
+    };
+    let (row_rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), row_h),
+        egui::Sense::hover(),
+    );
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(row_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+        |ui| {
+            ui.add_space(4.0);
+            // Header: column name on the left, a colour-coded type badge pinned to the
+            // right edge so types scan as a column.
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(&col.name)
+                        .strong()
+                        .color(palette::TEXT()),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    components::type_badge(ui, &col.type_name, kind_color(kind))
+                });
+            });
+            details_value_box(ui, edits, kind, row_idx, c, value, editable, date_pick);
+        },
+    );
+}
+
+fn details_value_preview(value: &dbcore::Value, kind: crate::edit::EditorKind) -> String {
+    use crate::edit::EditorKind as K;
+
+    if kind == K::Bool && !value.is_null() {
+        return if crate::edit::as_bool(value) {
+            "TRUE".to_string()
+        } else {
+            "FALSE".to_string()
+        };
+    }
+    let dbcore::Value::Text(text) = value else {
+        return value.display();
+    };
+
+    let mut chars = text.chars();
+    let mut preview = String::with_capacity(text.len().min(DETAILS_PREVIEW_CHARS + 1));
+    for _ in 0..DETAILS_PREVIEW_CHARS {
+        let Some(ch) = chars.next() else {
+            return preview;
+        };
+        preview.push(if ch == '\n' || ch == '\r' || ch == '\t' {
+            ' '
+        } else {
+            ch
+        });
+    }
+    if chars.next().is_some() {
+        preview.push('…');
+    }
+    preview
+}
+
+#[cfg(test)]
+mod details_preview_tests {
+    use super::{details_value_preview, DETAILS_PREVIEW_CHARS};
+
+    #[test]
+    fn long_multiline_values_get_a_bounded_single_line_preview() {
+        let value = dbcore::Value::Text(format!("first\n{}", "x".repeat(10_000)));
+        let preview = details_value_preview(&value, crate::edit::EditorKind::Text);
+
+        assert!(!preview.contains('\n'));
+        assert_eq!(preview.chars().count(), DETAILS_PREVIEW_CHARS + 1);
+        assert!(preview.ends_with('…'));
+    }
+}
 
 /// Type-aware behaviour:
 /// - clicking the box starts editing (booleans toggle instead);
@@ -8661,8 +9232,8 @@ fn details_value_box(
     }
 
     let staged = edits.staged(row_idx, c).cloned();
-    let shown = staged.clone().unwrap_or_else(|| value.clone());
     let is_staged = staged.is_some();
+    let shown = staged.as_ref().unwrap_or(value);
     let can_edit = editable && !matches!(value, dbcore::Value::Bytes(_));
 
     // --- the box: one allocation, a separate hit zone for the ⌄ at the right edge ---
@@ -8704,15 +9275,7 @@ fn details_value_box(
         } else {
             egui::TextStyle::Body.resolve(ui.style())
         };
-        let display = if kind == K::Bool && !shown.is_null() {
-            if crate::edit::as_bool(&shown) {
-                "TRUE".to_string()
-            } else {
-                "FALSE".to_string()
-            }
-        } else {
-            shown.display()
-        };
+        let display = details_value_preview(shown, kind);
         let mut job = egui::text::LayoutJob::default();
         job.append(
             &display,

@@ -39,6 +39,12 @@ pub fn themes_dir() -> Result<PathBuf> {
     Ok(config_dir()?.join("themes"))
 }
 
+/// Directory containing font files imported by the user. The application copies fonts here
+/// instead of retaining the source path, so a preference survives moving the original file.
+pub fn fonts_dir() -> Result<PathBuf> {
+    Ok(config_dir()?.join("fonts"))
+}
+
 /// Load saved connections. A missing file is not an error — it yields an empty list.
 pub fn load_connections() -> Result<Vec<ConnectionConfig>> {
     let path = connections_path()?;
@@ -79,6 +85,13 @@ pub struct Settings {
     /// `ui`'s `ThemeRegistry`). `None` = use the default.
     #[serde(default)]
     pub theme: Option<String>,
+    /// File name of the imported font used for interface text. `None` = embedded Inter.
+    #[serde(default)]
+    pub ui_font: Option<String>,
+    /// File name of the imported font used for SQL and tabular data. `None` = embedded
+    /// JetBrains Mono.
+    #[serde(default)]
+    pub code_font: Option<String>,
     /// SQL beautifier: convert reserved keywords to ALL CAPS. `None` = the default (on).
     #[serde(default)]
     pub beautify_uppercase: Option<bool>,
@@ -319,5 +332,7 @@ mod tests {
     fn old_settings_default_to_no_custom_table_order() {
         let settings: Settings = serde_json::from_slice(br#"{"theme":"dark"}"#).unwrap();
         assert!(settings.schema_table_order.is_empty());
+        assert!(settings.ui_font.is_none());
+        assert!(settings.code_font.is_none());
     }
 }

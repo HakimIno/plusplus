@@ -355,6 +355,17 @@ impl DbGuiApp {
         );
         let console_visible =
             self.show_query_console && sql_authoring_tab && !diagram_tab && !designing;
+        let show_view_mode_bar = (!diagram_tab
+            && !designing
+            && (editor_placement == QueryEditorPlacement::Top || !console_visible))
+            || (designing
+                && !diagram_tab
+                && self.tab().kind != crate::components::QueryTabKind::Query);
+        // On data-first tabs the mode bar and Live log form one bottom stack. Put the bar
+        // inside the resizable panel so its drag edge stays above Data / Structure / Indexes.
+        let mode_bar_in_live_log = self.show_live_log
+            && show_view_mode_bar
+            && editor_placement == QueryEditorPlacement::Bottom;
         if console_visible {
             self.query_console(ui_root, editor_placement, &mut actions);
         }
@@ -362,20 +373,15 @@ impl DbGuiApp {
         // independent makes it stay put across Data / Structure / Indexes and places it below
         // query results instead of between the editor and its toolbar.
         if self.show_live_log && !diagram_tab {
-            self.live_log_panel(ui_root, self.tab().id);
+            self.live_log_panel(ui_root, self.tab().id, mode_bar_in_live_log, &mut actions);
         }
         if !diagram_tab && !designing {
             // A top panel after left/right carves the strip directly above the grid.
             self.filter_bar(ui_root);
-            // Query result controls sit below the top editor. Table/View mode controls remain
-            // a standalone bottom strip because those tabs intentionally have no SQL console.
-            if editor_placement == QueryEditorPlacement::Top || !console_visible {
-                self.view_mode_bar(ui_root, editor_placement, &mut actions);
-            }
         }
-        // While editing a Table/View schema, keep Data / Structure / Indexes visible as
-        // the way back out (Query tabs' Data/Message/Chart switch is meaningless here).
-        if designing && !diagram_tab && self.tab().kind != crate::components::QueryTabKind::Query {
+        // Without Live log the mode bar remains its own dock. Query-tab result controls also
+        // stay standalone because their top placement is not adjacent to the bottom log.
+        if show_view_mode_bar && !mode_bar_in_live_log {
             self.view_mode_bar(ui_root, editor_placement, &mut actions);
         }
         self.central_panel(ui_root, &mut actions);

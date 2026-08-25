@@ -9,12 +9,30 @@ permissions:
   contents: write
 
 jobs:
-  # Nothing is built for users until the suite that guards `main` passes on this exact
-  # tag. The updater installs what this workflow publishes, so a tag that skips the tests
-  # ships a regression to every install on its next update check.
-  ci:
-    name: CI
+  # Linux tests are the hard compile+logic gate. macOS/Windows tests still run
+  # and still block *publish*, but they no longer delay packaging: a Windows
+  # MSVC + DuckDB test run was adding an hour of idle time before any DMG,
+  # AppImage, or zip started building.
+  ci-linux:
+    name: CI (Linux)
     uses: ./.github/workflows/ci.yml
+    with:
+      runners: '["ubuntu-latest"]'
+      run-clippy: false
+
+  ci-macos:
+    name: CI (macOS)
+    uses: ./.github/workflows/ci.yml
+    with:
+      runners: '["macos-latest"]'
+      run-clippy: false
+
+  ci-windows:
+    name: CI (Windows)
+    uses: ./.github/workflows/ci.yml
+    with:
+      runners: '["windows-latest"]'
+      run-clippy: false
 
   # A tag whose name disagrees with Cargo.toml breaks auto-update permanently and
   # silently: the packaging scripts name assets from Cargo.toml, while every client asks
@@ -42,12 +60,16 @@ jobs:
           echo "✓ ${tag} matches Cargo.toml ${version}"
 
   macos:
-    needs: [ci, verify-version]
+    needs: [ci-linux, verify-version]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-macos
 
       - name: Add Apple targets
         run: |
@@ -140,7 +162,7 @@ jobs:
           if-no-files-found: error
 
   linux:
-    needs: [ci, verify-version]
+    needs: [ci-linux, verify-version]
     runs-on: ubuntu-latest
     container: debian:12
     # Container jobs default to `sh`, which rejects `set -o pipefail` — force bash.
@@ -197,7 +219,7 @@ jobs:
           if-no-files-found: error
 
   windows:
-    needs: [ci, verify-version]
+    needs: [ci-linux, verify-version]
     runs-on: windows-latest
     defaults:
       run:
@@ -206,6 +228,17 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-windows
+
+      - name: Exclude the build tree from Windows Defender
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE
+          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
 
       - name: Build release binary
         run: cargo build --release -p plusplus-app
@@ -246,7 +279,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [macos, linux, windows]
+    needs: [macos, linux, windows, ci-macos, ci-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Collect release assets

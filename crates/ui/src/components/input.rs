@@ -302,78 +302,60 @@ pub(crate) fn segmented_sized(
     result
 }
 
-fn db_kind_button_image(kind: DbKind) -> egui::Image<'static> {
-    egui::Image::new(icons::db_kind_icon(kind))
-        .fit_to_exact_size(egui::vec2(
-            icons::DB_KIND_ICON_SIZE,
-            icons::DB_KIND_ICON_SIZE,
-        ))
-        .tint(icons::db_kind_icon_tint(kind))
-}
+/// Large provider card used as the first step of the new-connection flow.
+pub(crate) fn db_kind_card(ui: &mut egui::Ui, kind: DbKind) -> egui::Response {
+    const CARD_SIZE: Vec2 = Vec2::new(128.0, 84.0);
+    const LOGO_SIZE: f32 = 34.0;
 
-pub(crate) fn db_kind_selectable(
-    ui: &mut egui::Ui,
-    current: &mut DbKind,
-    kind: DbKind,
-) -> egui::Response {
-    let selected = *current == kind;
-    let btn = egui::Button::image_and_text(db_kind_button_image(kind), kind.label())
-        .selected(selected)
-        .frame_when_inactive(selected)
-        .frame(true)
-        .min_size(egui::vec2(ui.available_width(), 0.0));
-
-    let mut response = ui.add(btn);
-    if response.clicked() && !selected {
-        *current = kind;
-        response.mark_changed();
-    }
+    let (rect, response) = ui.allocate_exact_size(CARD_SIZE, egui::Sense::click());
     response
-}
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, kind.label()));
 
-pub(crate) fn db_kind_combo(
-    ui: &mut egui::Ui,
-    current: &mut DbKind,
-    id: impl std::hash::Hash,
-    width: f32,
-) -> egui::Response {
-    let btn = egui::Button::image_and_text(db_kind_button_image(*current), current.label())
-        // Reserve the trailing chevron zone for the shared SVG icon.
-        .right_text("   ")
-        .min_size(egui::vec2(width, 0.0));
-    let button_response = ui.add(btn);
-    if ui.is_rect_visible(button_response.rect) {
-        let center = egui::pos2(
-            button_response.rect.right() - 13.0,
-            button_response.rect.center().y,
+    if ui.is_rect_visible(rect) {
+        let active = response.hovered() || response.has_focus();
+        let radius = CornerRadius::same(8);
+        ui.painter().rect_filled(
+            rect,
+            radius,
+            if active {
+                palette::SURFACE_HOVER()
+            } else {
+                palette::SURFACE()
+            },
         );
-        egui::Image::new(crate::icons::chevron_down())
-            .fit_to_exact_size(egui::Vec2::splat(12.0))
-            .tint(crate::style::palette::TEXT_WEAK())
-            .paint_at(
-                ui,
-                egui::Rect::from_center_size(center, egui::Vec2::splat(12.0)),
-            );
+        ui.painter().rect_stroke(
+            rect,
+            radius,
+            Stroke::new(
+                if active { 1.5 } else { 1.0 },
+                if active {
+                    palette::ACCENT()
+                } else {
+                    palette::BORDER()
+                },
+            ),
+            egui::StrokeKind::Inside,
+        );
+
+        let logo_center = Pos2::new(rect.center().x, rect.top() + 29.0);
+        let logo_rect = egui::Rect::from_center_size(logo_center, Vec2::splat(LOGO_SIZE));
+        egui::Image::new(icons::db_kind_icon(kind))
+            .fit_to_exact_size(logo_rect.size())
+            .tint(icons::db_kind_icon_tint(kind))
+            .paint_at(ui, logo_rect);
+
+        ui.painter().text(
+            Pos2::new(rect.center().x, rect.bottom() - 15.0),
+            egui::Align2::CENTER_CENTER,
+            kind.label(),
+            FontId::new(12.0, FontFamily::Proportional),
+            if active {
+                palette::TEXT()
+            } else {
+                palette::TEXT_WEAK()
+            },
+        );
     }
 
-    egui::Popup::menu(&button_response)
-        .id(egui::Id::new(id).with("popup"))
-        .width(button_response.rect.width())
-        .show(|ui| {
-            ui.set_min_width(ui.available_width());
-            for kind in [
-                DbKind::Postgres,
-                DbKind::MySql,
-                DbKind::MariaDb,
-                DbKind::SqlServer,
-                DbKind::Sqlite,
-                DbKind::DuckDb,
-                DbKind::Cassandra,
-                DbKind::ScyllaDb,
-            ] {
-                db_kind_selectable(ui, current, kind);
-            }
-        });
-
-    button_response
+    response
 }

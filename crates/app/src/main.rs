@@ -146,18 +146,15 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| {
             #[cfg(target_os = "macos")]
             fix_titlebar_click_through(cc);
-            ui::install_fonts(
-                &cc.egui_ctx,
-                &ui::AppFonts {
-                    ui_regular: INTER_REGULAR,
-                    ui_semibold: INTER_SEMIBOLD,
-                    code_regular: JETBRAINS_MONO_REGULAR,
-                    thai_regular: THAI_REGULAR,
-                    thai_semibold: THAI_SEMIBOLD,
-                    universal_regular: UNIVERSAL_REGULAR,
-                },
-            );
-            Ok(Box::new(ui::DbGuiApp::new(cc)))
+            let fonts = ui::AppFonts {
+                ui_regular: INTER_REGULAR,
+                ui_semibold: INTER_SEMIBOLD,
+                code_regular: JETBRAINS_MONO_REGULAR,
+                thai_regular: THAI_REGULAR,
+                thai_semibold: THAI_SEMIBOLD,
+                universal_regular: UNIVERSAL_REGULAR,
+            };
+            Ok(Box::new(ui::DbGuiApp::new(cc, fonts)))
         }),
     )
 }

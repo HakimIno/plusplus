@@ -329,13 +329,11 @@ impl DbGuiApp {
                 self.error = Some("Production import needs a tab bound to its connection.".into());
                 return;
             };
-            let found = dbcore::safety::dangerous_statements(kind, &sql);
-            if found.is_empty() {
-                self.error = Some("Production Guardian could not classify the import.".into());
+            let found = dbcore::safety::statements_requiring_confirmation(kind, &sql);
+            if !found.is_empty() {
+                self.start_production_guard(idx, sql, found, ProductionGuardContinuation::Import);
                 return;
             }
-            self.start_production_guard(idx, sql, found, ProductionGuardContinuation::Import);
-            return;
         }
 
         let table_name = table.name.clone();

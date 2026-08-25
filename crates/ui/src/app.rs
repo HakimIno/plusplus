@@ -545,6 +545,7 @@ struct SqlEditorCache {
 struct HistoryViewCache {
     revision: u64,
     filter: String,
+    connection: Option<String>,
     days: Vec<panels::HistoryDay>,
 }
 
@@ -553,6 +554,7 @@ impl Default for HistoryViewCache {
         Self {
             revision: u64::MAX,
             filter: String::new(),
+            connection: None,
             days: Vec::new(),
         }
     }
@@ -1109,6 +1111,10 @@ struct ConnEditor {
     /// Index in `connections` being edited (for an existing connection).
     edit_index: Option<usize>,
     test_state: ConnTestState,
+    /// New connections choose a database provider before the provider-specific form appears.
+    selecting_provider: bool,
+    /// Optional appearance, safety, SSL, and SSH controls stay collapsed by default.
+    show_advanced: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1608,6 +1614,13 @@ pub struct DbGuiApp {
     theme: String,
     /// All themes the picker can offer: built-ins plus user-installed `*.json` files.
     themes: ThemeRegistry,
+    /// Embedded font bytes are present in the real application and absent in headless tests.
+    app_fonts: Option<crate::AppFonts>,
+    /// Imported font file names selected for interface and code/data text.
+    ui_font: Option<String>,
+    code_font: Option<String>,
+    /// Valid font files currently available in the app-owned font library.
+    custom_fonts: Vec<crate::fonts::FontOption>,
     /// SQL beautifier preferences (persisted to settings.json).
     beautify: crate::format::BeautifyPrefs,
 
@@ -1627,9 +1640,16 @@ pub struct DbGuiApp {
 }
 
 impl DbGuiApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, app_fonts: crate::AppFonts) -> Self {
         // Build state first: `construct` activates the saved theme, which `apply` then reads.
         let mut app = Self::construct();
+        app.app_fonts = Some(app_fonts);
+        if let Err(error) = app.apply_fonts(&cc.egui_ctx) {
+            app.ui_font = None;
+            app.code_font = None;
+            let _ = app.apply_fonts(&cc.egui_ctx);
+            app.error = Some(format!("Could not load the selected font: {error}"));
+        }
         // Restore the saved workspace (open tabs + their SQL/connection binding). Kept out of
         // `construct` so tests get a deterministic single-tab app independent of disk state.
         app.restore_workspace();
@@ -1708,6 +1728,12 @@ impl DbGuiApp {
         let settings = dbcore::config::load_settings();
         let themes = ThemeRegistry::load();
         let theme = themes.resolve_key(settings.theme.as_deref().unwrap_or(""));
+        let custom_fonts = crate::fonts::list_imported();
+        let available = |selection: Option<String>| {
+            selection.filter(|key| custom_fonts.iter().any(|font| font.key == *key))
+        };
+        let ui_font = available(settings.ui_font.clone());
+        let code_font = available(settings.code_font.clone());
         crate::theme::set_current(themes.theme_of(&theme));
         let beautify_defaults = crate::format::BeautifyPrefs::default();
         let beautify = crate::format::BeautifyPrefs {
@@ -1795,6 +1821,10 @@ impl DbGuiApp {
             show_live_log: true,
             theme,
             themes,
+            app_fonts: None,
+            ui_font,
+            code_font,
+            custom_fonts,
             beautify,
             commit_pending: None,
             schema_pending: None,

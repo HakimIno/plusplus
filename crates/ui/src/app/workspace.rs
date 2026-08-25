@@ -136,6 +136,8 @@ impl DbGuiApp {
     pub(super) fn persist_settings(&mut self) {
         let mut settings = dbcore::config::load_settings();
         settings.theme = Some(self.theme.clone());
+        settings.ui_font = self.ui_font.clone();
+        settings.code_font = self.code_font.clone();
         settings.beautify_uppercase = Some(self.beautify.uppercase);
         settings.beautify_indent = Some(self.beautify.indent);
         settings.welcomed = Some(!self.show_welcome);
@@ -147,6 +149,18 @@ impl DbGuiApp {
         if let Err(e) = dbcore::config::save_settings(&settings) {
             self.error = Some(format!("Could not save settings: {e}"));
         }
+    }
+    /// Rebuild egui's font families from the selected custom faces and embedded fallbacks.
+    pub(super) fn apply_fonts(&self, ctx: &egui::Context) -> Result<(), String> {
+        let Some(app_fonts) = self.app_fonts else {
+            return Ok(());
+        };
+        crate::fonts::install(
+            ctx,
+            app_fonts,
+            self.ui_font.as_deref(),
+            self.code_font.as_deref(),
+        )
     }
     /// Switch the active theme, re-apply the egui style, and persist the choice.
     pub(super) fn set_theme(&mut self, ctx: &egui::Context, key: String) {

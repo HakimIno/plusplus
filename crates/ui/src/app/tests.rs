@@ -429,6 +429,7 @@ fn new_connection_starts_with_an_explicit_development_profile() {
     );
     assert!(!editor.config.is_production());
     assert!(!editor.config.is_read_only());
+    assert!(editor.selecting_provider);
 }
 
 #[test]
@@ -515,7 +516,7 @@ fn production_connection_gates_destructive_queries() {
 }
 
 #[test]
-fn staging_guard_reviews_insert_and_session_writes() {
+fn staging_guard_allows_plain_inserts_but_reviews_other_writes() {
     let mut app = DbGuiApp::construct();
     app.connections.clear();
     let mut cfg = dbcore::ConnectionConfig::new(dbcore::DbKind::Sqlite);
@@ -531,8 +532,13 @@ fn staging_guard_reviews_insert_and_session_writes() {
     });
     app.tab_mut().conn_id = Some("c1".into());
 
+    app.tab_mut().sql = "INSERT INTO table_0 VALUES (1)".into();
+    app.apply_action(Action::RunQuery);
+    assert!(app.danger_pending.is_none());
+    assert_eq!(app.busy, Busy::Querying);
+
+    app.busy = Busy::Idle;
     for sql in [
-        "INSERT INTO table_0 VALUES (1)",
         "CREATE TABLE staging_copy (id INT)",
         "PRAGMA journal_mode = WAL",
     ] {
@@ -1003,46 +1009,13 @@ fn import_confirm_spawns_the_transaction() {
 }
 
 #[test]
-fn production_import_is_bound_to_guarded_table_and_mapping() {
+fn production_import_of_plain_rows_runs_without_guard() {
     let mut app = app_with_users_table(users_columns());
     app.connections[0].production = true;
     let path = temp_csv("prod.csv", "id,email\n1,a@b.c\n");
     app.import_pending = Some(draft_for(&app, &["id", "email"], &path));
 
     app.apply_action(Action::ConfirmImport);
-
-    let pending = app
-        .danger_pending
-        .as_mut()
-        .expect("production import must be guarded");
-    assert!(matches!(
-        pending.continuation,
-        ProductionGuardContinuation::Import
-    ));
-    assert_eq!(pending.statements[0].targets, ["users"]);
-    assert!(pending.sql.contains("\"id\", \"email\""));
-    assert!(app.import_pending.is_some());
-    assert_eq!(app.busy, Busy::Idle);
-
-    pending.preflights = Some(vec![dbcore::safety::ProductionPreflight::default()]);
-    // Changing even one source mapping invalidates the reviewed snapshot.
-    app.import_pending.as_mut().unwrap().mapping[2] = Some(0);
-    app.apply_action(Action::SetDangerConfirmation("users".into()));
-    app.apply_action(Action::ConfirmDangerQuery);
-
-    assert!(app.danger_pending.is_none());
-    assert!(app.import_pending.is_some());
-    assert_eq!(app.busy, Busy::Idle);
-    assert!(app.error.as_deref().unwrap_or("").contains("changed"));
-
-    // A fresh review of the new mapping can proceed.
-    app.error = None;
-    app.apply_action(Action::ConfirmImport);
-    app.danger_pending.as_mut().unwrap().preflights =
-        Some(vec![dbcore::safety::ProductionPreflight::default()]);
-    app.apply_action(Action::SetDangerConfirmation("users".into()));
-    app.apply_action(Action::ConfirmDangerQuery);
-
     assert!(app.danger_pending.is_none());
     assert!(app.import_pending.is_none());
     assert_eq!(app.busy, Busy::Importing);
@@ -2248,11 +2221,17 @@ fn table_tab_keeps_data_controls_without_a_query_console() {
     harness.run_steps(4);
 
     let grid_y = harness.get_by_label("col0").rect().center().y;
-    let modes_y = harness.get_by_label("Data").rect().center().y;
+    let modes = harness.get_by_label("Data");
+    let modes_y = modes.rect().center().y;
     let log_y = harness.get_by_label("Live log").rect().center().y;
+    let log_dock = harness.get_by_label("Live log dock");
     assert!(
         grid_y < modes_y && modes_y < log_y,
         "the table layout must be Grid, Data / Structure / Indexes, then Live log"
+    );
+    assert!(
+        log_dock.rect().top() <= modes.rect().top(),
+        "the Live log resize boundary must sit above the table mode bar"
     );
     assert!(
         harness.query_by_label("SQL workspace").is_none()
@@ -3687,6 +3666,37 @@ fn snapshot_welcome_page() {
 }
 
 #[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_connection_provider_picker() {
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.apply_action(Action::NewConnection);
+    render_and_snapshot(app, "connection_provider_picker", false);
+}
+
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_connection_details() {
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.apply_action(Action::NewConnection);
+    app.editor.as_mut().unwrap().selecting_provider = false;
+    render_and_snapshot(app, "connection_details", false);
+}
+
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_connection_details_advanced() {
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.apply_action(Action::NewConnection);
+    let editor = app.editor.as_mut().unwrap();
+    editor.selecting_provider = false;
+    editor.show_advanced = true;
+    render_and_snapshot(app, "connection_details_advanced", false);
+}
+
+#[test]
 fn settings_is_a_transient_utility_tab() {
     let mut app = DbGuiApp::construct();
     let tab_count = app.tabs.len();
@@ -3721,6 +3731,45 @@ fn snapshot_settings_appearance_page() {
     app.settings_open = true;
     app.settings_section = SettingsSection::Appearance;
     render_and_snapshot(app, "settings_appearance_page", false);
+}
+
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_settings_appearance_typography() {
+    let mut app = DbGuiApp::construct();
+    app.connections.clear();
+    app.show_welcome = false;
+    app.settings_open = true;
+    app.settings_section = SettingsSection::Appearance;
+
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1180.0, 1080.0))
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::install_fonts(
+                    ui.ctx(),
+                    &crate::AppFonts {
+                        ui_regular: include_bytes!("../../../app/assets/Inter-Regular.ttf"),
+                        ui_semibold: include_bytes!("../../../app/assets/Inter-SemiBold.ttf"),
+                        code_regular: include_bytes!(
+                            "../../../app/assets/JetBrainsMono-Regular.ttf"
+                        ),
+                        thai_regular: include_bytes!("../../../app/assets/Anuphan-Regular.ttf"),
+                        thai_semibold: include_bytes!("../../../app/assets/Anuphan-SemiBold.ttf"),
+                        universal_regular: include_bytes!(
+                            "../../../app/assets/Unifont-Regular.otf"
+                        ),
+                    },
+                );
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+        });
+    harness.run_steps(10);
+    harness.snapshot("settings_appearance_typography");
 }
 
 #[test]
@@ -5387,16 +5436,52 @@ fn query_history_groups_newest_first_by_local_day_and_filters_entries() {
         entry("2026-08-11T10:00:00+07:00", "primary", "SELECT newest"),
     ];
 
-    let days = super::panels::grouped_history(&entries, "");
-    assert_eq!(days.len(), 2);
+    let days = super::panels::grouped_history(&entries, "", Some("primary"));
+    assert_eq!(days.len(), 1);
     assert_eq!(days[0].entries, vec![2, 1]);
-    assert_eq!(days[1].entries, vec![0]);
     assert!(days[0].label.contains("August"));
-    assert!(days[1].label.contains("July"));
 
-    let filtered = super::panels::grouped_history(&entries, "newest");
+    let archive = super::panels::grouped_history(&entries, "", Some("archive"));
+    assert_eq!(archive.len(), 1);
+    assert_eq!(archive[0].entries, vec![0]);
+    assert!(archive[0].label.contains("July"));
+
+    let filtered = super::panels::grouped_history(&entries, "newest", Some("primary"));
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].entries, vec![2]);
+
+    assert!(super::panels::grouped_history(&entries, "", None).is_empty());
+}
+
+#[test]
+fn saved_queries_are_scoped_by_connection_and_keep_legacy_queries_global() {
+    let mut primary = saved_query("Primary", "SELECT 1");
+    primary.id = "primary".into();
+    let mut archive = saved_query("Archive", "SELECT 2");
+    archive.id = "archive".into();
+    archive.conn_id = Some("c2".into());
+    archive.folder = Some("Valet".into());
+    let mut global = saved_query("Legacy", "SELECT 3");
+    global.id = "legacy".into();
+    global.conn_id = None;
+    global.conn_name = None;
+    let queries = vec![primary, archive, global];
+
+    let folders = vec!["Valet".to_string()];
+    let primary_groups =
+        super::panels::grouped_favorites_for_connection(&queries, &folders, "", true, Some("c1"));
+    assert_eq!(primary_groups.len(), 1);
+    assert_eq!(primary_groups[0].0, dbcore::favorites::UNGROUPED);
+    assert_eq!(primary_groups[0].1, vec![0, 2]);
+
+    let archive_groups =
+        super::panels::grouped_favorites_for_connection(&queries, &folders, "", true, Some("c2"));
+    assert_eq!(archive_groups[0], ("Valet".into(), vec![1]));
+    assert_eq!(archive_groups[1].1, vec![2]);
+
+    let unbound_groups =
+        super::panels::grouped_favorites_for_connection(&queries, &folders, "", true, None);
+    assert_eq!(unbound_groups[0].1, vec![2]);
 }
 
 /// Show Diagram needs a live connection: without one it surfaces an error and

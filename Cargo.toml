@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 # Must stay truthful: the tree does not build on anything older. `1.80` was stale — the UI
@@ -116,6 +116,8 @@ async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 # Date type consumed by egui_extras' DatePickerButton (already in-tree via egui_extras).
 jiff = "0.2"
+# Validate user-imported OpenType fonts before handing them to egui's renderer.
+skrifa = "0.40"
 
 # --- embedded analytical database ---
 duckdb = { version = "1.10505.0", features = ["bundled", "parquet"] }
@@ -139,4 +141,18 @@ opt-level = 2
 # `target/`, so a few of those copies became tens of GB. We don't step through
 # DuckDB internals; keep opt-level 2 from the glob, drop debug.
 [profile.dev.package."libduckdb-sys"]
+debug = false
+
+# GitHub Actions runs `cargo test --profile ci`. Local `cargo test` keeps the
+# opt-level 2 dependency glob so the grid stays smooth while iterating. CI should
+# not spend 30–60 minutes optimizing DuckDB's C++ engine (and the rest of the
+# vendor tree) just to run unit tests — especially on windows-latest, where MSVC
+# + Defender make that the difference between ~20 minutes and well over an hour.
+[profile.ci]
+inherits = "dev"
+incremental = false
+debug = false
+
+[profile.ci.package."*"]
+opt-level = 0
 debug = false

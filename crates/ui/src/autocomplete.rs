@@ -408,18 +408,16 @@ fn maybe_quote(name: &str, kind: Option<DbKind>) -> String {
 
 // --- popup widget -------------------------------------------------------------------
 
-/// The icon-rail colour for a suggestion kind: one hue, three weights.
-///
-/// The theme's accent carries the schema — a table at full strength, a column muted toward
-/// the body text because it is a detail *of* a table — while a keyword stays uncoloured, as
-/// it belongs to SQL rather than to this database. A second and third hue would turn the
-/// rail into a legend the reader has to learn; a weight ladder is read at a glance.
-fn kind_color(kind: SuggestionKind) -> egui::Color32 {
+/// Keep every suggestion icon in the active theme's accent family. The icon shape already
+/// communicates its kind; colour is reserved for interaction state so the set stays cohesive.
+fn icon_color(selected: bool, hovered: bool) -> egui::Color32 {
     let t = crate::theme::current();
-    match kind {
-        SuggestionKind::Table => t.accent,
-        SuggestionKind::Column => crate::style::mix(t.accent, t.text_weak, 0.75),
-        SuggestionKind::Keyword => t.text_faint,
+    if selected {
+        t.accent_hover
+    } else if hovered {
+        t.accent
+    } else {
+        crate::style::mix(t.accent, t.text_weak, if t.is_dark { 0.35 } else { 0.20 })
     }
 }
 
@@ -428,6 +426,60 @@ pub enum Event {
     None,
     /// The user accepted item `i` (click, or Enter/Tab routed through [`NavKeys`]).
     Accept(usize),
+}
+
+const POPUP_ROW_H: f32 = 23.0;
+const POPUP_MARGIN: f32 = 4.0;
+const POPUP_MAX_VISIBLE_ROWS: usize = 6;
+
+fn popup_width(items: &[Suggestion], screen_width: f32) -> f32 {
+    let content_width = items
+        .iter()
+        .take(24)
+        .map(|item| {
+            let label = item.insert.chars().count() as f32 * 7.3;
+            let detail = item.detail.chars().count() as f32 * 5.7;
+            40.0 + label + if detail > 0.0 { 18.0 + detail } else { 0.0 }
+        })
+        .fold(0.0_f32, f32::max);
+    content_width
+        .clamp(260.0, 340.0)
+        .min((screen_width - 16.0).max(0.0))
+}
+
+fn popup_geometry(
+    item_count: usize,
+    anchor: egui::Rect,
+    screen: egui::Rect,
+    width: f32,
+) -> (egui::Pos2, f32, usize) {
+    let preferred_rows = item_count.clamp(1, POPUP_MAX_VISIBLE_ROWS);
+    let preferred_height = preferred_rows as f32 * POPUP_ROW_H + POPUP_MARGIN * 2.0;
+    let below_y = anchor.bottom() + 4.0;
+    let above_bottom = anchor.top() - 4.0;
+    let below_space = (screen.bottom() - 8.0 - below_y).max(0.0);
+    let above_space = (above_bottom - screen.top() - 8.0).max(0.0);
+
+    let (place_below, available) = if preferred_height <= below_space {
+        (true, below_space)
+    } else if preferred_height <= above_space {
+        (false, above_space)
+    } else {
+        (below_space >= above_space, below_space.max(above_space))
+    };
+    let visible_rows = (((available - POPUP_MARGIN * 2.0) / POPUP_ROW_H).floor() as usize)
+        .clamp(1, preferred_rows);
+    let height = visible_rows as f32 * POPUP_ROW_H + POPUP_MARGIN * 2.0;
+    let y = if place_below {
+        below_y
+    } else {
+        above_bottom - height
+    };
+    let x = anchor
+        .left()
+        .min(screen.right() - width - 8.0)
+        .max(screen.left() + 4.0);
+    (egui::pos2(x, y), height, visible_rows)
 }
 
 /// Draw the suggestion popup anchored under the text cursor and return what happened
@@ -443,23 +495,9 @@ pub fn show_popup(
 
     let mono = egui::FontId::monospace(12.0);
     let small = egui::FontId::proportional(10.5);
-    // Tight rows, small margins — a dense, clean list with no wasted space.
-    let row_h = 20.0;
-    let margin = 3.0_f32;
-    let visible = state.items.len().min(9);
-    let width: f32 = 300.0;
-    let height = visible as f32 * row_h + margin * 2.0;
-
-    // Below the cursor line by default; above it when the screen runs out underneath.
     let screen = ctx.content_rect();
-    let mut pos = egui::pos2(anchor.left(), anchor.bottom() + 4.0);
-    if pos.y + height > screen.bottom() {
-        pos.y = anchor.top() - height - 4.0;
-    }
-    pos.x = pos
-        .x
-        .min(screen.right() - width - 8.0)
-        .max(screen.left() + 4.0);
+    let width = popup_width(&state.items, screen.width());
+    let (pos, _height, visible_rows) = popup_geometry(state.items.len(), anchor, screen, width);
 
     let mut event = Event::None;
     let area = egui::Area::new(egui::Id::new("sql_autocomplete_popup"))
@@ -472,8 +510,8 @@ pub fn show_popup(
                 .fill(palette::PANEL())
                 .stroke(egui::Stroke::new(1.0, palette::BORDER()))
                 .shadow(egui::epaint::Shadow::NONE)
-                .corner_radius(egui::CornerRadius::same(6))
-                .inner_margin(margin)
+                .corner_radius(egui::CornerRadius::same(5))
+                .inner_margin(POPUP_MARGIN)
                 .show(ui, |ui| {
                     ui.set_width(width);
                     // Rows sit flush against each other — the tight, dense list the design calls
@@ -481,11 +519,11 @@ pub fn show_popup(
                     ui.spacing_mut().item_spacing.y = 0.0;
                     egui::ScrollArea::vertical()
                         .id_salt("sql_autocomplete_scroll")
-                        .max_height(9.0 * row_h)
+                        .max_height(visible_rows as f32 * POPUP_ROW_H)
                         .show(ui, |ui| {
                             for (i, item) in state.items.iter().enumerate() {
                                 let (rect, resp) = ui.allocate_exact_size(
-                                    egui::vec2(ui.available_width(), row_h),
+                                    egui::vec2(ui.available_width(), POPUP_ROW_H),
                                     egui::Sense::click(),
                                 );
                                 if !ui.is_rect_visible(rect) {
@@ -502,31 +540,41 @@ pub fn show_popup(
                                     resp.scroll_to_me(None);
                                 }
 
-                                // Kind icon, coloured so the three kinds separate at a glance:
-                                // a filled header band for a table, a filled vertical band for
-                                // a column, `< >` for a keyword.
                                 let icon = match item.kind {
-                                    SuggestionKind::Table => crate::icons::table(),
-                                    SuggestionKind::Column => crate::icons::column(),
-                                    SuggestionKind::Keyword => crate::icons::code(),
+                                    SuggestionKind::Keyword => crate::icons::autocomplete_keyword(),
+                                    SuggestionKind::Table => crate::icons::autocomplete_table(),
+                                    SuggestionKind::Column => crate::icons::autocomplete_column(),
                                 };
-                                const ICON: f32 = 13.0;
+                                const ICON_SIZE: f32 = 13.0;
                                 let icon_rect = egui::Rect::from_center_size(
-                                    egui::pos2(rect.left() + 11.0, rect.center().y),
-                                    egui::vec2(ICON, ICON),
+                                    egui::pos2(rect.left() + 9.0, rect.center().y),
+                                    egui::Vec2::splat(ICON_SIZE),
                                 );
                                 egui::Image::new(icon)
-                                    .fit_to_exact_size(egui::vec2(ICON, ICON))
-                                    .tint(kind_color(item.kind))
+                                    .fit_to_exact_size(egui::Vec2::splat(ICON_SIZE))
+                                    .tint(icon_color(selected, resp.hovered()))
                                     .paint_at(ui, icon_rect);
 
                                 // The label, with the run the typed prefix matched in the
                                 // accent colour: the reader sees at a glance which part of
                                 // each row they have already typed, and how it lines up.
-                                let mut label_pos = egui::pos2(rect.left() + 24.0, rect.center().y);
+                                let detail_pos = egui::pos2(rect.right() - 6.0, rect.center().y);
+                                let detail_rect = ui.painter().text(
+                                    detail_pos,
+                                    egui::Align2::RIGHT_CENTER,
+                                    &item.detail,
+                                    small.clone(),
+                                    palette::TEXT_FAINT(),
+                                );
+                                let label_clip = egui::Rect::from_min_max(
+                                    rect.left_top(),
+                                    egui::pos2(detail_rect.left() - 10.0, rect.bottom()),
+                                );
+                                let label_painter = ui.painter().with_clip_rect(label_clip);
+                                let mut label_pos = egui::pos2(rect.left() + 20.0, rect.center().y);
                                 let matched = matched_len(&item.insert, &state.prefix);
                                 if matched > 0 {
-                                    let painted = ui.painter().text(
+                                    let painted = label_painter.text(
                                         label_pos,
                                         egui::Align2::LEFT_CENTER,
                                         &item.insert[..matched],
@@ -535,23 +583,13 @@ pub fn show_popup(
                                     );
                                     label_pos.x = painted.right();
                                 }
-                                ui.painter().text(
+                                label_painter.text(
                                     label_pos,
                                     egui::Align2::LEFT_CENTER,
                                     &item.insert[matched..],
                                     mono.clone(),
                                     palette::TEXT(),
                                 );
-                                // Detail, right-aligned and clipped against the label.
-                                let detail_pos = egui::pos2(rect.right() - 7.0, rect.center().y);
-                                ui.painter().text(
-                                    detail_pos,
-                                    egui::Align2::RIGHT_CENTER,
-                                    &item.detail,
-                                    small.clone(),
-                                    palette::TEXT_FAINT(),
-                                );
-
                                 if resp.clicked() {
                                     event = Event::Accept(i);
                                 }
@@ -566,6 +604,33 @@ pub fn show_popup(
 mod tests {
     use super::*;
     use dbcore::{ColumnInfo, TableInfo};
+
+    #[test]
+    fn popup_height_is_content_aware_and_capped_at_six_rows() {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let anchor = egui::Rect::from_min_size(egui::pos2(100.0, 80.0), egui::vec2(2.0, 18.0));
+
+        let (_, short_height, short_rows) = popup_geometry(2, anchor, screen, 280.0);
+        assert_eq!(short_rows, 2);
+        assert_eq!(short_height, 2.0 * POPUP_ROW_H + POPUP_MARGIN * 2.0);
+
+        let (_, long_height, long_rows) = popup_geometry(30, anchor, screen, 280.0);
+        assert_eq!(long_rows, POPUP_MAX_VISIBLE_ROWS);
+        assert_eq!(
+            long_height,
+            POPUP_MAX_VISIBLE_ROWS as f32 * POPUP_ROW_H + POPUP_MARGIN * 2.0
+        );
+    }
+
+    #[test]
+    fn popup_moves_above_the_caret_when_space_below_is_tight() {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 300.0));
+        let anchor = egui::Rect::from_min_size(egui::pos2(100.0, 270.0), egui::vec2(2.0, 18.0));
+        let (position, _, rows) = popup_geometry(20, anchor, screen, 280.0);
+
+        assert_eq!(rows, POPUP_MAX_VISIBLE_ROWS);
+        assert!(position.y < anchor.top());
+    }
 
     fn schema() -> SchemaTree {
         let col = |name: &str, ty: &str| ColumnInfo {
@@ -945,7 +1010,7 @@ mod tests {
         let theme = crate::theme::ThemeRegistry::load().theme_of(theme_key);
         let mut setup = false;
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(340.0, 190.0))
+            .with_size(egui::vec2(420.0, 200.0))
             .with_pixels_per_point(2.0)
             .build_ui(move |ui| {
                 if !setup {

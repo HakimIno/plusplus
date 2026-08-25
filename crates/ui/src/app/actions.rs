@@ -47,6 +47,8 @@ impl DbGuiApp {
                     is_new: true,
                     edit_index: None,
                     test_state: ConnTestState::Untested,
+                    selecting_provider: true,
+                    show_advanced: false,
                 });
             }
             Action::EditConnection(i) => {
@@ -66,6 +68,8 @@ impl DbGuiApp {
                         is_new: false,
                         edit_index: Some(i),
                         test_state: ConnTestState::Untested,
+                        selecting_provider: false,
+                        show_advanced: false,
                     });
                 }
             }
@@ -470,12 +474,25 @@ impl DbGuiApp {
             }
             Action::SetErdDepth(depth) => self.set_erd_depth(depth),
             Action::ClearHistory => {
-                if let Err(e) = dbcore::history::clear() {
+                let Some(conn_id) = self.tab().conn_id.clone() else {
+                    self.status_msg = "Select a connection to clear its history".to_string();
+                    return;
+                };
+                let previous_len = self.history_cache.len();
+                let remaining: Vec<_> = self
+                    .history_cache
+                    .iter()
+                    .filter(|entry| entry.conn_id != conn_id)
+                    .cloned()
+                    .collect();
+                if let Err(e) = dbcore::history::replace_all(&remaining) {
                     self.error = Some(format!("Could not clear history: {e}"));
                 } else {
-                    self.history_cache.clear();
+                    self.history_cache = remaining;
                     self.mark_history_changed();
-                    self.status_msg = "Query history cleared".to_string();
+                    let removed = previous_len - self.history_cache.len();
+                    self.status_msg =
+                        format!("Cleared {removed} history entries for this connection");
                 }
             }
             // The panel stays open: picking entries to compare or replay in sequence is
@@ -1096,7 +1113,7 @@ impl DbGuiApp {
         else {
             return false;
         };
-        let found = dbcore::safety::dangerous_statements(kind, &sql);
+        let found = dbcore::safety::statements_requiring_confirmation(kind, &sql);
         if found.is_empty() {
             return false;
         }
@@ -1127,7 +1144,7 @@ impl DbGuiApp {
             let Some(kind) = self.active().map(|active| active.db.kind()) else {
                 return;
             };
-            let found = dbcore::safety::dangerous_statements(kind, &sql);
+            let found = dbcore::safety::statements_requiring_confirmation(kind, &sql);
             if !found.is_empty() {
                 self.start_production_guard(idx, sql, found, ProductionGuardContinuation::Schema);
                 return;
