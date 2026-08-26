@@ -69,6 +69,10 @@ impl DbGuiApp {
                 tab.kind = kind;
                 tab.sql = wt.sql;
                 tab.editor_size = wt.editor_size;
+                tab.editor_split = wt.editor_split;
+                tab.editor_split_size = wt.editor_split_size;
+                tab.split_sql = wt.split_sql;
+                tab.editor_pane = super::EditorPane::Primary;
                 tab.conn_id = wt.conn_id;
                 tab.edits.source = source;
                 tab
@@ -80,13 +84,52 @@ impl DbGuiApp {
         self.active_query_tab = saved.active_tab.min(tabs.len() - 1);
         self.next_tab_id = next_tab_id;
         self.tabs = tabs;
+        // Rehydrate the hidden right-hand workspace pane for a persisted split. Only the
+        // active tab can have an open split in the current UI, so keep restoration deterministic
+        // even when older workspace files contain split metadata on several tabs.
+        let primary_idx = self.active_query_tab;
+        if self.tabs[primary_idx].editor_split {
+            let (title, kind, conn_id, sql, revision, editor_size) = {
+                let primary = &self.tabs[primary_idx];
+                (
+                    primary.title.clone(),
+                    primary.kind,
+                    primary.conn_id.clone(),
+                    primary
+                        .split_sql
+                        .clone()
+                        .unwrap_or_else(|| primary.sql.clone()),
+                    primary.sql_revision,
+                    primary.editor_split_size.or(primary.editor_size),
+                )
+            };
+            let mut split = QueryTab::new(self.next_tab_id, title);
+            self.next_tab_id = self.next_tab_id.wrapping_add(1);
+            split.kind = kind;
+            split.conn_id = conn_id;
+            split.sql = sql;
+            split.sql_revision = revision;
+            split.editor_size = editor_size;
+            split.preview = false;
+            self.split_tab = Some(self.tabs.len());
+            self.tabs.push(split);
+        }
     }
     /// Snapshot the open tabs into the serialisable workspace (no result rows — only SQL,
     /// the bound connection, and the table source needed to re-open editable).
     /// Diagram tabs are skipped: their content is a schema snapshot that can't be
     /// rebuilt without a live connection, so they simply don't survive a restart.
     pub(super) fn snapshot_workspace(&self) -> dbcore::config::Workspace {
-        let saved = |t: &&QueryTab| t.kind != crate::components::QueryTabKind::Diagram;
+        // The right side of a split workspace is represented internally as a hidden tab so it
+        // can own its SQL, result and connection state. It must not leak into the persisted tab
+        // list as a second top-level workspace tab.
+        let split_id = self
+            .split_tab
+            .and_then(|idx| self.tabs.get(idx))
+            .map(|t| t.id);
+        let saved = |t: &&QueryTab| {
+            t.kind != crate::components::QueryTabKind::Diagram && Some(t.id) != split_id
+        };
         dbcore::config::Workspace {
             // The saved index must count only the tabs that are actually saved.
             active_tab: self
@@ -105,6 +148,9 @@ impl DbGuiApp {
                     sql: t.sql.clone(),
                     kind: Some(save_tab_kind(t.kind)),
                     editor_size: t.editor_size,
+                    editor_split: t.editor_split,
+                    editor_split_size: t.editor_split_size,
+                    split_sql: t.split_sql.clone(),
                     source: t
                         .edits
                         .source

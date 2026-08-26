@@ -1884,6 +1884,96 @@ fn drag_reorders_tabs_headlessly() {
 }
 
 #[test]
+fn dragging_a_tab_to_the_workspace_opens_a_split_pane() {
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    app.tabs[0].sql = "SELECT 'left'".into();
+    app.new_tab();
+    app.tab_mut().sql = "SELECT 'right'".into();
+    app.select_tab(0);
+
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+    let run = |app: &mut DbGuiApp, events: Vec<egui::Event>| {
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            },
+            |ui| app.draw(ui, None),
+        )
+    };
+    let out = run(&mut app, vec![]);
+    let query_2 = find_text_pos(&out.shapes, "Query 2").expect("Query 2 chip not painted");
+    let start = query_2 + egui::vec2(4.0, 6.0);
+    let drop = egui::pos2(820.0, 360.0);
+    run(&mut app, vec![egui::Event::PointerMoved(start)]);
+    run(
+        &mut app,
+        vec![egui::Event::PointerButton {
+            pos: start,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        }],
+    );
+    for step in 1..8 {
+        let t = step as f32 / 8.0;
+        run(
+            &mut app,
+            vec![egui::Event::PointerMoved(start + (drop - start) * t)],
+        );
+    }
+    run(&mut app, vec![egui::Event::PointerMoved(drop)]);
+    run(
+        &mut app,
+        vec![egui::Event::PointerButton {
+            pos: drop,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        }],
+    );
+
+    let split = app.split_tab.expect("drop did not create a split pane");
+    assert_eq!(app.tabs.len(), 2, "dragged tab should move, not duplicate");
+    assert_eq!(app.tabs[split].sql, "SELECT 'right'");
+    assert_eq!(app.tabs[app.active_query_tab].sql, "SELECT 'left'");
+}
+
+#[test]
+fn schema_table_payload_opens_an_editable_table_in_split() {
+    let mut app = DbGuiApp::construct();
+    connect_fake(&mut app, fake_schema(2, 3));
+
+    app.open_schema_table_in_split(SchemaTableDrag {
+        conn_id: "c1".into(),
+        schema: None,
+        table: "table_1".into(),
+        pinned: false,
+    });
+
+    let split = app.split_tab.expect("table drop did not create a split");
+    assert_eq!(app.tabs[split].kind, crate::components::QueryTabKind::Table);
+    assert_eq!(app.tabs[split].conn_id.as_deref(), Some("c1"));
+    assert!(app.tabs[split].sql.contains("table_1"));
+    let source = app.tabs[split]
+        .edits
+        .pending_source
+        .as_ref()
+        .expect("split table should remain editable after loading");
+    assert_eq!(source.table, "table_1");
+    assert_eq!(source.pk_cols, ["field_0"]);
+}
+
+#[test]
 fn query_tabs_use_their_database_provider_identity() {
     let mut app = DbGuiApp::construct();
     let mut pg = ConnectionConfig::new(DbKind::Postgres);
@@ -1972,6 +2062,63 @@ fn workspace_snapshot_keeps_tab_kind_and_editor_size() {
         Some(dbcore::config::WorkspaceTabKind::View)
     );
     assert_eq!(saved.tabs[0].editor_size, Some(212.0));
+}
+
+#[test]
+fn independent_split_query_uses_the_focused_pane() {
+    let mut app = DbGuiApp::construct();
+    app.tab_mut().sql = "SELECT 1".into();
+    app.tab_mut().editor_split = true;
+    app.tab_mut().split_sql = Some("SELECT 2".into());
+    app.tab_mut().editor_pane = super::EditorPane::Split;
+    assert_eq!(app.resolved_sql_snapshot_for(0).unwrap(), "SELECT 2");
+    app.tab_mut().editor_pane = super::EditorPane::Primary;
+    assert_eq!(app.resolved_sql_snapshot_for(0).unwrap(), "SELECT 1");
+}
+
+#[test]
+fn closing_split_repairs_an_active_hidden_pane_index() {
+    let mut app = DbGuiApp::construct();
+    app.tabs[0].editor_split = true;
+    let split = QueryTab::new(app.next_tab_id, "right".into());
+    app.next_tab_id += 1;
+    app.tabs.push(split);
+    app.split_tab = Some(1);
+    // Reproduces the crash: UI rendering temporarily left the hidden pane active when Close
+    // removed index 1, leaving active_query_tab == len.
+    app.active_query_tab = 1;
+
+    app.close_split_workspace();
+
+    assert_eq!(app.tabs.len(), 1);
+    assert_eq!(app.active_query_tab, 0);
+    assert!(app.split_tab.is_none());
+    assert!(!app.tabs[0].editor_split);
+    assert_eq!(app.tab().id, 0);
+}
+
+#[test]
+fn split_panes_keep_independent_editor_assistance_state() {
+    let mut app = DbGuiApp::construct();
+    app.tabs[0].editor_assist.autocomplete.open = true;
+    app.tabs[0].editor_assist.autocomplete.prefix = "cust".into();
+    app.tabs[0].editor_assist.ghost_suggestion = Some("omers".into());
+    app.tabs[0].editor_assist.syntax_checked = "SELECT left".into();
+
+    app.open_split_workspace();
+    let right = app.split_tab.unwrap();
+
+    assert!(app.tabs[0].editor_assist.autocomplete.open);
+    assert_eq!(app.tabs[0].editor_assist.autocomplete.prefix, "cust");
+    assert_eq!(
+        app.tabs[0].editor_assist.ghost_suggestion.as_deref(),
+        Some("omers")
+    );
+    assert_eq!(app.tabs[0].editor_assist.syntax_checked, "SELECT left");
+    assert!(!app.tabs[right].editor_assist.autocomplete.open);
+    assert!(app.tabs[right].editor_assist.autocomplete.prefix.is_empty());
+    assert!(app.tabs[right].editor_assist.ghost_suggestion.is_none());
+    assert!(app.tabs[right].editor_assist.syntax_checked.is_empty());
 }
 
 #[test]
@@ -2473,6 +2620,165 @@ fn exact_table_total_is_routed_only_to_the_matching_query() {
     app.poll_messages(&egui::Context::default());
     assert_eq!(app.tab().total_rows, Some(12_534));
     assert!(!app.tab().total_rows_pending);
+}
+
+#[test]
+fn duckdb_counts_the_full_table_after_loading_the_visible_page() {
+    let mut app = DbGuiApp::construct();
+    let config = dbcore::ConnectionConfig::new(dbcore::DbKind::DuckDb);
+    let db = std::sync::Arc::new(dbcore::backends::duckdb::DuckDb::connect(&config).unwrap());
+    app.rt
+        .block_on(db.execute_capped(
+            "CREATE TABLE items AS SELECT range AS id FROM range(250);",
+            1,
+        ))
+        .unwrap();
+    app.active_connections.push(ActiveConnection {
+        config_id: "duck".into(),
+        name: "DuckDB".into(),
+        db,
+        schema: SchemaTree::default(),
+        databases: Vec::new(),
+    });
+    {
+        let tab = app.tab_mut();
+        tab.conn_id = Some("duck".into());
+        tab.kind = crate::components::QueryTabKind::Table;
+        tab.sql = "SELECT * FROM items LIMIT 100;".into();
+        tab.edits.source = Some(EditSource {
+            schema: None,
+            table: "items".into(),
+            pk_cols: Vec::new(),
+        });
+    }
+
+    app.start_query_for(0);
+    let ctx = egui::Context::default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline
+        && (app.busy != Busy::Idle || app.tab().total_rows_pending)
+    {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        app.poll_messages(&ctx);
+    }
+
+    assert_eq!(app.tab().result.as_ref().unwrap().row_count(), 100);
+    assert_eq!(app.tab().total_rows, Some(250));
+    assert!(!app.tab().total_rows_pending);
+}
+
+#[test]
+fn duckdb_filter_searches_rows_beyond_the_loaded_page() {
+    let mut app = DbGuiApp::construct();
+    let config = dbcore::ConnectionConfig::new(dbcore::DbKind::DuckDb);
+    let db = std::sync::Arc::new(dbcore::backends::duckdb::DuckDb::connect(&config).unwrap());
+    app.rt
+        .block_on(db.execute_capped(
+            "CREATE TABLE trades AS SELECT range AS id, \
+             CASE WHEN range = 249 THEN 'needle' ELSE 'other' END AS symbol FROM range(250);",
+            1,
+        ))
+        .unwrap();
+    app.active_connections.push(ActiveConnection {
+        config_id: "duck-filter".into(),
+        name: "DuckDB".into(),
+        db,
+        schema: SchemaTree::default(),
+        databases: Vec::new(),
+    });
+    {
+        let tab = app.tab_mut();
+        tab.conn_id = Some("duck-filter".into());
+        tab.kind = crate::components::QueryTabKind::Table;
+        tab.sql = "SELECT * FROM trades LIMIT 100;".into();
+        tab.edits.source = Some(EditSource {
+            schema: None,
+            table: "trades".into(),
+            pk_cols: Vec::new(),
+        });
+        tab.set_result(QueryResult {
+            columns: vec![
+                ColumnMeta {
+                    name: "id".into(),
+                    type_name: "BIGINT".into(),
+                },
+                ColumnMeta {
+                    name: "symbol".into(),
+                    type_name: "VARCHAR".into(),
+                },
+            ],
+            ..QueryResult::default()
+        });
+        tab.filter.conditions[0].column = 1;
+        tab.filter.conditions[0].op = crate::filter::FilterOp::Equals;
+        tab.filter.conditions[0].value = "needle".into();
+    }
+
+    app.apply_result_filter(0, false);
+    let ctx = egui::Context::default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline
+        && (app.busy != Busy::Idle || app.tab().total_rows_pending)
+    {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        app.poll_messages(&ctx);
+    }
+
+    let result = app.tab().result.as_ref().unwrap();
+    assert_eq!(result.row_count(), 1);
+    assert_eq!(result.rows[0][1], Value::Text("needle".into()));
+    assert_eq!(app.tab().total_rows, Some(1));
+    assert!(app.tab().server_filter_predicate.is_some());
+
+    app.apply_result_filter(0, true);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline
+        && (app.busy != Busy::Idle || app.tab().total_rows_pending)
+    {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        app.poll_messages(&ctx);
+    }
+    assert_eq!(app.tab().result.as_ref().unwrap().row_count(), 100);
+    assert_eq!(app.tab().total_rows, Some(250));
+    assert!(app.tab().server_filter_predicate.is_none());
+
+    {
+        let tab = app.tab_mut();
+        tab.filter.conditions[0].column = 1;
+        tab.filter.conditions[0].op = crate::filter::FilterOp::NotEquals;
+        tab.filter.conditions[0].value = "needle".into();
+    }
+    app.apply_result_filter(0, false);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline
+        && (app.busy != Busy::Idle || app.tab().total_rows_pending)
+    {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        app.poll_messages(&ctx);
+    }
+    assert_eq!(app.tab().result.as_ref().unwrap().row_count(), 100);
+    assert_eq!(app.tab().total_rows, Some(249));
+
+    app.page_nav(PageNav::Next);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline && app.busy != Busy::Idle {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        app.poll_messages(&ctx);
+    }
+    assert_eq!(
+        dbcore::parse_page_window(&app.tab().sql).unwrap().offset,
+        100
+    );
+    assert_eq!(app.tab().result.as_ref().unwrap().row_count(), 100);
+    assert_eq!(app.tab().total_rows, Some(249));
+    assert!(app
+        .tab()
+        .result
+        .as_ref()
+        .unwrap()
+        .rows
+        .iter()
+        .all(|row| matches!(row.get(1), Some(Value::Text(value)) if value == "other")));
 }
 
 /// Replacement chunks stay off-screen until the terminal message installs the complete page.
@@ -3725,6 +4031,29 @@ fn snapshot_settings_page() {
 
 #[test]
 #[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_settings_narrow() {
+    let mut app = DbGuiApp::construct();
+    app.connections.clear();
+    app.show_welcome = false;
+    app.settings_open = true;
+
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(820.0, 700.0))
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+        });
+    harness.run_steps(10);
+    harness.snapshot("settings_narrow");
+}
+
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
 fn snapshot_settings_appearance_page() {
     let mut app = DbGuiApp::construct();
     app.show_welcome = false;
@@ -3753,9 +4082,6 @@ fn snapshot_settings_appearance_typography() {
                     &crate::AppFonts {
                         ui_regular: include_bytes!("../../../app/assets/Inter-Regular.ttf"),
                         ui_semibold: include_bytes!("../../../app/assets/Inter-SemiBold.ttf"),
-                        code_regular: include_bytes!(
-                            "../../../app/assets/JetBrainsMono-Regular.ttf"
-                        ),
                         thai_regular: include_bytes!("../../../app/assets/Anuphan-Regular.ttf"),
                         thai_semibold: include_bytes!("../../../app/assets/Anuphan-SemiBold.ttf"),
                         universal_regular: include_bytes!(
@@ -3770,6 +4096,16 @@ fn snapshot_settings_appearance_typography() {
         });
     harness.run_steps(10);
     harness.snapshot("settings_appearance_typography");
+}
+
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_settings_privacy_page() {
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.settings_open = true;
+    app.settings_section = SettingsSection::Privacy;
+    render_and_snapshot(app, "settings_privacy_page", false);
 }
 
 #[test]
@@ -3972,7 +4308,7 @@ fn schema_editor_is_per_tab() {
 }
 
 /// Drive the Details panel headlessly with one column per editor kind, editable, so
-/// the type-aware widgets (type badges, boolean checkbox, date picker) all render.
+/// the type-aware widgets (type labels, boolean checkbox, date picker) all render.
 /// Catches panics and ID clashes in the per-column widgets (e.g. the per-column
 /// date-picker salts).
 #[test]
@@ -5795,7 +6131,10 @@ fn sql_typos_are_flagged_after_a_pause_and_clear_when_fixed() {
                 app.tab_mut().sql = sql;
             }
             app.draw(ui, None);
-            probe.lock().unwrap().clone_from(&app.syntax_error);
+            probe
+                .lock()
+                .unwrap()
+                .clone_from(&app.tab().editor_assist.syntax_error);
         });
 
     // The harness steps 0.25s at a time, so a couple of frames covers the debounce.

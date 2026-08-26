@@ -596,7 +596,20 @@ impl DbGuiApp {
                         "Busy — wait for the current operation to finish.".to_string();
                     return;
                 }
-                let idx = self.active_query_tab;
+                let idx = if self.split_focus {
+                    self.split_tab.unwrap_or(self.active_query_tab)
+                } else {
+                    self.active_query_tab
+                };
+                let resolved_sql = match self.resolved_sql_for(idx) {
+                    Ok(sql) => sql.trim().to_string(),
+                    Err(message) => {
+                        self.tabs[idx].query_error = Some(message);
+                        self.tabs[idx].view = TabView::Data;
+                        self.status_msg = "Query parameters need attention.".into();
+                        return;
+                    }
+                };
                 // Editability is re-derived from the SQL itself on every run: any simple
                 // single-table `SELECT *` — including a hand-tuned LIMIT/WHERE/ORDER BY —
                 // stays editable; anything else runs as a read-only ad-hoc query.
@@ -614,8 +627,12 @@ impl DbGuiApp {
                             Some("Production Guardian requires a saved connection.".into());
                         return;
                     };
-                    let sql = self.tabs[idx].sql.trim().to_string();
-                    match dbcore::safety::evaluate_sql(kind, &sql, guardian_enabled, read_only) {
+                    match dbcore::safety::evaluate_sql(
+                        kind,
+                        &resolved_sql,
+                        guardian_enabled,
+                        read_only,
+                    ) {
                         dbcore::safety::SqlSafetyDecision::Allow => {}
                         dbcore::safety::SqlSafetyDecision::Block(found) => {
                             let Some(first) = found.first() else { return };
@@ -633,7 +650,7 @@ impl DbGuiApp {
                         dbcore::safety::SqlSafetyDecision::Confirm(found) => {
                             self.start_production_guard(
                                 idx,
-                                sql,
+                                resolved_sql,
                                 found,
                                 ProductionGuardContinuation::Query,
                             );
@@ -664,7 +681,9 @@ impl DbGuiApp {
                     return;
                 };
                 let source_unchanged = match pending.continuation {
-                    ProductionGuardContinuation::Query => self.tabs[idx].sql.trim() == pending.sql,
+                    ProductionGuardContinuation::Query => self
+                        .resolved_sql_snapshot_for(idx)
+                        .is_ok_and(|sql| sql.trim() == pending.sql),
                     ProductionGuardContinuation::Edits => self
                         .commit_pending
                         .as_ref()
@@ -739,6 +758,8 @@ impl DbGuiApp {
                 pin,
                 kind,
             } => self.open_table(sql, source, pin, kind),
+            Action::OpenSplitSchemaTable(payload) => self.open_schema_table_in_split(payload),
+            Action::OpenSplitTab { id, primary_id } => self.open_tab_in_split(id, primary_id),
             Action::OpenDefinition { title, sql, kind } => self.open_definition(title, sql, kind),
             Action::FollowForeignKey { row, col } => self.follow_foreign_key(row, col),
             Action::SetSort { col, asc } => self.tab_mut().set_sort(col, asc),

@@ -3,6 +3,81 @@
 use super::*;
 
 impl DbGuiApp {
+    pub(super) fn open_schema_table_in_split(&mut self, payload: SchemaTableDrag) {
+        let Some((kind, table)) = self
+            .active_connections
+            .iter()
+            .find(|connection| connection.config_id == payload.conn_id)
+            .and_then(|connection| {
+                connection
+                    .schema
+                    .tables
+                    .iter()
+                    .find(|table| table.schema == payload.schema && table.name == payload.table)
+                    .cloned()
+                    .map(|table| (connection.db.kind(), table))
+            })
+        else {
+            self.status_msg = "Connect to the database before opening a split table.".into();
+            return;
+        };
+        let source = EditSource {
+            schema: table.schema.clone(),
+            table: table.name.clone(),
+            pk_cols: table
+                .columns
+                .iter()
+                .filter(|column| column.primary_key)
+                .map(|column| column.name.clone())
+                .collect(),
+        };
+        let mut split = QueryTab::new(self.next_tab_id, table.name.clone());
+        self.next_tab_id = self.next_tab_id.wrapping_add(1);
+        split.kind = crate::components::QueryTabKind::Table;
+        split.conn_id = Some(payload.conn_id);
+        split.sql = kind.preview_query(&table.qualified(kind), 100);
+        split.edits.pending_source = Some(source);
+        self.install_split_tab(split, true);
+    }
+
+    pub(super) fn open_tab_in_split(&mut self, id: u64, primary_id: u64) {
+        let Some(source_idx) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return;
+        };
+        let primary = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == primary_id && tab.id != id)
+            .or_else(|| self.tabs.iter().position(|tab| tab.id != id));
+
+        if let Some(primary_idx) = primary {
+            let primary_id = self.tabs[primary_idx].id;
+            let split = self.tabs.remove(source_idx);
+            let Some(primary_idx) = self.tabs.iter().position(|tab| tab.id == primary_id) else {
+                return;
+            };
+            self.active_query_tab = primary_idx;
+            // Move the real tab into the right group: its loaded result, filters, selection,
+            // editor assistance and scroll state all survive exactly like a VS Code tab move.
+            self.install_split_tab(split, false);
+        } else {
+            // A single tab cannot leave its group empty. Keep it on the left and seed a new
+            // independent pane with the same query.
+            let source = &self.tabs[source_idx];
+            let mut split = QueryTab::new(self.next_tab_id, source.title.clone());
+            self.next_tab_id = self.next_tab_id.wrapping_add(1);
+            split.kind = source.kind;
+            split.conn_id = source.conn_id.clone();
+            split.sql = source.sql.clone();
+            split.edits.pending_source = source
+                .edits
+                .source
+                .clone()
+                .or_else(|| source.edits.pending_source.clone());
+            self.install_split_tab(split, true);
+        }
+    }
+
     /// Open a table (from the schema sidebar) as a named tab.
     ///
     /// - If the table is already open in a tab, just switch to it (no duplicate).

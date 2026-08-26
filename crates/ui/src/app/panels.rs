@@ -1,8 +1,8 @@
 use super::{
     result_status, Action, ActiveConnection, Busy, ConnField, ConnTestState, DbGuiApp, PageNav,
-    ProductionGuardContinuation, QueryEditorPlacement, QueryTab, SavedQueryDrag, SchemaTableDrag,
-    SettingsSection, SidebarTab, TabView, MAX_FETCH_ROWS, MAX_RESULT_MEMORY_BUDGET_MB,
-    MIN_RESULT_MEMORY_BUDGET_MB,
+    ProductionGuardContinuation, QueryEditorPlacement, QueryParameterKind, QueryTab,
+    SavedQueryDrag, SchemaTableDrag, SettingsSection, SidebarTab, TabView, MAX_FETCH_ROWS,
+    MAX_RESULT_MEMORY_BUDGET_MB, MIN_RESULT_MEMORY_BUDGET_MB,
 };
 use crate::components;
 use crate::filter::{self, FilterEvent};
@@ -13,16 +13,87 @@ use crate::title_bar;
 
 /// One theme card in the appearance picker, snapshotted before rendering so drawing a
 /// choice never holds a borrow on `self`:
-/// `(key, display name, builtin, author, base, surface, accent)`.
-type ThemeOption = (
-    String,
-    String,
-    bool,
-    Option<String>,
-    egui::Color32,
-    egui::Color32,
-    egui::Color32,
-);
+/// `(key, display name, builtin, author)`.
+type ThemeOption = (String, String, bool, Option<String>);
+
+fn settings_nav_item(
+    ui: &mut egui::Ui,
+    current: &mut SettingsSection,
+    candidate: SettingsSection,
+    label: &str,
+    icon: egui::ImageSource<'static>,
+) {
+    let selected = *current == candidate;
+    let (rect, mut response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, selected, label)
+    });
+
+    let keyboard_activated = response.has_focus()
+        && ui.input(|input| {
+            input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
+        });
+    if response.clicked() || keyboard_activated {
+        *current = candidate;
+        response.mark_changed();
+    }
+
+    if ui.is_rect_visible(rect) {
+        let text_color = if selected {
+            palette::TEXT()
+        } else {
+            palette::TEXT_WEAK()
+        };
+        let fill = if selected {
+            palette::SELECTION()
+        } else if response.hovered() || response.has_focus() {
+            palette::SURFACE_HOVER()
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(6), fill);
+
+        let icon_rect = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + 18.0, rect.center().y),
+            egui::vec2(14.0, 14.0),
+        );
+        egui::Image::new(icon)
+            .fit_to_exact_size(icon_rect.size())
+            .tint(text_color)
+            .paint_at(ui, icon_rect);
+        ui.painter().text(
+            egui::pos2(icon_rect.right() + 8.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::FontId::proportional(12.5),
+            text_color,
+        );
+    }
+}
+
+fn settings_toggle_row(ui: &mut egui::Ui, value: &mut bool, title: &str, description: &str) {
+    let row_width = ui.available_width();
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2((row_width - 66.0).max(180.0), 50.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_min_width((row_width - 66.0).max(180.0));
+                ui.label(egui::RichText::new(title).size(14.0).color(palette::TEXT()));
+                ui.add_space(3.0);
+                ui.label(
+                    egui::RichText::new(description)
+                        .size(12.0)
+                        .color(palette::TEXT_WEAK()),
+                );
+            },
+        );
+        components::input::toggle_switch(ui, value);
+    });
+}
 
 /// Byte offset of the `char_idx`-th character in `s` (its length when out of range), for
 /// turning the editor's char-based caret indices into `str` slice bounds.
@@ -31,6 +102,143 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(b, _)| b)
         .unwrap_or(s.len())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MultiCursorEdit {
+    Insert(String),
+    Backspace,
+    Delete,
+}
+
+/// Apply one edit to all selections and return their collapsed post-edit carets in the same
+/// order. Exact duplicate/overlapping ranges coalesce so text is never edited twice.
+fn apply_multi_cursor_edit(
+    sql: &str,
+    ranges: &[std::ops::Range<usize>],
+    edit: &MultiCursorEdit,
+) -> (String, Vec<std::ops::Range<usize>>) {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut operations = ranges
+        .iter()
+        .enumerate()
+        .map(|(index, range)| {
+            let mut start = range.start.min(chars.len());
+            let mut end = range.end.min(chars.len()).max(start);
+            if start == end {
+                match edit {
+                    MultiCursorEdit::Backspace if start > 0 => start -= 1,
+                    MultiCursorEdit::Delete if end < chars.len() => end += 1,
+                    _ => {}
+                }
+            }
+            let replacement = match edit {
+                MultiCursorEdit::Insert(text) => text.as_str(),
+                MultiCursorEdit::Backspace | MultiCursorEdit::Delete => "",
+            };
+            (start, end, index, replacement)
+        })
+        .collect::<Vec<_>>();
+    operations.sort_by_key(|(start, end, _, _)| (*start, *end));
+
+    let mut out = String::with_capacity(sql.len());
+    let mut source_cursor = 0usize;
+    let mut last_caret = 0usize;
+    let mut carets = vec![0..0; ranges.len()];
+    for (start, end, original_index, replacement) in operations {
+        if start < source_cursor {
+            carets[original_index] = last_caret..last_caret;
+            continue;
+        }
+        out.extend(chars[source_cursor..start].iter());
+        out.push_str(replacement);
+        last_caret = out.chars().count();
+        carets[original_index] = last_caret..last_caret;
+        source_cursor = end;
+    }
+    out.extend(chars[source_cursor..].iter());
+    (out, carets)
+}
+
+fn word_range_at(sql: &str, caret: usize) -> std::ops::Range<usize> {
+    let chars: Vec<char> = sql.chars().collect();
+    let is_word = |ch: char| ch == '_' || ch.is_alphanumeric();
+    let mut start = caret.min(chars.len());
+    let mut end = start;
+    if start == chars.len() || !chars.get(start).is_some_and(|ch| is_word(*ch)) {
+        if start > 0 && is_word(chars[start - 1]) {
+            start -= 1;
+            end = start + 1;
+        } else {
+            return caret.min(chars.len())..caret.min(chars.len());
+        }
+    }
+    while start > 0 && is_word(chars[start - 1]) {
+        start -= 1;
+    }
+    while end < chars.len() && is_word(chars[end]) {
+        end += 1;
+    }
+    start..end
+}
+
+fn next_occurrence(
+    sql: &str,
+    selected: &std::ops::Range<usize>,
+    after: usize,
+) -> Option<std::ops::Range<usize>> {
+    if selected.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = sql.chars().collect();
+    let needle = chars.get(selected.clone())?;
+    if needle.is_empty() || needle.len() > chars.len() {
+        return None;
+    }
+    let find = |range: std::ops::Range<usize>| {
+        range
+            .filter(|start| *start + needle.len() <= chars.len())
+            .find(|start| chars[*start..*start + needle.len()] == *needle)
+            .map(|start| start..start + needle.len())
+    };
+    find(after.min(chars.len())..chars.len()).or_else(|| find(0..selected.start.min(chars.len())))
+}
+
+#[cfg(test)]
+mod multi_cursor_tests {
+    use super::*;
+
+    #[test]
+    fn inserts_at_all_cursors_in_reverse_safe_order() {
+        let (sql, carets) = apply_multi_cursor_edit(
+            "foo foo",
+            &[0..0, 4..4],
+            &MultiCursorEdit::Insert("bar".into()),
+        );
+        assert_eq!(sql, "barfoo barfoo");
+        assert_eq!(carets, [3..3, 10..10]);
+    }
+
+    #[test]
+    fn deletes_selected_ranges_and_handles_unicode_backspace() {
+        let (sql, _) = apply_multi_cursor_edit("กขกข", &[1..1, 3..3], &MultiCursorEdit::Backspace);
+        assert_eq!(sql, "ขข");
+        let (sql, carets) = apply_multi_cursor_edit(
+            "one two one",
+            &[0..3, 8..11],
+            &MultiCursorEdit::Insert("x".into()),
+        );
+        assert_eq!(sql, "x two x");
+        assert_eq!(carets, [1..1, 7..7]);
+    }
+
+    #[test]
+    fn command_d_finds_word_then_wraps_to_next_match() {
+        let sql = "SELECT id FROM ids WHERE id = 1";
+        let first = word_range_at(sql, 7);
+        assert_eq!(&sql.chars().collect::<Vec<_>>()[first.clone()], &['i', 'd']);
+        assert_eq!(next_occurrence(sql, &first, first.end), Some(15..17));
+    }
 }
 
 fn live_log_clock(timestamp: &str) -> &str {
@@ -786,6 +994,23 @@ impl DbGuiApp {
                         {
                             actions.push(Action::OpenSettings);
                         }
+                        if components::toolbar_icon_button(
+                            ui,
+                            icons::split_editor(),
+                            if self.split_tab.is_some() {
+                                "Close split workspace"
+                            } else {
+                                "Split query workspace"
+                            },
+                        )
+                        .clicked()
+                        {
+                            if self.split_tab.is_some() {
+                                self.close_split_workspace();
+                            } else {
+                                self.open_split_workspace();
+                            }
+                        }
                         #[cfg(not(target_os = "macos"))]
                         title_bar::group_separator(ui);
                         components::layout_menu(
@@ -837,6 +1062,9 @@ impl DbGuiApp {
                                 let mut rects = Vec::with_capacity(self.tabs.len());
                                 let pointer_x = ui.ctx().pointer_interact_pos().map(|p| p.x);
                                 for idx in 0..self.tabs.len() {
+                                    if self.split_tab == Some(idx) {
+                                        continue;
+                                    }
                                     let selected =
                                         !self.settings_open && idx == self.active_query_tab;
                                     let label = self.tab_label(idx);
@@ -924,13 +1152,16 @@ impl DbGuiApp {
                                             id: self.tabs[idx].id,
                                             grab_x: pointer_x.unwrap_or(resp.rect.left())
                                                 - resp.rect.left(),
+                                            origin_active_id: self.tabs[self.active_query_tab].id,
                                         });
                                         actions.push(Action::SelectTab(idx));
                                     }
                                     rects.push(resp.rect);
                                     ui.add_space(2.0);
                                 }
-                                self.handle_tab_drag(ui, &rects, actions);
+                                if self.split_tab.is_none() {
+                                    self.handle_tab_drag(ui, &rects, actions);
+                                }
                                 if self.settings_open {
                                     let resp = components::settings_tab_item(ui);
                                     if resp.close {
@@ -1000,7 +1231,8 @@ impl DbGuiApp {
     fn handle_tab_drag(&mut self, ui: &egui::Ui, rects: &[egui::Rect], actions: &mut Vec<Action>) {
         let Some(drag) = self.tab_drag else { return };
         if !ui.input(|i| i.pointer.primary_down()) {
-            self.tab_drag = None;
+            // The workspace drop target is evaluated later in this frame and needs this id
+            // to decide whether the release creates a split pane.
             return;
         }
         let Some(from) = self.tabs.iter().position(|t| t.id == drag.id) else {
@@ -1152,11 +1384,13 @@ impl DbGuiApp {
         };
         let idle = self.busy == Busy::Idle;
         let at_start = win.offset == 0;
-        let has_more = !tab.page_exhausted;
         let loaded = tab
             .result
             .as_ref()
             .map_or(0_u64, |result| result.row_count() as u64);
+        let has_more = tab.total_rows.map_or(!tab.page_exhausted, |total| {
+            win.offset.saturating_add(loaded) < total
+        });
         let row_summary = if loaded == 0 {
             match tab.total_rows {
                 Some(total) => format!("0 of {} rows", group_digits(total)),
@@ -1342,8 +1576,10 @@ impl DbGuiApp {
     }
 
     fn query_workspace_bar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        self.tab_mut().sync_query_parameters();
         let dialect_label = self.active().map(|a| a.db.kind().label()).unwrap_or("SQL");
         let has_sql = !self.tab().sql.trim().is_empty();
+        let parameter_count = self.tab().query_parameters.len();
         let bar_h = 36.0;
         let row_h = 28.0;
         let (bar_rect, _) = ui.allocate_exact_size(
@@ -1374,7 +1610,27 @@ impl DbGuiApp {
                         .on_hover_text("Cmd/Ctrl+Enter")
                         .clicked()
                     {
+                        // A split pane is a real workspace in its own right. Remember which
+                        // pane launched Run so the action executes against that pane's SQL and
+                        // stores rows in that pane's result view.
+                        self.split_focus = self.split_tab == Some(self.active_query_tab);
                         actions.push(Action::RunQuery);
+                    }
+                    if parameter_count > 0
+                        && components::button::soft_icon_button_state(
+                            ui,
+                            icons::key(),
+                            if self.tab().parameters_expanded {
+                                "Hide query parameters"
+                            } else {
+                                "Show query parameters"
+                            },
+                            true,
+                            self.tab().parameters_expanded,
+                        )
+                        .clicked()
+                    {
+                        self.tab_mut().parameters_expanded = !self.tab().parameters_expanded;
                     }
                     let resp =
                         components::beautify_button(ui, &mut self.beautify, has_sql, dialect_label);
@@ -1393,6 +1649,306 @@ impl DbGuiApp {
                 });
             });
         });
+    }
+
+    fn query_parameter_panel(&mut self, ui: &mut egui::Ui) {
+        let idx = self.active_query_tab;
+        self.tabs[idx].sync_query_parameters();
+        if self.tabs[idx].query_parameters.is_empty() || !self.tabs[idx].parameters_expanded {
+            return;
+        }
+
+        egui::Frame::new()
+            .fill(palette::SURFACE())
+            .inner_margin(egui::Margin::symmetric(10, 7))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Parameters")
+                            .size(11.5)
+                            .strong()
+                            .color(palette::TEXT_WEAK()),
+                    );
+                    ui.label(
+                        egui::RichText::new("{{name}}")
+                            .monospace()
+                            .size(10.5)
+                            .color(palette::TEXT_FAINT()),
+                    );
+                });
+                ui.add_space(5.0);
+
+                egui::ScrollArea::vertical()
+                    .id_salt(("query_parameters", self.tabs[idx].id))
+                    .max_height(118.0)
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 5.0;
+                        for parameter in &mut self.tabs[idx].query_parameters {
+                            ui.horizontal(|ui| {
+                                ui.set_min_height(26.0);
+                                ui.add_sized(
+                                    [132.0, 24.0],
+                                    egui::Label::new(
+                                        egui::RichText::new(&parameter.name)
+                                            .monospace()
+                                            .color(palette::TEXT()),
+                                    ),
+                                );
+                                let old_kind = parameter.kind;
+                                egui::ComboBox::from_id_salt((
+                                    "query_parameter_kind",
+                                    &parameter.name,
+                                ))
+                                .width(86.0)
+                                .selected_text(parameter.kind.label())
+                                .show_ui(ui, |ui| {
+                                    for kind in QueryParameterKind::ALL {
+                                        ui.selectable_value(
+                                            &mut parameter.kind,
+                                            kind,
+                                            kind.label(),
+                                        );
+                                    }
+                                });
+                                if parameter.kind != old_kind {
+                                    parameter.set = parameter.kind == QueryParameterKind::Null
+                                        || !parameter.value.is_empty();
+                                }
+                                if parameter.kind == QueryParameterKind::Null {
+                                    ui.label(
+                                        egui::RichText::new("SQL NULL")
+                                            .size(11.5)
+                                            .color(palette::TEXT_FAINT()),
+                                    );
+                                } else {
+                                    let response = ui.add_sized(
+                                        [ui.available_width().max(100.0), 24.0],
+                                        egui::TextEdit::singleline(&mut parameter.value).hint_text(
+                                            match parameter.kind {
+                                                QueryParameterKind::Boolean => "true or false",
+                                                QueryParameterKind::Number => "0",
+                                                QueryParameterKind::Text => "Value",
+                                                QueryParameterKind::Null => "",
+                                            },
+                                        ),
+                                    );
+                                    response.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::WidgetType::TextEdit,
+                                            true,
+                                            format!("Parameter {}", parameter.name),
+                                        )
+                                    });
+                                    if response.changed() {
+                                        parameter.set = true;
+                                    }
+                                }
+                            });
+                        }
+                    });
+            });
+        ui.painter().hline(
+            ui.min_rect().x_range(),
+            ui.min_rect().bottom(),
+            egui::Stroke::new(1.0, palette::BORDER()),
+        );
+    }
+
+    fn split_sql_editor(&mut self, ui: &mut egui::Ui, font: &egui::FontId) {
+        let idx = self.active_query_tab;
+        let tab_id = self.tabs[idx].id;
+        egui::Frame::new()
+            .fill(palette::CODE_BG())
+            .inner_margin(egui::Margin::ZERO)
+            .show(ui, |ui| {
+                ui.painter().vline(
+                    ui.min_rect().left(),
+                    ui.min_rect().y_range(),
+                    egui::Stroke::new(1.0, palette::BORDER_STRONG()),
+                );
+                egui::ScrollArea::vertical()
+                    .id_salt(("sql_scroll", tab_id, "split"))
+                    .auto_shrink(false)
+                    .show(ui, |ui| {
+                        let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
+                        let rows = (ui.available_height() / row_height).floor().max(5.0) as usize;
+                        let mut layouter =
+                            |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+                                let mut job = crate::highlight::highlight_sql_folded(
+                                    buf.as_str(),
+                                    font.clone(),
+                                    &[],
+                                );
+                                job.wrap.max_width = wrap_width;
+                                ui.ctx().fonts_mut(|fonts| fonts.layout_job(job))
+                            };
+                        if self.tabs[idx].split_sql.is_none() {
+                            self.tabs[idx].split_sql = Some(self.tabs[idx].sql.clone());
+                        }
+                        let split_sql = self.tabs[idx]
+                            .split_sql
+                            .as_mut()
+                            .expect("split buffer initialized above");
+                        let response = egui::TextEdit::multiline(split_sql)
+                            .id_source(("sql_editor", tab_id, "split"))
+                            .code_editor()
+                            .frame(egui::Frame::NONE)
+                            .margin(egui::Margin::symmetric(10, 0))
+                            .desired_rows(rows)
+                            .desired_width(f32::INFINITY)
+                            .layouter(&mut layouter)
+                            .hint_text("SELECT ...")
+                            .show(ui)
+                            .response;
+                        response.response.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::TextEdit,
+                                true,
+                                "Split SQL editor",
+                            )
+                        });
+                        if response.response.changed() {
+                            let tab = &mut self.tabs[idx];
+                            tab.editor_pane = super::EditorPane::Split;
+                            tab.edits.source = None;
+                            tab.preview = false;
+                            tab.extra_cursors.clear();
+                            tab.mark_sql_changed();
+                            self.workspace_dirty = true;
+                        }
+                        if response.response.has_focus() {
+                            self.tabs[idx].editor_pane = super::EditorPane::Split;
+                        }
+                    });
+            });
+    }
+
+    /// Consume text/delete events while secondary carets are active and apply one edit to every
+    /// range. egui's TextEdit owns one native cursor, so this small interception keeps its normal
+    /// keyboard behavior until the user explicitly enables another caret.
+    fn apply_multi_cursor_input(&mut self, ctx: &egui::Context, editor_id: egui::Id) -> bool {
+        let idx = self.active_query_tab;
+        if self.tabs[idx].extra_cursors.is_empty()
+            || !ctx.memory(|memory| memory.has_focus(editor_id))
+        {
+            return false;
+        }
+        let mut edit = None;
+        ctx.input_mut(|input| {
+            let event_index = input.events.iter().position(|event| match event {
+                egui::Event::Text(text) if !text.is_empty() => true,
+                egui::Event::Paste(text) if !text.is_empty() => true,
+                egui::Event::Key {
+                    key: egui::Key::Backspace | egui::Key::Delete | egui::Key::Enter,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if *modifiers == egui::Modifiers::NONE => true,
+                _ => false,
+            });
+            let Some(event_index) = event_index else {
+                return;
+            };
+            let event = input.events.remove(event_index);
+            edit = match event {
+                egui::Event::Text(text) | egui::Event::Paste(text) => {
+                    Some(MultiCursorEdit::Insert(text))
+                }
+                egui::Event::Key { key, .. } => match key {
+                    egui::Key::Backspace => Some(MultiCursorEdit::Backspace),
+                    egui::Key::Delete => Some(MultiCursorEdit::Delete),
+                    egui::Key::Enter => Some(MultiCursorEdit::Insert("\n".into())),
+                    _ => None,
+                },
+                _ => None,
+            };
+        });
+        let Some(edit) = edit else { return false };
+
+        let tab = &self.tabs[idx];
+        let old_sql = tab.sql.clone();
+        let old_primary = tab.primary_cursor.clone();
+        let mut ranges = vec![old_primary];
+        ranges.extend(tab.extra_cursors.iter().cloned());
+        let (new_sql, carets) = apply_multi_cursor_edit(&old_sql, &ranges, &edit);
+        let tab = &mut self.tabs[idx];
+        tab.sql = new_sql;
+        tab.mark_sql_changed();
+        tab.edits.source = None;
+        tab.preview = false;
+        tab.primary_cursor = carets.first().cloned().unwrap_or(0..0);
+        tab.extra_cursors = carets.into_iter().skip(1).collect();
+        self.workspace_dirty = true;
+        if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, editor_id) {
+            let old_range = egui::text::CCursorRange::two(
+                egui::text::CCursor::new(ranges[0].start),
+                egui::text::CCursor::new(ranges[0].end),
+            );
+            let mut undoer = state.undoer();
+            undoer.add_undo(&(old_range, old_sql));
+            state.set_undoer(undoer);
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(tab.primary_cursor.start),
+                )));
+            state.store(ctx, editor_id);
+        }
+        true
+    }
+
+    fn add_next_cursor(&mut self, ctx: &egui::Context, editor_id: egui::Id) {
+        let idx = self.active_query_tab;
+        if !ctx.memory(|memory| memory.has_focus(editor_id)) {
+            return;
+        }
+        let current = self.tabs[idx].primary_cursor.clone();
+        let sql = self.tabs[idx].sql.clone();
+        let selected = if current.is_empty() {
+            word_range_at(&sql, current.start)
+        } else {
+            current.clone()
+        };
+        if selected.is_empty() {
+            return;
+        }
+        if current.is_empty() {
+            self.tabs[idx].primary_cursor = selected.clone();
+            self.tabs[idx].folds.clear();
+        } else {
+            let after = self.tabs[idx]
+                .extra_cursors
+                .iter()
+                .map(|range| range.end)
+                .chain(std::iter::once(current.end))
+                .max()
+                .unwrap_or(current.end);
+            let Some(next) = next_occurrence(&sql, &selected, after) else {
+                return;
+            };
+            let existing = std::iter::once(&current)
+                .chain(self.tabs[idx].extra_cursors.iter())
+                .any(|range| *range == next);
+            if !existing {
+                self.tabs[idx].extra_cursors.push(next);
+            }
+            self.tabs[idx].folds.clear();
+        }
+        if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, editor_id) {
+            let caret = self.tabs[idx].primary_cursor.clone();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(caret.start),
+                    egui::text::CCursor::new(caret.end),
+                )));
+            state.store(ctx, editor_id);
+        }
+        ctx.request_repaint();
+    }
+
+    fn clear_extra_cursors(&mut self) {
+        self.tabs[self.active_query_tab].extra_cursors.clear();
     }
 
     /// SQL editor with syntax highlighting and a Run button. Query/definition tabs dock it
@@ -1449,8 +2005,12 @@ impl DbGuiApp {
         let panel_max_size = (max_size + bottom_chrome).min((available - 80.0).max(panel_min_size));
         let panel_default_size =
             (default_size + bottom_chrome).clamp(panel_min_size, panel_max_size);
-        let panel_id = egui::Id::new(("query_console", tab_id, placement));
-        let footer_id = egui::Id::new(("query_footer", tab_id, placement));
+        // Use a distinct egui panel identity while the whole workspace is split. This prevents
+        // a remembered single-pane splitter position from making the two columns start at
+        // different heights.
+        let split_layout = self.split_tab.is_some();
+        let panel_id = egui::Id::new(("query_console", tab_id, placement, split_layout));
+        let footer_id = egui::Id::new(("query_footer", tab_id, placement, split_layout));
         let footer = |app: &mut Self,
                       root: &mut egui::Ui,
                       dock: QueryEditorPlacement,
@@ -1482,13 +2042,40 @@ impl DbGuiApp {
                     }
                     footer(self, ui, QueryEditorPlacement::Top, actions);
                 }
+                self.query_parameter_panel(ui);
                 let font = egui::TextStyle::Monospace.resolve(ui.style());
+
+                if self.tabs[idx].editor_split && self.split_tab.is_none() {
+                    let split_id = egui::Id::new(("sql_editor_split", tab_id));
+                    let available_width = ui.available_width();
+                    let default_width = self.tabs[idx]
+                        .editor_split_size
+                        .unwrap_or(available_width * 0.5)
+                        .clamp(220.0, (available_width - 220.0).max(220.0));
+                    let split = egui::Panel::right(split_id)
+                        .resizable(true)
+                        .default_size(default_width)
+                        .min_size(220.0)
+                        .max_size((available_width - 220.0).max(220.0))
+                        .show_inside(ui, |ui| self.split_sql_editor(ui, &font));
+                    let width = split.response.rect.width();
+                    let dragged = ui
+                        .ctx()
+                        .read_response(split_id.with("__resize"))
+                        .is_some_and(|response| response.dragged());
+                    if self.tabs[idx].editor_split_size.is_none() || dragged {
+                        self.tabs[idx].editor_split_size = Some(width);
+                        if dragged {
+                            self.workspace_dirty = true;
+                        }
+                    }
+                }
 
                 // Autocomplete: while the popup is open, steal its navigation keys before the
                 // editor renders so arrows/Enter/Tab drive the suggestion list instead of the
                 // text cursor. Ctrl+Space force-opens it (also when the prefix is empty).
                 let mut nav = crate::autocomplete::NavKeys::default();
-                if self.autocomplete.open {
+                if self.tabs[idx].editor_assist.autocomplete.open {
                     ui.input_mut(|i| {
                         nav.down |= i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown);
                         nav.up |= i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp);
@@ -1509,8 +2096,8 @@ impl DbGuiApp {
                 // Ghost text (fish-shell autosuggestion): when the popup is closed and a
                 // suggestion was trailing the caret last frame, Tab accepts it. Stolen here,
                 // before the editor, so the keystroke drives the suggestion, not a literal tab.
-                let accept_ghost = !self.autocomplete.open
-                    && self.ghost_suggestion.is_some()
+                let accept_ghost = !self.tabs[idx].editor_assist.autocomplete.open
+                    && self.tabs[idx].editor_assist.ghost_suggestion.is_some()
                     && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
 
                 // Fill the panel's height instead of shrinking to the text: otherwise a long
@@ -1596,6 +2183,17 @@ impl DbGuiApp {
                                 });
                                 let gutter_width =
                                     digits as f32 * digit_width + 14.0 + FOLD_CHEVRON_W;
+                                let editor_id = egui::Id::new(("sql_editor", tab_id, "primary"));
+                                let multi_changed =
+                                    self.apply_multi_cursor_input(ui.ctx(), editor_id);
+                                if !self.tabs[idx].editor_assist.autocomplete.open
+                                    && ui.input_mut(|input| {
+                                        input.consume_key(egui::Modifiers::COMMAND, egui::Key::D)
+                                    })
+                                {
+                                    self.add_next_cursor(ui.ctx(), editor_id);
+                                }
+                                let previous_primary = self.tabs[idx].primary_cursor.clone();
                                 // `.show()` (not `ui.add`) exposes the galley + cursor so the popup can
                                 // anchor under the caret and we can move the caret after an insertion.
                                 let (gutter_rect, output, shifts, refused_undo) = ui
@@ -1622,6 +2220,7 @@ impl DbGuiApp {
                                             &editor_cache.view,
                                         );
                                         let output = egui::TextEdit::multiline(&mut buffer)
+                                            .id(editor_id)
                                             .code_editor()
                                             .frame(egui::Frame::NONE)
                                             .margin(egui::Margin::ZERO)
@@ -1670,9 +2269,12 @@ impl DbGuiApp {
                                 );
 
                                 let resp = &output.response.response;
-                                let editor_id = resp.id;
                                 let focused = resp.has_focus();
-                                let text_changed = resp.changed();
+                                if focused {
+                                    self.tabs[idx].editor_pane = super::EditorPane::Primary;
+                                    self.split_focus = self.split_tab == Some(idx);
+                                }
+                                let text_changed = resp.changed() || multi_changed;
 
                                 // Clicking the `⋯ N lines` stand-in opens what it hides — the
                                 // caret lands inside the marker, which is answer enough.
@@ -1696,6 +2298,9 @@ impl DbGuiApp {
                                     let tab = self.tab_mut();
                                     tab.edits.source = None;
                                     tab.preview = false;
+                                    if !multi_changed {
+                                        tab.extra_cursors.clear();
+                                    }
                                     tab.mark_sql_changed();
                                     self.workspace_dirty = true;
                                 }
@@ -1713,6 +2318,66 @@ impl DbGuiApp {
                                         .pos_from_cursor(c)
                                         .translate(output.galley_pos.to_vec2())
                                 });
+
+                                let source_range = output.cursor_range.map(|range| {
+                                    let sorted = range.as_sorted_char_range();
+                                    editor_cache.view.to_source(sorted.start)
+                                        ..editor_cache.view.to_source_end(sorted.end)
+                                });
+                                if let Some(source_range) = source_range.clone() {
+                                    self.tabs[idx].primary_cursor = source_range;
+                                }
+                                if resp.clicked() {
+                                    let command_click = ui.input(|input| input.modifiers.command);
+                                    if command_click {
+                                        if !self.tabs[idx]
+                                            .extra_cursors
+                                            .iter()
+                                            .any(|range| *range == previous_primary)
+                                        {
+                                            self.tabs[idx].extra_cursors.push(previous_primary);
+                                        }
+                                        self.tabs[idx].folds.clear();
+                                    } else {
+                                        self.clear_extra_cursors();
+                                    }
+                                }
+                                if !self.tabs[idx].extra_cursors.is_empty() {
+                                    let offset = output.galley_pos.to_vec2();
+                                    for range in &self.tabs[idx].extra_cursors {
+                                        let start = editor_cache.view.to_display(range.start);
+                                        let end = editor_cache.view.to_display_clamped(range.end);
+                                        let Some(start) = start else {
+                                            continue;
+                                        };
+                                        let from = output
+                                            .galley
+                                            .pos_from_cursor(egui::text::CCursor::new(start))
+                                            .translate(offset);
+                                        let to = output
+                                            .galley
+                                            .pos_from_cursor(egui::text::CCursor::new(end))
+                                            .translate(offset);
+                                        if range.start != range.end {
+                                            ui.painter().rect_filled(
+                                                egui::Rect::from_min_max(
+                                                    egui::pos2(from.left(), from.top()),
+                                                    egui::pos2(
+                                                        to.right().max(from.right()),
+                                                        from.bottom(),
+                                                    ),
+                                                ),
+                                                egui::CornerRadius::ZERO,
+                                                palette::SELECTION(),
+                                            );
+                                        }
+                                        ui.painter().vline(
+                                            from.left(),
+                                            egui::Rangef::new(from.top(), from.bottom()),
+                                            egui::Stroke::new(1.5, palette::ACCENT()),
+                                        );
+                                    }
+                                }
 
                                 let ctx = ui.ctx().clone();
 
@@ -2110,34 +2775,40 @@ impl DbGuiApp {
         font: &egui::FontId,
         accept: bool,
     ) {
+        let idx = self.active_query_tab;
         // The popup owns the caret area and the Tab key while it's up; no ghost then.
         let (Some(cursor_char), Some(cursor_rect)) = (cursor_char, cursor_rect) else {
-            self.ghost_suggestion = None;
-            self.ghost_key = None;
+            self.tabs[idx].editor_assist.ghost_suggestion = None;
+            self.tabs[idx].editor_assist.ghost_key = None;
             return;
         };
-        if !focused || self.autocomplete.open {
-            self.ghost_suggestion = None;
-            self.ghost_key = None;
+        if !focused || self.tabs[idx].editor_assist.autocomplete.open {
+            self.tabs[idx].editor_assist.ghost_suggestion = None;
+            self.tabs[idx].editor_assist.ghost_key = None;
             return;
         }
 
         // Recompute only when the text or caret moved since the cached suggestion. While the
         // focused editor merely repaints — e.g. the result grid is scrolling — reuse the cached
         // value instead of re-scanning history and the schema every frame.
-        let tab_id = self.tabs[self.active_query_tab].id;
-        let cache_hit = self.ghost_key.as_ref().is_some_and(|(id, sql, caret)| {
-            *id == tab_id && *caret == cursor_char && sql == &self.tabs[self.active_query_tab].sql
-        });
+        let tab_id = self.tabs[idx].id;
+        let cache_hit =
+            self.tabs[idx]
+                .editor_assist
+                .ghost_key
+                .as_ref()
+                .is_some_and(|(id, sql, caret)| {
+                    *id == tab_id && *caret == cursor_char && sql == &self.tabs[idx].sql
+                });
         if !cache_hit {
-            self.ghost_suggestion = {
+            let suggestion = {
                 let (schema, kind) = match self.active() {
                     Some(c) => (Some(&c.schema), Some(c.db.kind())),
                     None => (None, None),
                 };
                 // Only complete from history this tab's own connection produced — never from
                 // another database's queries (whose tables, and SQL dialect, won't match).
-                let conn_id = self.tabs[self.active_query_tab].conn_id.as_deref();
+                let conn_id = self.tabs[idx].conn_id.as_deref();
                 let pool: Vec<&str> = match conn_id {
                     Some(id) => self
                         .suggest_pool
@@ -2147,24 +2818,22 @@ impl DbGuiApp {
                         .collect(),
                     None => Vec::new(),
                 };
-                let sql = &self.tabs[self.active_query_tab].sql;
+                let sql = &self.tabs[idx].sql;
                 crate::ghost::suggest(sql, cursor_char, &pool, schema, kind)
             };
-            self.ghost_key = Some((
-                tab_id,
-                self.tabs[self.active_query_tab].sql.clone(),
-                cursor_char,
-            ));
+            self.tabs[idx].editor_assist.ghost_suggestion = suggestion;
+            self.tabs[idx].editor_assist.ghost_key =
+                Some((tab_id, self.tabs[idx].sql.clone(), cursor_char));
         }
 
-        let Some(remainder) = self.ghost_suggestion.clone() else {
+        let Some(remainder) = self.tabs[idx].editor_assist.ghost_suggestion.clone() else {
             return;
         };
 
         if accept {
             self.accept_ghost(ctx, editor_id, cursor_char, &remainder);
-            self.ghost_suggestion = None;
-            self.ghost_key = None;
+            self.tabs[idx].editor_assist.ghost_suggestion = None;
+            self.tabs[idx].editor_assist.ghost_key = None;
             return;
         }
 
@@ -2178,7 +2847,7 @@ impl DbGuiApp {
             font.clone(),
             palette::TEXT_FAINT(),
         );
-        self.ghost_suggestion = Some(remainder);
+        self.tabs[idx].editor_assist.ghost_suggestion = Some(remainder);
     }
 
     /// Re-check the editor's SQL for syntax errors and mark the first one: a red squiggle
@@ -2202,19 +2871,20 @@ impl DbGuiApp {
         /// Height and half-period of the squiggle, in points.
         const WAVE: f32 = 1.7;
 
+        let idx = self.active_query_tab;
         let now = ui.input(|i| i.time);
-        let stale = self.tabs[self.active_query_tab].sql != self.syntax_checked;
-        if text_changed || (stale && self.syntax_dirty_at.is_none()) {
-            self.syntax_dirty_at = Some(now);
+        let stale = self.tabs[idx].sql != self.tabs[idx].editor_assist.syntax_checked;
+        if text_changed || (stale && self.tabs[idx].editor_assist.syntax_dirty_at.is_none()) {
+            self.tabs[idx].editor_assist.syntax_dirty_at = Some(now);
         }
-        if let Some(since) = self.syntax_dirty_at {
+        if let Some(since) = self.tabs[idx].editor_assist.syntax_dirty_at {
             let waited = now - since;
             if waited >= DEBOUNCE {
                 let kind = self.active().map(|c| c.db.kind());
-                let sql = self.tabs[self.active_query_tab].sql.clone();
-                self.syntax_error = dbcore::check_syntax(kind, &sql);
-                self.syntax_checked = sql;
-                self.syntax_dirty_at = None;
+                let sql = self.tabs[idx].sql.clone();
+                self.tabs[idx].editor_assist.syntax_error = dbcore::check_syntax(kind, &sql);
+                self.tabs[idx].editor_assist.syntax_checked = sql;
+                self.tabs[idx].editor_assist.syntax_dirty_at = None;
             } else {
                 // Nothing else would repaint an idle editor, so ask for the frame that runs
                 // the check once the pause is long enough.
@@ -2224,12 +2894,12 @@ impl DbGuiApp {
             }
         }
 
-        let Some(error) = self.syntax_error.as_ref() else {
+        let Some(error) = self.tabs[idx].editor_assist.syntax_error.as_ref() else {
             return;
         };
         // The check ran against this exact text (the debounce above guarantees it), so the
         // range still indexes the buffer on screen.
-        let sql = &self.tabs[self.active_query_tab].sql;
+        let sql = &self.tabs[idx].sql;
         if error_under_caret(&error.range, cursor_char) {
             return;
         }
@@ -2441,9 +3111,10 @@ impl DbGuiApp {
         cursor_rect: Option<egui::Rect>,
         nav: crate::autocomplete::NavKeys,
     ) {
+        let tab_idx = self.active_query_tab;
         // Esc dismisses without touching the text; the editor never saw the keystroke.
         if nav.dismiss {
-            self.autocomplete.open = false;
+            self.tabs[tab_idx].editor_assist.autocomplete.open = false;
             return;
         }
 
@@ -2451,8 +3122,8 @@ impl DbGuiApp {
         // popup — which strips the editor's focus that same frame, nulling the caret — can
         // still recompute and resolve the insertion point.
         if let (Some(cc), Some(cr)) = (cursor_char, cursor_rect) {
-            self.autocomplete.caret_char = cc;
-            self.autocomplete.anchor = cr;
+            self.tabs[tab_idx].editor_assist.autocomplete.caret_char = cc;
+            self.tabs[tab_idx].editor_assist.autocomplete.anchor = cr;
         }
 
         // Open while actively typing (or on a forced trigger); a caret that merely sits in a
@@ -2462,7 +3133,7 @@ impl DbGuiApp {
         // popup is already open and following the prefix. Recomputing every focused frame meant
         // re-scanning the whole schema even while idle — e.g. when the grid scrolls and the
         // still-focused editor keeps repainting — which made scrolling janky on big schemas.
-        if focused && (typing || self.autocomplete.open) {
+        if focused && (typing || self.tabs[tab_idx].editor_assist.autocomplete.open) {
             // Recompute against the live text. Borrow the connection's schema and the tab's
             // SQL immutably together, then hand ownership back so the borrows end.
             let completion = {
@@ -2470,10 +3141,10 @@ impl DbGuiApp {
                     Some(c) => (Some(&c.schema), Some(c.db.kind())),
                     None => (None, None),
                 };
-                let sql = &self.tabs[self.active_query_tab].sql;
+                let sql = &self.tabs[tab_idx].sql;
                 crate::autocomplete::complete(
                     sql,
-                    self.autocomplete.caret_char,
+                    self.tabs[tab_idx].editor_assist.autocomplete.caret_char,
                     schema,
                     kind,
                     force,
@@ -2485,52 +3156,64 @@ impl DbGuiApp {
                     // A single append-only match reads more naturally as inline ghost text;
                     // Ctrl+Space still force-opens the popup when the user explicitly asks.
                     if !force && crate::autocomplete::inline_suffix(&c).is_some() {
-                        self.autocomplete.open = false;
+                        self.tabs[tab_idx].editor_assist.autocomplete.open = false;
                         return;
                     }
-                    self.autocomplete.items = c.items;
-                    self.autocomplete.replace_start = c.replace_start;
-                    self.autocomplete.prefix = c.prefix;
-                    self.autocomplete.open = true;
-                    self.autocomplete.selected = self
+                    self.tabs[tab_idx].editor_assist.autocomplete.items = c.items;
+                    self.tabs[tab_idx].editor_assist.autocomplete.replace_start = c.replace_start;
+                    self.tabs[tab_idx].editor_assist.autocomplete.prefix = c.prefix;
+                    self.tabs[tab_idx].editor_assist.autocomplete.open = true;
+                    self.tabs[tab_idx].editor_assist.autocomplete.selected = self.tabs[tab_idx]
+                        .editor_assist
                         .autocomplete
                         .selected
-                        .min(self.autocomplete.items.len() - 1);
+                        .min(self.tabs[tab_idx].editor_assist.autocomplete.items.len() - 1);
                 }
                 None => {
-                    self.autocomplete.open = false;
+                    self.tabs[tab_idx].editor_assist.autocomplete.open = false;
                 }
             }
         }
         // When not focused we leave `open`/`items` as they were: the popup keeps showing so a
         // click in progress can land on a row. The click-outside check below closes it.
 
-        if !self.autocomplete.open {
+        if !self.tabs[tab_idx].editor_assist.autocomplete.open {
             return;
         }
 
         // Apply list navigation consumed before the editor rendered.
-        let len = self.autocomplete.items.len();
+        let len = self.tabs[tab_idx].editor_assist.autocomplete.items.len();
         if nav.down {
-            self.autocomplete.selected = (self.autocomplete.selected + 1) % len;
+            self.tabs[tab_idx].editor_assist.autocomplete.selected =
+                (self.tabs[tab_idx].editor_assist.autocomplete.selected + 1) % len;
         }
         if nav.up {
-            self.autocomplete.selected = (self.autocomplete.selected + len - 1) % len;
+            self.tabs[tab_idx].editor_assist.autocomplete.selected =
+                (self.tabs[tab_idx].editor_assist.autocomplete.selected + len - 1) % len;
         }
 
-        let anchor = self.autocomplete.anchor;
-        let (event, popup_rect) =
-            crate::autocomplete::show_popup(ctx, &self.autocomplete, anchor, nav.up || nav.down);
+        let anchor = self.tabs[tab_idx].editor_assist.autocomplete.anchor;
+        let (event, popup_rect) = crate::autocomplete::show_popup(
+            ctx,
+            &self.tabs[tab_idx].editor_assist.autocomplete,
+            anchor,
+            nav.up || nav.down,
+        );
 
         let accept = if nav.accept {
-            Some(self.autocomplete.selected)
+            Some(self.tabs[tab_idx].editor_assist.autocomplete.selected)
         } else if let crate::autocomplete::Event::Accept(i) = event {
             Some(i)
         } else {
             None
         };
         if let Some(idx) = accept {
-            self.accept_completion(ctx, editor_id, idx, self.autocomplete.caret_char);
+            self.accept_completion(
+                ctx,
+                editor_id,
+                idx,
+                self.tabs[tab_idx].editor_assist.autocomplete.caret_char,
+            );
             return;
         }
 
@@ -2546,7 +3229,7 @@ impl DbGuiApp {
                         .is_some_and(|p| popup_rect.contains(p))
             });
             if !keep {
-                self.autocomplete.open = false;
+                self.tabs[tab_idx].editor_assist.autocomplete.open = false;
             }
         }
     }
@@ -2559,16 +3242,23 @@ impl DbGuiApp {
         idx: usize,
         cursor_char: usize,
     ) {
-        let Some(suggestion) = self.autocomplete.items.get(idx).map(|s| s.insert.clone()) else {
+        let tab_idx = self.active_query_tab;
+        let Some(suggestion) = self.tabs[tab_idx]
+            .editor_assist
+            .autocomplete
+            .items
+            .get(idx)
+            .map(|s| s.insert.clone())
+        else {
             return;
         };
-        let start = self.autocomplete.replace_start;
-        let tab = &mut self.tabs[self.active_query_tab];
+        let start = self.tabs[tab_idx].editor_assist.autocomplete.replace_start;
+        let tab = &mut self.tabs[tab_idx];
         let byte_start = char_to_byte(&tab.sql, start);
         let byte_cursor = char_to_byte(&tab.sql, cursor_char);
         // Guard against indices that went stale if the text shifted under us this frame.
         if byte_start > byte_cursor || byte_cursor > tab.sql.len() {
-            self.autocomplete.open = false;
+            self.tabs[tab_idx].editor_assist.autocomplete.open = false;
             return;
         }
         tab.sql.replace_range(byte_start..byte_cursor, &suggestion);
@@ -2577,7 +3267,7 @@ impl DbGuiApp {
         tab.preview = false;
         self.workspace_dirty = true;
         self.shift_folds(
-            self.active_query_tab,
+            tab_idx,
             start,
             suggestion.chars().count() as isize - (cursor_char - start) as isize,
         );
@@ -2593,7 +3283,7 @@ impl DbGuiApp {
             state.store(ctx, editor_id);
         }
         ctx.memory_mut(|m| m.request_focus(editor_id));
-        self.autocomplete.open = false;
+        self.tabs[tab_idx].editor_assist.autocomplete.open = false;
     }
 
     /// Right-hand Details panel: the selected row's columns and values.
@@ -3102,18 +3792,9 @@ impl DbGuiApp {
         }
     }
 
-    /// The History tab: connection scope, search, then the executed-statement list.
+    /// The History tab: search, then the executed-statement list.
     fn sidebar_history(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        let connection = self
-            .active_connection_config()
-            .map(|config| (config.name.clone(), config.kind));
-        sidebar_connection_scope(
-            ui,
-            connection
-                .as_ref()
-                .map(|(name, kind)| (name.as_str(), *kind)),
-        );
-        ui.add_space(5.0);
+        let has_connection = self.active_connection_config().is_some();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let trash_w = 28.0;
@@ -3127,7 +3808,7 @@ impl DbGuiApp {
             );
             let clear =
                 components::icon_button(ui, icons::trash(), "Delete history for this connection");
-            if clear.clicked() && connection.is_some() {
+            if clear.clicked() && has_connection {
                 actions.push(Action::ClearHistory);
             }
         });
@@ -3250,8 +3931,8 @@ impl DbGuiApp {
         if !ui.is_rect_visible(row_rect) && state.openness(ui.ctx()) <= 0.0 {
             return;
         }
-        let row_resp =
-            row_resp.on_hover_text("Click to preview · drag to reorder · double-click to open");
+        let row_resp = row_resp
+            .on_hover_text("Click to preview · drag to reorder or split · double-click to open");
         let payload = SchemaTableDrag {
             conn_id: active.config_id.clone(),
             schema: table.schema.clone(),
@@ -3677,11 +4358,8 @@ impl DbGuiApp {
             });
 
         match event {
-            Some(FilterEvent::Apply) => self.tabs[idx].recompute_view(),
-            Some(FilterEvent::Clear) => {
-                self.tabs[idx].filter.reset();
-                self.tabs[idx].recompute_view();
-            }
+            Some(FilterEvent::Apply) => self.apply_result_filter(idx, false),
+            Some(FilterEvent::Clear) => self.apply_result_filter(idx, true),
             None => {}
         }
     }
@@ -4443,11 +5121,11 @@ impl DbGuiApp {
                     card_rect = card.response.rect;
                 });
 
-                // Soft ++ mark beside the card stack (skipped when the window is too
-                // narrow for it to sit clear of the cards).
+                // Landscape illustration beside the card stack (skipped when the
+                // window is too narrow for it to sit clear of the cards).
                 let mark = egui::Rect::from_min_size(
-                    egui::pos2(card_rect.right() + 24.0, full.bottom() - 142.0),
-                    egui::vec2(150.0, 150.0),
+                    egui::pos2(card_rect.right() + 24.0, full.bottom() - 150.0),
+                    egui::vec2(250.0, 150.0),
                 );
                 if mark.right() < full.right() - 8.0 {
                     ui.scope_builder(egui::UiBuilder::new().max_rect(mark), |ui| {
@@ -4631,8 +5309,8 @@ impl DbGuiApp {
         }
     }
 
-    /// Settings workspace shown behind a selected utility tab. A fixed category rail keeps
-    /// preferences navigable as the list grows, while the right side owns the active section.
+    /// Settings workspace shown behind a selected utility tab. The category rail and active
+    /// section share one centered workspace so neither side is pinned to the window edge.
     pub(super) fn draw_settings_page(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
         let ctx = root.ctx().clone();
         if ctx.input(|i| {
@@ -4657,53 +5335,80 @@ impl DbGuiApp {
             .themes
             .entries()
             .iter()
-            .map(|e| {
-                (
-                    e.key.clone(),
-                    e.name.clone(),
-                    e.builtin,
-                    e.author.clone(),
-                    e.theme.base,
-                    e.theme.surface,
-                    e.theme.accent,
-                )
-            })
+            .map(|e| (e.key.clone(), e.name.clone(), e.builtin, e.author.clone()))
             .collect();
         let themes_dir = dbcore::config::themes_dir()
             .ok()
             .map(|p| p.display().to_string());
 
+        let outer_gutter = (root.available_width() * 0.028).clamp(16.0, 56.0);
+        let gutter_frame = || egui::Frame::new().fill(palette::BASE());
+        egui::Panel::left("settings_left_gutter")
+            .resizable(false)
+            .exact_size(outer_gutter)
+            .frame(gutter_frame())
+            .show_inside(root, |_| {});
+        egui::Panel::right("settings_right_gutter")
+            .resizable(false)
+            .exact_size(outer_gutter)
+            .frame(gutter_frame())
+            .show_inside(root, |_| {});
+
         egui::Panel::left("settings_category_rail")
             .resizable(false)
-            .exact_size(210.0)
+            .exact_size(280.0)
             .frame(
                 egui::Frame::new()
                     .fill(palette::PANEL())
-                    .inner_margin(egui::Margin::symmetric(14, 18)),
+                    .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                    .inner_margin(egui::Margin::symmetric(24, 34)),
             )
             .show_inside(root, |ui| {
-                ui.label(
-                    egui::RichText::new("Settings")
-                        .size(18.0)
-                        .strong()
-                        .color(palette::TEXT()),
-                );
-                ui.add_space(3.0);
-                ui.label(
-                    egui::RichText::new("Workspace preferences")
-                        .size(11.5)
-                        .color(palette::TEXT_FAINT()),
-                );
-                ui.add_space(22.0);
+                let nav_width = 220.0_f32.min(ui.available_width());
+                let nav_inset = ((ui.available_width() - nav_width) * 0.5).max(0.0);
+                ui.add_space(18.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(nav_inset);
+                    ui.vertical(|ui| {
+                        ui.set_width(nav_width);
+                        ui.label(
+                            egui::RichText::new("Settings")
+                                .size(21.0)
+                                .strong()
+                                .color(palette::TEXT()),
+                        );
+                        ui.add_space(3.0);
+                        ui.label(
+                            egui::RichText::new("Workspace preferences")
+                                .size(12.0)
+                                .color(palette::TEXT_WEAK()),
+                        );
+                        ui.add_space(30.0);
 
-                ui.spacing_mut().item_spacing.y = 6.0;
-                for (candidate, label) in [
-                    (SettingsSection::General, "General"),
-                    (SettingsSection::Appearance, "Appearance"),
-                    (SettingsSection::Privacy, "Privacy"),
-                ] {
-                    ui.selectable_value(&mut section, candidate, label);
-                }
+                        ui.spacing_mut().item_spacing.y = 4.0;
+                        settings_nav_item(
+                            ui,
+                            &mut section,
+                            SettingsSection::General,
+                            "General",
+                            icons::settings(),
+                        );
+                        settings_nav_item(
+                            ui,
+                            &mut section,
+                            SettingsSection::Appearance,
+                            "Appearance",
+                            icons::fit(),
+                        );
+                        settings_nav_item(
+                            ui,
+                            &mut section,
+                            SettingsSection::Privacy,
+                            "Privacy",
+                            icons::key(),
+                        );
+                    });
+                });
             });
 
         egui::CentralPanel::default()
@@ -4719,7 +5424,7 @@ impl DbGuiApp {
                     .show(ui, |ui| {
                         ui.add_space(38.0);
                         let available = ui.available_width();
-                        let content_w = (available - 64.0).clamp(320.0, 780.0);
+                        let content_w = (available - 80.0).clamp(340.0, 980.0);
                         let inset = ((available - content_w) / 2.0).max(0.0);
 
                         ui.horizontal(|ui| {
@@ -4742,14 +5447,14 @@ impl DbGuiApp {
                                 };
                                 ui.label(
                                     egui::RichText::new(page_title)
-                                        .size(28.0)
+                                        .size(30.0)
                                         .strong()
                                         .color(palette::TEXT()),
                                 );
                                 ui.add_space(4.0);
                                 ui.label(
                                     egui::RichText::new(page_description)
-                                        .size(13.0)
+                                        .size(14.0)
                                         .color(palette::TEXT_WEAK()),
                                 );
 
@@ -4757,73 +5462,50 @@ impl DbGuiApp {
                                     SettingsSection::General => {
                                         ui.add_space(30.0);
                                         ui.label(
-                                            egui::RichText::new("Startup")
-                                                .size(13.0)
-                                                .strong()
+                                            egui::RichText::new("Workspace")
+                                                .size(14.0)
                                                 .color(palette::TEXT_WEAK()),
                                         );
                                         ui.add_space(10.0);
-                                        egui::Frame::new()
-                                            .fill(palette::PANEL())
-                                            .stroke(egui::Stroke::new(1.0, palette::BORDER()))
-                                            .corner_radius(egui::CornerRadius::same(14))
-                                            .inner_margin(egui::Margin::symmetric(18, 14))
-                                            .show(ui, |ui| {
-                                                ui.set_width(content_w - 36.0);
-                                                ui.horizontal(|ui| {
-                                                    ui.checkbox(&mut update_check_enabled, "");
-                                                    ui.add_space(6.0);
-                                                    ui.vertical(|ui| {
-                                                        ui.label(
-                                                            egui::RichText::new(
-                                                                "Check for updates at launch",
-                                                            )
-                                                            .size(13.0)
-                                                            .color(palette::TEXT()),
-                                                        );
-                                                        ui.add_space(2.0);
-                                                        ui.label(
-                                                            egui::RichText::new(
-                                                                "Ask GitHub for the latest release when plusplus starts. No telemetry is sent.",
-                                                            )
-                                                            .size(11.5)
-                                                            .color(palette::TEXT_WEAK()),
-                                                        );
-                                                    });
-                                                });
-                                            });
-                                        ui.add_space(24.0);
-                                        ui.label(
-                                            egui::RichText::new("Query results")
-                                                .size(13.0)
-                                                .strong()
-                                                .color(palette::TEXT_WEAK()),
+                                        settings_toggle_row(
+                                            ui,
+                                            &mut update_check_enabled,
+                                            "Check for updates at launch",
+                                            "Ask GitHub for the latest release. No telemetry is sent.",
                                         );
-                                        ui.add_space(10.0);
-                                        egui::Frame::new()
-                                            .fill(palette::PANEL())
-                                            .stroke(egui::Stroke::new(1.0, palette::BORDER()))
-                                            .corner_radius(egui::CornerRadius::same(14))
-                                            .inner_margin(egui::Margin::symmetric(18, 14))
-                                            .show(ui, |ui| {
-                                                ui.set_width(content_w - 36.0);
-                                                ui.label(
-                                                    egui::RichText::new("Global memory budget")
-                                                        .size(13.0)
-                                                        .color(palette::TEXT()),
-                                                );
-                                                ui.add_space(4.0);
-                                                ui.label(
-                                                    egui::RichText::new(
-                                                        "Shared by results in every tab. Inactive least-recently-used results are released first; staged edits are protected.",
-                                                    )
-                                                    .size(11.5)
-                                                    .color(palette::TEXT_WEAK()),
-                                                );
-                                                ui.add_space(8.0);
-                                                ui.add(
+                                        ui.add_space(12.0);
+                                        ui.separator();
+                                        ui.add_space(14.0);
+                                        let row_width = ui.available_width();
+                                        let labels = |ui: &mut egui::Ui| {
+                                            ui.label(
+                                                egui::RichText::new("Global memory budget")
+                                                    .size(14.0)
+                                                    .color(palette::TEXT()),
+                                            );
+                                            ui.add_space(3.0);
+                                            ui.label(
+                                                egui::RichText::new(
+                                                    "Shared by results in every tab. Inactive results are released first.",
+                                                )
+                                                .size(12.0)
+                                                .color(palette::TEXT_WEAK()),
+                                            );
+                                        };
+                                        let slider = |ui: &mut egui::Ui,
+                                                      value: &mut u32,
+                                                      width: f32| {
+                                            ui.scope(|ui| {
+                                                let visuals = ui.visuals_mut();
+                                                visuals.extreme_bg_color = palette::BASE();
+                                                visuals.widgets.inactive.bg_stroke =
+                                                    egui::Stroke::NONE;
+                                                visuals.widgets.hovered.bg_stroke =
+                                                    egui::Stroke::NONE;
+                                                ui.add_sized(
+                                                    egui::vec2(width, 28.0),
                                                     egui::Slider::new(
-                                                        &mut result_memory_budget_mb,
+                                                        value,
                                                         MIN_RESULT_MEMORY_BUDGET_MB
                                                             ..=MAX_RESULT_MEMORY_BUDGET_MB,
                                                     )
@@ -4831,173 +5513,137 @@ impl DbGuiApp {
                                                     .logarithmic(true),
                                                 );
                                             });
+                                        };
+                                        if row_width >= 520.0 {
+                                            ui.horizontal(|ui| {
+                                                ui.allocate_ui_with_layout(
+                                                    egui::vec2(row_width - 262.0, 56.0),
+                                                    egui::Layout::top_down(egui::Align::Min),
+                                                    |ui| {
+                                                        ui.set_min_width(row_width - 262.0);
+                                                        labels(ui);
+                                                    },
+                                                );
+                                                slider(ui, &mut result_memory_budget_mb, 246.0);
+                                            });
+                                        } else {
+                                            labels(ui);
+                                            ui.add_space(10.0);
+                                            slider(ui, &mut result_memory_budget_mb, row_width);
+                                        }
                                     }
                                     SettingsSection::Appearance => {
                                 ui.add_space(30.0);
                                 ui.label(
-                                    egui::RichText::new("Theme")
-                                        .size(13.0)
-                                        .strong()
+                                    egui::RichText::new("Personalization")
+                                        .size(14.0)
                                         .color(palette::TEXT_WEAK()),
                                 );
-                                ui.add_space(3.0);
-                                ui.label(
-                                    egui::RichText::new(
-                                        "Choose a palette for the workspace and SQL editor. Changes apply immediately.",
-                                    )
-                                    .size(12.0)
-                                    .color(palette::TEXT_WEAK()),
-                                );
-                                ui.add_space(12.0);
+                                ui.add_space(10.0);
 
-                                egui::Frame::new()
-                                    .fill(palette::PANEL())
-                                    .stroke(egui::Stroke::new(1.0, palette::BORDER()))
-                                    .corner_radius(egui::CornerRadius::same(14))
-                                    .inner_margin(egui::Margin::same(16))
-                                    .show(ui, |ui| {
-                                        ui.set_width(content_w - 32.0);
-                                        let columns: usize = if ui.available_width() >= 560.0 {
-                                            2
-                                        } else {
-                                            1
+                                let row_width = ui.available_width();
+                                        let selected_theme = options
+                                            .iter()
+                                            .find(|(key, _, _, _)| *key == chosen)
+                                            .map_or("Default", |(_, label, _, _)| label.as_str())
+                                            .to_string();
+                                        let theme_labels = |ui: &mut egui::Ui| {
+                                            ui.label(
+                                                egui::RichText::new("Theme")
+                                                    .size(14.0)
+                                                    .color(palette::TEXT()),
+                                            );
+                                            ui.add_space(3.0);
+                                            ui.label(
+                                                egui::RichText::new(
+                                                    "Choose a palette for the workspace and SQL editor.",
+                                                )
+                                                .size(12.0)
+                                                .color(palette::TEXT_WEAK()),
+                                            );
                                         };
-                                        let gap = 10.0;
-                                        let card_w = (ui.available_width()
-                                            - gap * (columns.saturating_sub(1) as f32))
-                                            / columns as f32;
-
-                                        for row in options.chunks(columns) {
-                                            ui.horizontal(|ui| {
-                                                ui.spacing_mut().item_spacing.x = gap;
-                                                for (
-                                                    key,
-                                                    label,
-                                                    builtin,
-                                                    author,
-                                                    base,
-                                                    surface,
-                                                    accent,
-                                                ) in row
-                                                {
-                                                    let (rect, resp) = ui.allocate_exact_size(
-                                                        egui::vec2(card_w, 66.0),
-                                                        egui::Sense::click(),
-                                                    );
-                                                    let selected = *key == chosen;
-                                                    let activate = resp.clicked()
-                                                        || (resp.has_focus()
-                                                            && ui.input(|i| {
-                                                                i.key_pressed(egui::Key::Enter)
-                                                            }));
-                                                    if activate {
-                                                        chosen = key.clone();
+                                        let theme_combo = |ui: &mut egui::Ui,
+                                                           chosen: &mut String,
+                                                           width: f32| {
+                                            egui::ComboBox::from_id_salt("appearance_theme")
+                                                .width(width)
+                                                .selected_text(&selected_theme)
+                                                .show_ui(ui, |ui| {
+                                                    for (key, label, builtin, author) in &options {
+                                                        let detail = if *builtin {
+                                                            label.clone()
+                                                        } else if let Some(author) = author {
+                                                            format!("{label} · {author}")
+                                                        } else {
+                                                            format!("{label} · Custom")
+                                                        };
+                                                        ui.selectable_value(
+                                                            chosen,
+                                                            key.clone(),
+                                                            detail,
+                                                        );
                                                     }
-
-                                                    resp.widget_info(|| {
-                                                        egui::WidgetInfo::selected(
-                                                            egui::WidgetType::RadioButton,
-                                                            true,
-                                                            selected,
-                                                            label,
-                                                        )
-                                                    });
-                                                    let fill = if selected {
-                                                        palette::SELECTION()
-                                                    } else if resp.hovered() {
-                                                        palette::SURFACE_HOVER()
-                                                    } else {
-                                                        palette::SURFACE()
-                                                    };
-                                                    let stroke = if selected {
-                                                        egui::Stroke::new(
-                                                            1.5,
-                                                            palette::ACCENT(),
-                                                        )
-                                                    } else {
-                                                        egui::Stroke::new(
-                                                            1.0,
-                                                            palette::BORDER(),
-                                                        )
-                                                    };
-                                                    ui.painter().rect(
-                                                        rect,
-                                                        egui::CornerRadius::same(10),
-                                                        fill,
-                                                        stroke,
-                                                        egui::StrokeKind::Inside,
-                                                    );
-
-                                                    let preview = egui::Rect::from_min_size(
-                                                        rect.min + egui::vec2(12.0, 12.0),
-                                                        egui::vec2(42.0, 42.0),
-                                                    );
-                                                    ui.painter().rect_filled(
-                                                        preview,
-                                                        egui::CornerRadius::same(8),
-                                                        *base,
-                                                    );
-                                                    ui.painter().rect_filled(
-                                                        egui::Rect::from_min_max(
-                                                            egui::pos2(
-                                                                preview.left() + 6.0,
-                                                                preview.center().y,
-                                                            ),
-                                                            egui::pos2(
-                                                                preview.right() - 6.0,
-                                                                preview.bottom() - 6.0,
-                                                            ),
-                                                        ),
-                                                        egui::CornerRadius::same(4),
-                                                        *surface,
-                                                    );
-                                                    ui.painter().circle_filled(
-                                                        preview.right_top()
-                                                            + egui::vec2(-9.0, 9.0),
-                                                        4.0,
-                                                        *accent,
-                                                    );
-
-                                                    let text_x = preview.right() + 12.0;
-                                                    ui.painter().text(
-                                                        egui::pos2(text_x, rect.top() + 22.0),
-                                                        egui::Align2::LEFT_CENTER,
-                                                        label,
-                                                        egui::FontId::proportional(13.0),
-                                                        palette::TEXT(),
-                                                    );
-                                                    let detail = if *builtin {
-                                                        "Built in".to_string()
-                                                    } else if let Some(author) = author {
-                                                        format!("Custom · {author}")
-                                                    } else {
-                                                        "Custom".to_string()
-                                                    };
-                                                    ui.painter().text(
-                                                        egui::pos2(text_x, rect.top() + 44.0),
-                                                        egui::Align2::LEFT_CENTER,
-                                                        detail,
-                                                        egui::FontId::proportional(11.0),
-                                                        palette::TEXT_FAINT(),
-                                                    );
-                                                }
+                                                });
+                                        };
+                                        if row_width >= 540.0 {
+                                            ui.horizontal(|ui| {
+                                                ui.allocate_ui_with_layout(
+                                                    egui::vec2(row_width - 280.0, 50.0),
+                                                    egui::Layout::top_down(egui::Align::Min),
+                                                    |ui| {
+                                                        ui.set_min_width(row_width - 280.0);
+                                                        theme_labels(ui);
+                                                    },
+                                                );
+                                                ui.with_layout(
+                                                    egui::Layout::right_to_left(
+                                                        egui::Align::Center,
+                                                    ),
+                                                    |ui| theme_combo(ui, &mut chosen, 250.0),
+                                                );
                                             });
-                                            ui.add_space(gap);
+                                        } else {
+                                            theme_labels(ui);
+                                            ui.add_space(8.0);
+                                            theme_combo(ui, &mut chosen, row_width);
                                         }
 
-                                        ui.add_space(2.0);
+                                        ui.add_space(14.0);
+                                        ui.separator();
+                                        ui.add_space(14.0);
                                         ui.horizontal(|ui| {
-                                            if components::Btn::new("Reload themes")
+                                            ui.allocate_ui_with_layout(
+                                                egui::vec2(
+                                                    (row_width - 150.0).max(180.0),
+                                                    44.0,
+                                                ),
+                                                egui::Layout::top_down(egui::Align::Min),
+                                                |ui| {
+                                                    ui.set_min_width(
+                                                        (row_width - 150.0).max(180.0),
+                                                    );
+                                                    ui.label(
+                                                        egui::RichText::new("Custom themes")
+                                                            .size(14.0)
+                                                            .color(palette::TEXT()),
+                                                    );
+                                                    ui.add_space(3.0);
+                                                    ui.label(
+                                                        egui::RichText::new(
+                                                            "Rescan the local themes folder.",
+                                                        )
+                                                        .size(12.0)
+                                                        .color(palette::TEXT_WEAK()),
+                                                    );
+                                                },
+                                            );
+                                            if components::Btn::new("Reload")
                                                 .icon(icons::refresh())
                                                 .show(ui)
                                                 .on_hover_text(
                                                     themes_dir
                                                         .as_deref()
-                                                        .map(|d| {
-                                                            format!(
-                                                                "Drop *.json theme files in:\n{d}"
-                                                            )
-                                                        })
+                                                        .map(|d| format!("Theme folder:\n{d}"))
                                                         .unwrap_or_else(|| {
                                                             "Re-scan the themes folder".to_string()
                                                         }),
@@ -5006,43 +5652,17 @@ impl DbGuiApp {
                                             {
                                                 reload_themes = true;
                                             }
-                                            ui.add_space(4.0);
-                                            ui.label(
-                                                egui::RichText::new(
-                                                    "Custom themes appear here after reloading.",
-                                                )
-                                                .size(11.0)
-                                                .color(palette::TEXT_FAINT()),
-                                            );
                                         });
-                                    });
 
-                                    ui.add_space(24.0);
+                                    ui.add_space(28.0);
                                     ui.label(
                                         egui::RichText::new("Typography")
-                                            .size(13.0)
-                                            .strong()
+                                            .size(14.0)
                                             .color(palette::TEXT_WEAK()),
                                     );
-                                    ui.add_space(3.0);
-                                    ui.label(
-                                        egui::RichText::new(
-                                            "Choose separate fonts for the interface and code. Imported fonts stay on this device.",
-                                        )
-                                        .size(12.0)
-                                        .color(palette::TEXT_WEAK()),
-                                    );
-                                    ui.add_space(12.0);
+                                    ui.add_space(10.0);
 
-                                    egui::Frame::new()
-                                        .fill(palette::PANEL())
-                                        .stroke(egui::Stroke::new(1.0, palette::BORDER()))
-                                        .corner_radius(egui::CornerRadius::same(14))
-                                        .inner_margin(egui::Margin::same(16))
-                                        .show(ui, |ui| {
-                                            ui.set_width(content_w - 32.0);
-
-                                            for (id, title, description, selection, default) in [
+                                    for (id, title, description, selection, default) in [
                                                 (
                                                     "interface_font",
                                                     "Interface font",
@@ -5055,34 +5675,40 @@ impl DbGuiApp {
                                                     "Editor & data font",
                                                     "SQL, values and code-like metadata",
                                                     &mut code_font,
-                                                    "JetBrains Mono (built in)",
+                                                    "Same as interface",
                                                 ),
                                             ] {
-                                                ui.horizontal(|ui| {
-                                                    ui.vertical(|ui| {
-                                                        ui.set_width(230.0);
-                                                        ui.label(
-                                                            egui::RichText::new(title)
-                                                                .size(13.0)
-                                                                .color(palette::TEXT()),
-                                                        );
-                                                        ui.label(
-                                                            egui::RichText::new(description)
-                                                                .size(11.0)
-                                                                .color(palette::TEXT_FAINT()),
-                                                        );
-                                                    });
-                                                    let selected = selection
-                                                        .as_deref()
-                                                        .and_then(|key| {
-                                                            custom_fonts
-                                                                .iter()
-                                                                .find(|font| font.key == key)
-                                                        })
-                                                        .map_or(default, |font| font.label.as_str());
+                                                let row_width = ui.available_width();
+                                                let selected = selection
+                                                    .as_deref()
+                                                    .and_then(|key| {
+                                                        custom_fonts
+                                                            .iter()
+                                                            .find(|font| font.key == key)
+                                                    })
+                                                    .map_or_else(
+                                                        || default.to_string(),
+                                                        |font| font.label.clone(),
+                                                    );
+                                                let labels = |ui: &mut egui::Ui| {
+                                                    ui.label(
+                                                        egui::RichText::new(title)
+                                                            .size(14.0)
+                                                            .color(palette::TEXT()),
+                                                    );
+                                                    ui.add_space(3.0);
+                                                    ui.label(
+                                                        egui::RichText::new(description)
+                                                            .size(12.0)
+                                                            .color(palette::TEXT_WEAK()),
+                                                    );
+                                                };
+                                                let combo = |ui: &mut egui::Ui,
+                                                             selection: &mut Option<String>,
+                                                             width: f32| {
                                                     egui::ComboBox::from_id_salt(id)
-                                                        .width(250.0)
-                                                        .selected_text(selected)
+                                                        .width(width)
+                                                        .selected_text(&selected)
                                                         .show_ui(ui, |ui| {
                                                             ui.selectable_value(
                                                                 selection,
@@ -5097,13 +5723,80 @@ impl DbGuiApp {
                                                                 );
                                                             }
                                                         });
-                                                });
+                                                };
+                                                if row_width >= 540.0 {
+                                                    ui.horizontal(|ui| {
+                                                        ui.allocate_ui_with_layout(
+                                                            egui::vec2(row_width - 280.0, 50.0),
+                                                            egui::Layout::top_down(
+                                                                egui::Align::Min,
+                                                            ),
+                                                            |ui| {
+                                                                ui.set_min_width(
+                                                                    row_width - 280.0,
+                                                                );
+                                                                labels(ui);
+                                                            },
+                                                        );
+                                                        ui.with_layout(
+                                                            egui::Layout::right_to_left(
+                                                                egui::Align::Center,
+                                                            ),
+                                                            |ui| combo(ui, selection, 250.0),
+                                                        );
+                                                    });
+                                                } else {
+                                                    labels(ui);
+                                                    ui.add_space(8.0);
+                                                    combo(ui, selection, row_width);
+                                                }
                                                 if id == "interface_font" {
-                                                    ui.add_space(10.0);
+                                                    ui.add_space(14.0);
                                                     ui.separator();
-                                                    ui.add_space(10.0);
+                                                    ui.add_space(14.0);
                                                 }
                                             }
+
+                                            ui.add_space(14.0);
+                                            ui.separator();
+                                            ui.add_space(14.0);
+                                            let row_width = ui.available_width();
+                                            ui.horizontal(|ui| {
+                                                ui.allocate_ui_with_layout(
+                                                    egui::vec2(
+                                                        (row_width - 150.0).max(180.0),
+                                                        44.0,
+                                                    ),
+                                                    egui::Layout::top_down(egui::Align::Min),
+                                                    |ui| {
+                                                        ui.set_min_width(
+                                                            (row_width - 150.0).max(180.0),
+                                                        );
+                                                        ui.label(
+                                                            egui::RichText::new("Imported fonts")
+                                                                .size(14.0)
+                                                                .color(palette::TEXT()),
+                                                        );
+                                                        ui.add_space(3.0);
+                                                        ui.label(
+                                                            egui::RichText::new(
+                                                                "TTF or OTF · up to 32 MiB",
+                                                            )
+                                                            .size(12.0)
+                                                            .color(palette::TEXT_WEAK()),
+                                                        );
+                                                    },
+                                                );
+                                                if components::Btn::new("Import…")
+                                                    .show(ui)
+                                                    .on_hover_text(
+                                                        "Copy a .ttf or .otf file into the plusplus font library",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    import_font = true;
+                                                }
+                                            });
 
                                             ui.add_space(14.0);
                                             egui::Frame::new()
@@ -5128,53 +5821,17 @@ impl DbGuiApp {
                                                     );
                                                 });
 
-                                            ui.add_space(12.0);
-                                            ui.horizontal(|ui| {
-                                                if components::Btn::new("Import font…")
-                                                    .show(ui)
-                                                    .on_hover_text(
-                                                        "Copy a .ttf or .otf file into the plusplus font library",
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    import_font = true;
-                                                }
-                                                ui.add_space(4.0);
-                                                ui.label(
-                                                    egui::RichText::new("TTF or OTF · up to 32 MiB")
-                                                        .size(11.0)
-                                                        .color(palette::TEXT_FAINT()),
-                                                );
-                                            });
-                                        });
-
                                     }
                                     SettingsSection::Privacy => {
                                 ui.add_space(30.0);
                                 ui.label(
                                     egui::RichText::new("Local records")
-                                        .size(13.0)
-                                        .strong()
+                                        .size(14.0)
                                         .color(palette::TEXT_WEAK()),
                                 );
-                                ui.add_space(3.0);
-                                ui.label(
-                                    egui::RichText::new(
-                                        "Executed SQL may contain sensitive values. These records never leave this machine.",
-                                    )
-                                    .size(12.0)
-                                    .color(palette::TEXT_WEAK()),
-                                );
-                                ui.add_space(12.0);
+                                ui.add_space(10.0);
 
-                                egui::Frame::new()
-                                    .fill(palette::PANEL())
-                                    .stroke(egui::Stroke::new(1.0, palette::BORDER()))
-                                    .corner_radius(egui::CornerRadius::same(14))
-                                    .inner_margin(egui::Margin::symmetric(18, 10))
-                                    .show(ui, |ui| {
-                                        ui.set_width(content_w - 36.0);
-                                        for (enabled, title, description) in [
+                                for (enabled, title, description) in [
                                             (
                                                 &mut history_enabled,
                                                 "Record query history",
@@ -5186,31 +5843,13 @@ impl DbGuiApp {
                                                 "Append connections and statements to a monthly local compliance log.",
                                             ),
                                         ] {
-                                            ui.horizontal(|ui| {
-                                                ui.add_space(2.0);
-                                                ui.checkbox(enabled, "");
-                                                ui.add_space(6.0);
-                                                ui.vertical(|ui| {
-                                                    ui.label(
-                                                        egui::RichText::new(title)
-                                                            .size(13.0)
-                                                            .color(palette::TEXT()),
-                                                    );
-                                                    ui.add_space(2.0);
-                                                    ui.label(
-                                                        egui::RichText::new(description)
-                                                            .size(11.5)
-                                                            .color(palette::TEXT_WEAK()),
-                                                    );
-                                                });
-                                            });
-                                            ui.add_space(10.0);
+                                            settings_toggle_row(ui, enabled, title, description);
+                                            ui.add_space(12.0);
                                             if title != "Record audit trail" {
                                                 ui.separator();
-                                                ui.add_space(10.0);
+                                                ui.add_space(12.0);
                                             }
                                         }
-                                    });
                                     }
                                 }
 
@@ -5414,16 +6053,6 @@ impl DbGuiApp {
     /// query name (SQL stays in the editor / a hover tooltip). Click opens a Query tab;
     /// folders and move/rename/delete sit on the right-click menu.
     fn favorites_tab(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        let connection = self
-            .active_connection_config()
-            .map(|config| (config.name.clone(), config.kind));
-        sidebar_connection_scope(
-            ui,
-            connection
-                .as_ref()
-                .map(|(name, kind)| (name.as_str(), *kind)),
-        );
-        ui.add_space(5.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let plus_w = 28.0;
@@ -7293,7 +7922,6 @@ fn embedded_table_editor_header(ui: &mut egui::Ui, editor: &crate::schema::Schem
         );
         ui.label(
             egui::RichText::new(&editor.table_name)
-                .monospace()
                 .strong()
                 .color(palette::TEXT()),
         );
@@ -7917,31 +8545,6 @@ fn history_entry_menu(ui: &mut egui::Ui, idx: usize, sql: &str, actions: &mut Ve
     }
 }
 
-fn sidebar_connection_scope(ui: &mut egui::Ui, connection: Option<(&str, dbcore::DbKind)>) {
-    ui.horizontal(|ui| match connection {
-        Some((name, kind)) => {
-            ui.add(
-                egui::Image::new(icons::db_kind_icon(kind))
-                    .fit_to_exact_size(egui::Vec2::splat(14.0))
-                    .tint(icons::db_kind_icon_tint(kind)),
-            );
-            ui.label(
-                egui::RichText::new(name)
-                    .size(11.5)
-                    .strong()
-                    .color(palette::TEXT_WEAK()),
-            );
-        }
-        None => {
-            ui.label(
-                egui::RichText::new("No connection selected")
-                    .size(11.5)
-                    .color(palette::TEXT_FAINT()),
-            );
-        }
-    });
-}
-
 fn reveal_history_label() -> &'static str {
     if cfg!(target_os = "macos") {
         "Show in Finder"
@@ -8291,12 +8894,16 @@ mod object_row_tests {
 fn structure_view(ui: &mut egui::Ui, info: &dbcore::TableInfo) {
     use egui_extras::{Column, TableBuilder};
 
-    let row_height = egui::TextStyle::Monospace.resolve(ui.style()).size + 8.0;
+    let row_height = ui.text_style_height(&egui::TextStyle::Body) + 10.0;
     let header = |ui: &mut egui::Ui, title: &str| {
         components::paint_table_header_cell(ui);
         ui.add(
-            egui::Label::new(egui::RichText::new(title).strong().color(palette::TEXT()))
-                .selectable(false),
+            egui::Label::new(
+                egui::RichText::new(title)
+                    .font(egui::TextStyle::Heading.resolve(ui.style()))
+                    .color(palette::TEXT()),
+            )
+            .selectable(false),
         );
     };
 
@@ -8326,7 +8933,7 @@ fn structure_view(ui: &mut egui::Ui, info: &dbcore::TableInfo) {
                         ui.label(
                             egui::RichText::new("#")
                                 .color(palette::TEXT_FAINT())
-                                .monospace(),
+                                .font(egui::TextStyle::Small.resolve(ui.style())),
                         );
                     });
                     for title in ["column_name", "data_type", "nullable", "key"] {
@@ -8341,9 +8948,9 @@ fn structure_view(ui: &mut egui::Ui, info: &dbcore::TableInfo) {
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         ui.add_space(4.0);
-                                        ui.weak(
-                                            egui::RichText::new(format!("{}", i + 1)).monospace(),
-                                        );
+                                        ui.weak(egui::RichText::new(format!("{}", i + 1)).font(
+                                            egui::FontId::new(10.5, egui::FontFamily::Monospace),
+                                        ));
                                     },
                                 );
                             });
@@ -8355,7 +8962,7 @@ fn structure_view(ui: &mut egui::Ui, info: &dbcore::TableInfo) {
                                 ui.label(&col.name);
                             });
                             row.col(|ui| {
-                                ui.label(egui::RichText::new(&col.data_type).monospace());
+                                ui.label(&col.data_type);
                             });
                             row.col(|ui| {
                                 if col.nullable {
@@ -8395,7 +9002,7 @@ fn structure_view(ui: &mut egui::Ui, info: &dbcore::TableInfo) {
                             ui.label(
                                 egui::RichText::new("#")
                                     .color(palette::TEXT_FAINT())
-                                    .monospace(),
+                                    .font(egui::TextStyle::Small.resolve(ui.style())),
                             );
                         });
                         for title in ["index_name", "unique", "columns"] {
@@ -8411,8 +9018,12 @@ fn structure_view(ui: &mut egui::Ui, info: &dbcore::TableInfo) {
                                         |ui| {
                                             ui.add_space(4.0);
                                             ui.weak(
-                                                egui::RichText::new(format!("{}", i + 1))
-                                                    .monospace(),
+                                                egui::RichText::new(format!("{}", i + 1)).font(
+                                                    egui::FontId::new(
+                                                        10.5,
+                                                        egui::FontFamily::Monospace,
+                                                    ),
+                                                ),
                                             );
                                         },
                                     );
@@ -8459,7 +9070,7 @@ fn structure_view(ui: &mut egui::Ui, info: &dbcore::TableInfo) {
                             ui.label(
                                 egui::RichText::new("#")
                                     .color(palette::TEXT_FAINT())
-                                    .monospace(),
+                                    .font(egui::TextStyle::Small.resolve(ui.style())),
                             );
                         });
                         for title in [
@@ -8481,8 +9092,12 @@ fn structure_view(ui: &mut egui::Ui, info: &dbcore::TableInfo) {
                                         |ui| {
                                             ui.add_space(4.0);
                                             ui.weak(
-                                                egui::RichText::new(format!("{}", i + 1))
-                                                    .monospace(),
+                                                egui::RichText::new(format!("{}", i + 1)).font(
+                                                    egui::FontId::new(
+                                                        10.5,
+                                                        egui::FontFamily::Monospace,
+                                                    ),
+                                                ),
                                             );
                                         },
                                     );
@@ -9098,8 +9713,8 @@ fn details_field(
             .layout(egui::Layout::top_down(egui::Align::Min)),
         |ui| {
             ui.add_space(4.0);
-            // Header: column name on the left, a colour-coded type badge pinned to the
-            // right edge so types scan as a column.
+            // Header: column name on the left, with a quiet colour-coded type label pinned to
+            // the right edge. Details deliberately avoids badge chrome so values stay dominant.
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(&col.name)
@@ -9107,7 +9722,12 @@ fn details_field(
                         .color(palette::TEXT()),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    components::type_badge(ui, &col.type_name, kind_color(kind))
+                    ui.label(
+                        egui::RichText::new(col.type_name.to_uppercase())
+                            .size(10.0)
+                            .strong()
+                            .color(kind_color(kind)),
+                    );
                 });
             });
             details_value_box(ui, edits, kind, row_idx, c, value, editable, date_pick);
@@ -9711,8 +10331,7 @@ fn schema_grid_header(ui: &mut egui::Ui, label: &str) {
             ui.add(
                 egui::Label::new(
                     egui::RichText::new(label)
-                        .size(11.0)
-                        .strong()
+                        .font(egui::TextStyle::Heading.resolve(ui.style()))
                         .color(palette::TEXT()),
                 )
                 .selectable(false)
@@ -9749,7 +10368,7 @@ fn schema_grid_text(
             egui::vec2(width, 21.0),
             egui::TextEdit::singleline(value)
                 .hint_text(hint)
-                .font(egui::TextStyle::Monospace)
+                .font(egui::TextStyle::Body)
                 .vertical_align(egui::Align::Center)
                 .margin(egui::Margin::symmetric(4, 0))
                 .frame(egui::Frame::NONE),
@@ -9777,8 +10396,7 @@ fn schema_grid_bool(
                     enabled,
                     egui::Button::new(
                         egui::RichText::new(if *value { "YES" } else { "NO" })
-                            .size(11.0)
-                            .monospace()
+                            .font(egui::TextStyle::Body.resolve(ui.style()))
                             .color(color),
                     )
                     .frame(false)
@@ -9843,7 +10461,7 @@ fn schema_grid_metadata(ui: &mut egui::Ui, value: &str, empty: &str) -> egui::Re
         (value, palette::TEXT_WEAK())
     };
     ui.add(
-        egui::Label::new(egui::RichText::new(text).monospace().color(color))
+        egui::Label::new(egui::RichText::new(text).color(color))
             .truncate()
             .sense(egui::Sense::click()),
     )
@@ -9961,9 +10579,7 @@ fn schema_structure_grid(
                                 egui::ComboBox::from_id_salt(("structure_column_type", row_index))
                                     .icon(schema_grid_combo_icon)
                                     .height(320.0)
-                                    .selected_text(
-                                        egui::RichText::new(&column.data_type).monospace(),
-                                    )
+                                    .selected_text(egui::RichText::new(&column.data_type))
                                     .width((ui.available_width() - 4.0).max(60.0))
                                     .show_ui(ui, |ui| {
                                         components::text_input(

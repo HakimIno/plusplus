@@ -11,7 +11,7 @@
 //! [`FilterEvent`] when the user asks to (re)apply or clear, which the app turns into a
 //! `recompute_view`.
 
-use dbcore::{QueryResult, Value};
+use dbcore::{ColumnMeta, DbKind, QueryResult, Value};
 use std::ops::Range;
 
 /// A comparison operator for a single filter condition. Ordering operators (`>`, `<`, …)
@@ -196,6 +196,181 @@ impl FilterState {
     pub fn is_active(&self) -> bool {
         self.conditions.iter().any(|c| c.is_effective())
     }
+}
+
+fn sql_string(kind: DbKind, value: &str) -> String {
+    let escaped = value.replace('\'', "''");
+    let escaped = match kind {
+        DbKind::MySql | DbKind::MariaDb => escaped.replace('\\', "\\\\"),
+        _ => escaped,
+    };
+    format!("'{escaped}'")
+}
+
+fn sql_operand(kind: DbKind, value: &str) -> String {
+    let value = value.trim();
+    if value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok_and(|number| number.is_finite()) {
+        value.to_string()
+    } else if value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false") {
+        value.to_ascii_uppercase()
+    } else {
+        sql_string(kind, value)
+    }
+}
+
+fn text_expression(kind: DbKind, column: &str) -> String {
+    let cast = match kind {
+        DbKind::SqlServer => "NVARCHAR(MAX)",
+        DbKind::MySql | DbKind::MariaDb => "CHAR",
+        _ => "VARCHAR",
+    };
+    format!("LOWER(CAST({} AS {cast}))", kind.quote_ident(column))
+}
+
+fn equality_expression(kind: DbKind, column: &str, value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed
+        .parse::<f64>()
+        .is_ok_and(|number| number.is_finite())
+        || trimmed.eq_ignore_ascii_case("true")
+        || trimmed.eq_ignore_ascii_case("false")
+    {
+        format!(
+            "{} = {}",
+            kind.quote_ident(column),
+            sql_operand(kind, trimmed)
+        )
+    } else {
+        format!(
+            "{} = LOWER({})",
+            text_expression(kind, column),
+            sql_string(kind, &trimmed.to_lowercase())
+        )
+    }
+}
+
+/// Build a safely escaped SQL predicate for the currently applied filter. CQL is intentionally
+/// excluded: its WHERE restrictions depend on the table's primary-key layout and ALLOW FILTERING
+/// policy, so those backends keep the bounded client-side fallback.
+pub fn server_predicate(
+    kind: DbKind,
+    state: &FilterState,
+    columns: &[ColumnMeta],
+) -> Option<String> {
+    if kind.is_cql() {
+        return None;
+    }
+    let conditions = state
+        .conditions
+        .iter()
+        .filter(|condition| condition.is_effective())
+        .map(|condition| {
+            let column = &columns.get(condition.column)?.name;
+            let quoted = kind.quote_ident(column);
+            let value = condition.value.trim();
+            let expression = match condition.op {
+                FilterOp::Equals => equality_expression(kind, column, value),
+                FilterOp::NotEquals => {
+                    format!("NOT ({})", equality_expression(kind, column, value))
+                }
+                FilterOp::Less | FilterOp::Greater | FilterOp::LessEq | FilterOp::GreaterEq => {
+                    let operator = condition.op.label();
+                    if value.parse::<f64>().is_ok_and(|number| number.is_finite()) {
+                        format!("{quoted} {operator} {}", sql_operand(kind, value))
+                    } else {
+                        format!(
+                            "{} {operator} LOWER({})",
+                            text_expression(kind, column),
+                            sql_string(kind, &value.to_lowercase())
+                        )
+                    }
+                }
+                FilterOp::In | FilterOp::NotIn => {
+                    let items = value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|item| !item.is_empty())
+                        .map(|item| equality_expression(kind, column, item))
+                        .collect::<Vec<_>>();
+                    let found = if items.is_empty() {
+                        "1 = 0".to_string()
+                    } else {
+                        format!("({})", items.join(" OR "))
+                    };
+                    if condition.op == FilterOp::NotIn {
+                        format!("NOT ({found})")
+                    } else {
+                        found
+                    }
+                }
+                FilterOp::IsNull => format!("{quoted} IS NULL"),
+                FilterOp::IsNotNull => format!("{quoted} IS NOT NULL"),
+                FilterOp::Between | FilterOp::NotBetween => {
+                    let between = two_bounds(value).map_or_else(
+                        || "1 = 0".to_string(),
+                        |(low, high)| {
+                            if low.parse::<f64>().is_ok_and(|number| number.is_finite())
+                                && high.parse::<f64>().is_ok_and(|number| number.is_finite())
+                            {
+                                format!(
+                                    "{quoted} BETWEEN {} AND {}",
+                                    sql_operand(kind, &low),
+                                    sql_operand(kind, &high)
+                                )
+                            } else {
+                                let text = text_expression(kind, column);
+                                format!(
+                                    "{text} BETWEEN LOWER({}) AND LOWER({})",
+                                    sql_string(kind, &low.to_lowercase()),
+                                    sql_string(kind, &high.to_lowercase())
+                                )
+                            }
+                        },
+                    );
+                    if condition.op == FilterOp::NotBetween {
+                        format!("NOT ({between})")
+                    } else {
+                        between
+                    }
+                }
+                FilterOp::Contains
+                | FilterOp::NotContains
+                | FilterOp::BeginsWith
+                | FilterOp::EndsWith => {
+                    let pattern = match condition.op {
+                        FilterOp::BeginsWith => format!("{}%", value.to_lowercase()),
+                        FilterOp::EndsWith => format!("%{}", value.to_lowercase()),
+                        _ => format!("%{}%", value.to_lowercase()),
+                    };
+                    let matches = format!(
+                        "{} LIKE {}",
+                        text_expression(kind, column),
+                        sql_string(kind, &pattern)
+                    );
+                    if condition.op == FilterOp::NotContains {
+                        format!("NOT ({matches})")
+                    } else {
+                        matches
+                    }
+                }
+            };
+            Some(expression)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if conditions.is_empty() {
+        return None;
+    }
+    let joiner = match state.conjunction {
+        Conjunction::All => " AND ",
+        Conjunction::Any => " OR ",
+    };
+    Some(
+        conditions
+            .into_iter()
+            .map(|item| format!("({item})"))
+            .collect::<Vec<_>>()
+            .join(joiner),
+    )
 }
 
 /// What the user asked the filter bar to do this frame.
@@ -725,6 +900,38 @@ mod tests {
             &[cond(0, FilterOp::Between, "50")],
             Conjunction::All
         ));
+    }
+
+    #[test]
+    fn server_predicate_is_typed_case_insensitive_and_escaped() {
+        let state = FilterState {
+            visible: true,
+            conjunction: Conjunction::All,
+            conditions: vec![
+                cond(0, FilterOp::Equals, "O'Reilly"),
+                cond(1, FilterOp::Greater, "1200"),
+            ],
+        };
+        let columns = vec![
+            ColumnMeta {
+                name: "symbol".into(),
+                type_name: "VARCHAR".into(),
+            },
+            ColumnMeta {
+                name: "price".into(),
+                type_name: "DOUBLE".into(),
+            },
+        ];
+
+        assert_eq!(
+            server_predicate(DbKind::DuckDb, &state, &columns),
+            Some(
+                "(LOWER(CAST(\"symbol\" AS VARCHAR)) = LOWER('o''reilly')) AND \
+                 (\"price\" > 1200)"
+                    .to_string()
+            )
+        );
+        assert_eq!(server_predicate(DbKind::Cassandra, &state, &columns), None);
     }
 
     #[test]

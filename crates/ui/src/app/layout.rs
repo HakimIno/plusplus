@@ -17,6 +17,168 @@ impl eframe::App for DbGuiApp {
 }
 
 impl DbGuiApp {
+    fn split_drop_overlay(
+        &mut self,
+        ui: &mut egui::Ui,
+        workspace: egui::Rect,
+        actions: &mut Vec<Action>,
+    ) {
+        if self.split_tab.is_some() || workspace.width() < 440.0 {
+            if ui.input(|input| input.pointer.any_released()) {
+                self.tab_drag = None;
+            }
+            return;
+        }
+        let response = ui.interact(
+            workspace,
+            egui::Id::new("workspace_split_drop_target"),
+            egui::Sense::hover(),
+        );
+        let table_drag = response
+            .contains_pointer()
+            .then(|| egui::DragAndDrop::payload::<SchemaTableDrag>(ui.ctx()))
+            .flatten();
+        let tab_drag = response
+            .contains_pointer()
+            .then_some(self.tab_drag)
+            .flatten();
+        if table_drag.is_none() && tab_drag.is_none() {
+            if ui.input(|input| input.pointer.any_released()) {
+                self.tab_drag = None;
+            }
+            return;
+        }
+
+        // The right edge is the intentional split target, matching editor-group DnD in VS Code.
+        // Keeping the centre/left quiet prevents an ordinary click-drag over the grid from
+        // looking like a destructive takeover of the current pane.
+        let target = egui::Rect::from_min_max(
+            egui::pos2(workspace.center().x, workspace.top()),
+            workspace.max,
+        )
+        .shrink(10.0);
+        let pointer_in_target = ui
+            .ctx()
+            .pointer_interact_pos()
+            .is_some_and(|pointer| target.contains(pointer));
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("workspace_split_drop_overlay"),
+        ));
+        painter.rect_filled(
+            target,
+            8.0,
+            palette::ACCENT().gamma_multiply(if pointer_in_target { 0.22 } else { 0.10 }),
+        );
+
+        if !pointer_in_target {
+            if ui.input(|input| input.pointer.any_released()) {
+                self.tab_drag = None;
+            }
+            return;
+        }
+        let released = ui.input(|input| input.pointer.any_released());
+        let table_release = if released {
+            egui::DragAndDrop::take_payload::<SchemaTableDrag>(ui.ctx())
+        } else {
+            None
+        };
+        if let Some(payload) = table_release {
+            actions.push(Action::OpenSplitSchemaTable(payload.as_ref().clone()));
+        } else if released {
+            if let Some(drag) = tab_drag {
+                actions.push(Action::OpenSplitTab {
+                    id: drag.id,
+                    primary_id: drag.origin_active_id,
+                });
+            }
+        }
+        if released {
+            self.tab_drag = None;
+        }
+    }
+
+    fn draw_workspace_pane(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let editor_placement = query_editor_placement(self.tab().kind);
+        let diagram_tab = self.tab().kind == crate::components::QueryTabKind::Diagram;
+        let designing = self.tab().schema_editor.is_some();
+        let sql_authoring_tab = matches!(
+            self.tab().kind,
+            crate::components::QueryTabKind::Query
+                | crate::components::QueryTabKind::Function
+                | crate::components::QueryTabKind::Procedure
+                | crate::components::QueryTabKind::Trigger
+        );
+        let console_visible =
+            self.show_query_console && sql_authoring_tab && !diagram_tab && !designing;
+        let show_view_mode_bar = (!diagram_tab
+            && !designing
+            && (editor_placement == QueryEditorPlacement::Top || !console_visible))
+            || (designing
+                && !diagram_tab
+                && self.tab().kind != crate::components::QueryTabKind::Query);
+        if console_visible {
+            self.query_console(root, editor_placement, actions);
+        }
+        if !diagram_tab && !designing {
+            self.filter_bar(root);
+        }
+        if show_view_mode_bar {
+            self.view_mode_bar(root, editor_placement, actions);
+        }
+        self.central_panel(root, actions);
+    }
+
+    fn draw_split_workspace(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let primary = self.active_query_tab;
+        let Some(split) = self.split_tab.filter(|idx| *idx < self.tabs.len()) else {
+            self.draw_workspace_pane(root, actions);
+            return;
+        };
+        let height = root.available_height();
+        let width = root.available_width();
+        let gap = 6.0;
+        let max_left = (width - gap - 220.0).max(220.0);
+        let left_width = ((width - gap) * self.split_workspace_ratio).clamp(220.0, max_left);
+        root.horizontal(|row| {
+            row.spacing_mut().item_spacing.x = 0.0;
+            row.allocate_ui_with_layout(
+                egui::vec2(left_width, height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    self.active_query_tab = primary;
+                    self.draw_workspace_pane(ui, actions);
+                },
+            );
+            let (divider, response) =
+                row.allocate_exact_size(egui::vec2(gap, height), egui::Sense::drag());
+            row.painter().rect_filled(divider, 1.0, palette::BORDER());
+            if response.dragged() {
+                self.split_workspace_ratio = ((response
+                    .interact_pointer_pos()
+                    .unwrap_or(divider.center())
+                    .x
+                    - row.min_rect().left())
+                    / width)
+                    .clamp(0.25, 0.75);
+                self.workspace_dirty = true;
+            }
+            if response.hovered() || response.dragged() {
+                row.ctx()
+                    .set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+            row.allocate_ui_with_layout(
+                egui::vec2((width - gap - left_width).max(220.0), height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    self.active_query_tab = split;
+                    self.draw_workspace_pane(ui, actions);
+                },
+            );
+        });
+        self.active_query_tab = primary;
+    }
+
     /// Draw one frame into the given root ui. Split out from `eframe::App::ui` so it can be
     /// driven headlessly in tests (no `eframe::Frame` needed).
     pub(super) fn draw(&mut self, ui_root: &mut egui::Ui, frame: Option<&eframe::Frame>) {
@@ -340,51 +502,57 @@ impl DbGuiApp {
         if self.show_details_panel {
             self.right_panel(ui_root);
         }
-        let editor_placement = query_editor_placement(self.tab().kind);
-        // A Diagram tab is just the canvas: no SQL editor, no filter or result-mode bars.
-        let diagram_tab = self.tab().kind == crate::components::QueryTabKind::Diagram;
-        // An open object designer (Create/Edit Table, View, Trigger, Routine) owns the whole
-        // tab the same way: the SQL console and result bars would only crowd the form.
-        let designing = self.tab().schema_editor.is_some();
-        let sql_authoring_tab = matches!(
-            self.tab().kind,
-            crate::components::QueryTabKind::Query
-                | crate::components::QueryTabKind::Function
-                | crate::components::QueryTabKind::Procedure
-                | crate::components::QueryTabKind::Trigger
-        );
-        let console_visible =
-            self.show_query_console && sql_authoring_tab && !diagram_tab && !designing;
-        let show_view_mode_bar = (!diagram_tab
-            && !designing
-            && (editor_placement == QueryEditorPlacement::Top || !console_visible))
-            || (designing
-                && !diagram_tab
-                && self.tab().kind != crate::components::QueryTabKind::Query);
-        // On data-first tabs the mode bar and Live log form one bottom stack. Put the bar
-        // inside the resizable panel so its drag edge stays above Data / Structure / Indexes.
-        let mode_bar_in_live_log = self.show_live_log
-            && show_view_mode_bar
-            && editor_placement == QueryEditorPlacement::Bottom;
-        if console_visible {
-            self.query_console(ui_root, editor_placement, &mut actions);
+        let workspace_drop_rect = ui_root.available_rect_before_wrap();
+        if self.split_tab.is_some() {
+            self.draw_split_workspace(ui_root, &mut actions);
+        } else {
+            let editor_placement = query_editor_placement(self.tab().kind);
+            // A Diagram tab is just the canvas: no SQL editor, no filter or result-mode bars.
+            let diagram_tab = self.tab().kind == crate::components::QueryTabKind::Diagram;
+            // An open object designer (Create/Edit Table, View, Trigger, Routine) owns the whole
+            // tab the same way: the SQL console and result bars would only crowd the form.
+            let designing = self.tab().schema_editor.is_some();
+            let sql_authoring_tab = matches!(
+                self.tab().kind,
+                crate::components::QueryTabKind::Query
+                    | crate::components::QueryTabKind::Function
+                    | crate::components::QueryTabKind::Procedure
+                    | crate::components::QueryTabKind::Trigger
+            );
+            let console_visible =
+                self.show_query_console && sql_authoring_tab && !diagram_tab && !designing;
+            let show_view_mode_bar = (!diagram_tab
+                && !designing
+                && (editor_placement == QueryEditorPlacement::Top || !console_visible))
+                || (designing
+                    && !diagram_tab
+                    && self.tab().kind != crate::components::QueryTabKind::Query);
+            // On data-first tabs the mode bar and Live log form one bottom stack. Put the bar
+            // inside the resizable panel so its drag edge stays above Data / Structure / Indexes.
+            let mode_bar_in_live_log = self.show_live_log
+                && show_view_mode_bar
+                && editor_placement == QueryEditorPlacement::Bottom;
+            if console_visible {
+                self.query_console(ui_root, editor_placement, &mut actions);
+            }
+            // Live log is a workspace-level bottom dock, not part of the SQL editor. Keeping it
+            // independent makes it stay put across Data / Structure / Indexes and places it below
+            // query results instead of between the editor and its toolbar.
+            if self.show_live_log && !diagram_tab {
+                self.live_log_panel(ui_root, self.tab().id, mode_bar_in_live_log, &mut actions);
+            }
+            if !diagram_tab && !designing {
+                // A top panel after left/right carves the strip directly above the grid.
+                self.filter_bar(ui_root);
+            }
+            // Without Live log the mode bar remains its own dock. Query-tab result controls also
+            // stay standalone because their top placement is not adjacent to the bottom log.
+            if self.split_tab.is_none() && show_view_mode_bar && !mode_bar_in_live_log {
+                self.view_mode_bar(ui_root, editor_placement, &mut actions);
+            }
+            self.central_panel(ui_root, &mut actions);
         }
-        // Live log is a workspace-level bottom dock, not part of the SQL editor. Keeping it
-        // independent makes it stay put across Data / Structure / Indexes and places it below
-        // query results instead of between the editor and its toolbar.
-        if self.show_live_log && !diagram_tab {
-            self.live_log_panel(ui_root, self.tab().id, mode_bar_in_live_log, &mut actions);
-        }
-        if !diagram_tab && !designing {
-            // A top panel after left/right carves the strip directly above the grid.
-            self.filter_bar(ui_root);
-        }
-        // Without Live log the mode bar remains its own dock. Query-tab result controls also
-        // stay standalone because their top placement is not adjacent to the bottom log.
-        if show_view_mode_bar && !mode_bar_in_live_log {
-            self.view_mode_bar(ui_root, editor_placement, &mut actions);
-        }
-        self.central_panel(ui_root, &mut actions);
+        self.split_drop_overlay(ui_root, workspace_drop_rect, &mut actions);
         self.connection_dialog(&ctx, &mut actions);
         self.commit_preview_dialog(&ctx, &mut actions);
         self.favorite_name_dialog(&ctx, &mut actions);

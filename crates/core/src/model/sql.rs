@@ -5,7 +5,7 @@ use crate::value::Value;
 
 /// Render `value` as a SQL literal for `kind`, safely escaping strings. Returns `None` for
 /// [`Value::Bytes`], which has no portable literal form (those cells aren't editable).
-fn value_to_literal(value: &Value, kind: DbKind) -> Option<String> {
+pub(crate) fn value_to_literal(value: &Value, kind: DbKind) -> Option<String> {
     Some(match value {
         Value::Null => "NULL".to_string(),
         Value::Int(i) => i.to_string(),
@@ -593,6 +593,47 @@ pub fn with_page_window(kind: DbKind, sql: &str, limit: u64, offset: u64) -> Opt
         _ if offset == 0 => format!("{base} LIMIT {limit};"),
         _ => format!("{base} LIMIT {limit} OFFSET {offset};"),
     })
+}
+
+/// Add `predicate` to a simple single-table read while preserving its existing ORDER BY and
+/// paging clauses. Callers must build the predicate from quoted identifiers and escaped values.
+/// Existing WHERE conditions are parenthesized before being combined so their boolean precedence
+/// cannot change.
+pub fn with_where_predicate(sql: &str, predicate: &str) -> Option<String> {
+    simple_select_target(sql)?;
+    let predicate = predicate.trim();
+    if predicate.is_empty() {
+        return None;
+    }
+
+    let sql = sql.trim().trim_end_matches(';').trim_end();
+    let (paging_start, _, _) = trailing_paging(sql);
+    let body = sql[..paging_start].trim_end();
+    let paging = sql[paging_start..].trim();
+    let order_start = keyword_positions(body, "ORDER")
+        .first()
+        .copied()
+        .unwrap_or(body.len());
+    let select_body = body[..order_start].trim_end();
+    let ordering = body[order_start..].trim();
+
+    let filtered =
+        if let Some(where_start) = keyword_positions(select_body, "WHERE").first().copied() {
+            let prefix = select_body[..where_start].trim_end();
+            let existing = select_body[where_start + "WHERE".len()..].trim();
+            format!("{prefix} WHERE ({existing}) AND ({predicate})")
+        } else {
+            format!("{select_body} WHERE {predicate}")
+        };
+
+    let mut parts = vec![filtered];
+    if !ordering.is_empty() {
+        parts.push(ordering.to_string());
+    }
+    if !paging.is_empty() {
+        parts.push(paging.to_string());
+    }
+    Some(format!("{};", parts.join(" ")))
 }
 
 /// Build a stable keyset page for a simple `SELECT *` using ascending unique-key columns.

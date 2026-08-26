@@ -5,6 +5,28 @@ use std::io;
 
 use super::*;
 
+async fn fetch_query_total(
+    db: std::sync::Arc<dyn dbcore::Database>,
+    count_sql: String,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Option<u64> {
+    const COUNT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    let query_cancel = cancel.clone();
+    match tokio::time::timeout(
+        COUNT_TIMEOUT,
+        db.execute_capped_cancellable(&count_sql, 1, query_cancel),
+    )
+    .await
+    {
+        Ok(Ok(result)) => total_from_count_result(&result),
+        Ok(Err(_)) => None,
+        Err(_) => {
+            cancel.cancel();
+            None
+        }
+    }
+}
+
 /// Bridges the core's row-at-a-time database stream to coarser UI messages, avoiding channel and
 /// repaint overhead from dominating a fast local database.
 struct UiQuerySink {
@@ -216,6 +238,47 @@ mod query_sink_tests {
 }
 
 impl DbGuiApp {
+    pub(super) fn resolved_sql_for(&mut self, idx: usize) -> Result<String, String> {
+        let Some(tab) = self.tabs.get_mut(idx) else {
+            return Err("Query tab is no longer open.".into());
+        };
+        tab.sync_query_parameters();
+        self.resolved_sql_snapshot_for(idx)
+    }
+
+    pub(super) fn resolved_sql_snapshot_for(&self, idx: usize) -> Result<String, String> {
+        let Some(tab) = self.tabs.get(idx) else {
+            return Err("Query tab is no longer open.".into());
+        };
+        let source_sql = match tab.editor_pane {
+            super::EditorPane::Primary => &tab.sql,
+            super::EditorPane::Split => tab.split_sql.as_ref().unwrap_or(&tab.sql),
+        };
+        let kind = tab
+            .conn_id
+            .as_deref()
+            .and_then(|id| {
+                self.active_connections
+                    .iter()
+                    .find(|connection| connection.config_id == id)
+                    .map(|connection| connection.db.kind())
+                    .or_else(|| {
+                        self.connections
+                            .iter()
+                            .find(|connection| connection.id == id)
+                            .map(|connection| connection.kind)
+                    })
+            })
+            .unwrap_or(dbcore::DbKind::Sqlite);
+        let values = tab
+            .query_parameters
+            .iter()
+            .map(|parameter| Ok((parameter.name.clone(), parameter.parse()?)))
+            .collect::<Result<Vec<_>, String>>()?;
+        dbcore::resolve_query_parameters(source_sql, kind, &values)
+            .map_err(|error| error.to_string())
+    }
+
     /// Hold a destructive production query, run only read-only preflight checks in the
     /// background, then let the dialog decide whether the exact snapshot may execute.
     pub(super) fn start_production_guard(
@@ -316,10 +379,24 @@ impl DbGuiApp {
         let Some(tab) = self.tabs.get(idx) else {
             return;
         };
-        let sql = tab.sql.trim().to_string();
-        if sql.is_empty() {
+        if tab.sql.trim().is_empty() {
             return;
         }
+        let base_sql = match self.resolved_sql_for(idx) {
+            Ok(sql) => sql.trim().to_string(),
+            Err(message) => {
+                self.tabs[idx].query_error = Some(message);
+                self.tabs[idx].view = TabView::Data;
+                self.status_msg = "Query parameters need attention.".into();
+                return;
+            }
+        };
+        let tab = &self.tabs[idx];
+        let sql = tab
+            .server_filter_predicate
+            .as_deref()
+            .and_then(|predicate| dbcore::with_where_predicate(&base_sql, predicate))
+            .unwrap_or(base_sql);
         let requested_result_limit =
             dbcore::parse_page_window(&sql).and_then(|window| window.limit);
         // SQL typed directly into the editor bypasses the pager dialog's validation. Clamp it
@@ -361,13 +438,6 @@ impl DbGuiApp {
             .unwrap_or_else(|| sql.clone());
         let count_sql = (refresh_total
             && requested_result_limit.is_some()
-            // One embedded DuckDB connection executes one operation at a time. Running an
-            // exact COUNT before the visible page would serialize two full analytical scans.
-            && tab
-                .conn_id
-                .as_deref()
-                .and_then(|id| self.connections.iter().find(|config| config.id == id))
-                .is_none_or(|config| config.kind != DbKind::DuckDb)
             && matches!(
                 tab.kind,
                 crate::components::QueryTabKind::Table | crate::components::QueryTabKind::View
@@ -469,29 +539,22 @@ impl DbGuiApp {
         let query_byte_limit = self
             .result_memory_budget
             .saturating_sub(self.total_result_memory_bytes());
-        if let Some(count_sql) = count_sql {
+        // DuckDB serializes work on its embedded connection. Let its visible page finish first,
+        // then count on the same task; networked backends can count beside the page fetch.
+        let deferred_count_sql = if db.kind() == DbKind::DuckDb {
+            count_sql
+        } else if let Some(count_sql) = count_sql {
             let count_db = db.clone();
             let count_tx = tx.clone();
             let count_cancel = cancel.clone();
             self.rt.spawn(async move {
-                const COUNT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-                let query_cancel = count_cancel.clone();
-                let total = match tokio::time::timeout(
-                    COUNT_TIMEOUT,
-                    count_db.execute_capped_cancellable(&count_sql, 1, query_cancel),
-                )
-                .await
-                {
-                    Ok(Ok(result)) => total_from_count_result(&result),
-                    Ok(Err(_)) => None,
-                    Err(_) => {
-                        count_cancel.cancel();
-                        None
-                    }
-                };
+                let total = fetch_query_total(count_db, count_sql, count_cancel).await;
                 let _ = count_tx.send(AppMessage::QueryTotal { tab_id, total, seq });
             });
-        }
+            None
+        } else {
+            None
+        };
         self.rt.spawn(async move {
             if let Some(page) = page {
                 let started = Instant::now();
@@ -503,7 +566,9 @@ impl DbGuiApp {
                     query_byte_limit,
                     MAX_FETCH_ROWS,
                 );
-                let res = db.export_query_cancellable(&sql, cancel, &mut sink).await;
+                let res = db
+                    .export_query_cancellable(&sql, cancel.clone(), &mut sink)
+                    .await;
                 // Cancellation or a driver error can end the stream before `finish`; preserve
                 // rows already decoded so useful partial progress is never thrown away.
                 let _ = sink.flush_rows();
@@ -516,6 +581,7 @@ impl DbGuiApp {
                 } else {
                     res.map_err(|e| e.to_string())
                 };
+                let page_succeeded = result.is_ok() && !canceled;
                 let _ = tx.send(AppMessage::QueryStreamFinished {
                     tab_id,
                     conn_id,
@@ -531,6 +597,14 @@ impl DbGuiApp {
                     row_truncated,
                     seq,
                 });
+                if let Some(count_sql) = deferred_count_sql {
+                    let total = if page_succeeded {
+                        fetch_query_total(db, count_sql, cancel).await
+                    } else {
+                        None
+                    };
+                    let _ = tx.send(AppMessage::QueryTotal { tab_id, total, seq });
+                }
                 return;
             }
             let res = db
@@ -593,16 +667,71 @@ impl DbGuiApp {
         let Some(kind) = self.active().map(|active| active.db.kind()) else {
             return;
         };
+        let query_sql = tab
+            .server_filter_predicate
+            .as_deref()
+            .and_then(|predicate| dbcore::with_where_predicate(&tab.sql, predicate))
+            .unwrap_or_else(|| tab.sql.clone());
         let keyset_sql = keyset_cursor(tab).and_then(|(keys, values)| {
-            dbcore::with_keyset_page(kind, &tab.sql, &keys, Some(&values), fetch_limit)
+            dbcore::with_keyset_page(kind, &query_sql, &keys, Some(&values), fetch_limit)
         });
         let offset = window.offset.saturating_add(loaded);
         let Some(sql) =
-            keyset_sql.or_else(|| dbcore::with_page_window(kind, &tab.sql, fetch_limit, offset))
+            keyset_sql.or_else(|| dbcore::with_page_window(kind, &query_sql, fetch_limit, offset))
         else {
             return;
         };
         self.start_query_sql(idx, sql, true, Some(limit), None);
+    }
+
+    /// Apply the filter draft. Simple table/view reads run it on the database; unsupported
+    /// result shapes retain the bounded in-memory fallback.
+    pub(super) fn apply_result_filter(&mut self, idx: usize, clear: bool) {
+        if clear {
+            self.tabs[idx].filter.reset();
+        }
+        let Some(kind) = self.tabs[idx].conn_id.as_deref().and_then(|conn_id| {
+            self.active_connections
+                .iter()
+                .find(|connection| connection.config_id == conn_id)
+                .map(|connection| connection.db.kind())
+        }) else {
+            self.tabs[idx].server_filter_predicate = None;
+            self.tabs[idx].recompute_view();
+            return;
+        };
+        let server_capable = !kind.is_cql()
+            && matches!(
+                self.tabs[idx].kind,
+                crate::components::QueryTabKind::Table | crate::components::QueryTabKind::View
+            )
+            && dbcore::parse_page_window(&self.tabs[idx].sql).is_some();
+        let predicate = if !clear && server_capable {
+            self.tabs[idx].result.as_ref().and_then(|result| {
+                filter::server_predicate(kind, &self.tabs[idx].filter, &result.columns)
+            })
+        } else {
+            None
+        };
+        let had_server_filter = self.tabs[idx].server_filter_predicate.is_some();
+
+        if server_capable && (predicate.is_some() || had_server_filter) {
+            self.tabs[idx].server_filter_predicate = predicate;
+            if let Some(window) = dbcore::parse_page_window(&self.tabs[idx].sql) {
+                if let Some(limit) = window.limit {
+                    if let Some(sql) = dbcore::with_page_window(kind, &self.tabs[idx].sql, limit, 0)
+                    {
+                        self.tabs[idx].replace_sql(sql);
+                    }
+                }
+            }
+            self.tabs[idx].edits.pending_source = self.derive_edit_source(idx);
+            self.workspace_dirty = true;
+            self.start_query_for(idx);
+        } else {
+            self.tabs[idx].server_filter_predicate = None;
+            self.tabs[idx].recompute_view();
+        }
     }
     /// Rewrite the active tab's paging window to `(limit, offset)` in its connection's
     /// dialect and re-run. No-op when the tab isn't a paged simple-table read.

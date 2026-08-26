@@ -1,10 +1,9 @@
 # Custom themes
 
-plusplus ships seven built-in themes: Midnight Conversational IDE, Carbon, Midnight, Daylight,
-Lotus Dusk, Tidal Ledger, and Copper Circuit. You can also install your own — a theme is just
-a small JSON file of colours, no recompile required. This is the
-first plugin "contribution point": more contribution types (snippets, keybindings, WASM
-plugins) will follow the same drop-a-file model.
+plusplus ships five built-in themes: Midnight Conversational IDE, Carbon, Midnight, Daylight,
+and Graphite. You can also install your own — a theme is just a small JSON file of colours,
+no recompile required. This is the first plugin "contribution point": more contribution types
+(snippets, keybindings, WASM plugins) will follow the same drop-a-file model.
 
 ## Installing a theme
 
@@ -17,8 +16,9 @@ plugins) will follow the same drop-a-file model.
    | Windows | `%APPDATA%\plusplus\themes\` |
 
 2. Copy a `*.json` theme file into it. A ready-made custom example lives at
-   [Dracula](../examples/themes/dracula.json). The JSON sources for the three newer built-in
-   palettes are also available in `examples/themes/` as authoring references.
+   [Dracula](../examples/themes/dracula.json). Former built-ins (Lotus Dusk, Tidal Ledger,
+   Copper Circuit) live there too if you want them back. Graphite's JSON source is an
+   authoring reference for the built-in of the same name.
 
 3. In plusplus, open **Settings → Appearance** and click **Reload themes** (or restart).
    Your theme appears in the picker next to the built-ins.

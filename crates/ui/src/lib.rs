@@ -40,8 +40,6 @@ pub struct AppFonts {
     pub ui_regular: &'static [u8],
     /// Inter Semibold — the weight for the [`HEADING_FAMILY`] family.
     pub ui_semibold: &'static [u8],
-    /// JetBrains Mono Regular — SQL/code font.
-    pub code_regular: &'static [u8],
     /// Anuphan Regular — Thai fallback for proportional and monospace families.
     pub thai_regular: &'static [u8],
     /// Anuphan Semibold — Thai weight for the [`HEADING_FAMILY`] family.
@@ -50,7 +48,7 @@ pub struct AppFonts {
     pub universal_regular: &'static [u8],
 }
 
-/// Install the primary UI/code fonts followed by Thai and broad Unicode fallbacks.
+/// Install the primary UI font followed by Thai and broad Unicode fallbacks.
 pub fn install_fonts(ctx: &egui::Context, app_fonts: &AppFonts) {
     fonts::install(ctx, *app_fonts, None, None).expect("embedded fonts are valid");
 }

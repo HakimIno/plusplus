@@ -137,9 +137,18 @@ pub mod font {
 
 /// Apply the plusplus look to a context.
 pub fn apply(ctx: &egui::Context) {
-    ctx.set_visuals(visuals());
+    let t = crate::theme::current();
+    // egui 0.32+ keeps separate dark/light styles and defaults to following the OS.
+    // Custom-painted widgets read `theme::current()`; stock egui widgets read the active
+    // style. Painting only the current bucket meant the first frame — when the system
+    // theme arrives — could swap in stock light/dark visuals next to ours.
+    ctx.set_theme(if t.is_dark {
+        egui::ThemePreference::Dark
+    } else {
+        egui::ThemePreference::Light
+    });
 
-    let mut style = (*ctx.global_style()).clone();
+    let v = visuals();
 
     // Compact, minimal type scale — small but still readable.
     // Headless tests do not install the app's embedded fonts; resolving an unbound named
@@ -149,7 +158,7 @@ pub fn apply(ctx: &egui::Context) {
     } else {
         FontFamily::Name(crate::HEADING_FAMILY.into())
     };
-    style.text_styles = [
+    let text_styles = [
         (TextStyle::Heading, FontId::new(12.5, heading_family)),
         (TextStyle::Body, FontId::new(12.5, FontFamily::Proportional)),
         (
@@ -164,47 +173,49 @@ pub fn apply(ctx: &egui::Context) {
             TextStyle::Small,
             FontId::new(10.5, FontFamily::Proportional),
         ),
-    ]
-    .into();
+    ];
 
-    // Spacing — tight and even for a clean, dense look.
-    let s = &mut style.spacing;
-    s.item_spacing = egui::vec2(5.0, 4.0);
-    s.button_padding = egui::vec2(7.0, 2.0);
-    s.menu_margin = Margin::same(5);
-    s.indent = 14.0;
-    // Buttons and combo boxes adopt the shared control height from here.
-    s.interact_size.y = CONTROL_H;
-    s.combo_width = 0.0; // let combos size to their content/width hint, not a min
-                         // Tighter vertical padding keeps dialog title bars compact.
-    s.window_margin = Margin::symmetric(12, 4);
-    s.scroll.bar_width = 8.0;
-    s.scroll.bar_inner_margin = 2.0;
+    ctx.all_styles_mut(|style| {
+        style.visuals = v.clone();
+        style.text_styles = text_styles.clone().into();
 
-    // Silence egui's developer debug overlays, which are on by default in debug builds
-    // (`cfg!(debug_assertions)`). Two of them fire on our virtualized results grid during
-    // fast HiDPI scrolling and read as a flickering coloured column border:
-    //   * `warn_if_rect_changes_id` — a 2px RED outline egui draws when the same on-screen
-    //     rect maps to a different widget id between layout passes. Virtualized rows do
-    //     exactly this while scrolling (a screen slot is row N in one pass, row N+1 in the
-    //     next), so it false-positives constantly. This is the red border the user saw.
-    //   * `show_unaligned` — orange edge lines on any rect not snapped to the pixel grid,
-    //     which sub-pixel scroll offsets trigger every frame.
-    // These are diagnostics, not real bugs (the headless probes verify no actual id
-    // clashes) and they never compile into release. Turning them off makes debug builds
-    // look like release.
-    // `Style::debug` only exists under `cfg(debug_assertions)`; gating keeps release builds,
-    // where these overlays are already compiled out, from referencing a missing field.
-    #[cfg(debug_assertions)]
-    {
-        let dbg = &mut style.debug;
-        dbg.warn_if_rect_changes_id = false;
-        dbg.show_unaligned = false;
-        dbg.show_expand_width = false;
-        dbg.show_expand_height = false;
-    }
+        // Spacing — tight and even for a clean, dense look.
+        let s = &mut style.spacing;
+        s.item_spacing = egui::vec2(5.0, 4.0);
+        s.button_padding = egui::vec2(7.0, 2.0);
+        s.menu_margin = Margin::same(5);
+        s.indent = 14.0;
+        // Buttons and combo boxes adopt the shared control height from here.
+        s.interact_size.y = CONTROL_H;
+        s.combo_width = 0.0; // let combos size to their content/width hint, not a min
+                             // Tighter vertical padding keeps dialog title bars compact.
+        s.window_margin = Margin::symmetric(12, 4);
+        s.scroll.bar_width = 8.0;
+        s.scroll.bar_inner_margin = 2.0;
 
-    ctx.set_global_style(style);
+        // Silence egui's developer debug overlays, which are on by default in debug builds
+        // (`cfg!(debug_assertions)`). Two of them fire on our virtualized results grid during
+        // fast HiDPI scrolling and read as a flickering coloured column border:
+        //   * `warn_if_rect_changes_id` — a 2px RED outline egui draws when the same on-screen
+        //     rect maps to a different widget id between layout passes. Virtualized rows do
+        //     exactly this while scrolling (a screen slot is row N in one pass, row N+1 in the
+        //     next), so it false-positives constantly. This is the red border the user saw.
+        //   * `show_unaligned` — orange edge lines on any rect not snapped to the pixel grid,
+        //     which sub-pixel scroll offsets trigger every frame.
+        // These are diagnostics, not real bugs (the headless probes verify no actual id
+        // clashes) and they never compile into release. Turning them off makes debug builds
+        // look like release.
+        // `Style::debug` only exists under `cfg(debug_assertions)`; gating keeps release builds,
+        // where these overlays are already compiled out, from referencing a missing field.
+        #[cfg(debug_assertions)]
+        {
+            let dbg = &mut style.debug;
+            dbg.warn_if_rect_changes_id = false;
+            dbg.show_unaligned = false;
+            dbg.show_expand_width = false;
+            dbg.show_expand_height = false;
+        }
+    });
 }
 
 fn visuals() -> egui::Visuals {
@@ -288,4 +299,25 @@ fn visuals() -> egui::Visuals {
     w.open.bg_stroke = Stroke::new(1.0, t.border_strong);
 
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Stock egui follows the OS and keeps a second, unstyled light/dark bucket. If we
+    /// only paint the active one, flipping the preference (the first-frame system-theme
+    /// report) would show default colours next to plusplus-painted widgets.
+    #[test]
+    fn apply_keeps_both_egui_style_buckets_on_the_plusplus_palette() {
+        let ctx = egui::Context::default();
+        let theme = crate::theme::ThemeRegistry::load().theme_of("graphite");
+        crate::theme::set_current(theme);
+        apply(&ctx);
+
+        ctx.set_theme(egui::ThemePreference::Light);
+        assert_eq!(ctx.global_style().visuals.panel_fill, theme.panel);
+        ctx.set_theme(egui::ThemePreference::Dark);
+        assert_eq!(ctx.global_style().visuals.panel_fill, theme.panel);
+    }
 }

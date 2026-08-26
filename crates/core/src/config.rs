@@ -88,8 +88,8 @@ pub struct Settings {
     /// File name of the imported font used for interface text. `None` = embedded Inter.
     #[serde(default)]
     pub ui_font: Option<String>,
-    /// File name of the imported font used for SQL and tabular data. `None` = embedded
-    /// JetBrains Mono.
+    /// File name of the imported font used for SQL and tabular data. `None` = follow the
+    /// interface font.
     #[serde(default)]
     pub code_font: Option<String>,
     /// SQL beautifier: convert reserved keywords to ALL CAPS. `None` = the default (on).
@@ -187,6 +187,15 @@ pub struct WorkspaceTab {
     /// Last user-selected SQL editor height, in egui points. `None` uses the contextual default.
     #[serde(default)]
     pub editor_size: Option<f32>,
+    /// Whether this tab restores with a second view over the same SQL buffer.
+    #[serde(default)]
+    pub editor_split: bool,
+    /// Width of the right-hand editor pane, in egui points.
+    #[serde(default)]
+    pub editor_split_size: Option<f32>,
+    /// Independent SQL buffer shown in the second split pane, if any.
+    #[serde(default)]
+    pub split_sql: Option<String>,
     /// The table this tab represents, if it was opened from the schema sidebar.
     #[serde(default)]
     pub source: Option<WorkspaceSource>,
@@ -250,6 +259,9 @@ mod tests {
                     sql: "SELECT * FROM users;".into(),
                     kind: Some(WorkspaceTabKind::Table),
                     editor_size: Some(184.0),
+                    editor_split: true,
+                    editor_split_size: Some(320.0),
+                    split_sql: Some("SELECT 2;".into()),
                     source: Some(WorkspaceSource {
                         schema: Some("public".into()),
                         table: "users".into(),
@@ -262,6 +274,9 @@ mod tests {
                     sql: "SELECT 1;".into(),
                     kind: Some(WorkspaceTabKind::Query),
                     editor_size: None,
+                    editor_split: false,
+                    editor_split_size: None,
+                    split_sql: None,
                     source: None,
                 },
             ],
@@ -276,6 +291,9 @@ mod tests {
         assert_eq!(back.tabs[0].sql, "SELECT * FROM users;");
         assert_eq!(back.tabs[0].kind, Some(WorkspaceTabKind::Table));
         assert_eq!(back.tabs[0].editor_size, Some(184.0));
+        assert!(back.tabs[0].editor_split);
+        assert_eq!(back.tabs[0].editor_split_size, Some(320.0));
+        assert_eq!(back.tabs[0].split_sql.as_deref(), Some("SELECT 2;"));
         let src = back.tabs[0].source.as_ref().unwrap();
         assert_eq!(src.table, "users");
         assert_eq!(src.pk_cols, vec!["id".to_string()]);

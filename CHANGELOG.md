@@ -3,8 +3,18 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
+## 0.4.3 — 2026-08-26
+
+- Added independent, resizable split workspaces with per-pane SQL editors, results, filters, autocomplete, ghost suggestions, diagnostics, and query parameters.
+- Added VS Code-style drag-and-drop splitting for schema tables and query tabs, including a lightweight drop-zone preview.
+- Added typed `{{name}}` query parameters with dialect-aware SQL literal rendering.
+- Added multiple SQL editor cursors with Cmd/Ctrl-click and Cmd/Ctrl+D selection workflows.
+- Improved workspace persistence and split-tab lifecycle handling so opening, closing, moving, and restoring panes keeps tab indices safe.
+
 ## 0.4.2 — 2026-08-25
 
+- Replaced the Lotus Dusk, Tidal Ledger, and Copper Circuit built-ins with Graphite, a TablePlus-style charcoal palette with a vivid blue accent. The three older palettes remain as installable JSON in `examples/themes/`.
+- Stopped the first window frame mixing stock egui light/dark colours with the selected plusplus theme when the OS appearance differs.
 - Redesigned New Connection around a provider picker, then a focused details form with optional appearance, safety, SSL, and SSH controls.
 - Added Settings typography so imported OpenType fonts can replace the interface and SQL/grid faces.
 - Tightened the SQL autocomplete popup with kind icons, better on-screen placement, and clipped labels.

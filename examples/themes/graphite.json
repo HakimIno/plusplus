@@ -1,0 +1,23 @@
+{
+  "name": "Graphite",
+  "author": "plusplus",
+  "is_dark": true,
+  "base": "#1e1e1e",
+  "panel": "#252525",
+  "surface": "#2a2a2a",
+  "surface_hover": "#343434",
+  "code_bg": "#1e1e1e",
+  "stripe": "#292929",
+  "selection": "#16324d",
+  "border": "#333333",
+  "border_strong": "#424242",
+  "text": "#e8e8e8",
+  "text_weak": "#a8a8a8",
+  "text_faint": "#737373",
+  "accent": "#0f7eff",
+  "accent_hover": "#3a96ff",
+  "on_accent": "#ffffff",
+  "success": "#3ecf7a",
+  "danger": "#e05c5c",
+  "warning": "#e0b040"
+}

@@ -77,6 +77,7 @@ icon_fns! {
     layout_schema => "../assets/icons/layout-schema.svg",
     layout_details => "../assets/icons/layout-details.svg",
     layout_query => "../assets/icons/layout-query.svg",
+    split_editor => "../assets/icons/split-editor.svg",
     layout_log => "../assets/icons/layout-log.svg",
     db_postgres_dark => "../assets/icondb/skill-icons--postgresql-dark.svg",
     db_postgres_light => "../assets/icondb/skill-icons--postgresql-light.svg",

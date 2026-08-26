@@ -9,9 +9,6 @@ const INTER_REGULAR: &[u8] = include_bytes!("../assets/Inter-Regular.ttf");
 /// Inter Semibold, used for headings and compact emphasis.
 const INTER_SEMIBOLD: &[u8] = include_bytes!("../assets/Inter-SemiBold.ttf");
 
-/// JetBrains Mono, embedded for SQL editors, result values, and code-like metadata.
-const JETBRAINS_MONO_REGULAR: &[u8] = include_bytes!("../assets/JetBrainsMono-Regular.ttf");
-
 /// Anuphan (loopless Thai, OFL-licensed) covers Thai glyphs and pairs cleanly with Inter.
 const THAI_REGULAR: &[u8] = include_bytes!("../assets/Anuphan-Regular.ttf");
 const THAI_SEMIBOLD: &[u8] = include_bytes!("../assets/Anuphan-SemiBold.ttf");
@@ -149,7 +146,6 @@ fn main() -> eframe::Result<()> {
             let fonts = ui::AppFonts {
                 ui_regular: INTER_REGULAR,
                 ui_semibold: INTER_SEMIBOLD,
-                code_regular: JETBRAINS_MONO_REGULAR,
                 thai_regular: THAI_REGULAR,
                 thai_semibold: THAI_SEMIBOLD,
                 universal_regular: UNIVERSAL_REGULAR,
@@ -171,7 +167,6 @@ mod tests {
             &ui::AppFonts {
                 ui_regular: INTER_REGULAR,
                 ui_semibold: INTER_SEMIBOLD,
-                code_regular: JETBRAINS_MONO_REGULAR,
                 thai_regular: THAI_REGULAR,
                 thai_semibold: THAI_SEMIBOLD,
                 universal_regular: UNIVERSAL_REGULAR,

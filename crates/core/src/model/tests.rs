@@ -1016,3 +1016,22 @@ fn clone_table_dialects() {
         vec!["CREATE TABLE \"orders_copy\" AS SELECT * FROM \"orders\";".to_string()]
     );
 }
+
+#[test]
+fn server_filter_preserves_existing_where_order_and_page() {
+    assert_eq!(
+        with_where_predicate(
+            "SELECT * FROM trades WHERE active = TRUE ORDER BY date DESC LIMIT 100 OFFSET 200;",
+            "\"symbol\" = 'HEROHONDA'",
+        ),
+        Some(
+            "SELECT * FROM trades WHERE (active = TRUE) AND (\"symbol\" = 'HEROHONDA') \
+             ORDER BY date DESC LIMIT 100 OFFSET 200;"
+                .to_string()
+        )
+    );
+    assert_eq!(
+        with_where_predicate("SELECT TOP 100 * FROM trades;", "[price] > 1200"),
+        Some("SELECT TOP 100 * FROM trades WHERE [price] > 1200;".to_string())
+    );
+}

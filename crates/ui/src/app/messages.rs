@@ -253,7 +253,14 @@ impl DbGuiApp {
                     if !stale {
                         self.busy = Busy::Idle;
                         self.querying_tab_id = None;
-                        self.query_cancel = None;
+                        if !self
+                            .tabs
+                            .iter()
+                            .find(|tab| tab.id == tab_id)
+                            .is_some_and(|tab| tab.total_rows_pending)
+                        {
+                            self.query_cancel = None;
+                        }
                     }
                     // A user cancel isn't a failure: don't log it as a failed statement and
                     // don't flag a red error — just note it and leave the previous result up.
@@ -339,6 +346,9 @@ impl DbGuiApp {
                     };
                     tab.total_rows = total;
                     tab.total_rows_pending = false;
+                    if self.querying_tab_id.is_none() {
+                        self.query_cancel = None;
+                    }
                     ctx.request_repaint();
                 }
                 AppMessage::QueryStreamStarted {

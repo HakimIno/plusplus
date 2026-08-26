@@ -124,7 +124,6 @@ pub(crate) fn install(
     for (name, bytes) in [
         ("inter", app_fonts.ui_regular),
         ("inter_semibold", app_fonts.ui_semibold),
-        ("jetbrains_mono", app_fonts.code_regular),
         ("thai", app_fonts.thai_regular),
         ("thai_semibold", app_fonts.thai_semibold),
         ("unifont", app_fonts.universal_regular),
@@ -158,15 +157,17 @@ pub(crate) fn install(
         .families
         .insert(FontFamily::Proportional, proportional);
 
+    // egui calls this semantic slot `Monospace`, but plusplus intentionally renders it with
+    // the selected editor/data face (or the interface face by default). This keeps SQL, values,
+    // logs, and metadata readable without a fixed-width typeface while preserving egui's code
+    // styling hooks.
     let mut monospace = Vec::new();
     if code_custom.is_some() {
         monospace.push("custom_code".to_owned());
+    } else if ui_custom.is_some() {
+        monospace.push("custom_ui".to_owned());
     }
-    monospace.extend([
-        "jetbrains_mono".to_owned(),
-        "thai".to_owned(),
-        "unifont".to_owned(),
-    ]);
+    monospace.extend(["inter".to_owned(), "thai".to_owned(), "unifont".to_owned()]);
     fonts.families.insert(FontFamily::Monospace, monospace);
 
     let mut headings = Vec::new();
@@ -201,5 +202,36 @@ mod tests {
     fn accepts_a_real_opentype_font() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../app/assets/Inter-Regular.ttf");
         assert!(read_valid_font(&path).is_ok());
+    }
+
+    #[test]
+    fn default_editor_family_is_proportional() {
+        let ctx = egui::Context::default();
+        install(
+            &ctx,
+            AppFonts {
+                ui_regular: include_bytes!("../../app/assets/Inter-Regular.ttf"),
+                ui_semibold: include_bytes!("../../app/assets/Inter-SemiBold.ttf"),
+                thai_regular: include_bytes!("../../app/assets/Anuphan-Regular.ttf"),
+                thai_semibold: include_bytes!("../../app/assets/Anuphan-SemiBold.ttf"),
+                universal_regular: include_bytes!("../../app/assets/Unifont-Regular.otf"),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        let _ = ctx.run_ui(Default::default(), |_| {});
+
+        let font = egui::FontId::new(12.0, egui::FontFamily::Monospace);
+        let (narrow, wide) = ctx.fonts_mut(|fonts| {
+            let mut width = |text: &str| {
+                fonts
+                    .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::WHITE)
+                    .size()
+                    .x
+            };
+            (width("iiii"), width("WWWW"))
+        });
+        assert!(wide > narrow, "editor/data family must not be fixed-width");
     }
 }

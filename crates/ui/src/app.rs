@@ -133,8 +133,8 @@ enum AppMessage {
         /// run (`seq != query_seq`) are logged to history but never touch UI state.
         seq: u64,
     },
-    /// Exact row count for the simple table query associated with `seq`. Counting runs beside
-    /// the page fetch so a slow `COUNT(*)` never delays the first visible rows.
+    /// Exact row count for the simple table query associated with `seq`. Networked backends
+    /// count beside the page fetch; serialized embedded backends count just after it.
     QueryTotal {
         tab_id: u64,
         total: Option<u64>,
@@ -595,9 +595,90 @@ impl SqlEditorCache {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum QueryParameterKind {
+    #[default]
+    Text,
+    Number,
+    Boolean,
+    Null,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum EditorPane {
+    #[default]
+    Primary,
+    Split,
+}
+
+impl QueryParameterKind {
+    const ALL: [Self; 4] = [Self::Text, Self::Number, Self::Boolean, Self::Null];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Text => "Text",
+            Self::Number => "Number",
+            Self::Boolean => "Boolean",
+            Self::Null => "NULL",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueryParameterInput {
+    name: String,
+    value: String,
+    kind: QueryParameterKind,
+    set: bool,
+}
+
+impl QueryParameterInput {
+    fn parse(&self) -> Result<dbcore::Value, String> {
+        if !self.set && self.kind != QueryParameterKind::Null {
+            return Err(format!(
+                "Enter a value for query parameter “{}”.",
+                self.name
+            ));
+        }
+        match self.kind {
+            QueryParameterKind::Text => Ok(dbcore::Value::Text(self.value.clone())),
+            QueryParameterKind::Number => self
+                .value
+                .parse::<i64>()
+                .map(dbcore::Value::Int)
+                .or_else(|_| {
+                    self.value
+                        .parse::<f64>()
+                        .map(dbcore::Value::Float)
+                        .map_err(|_| ())
+                })
+                .map_err(|()| format!("Query parameter “{}” must be a number.", self.name)),
+            QueryParameterKind::Boolean => match self.value.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" => Ok(dbcore::Value::Bool(true)),
+                "false" | "0" => Ok(dbcore::Value::Bool(false)),
+                _ => Err(format!(
+                    "Query parameter “{}” must be true or false.",
+                    self.name
+                )),
+            },
+            QueryParameterKind::Null => Ok(dbcore::Value::Null),
+        }
+    }
+}
+
 /// One query tab: an independent SQL editor with its own result, view state, and the
 /// connection it runs against. Tabs are global (a single row above the editor) but each
 /// remembers its own `conn_id`, so switching tabs switches the active connection too.
+#[derive(Default)]
+struct EditorAssistState {
+    autocomplete: crate::autocomplete::State,
+    ghost_suggestion: Option<String>,
+    ghost_key: Option<(u64, String, usize)>,
+    syntax_error: Option<dbcore::SyntaxError>,
+    syntax_checked: String,
+    syntax_dirty_at: Option<f64>,
+}
+
 struct QueryTab {
     /// Stable id, used to route async query/commit results back to the right tab.
     id: u64,
@@ -622,6 +703,20 @@ struct QueryTab {
     /// looking at a query right now, not something to restore days later against text that
     /// may have moved on.
     folds: std::collections::BTreeSet<usize>,
+    /// Values for application-owned `{{name}}` placeholders.
+    query_parameters: Vec<QueryParameterInput>,
+    parameters_expanded: bool,
+    /// A second independent SQL buffer, initialized from `sql` when split is opened.
+    editor_split: bool,
+    editor_split_size: Option<f32>,
+    split_sql: Option<String>,
+    editor_pane: EditorPane,
+    /// Source-coordinate selections beyond egui's primary caret.
+    extra_cursors: Vec<std::ops::Range<usize>>,
+    primary_cursor: std::ops::Range<usize>,
+    /// Autocomplete, ghost text and diagnostics belong to this editor pane. A split pane is
+    /// backed by its own `QueryTab`, so neither side can overwrite the other's popup/cache.
+    editor_assist: EditorAssistState,
     /// Last splitter-selected SQL editor height in egui points. `None` uses the contextual
     /// default; once the user drags the splitter this is persisted with the workspace.
     editor_size: Option<f32>,
@@ -642,6 +737,9 @@ struct QueryTab {
     edits: Edits,
     /// TablePlus-style result filter bar (column / operator / value conditions).
     filter: FilterState,
+    /// Escaped predicate produced by the last Apply for a simple table/view query. Kept apart
+    /// from the mutable filter controls so typing does not issue queries or alter paging.
+    server_filter_predicate: Option<String>,
     /// Data vs Structure view in the central panel (table tabs only).
     view: TabView,
     /// In-flight bounded page stream. Keeping this beside the visible result lets a replacement
@@ -681,6 +779,15 @@ impl QueryTab {
             sql_revision: 0,
             sql_editor_cache: SqlEditorCache::default(),
             folds: std::collections::BTreeSet::new(),
+            query_parameters: Vec::new(),
+            parameters_expanded: true,
+            editor_split: false,
+            editor_split_size: None,
+            split_sql: None,
+            editor_pane: EditorPane::Primary,
+            extra_cursors: Vec::new(),
+            primary_cursor: 0..0,
+            editor_assist: EditorAssistState::default(),
             editor_size: None,
             query_error: None,
             result: None,
@@ -691,6 +798,7 @@ impl QueryTab {
             selection: crate::grid::Selection::default(),
             edits: Edits::default(),
             filter: FilterState::default(),
+            server_filter_predicate: None,
             view: TabView::default(),
             stream: None,
             page_exhausted: false,
@@ -712,6 +820,33 @@ impl QueryTab {
 
     fn mark_sql_changed(&mut self) {
         self.sql_revision = self.sql_revision.wrapping_add(1);
+    }
+
+    fn sync_query_parameters(&mut self) {
+        let mut names = dbcore::query_parameter_names(&self.sql);
+        if let Some(split_sql) = &self.split_sql {
+            for name in dbcore::query_parameter_names(split_sql) {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+        self.query_parameters
+            .retain(|parameter| names.iter().any(|name| name == &parameter.name));
+        for name in names {
+            if !self
+                .query_parameters
+                .iter()
+                .any(|parameter| parameter.name == name)
+            {
+                self.query_parameters.push(QueryParameterInput {
+                    name,
+                    value: String::new(),
+                    kind: QueryParameterKind::Text,
+                    set: false,
+                });
+            }
+        }
     }
 
     /// Install a freshly returned result and rebuild the display order.
@@ -1283,6 +1418,11 @@ enum Action {
         pin: bool,
         kind: crate::components::QueryTabKind,
     },
+    OpenSplitSchemaTable(SchemaTableDrag),
+    OpenSplitTab {
+        id: u64,
+        primary_id: u64,
+    },
     /// Show a routine/trigger's definition SQL in a preview tab (read-only; not executed).
     OpenDefinition {
         title: String,
@@ -1434,6 +1574,8 @@ struct TabDrag {
     /// Pointer x-offset from the chip's left edge at grab time, so the floating chip
     /// keeps the grab point under the cursor instead of snapping its centre there.
     grab_x: f32,
+    /// Tab that owned the workspace before the drag began.
+    origin_active_id: u64,
 }
 
 /// Drag-to-reorder state for the vertical saved-connection strip.
@@ -1492,6 +1634,12 @@ pub struct DbGuiApp {
     /// Open query tabs. Always non-empty.
     tabs: Vec<QueryTab>,
     active_query_tab: usize,
+    /// Index of the hidden query state rendered in the right split workspace pane.
+    split_tab: Option<usize>,
+    /// Whether the right split pane owns keyboard focus for the next action frame.
+    split_focus: bool,
+    /// Width of the left pane in the split workspace (0.25..0.75).
+    split_workspace_ratio: f32,
     /// Monotonic id source for new tabs.
     next_tab_id: u64,
     /// Approximate memory ceiling shared by materialized results in every query tab.
@@ -1522,31 +1670,11 @@ pub struct DbGuiApp {
     favorites_filter: String,
     /// History tab: live SQL/connection/error filter over the grouped timeline.
     history_filter: String,
-    /// SQL editor autocomplete (table/column/keyword popup). Transient; not persisted.
-    autocomplete: crate::autocomplete::State,
     /// Recently-run, successful SQL — the pool the editor's ghost-text autosuggestion
     /// matches a prefix against (fish-shell style). Seeded from history on launch and
     /// appended to as queries run. In-memory only. Each entry carries its `conn_id` so the
     /// suggestion is filtered to the active tab's database (never another connection's SQL).
     suggest_pool: Vec<PooledQuery>,
-    /// The ghost-text remainder shown after the caret last frame (the text Tab accepts),
-    /// or `None` when nothing is suggested. Cached: recomputed only when the SQL or caret
-    /// changes, then repainted each frame (so scrolling a focused editor doesn't re-scan
-    /// history/schema every frame).
-    ghost_suggestion: Option<String>,
-    /// `(tab id, exact SQL, caret char index)` the cached `ghost_suggestion` was computed for;
-    /// exact text and tab identity prevent same-length edits/tab switches from reusing stale text.
-    ghost_key: Option<(u64, String, usize)>,
-    /// First syntax error in the active editor's SQL — the red squiggle and its tooltip —
-    /// or `None` when the buffer parses. Recomputed on a short pause after typing, never
-    /// per keystroke: parsing a half-written statement only ever reports the obvious.
-    syntax_error: Option<dbcore::SyntaxError>,
-    /// The exact SQL `syntax_error` describes. A mismatch means the buffer moved on (edited,
-    /// or another tab is showing), so nothing is drawn until the check catches up.
-    syntax_checked: String,
-    /// When the SQL last changed, in `input.time` seconds; `None` once the check has caught
-    /// up. This is the debounce clock.
-    syntax_dirty_at: Option<f64>,
     status_msg: String,
     error: Option<String>,
     /// Text staged for the OS clipboard this frame (e.g. copied result rows). Flushed to the
@@ -1789,6 +1917,9 @@ impl DbGuiApp {
             connection_timings: HashMap::new(),
             tabs: vec![default_tab],
             active_query_tab: 0,
+            split_tab: None,
+            split_focus: false,
+            split_workspace_ratio: 0.5,
             next_tab_id: 1,
             result_memory_budget,
             result_access_clock: 0,
@@ -1803,13 +1934,7 @@ impl DbGuiApp {
             settings_section: SettingsSection::default(),
             schema_filter: String::new(),
             favorites_filter: String::new(),
-            autocomplete: crate::autocomplete::State::default(),
             suggest_pool: Vec::new(),
-            ghost_suggestion: None,
-            ghost_key: None,
-            syntax_error: None,
-            syntax_checked: String::new(),
-            syntax_dirty_at: None,
             status_msg: "Ready".to_string(),
             error: None,
             copy_buffer: None,

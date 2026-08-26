@@ -211,6 +211,67 @@ pub(crate) fn accent_radio<T: PartialEq>(
     resp
 }
 
+/// Native-style on/off switch used by Settings rows. The entire control is keyboard
+/// focusable; Space or Enter toggles it just like a checkbox.
+pub(crate) fn toggle_switch(ui: &mut egui::Ui, value: &mut bool) -> egui::Response {
+    const WIDTH: f32 = 42.0;
+    const HEIGHT: f32 = 22.0;
+    const KNOB: f32 = 16.0;
+
+    let (rect, mut response) = ui.allocate_exact_size(
+        egui::vec2(WIDTH, HEIGHT),
+        egui::Sense::click().union(egui::Sense::focusable_noninteractive()),
+    );
+    let keyboard_toggle = response.has_focus()
+        && ui.input(|input| {
+            input.key_pressed(egui::Key::Space) || input.key_pressed(egui::Key::Enter)
+        });
+    if response.clicked() || keyboard_toggle {
+        *value = !*value;
+        response.mark_changed();
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, *value, "Toggle")
+    });
+
+    if ui.is_rect_visible(rect) {
+        let progress = ui.ctx().animate_bool(response.id, *value);
+        let fill = if *value {
+            palette::ACCENT()
+        } else if response.hovered() {
+            palette::SURFACE_HOVER()
+        } else {
+            palette::SURFACE()
+        };
+        let stroke = if *value {
+            Stroke::new(1.0, palette::ACCENT_HOVER())
+        } else {
+            Stroke::new(1.0, palette::BORDER_STRONG())
+        };
+        ui.painter().rect(
+            rect,
+            CornerRadius::same(HEIGHT as u8 / 2),
+            fill,
+            stroke,
+            egui::StrokeKind::Inside,
+        );
+        let left = rect.left() + (HEIGHT - KNOB) * 0.5 + KNOB * 0.5;
+        let right = rect.right() - (HEIGHT - KNOB) * 0.5 - KNOB * 0.5;
+        let center = egui::pos2(egui::lerp(left..=right, progress), rect.center().y);
+        ui.painter().circle_filled(
+            center,
+            KNOB * 0.5,
+            if *value {
+                palette::ON_ACCENT()
+            } else {
+                palette::TEXT_WEAK()
+            },
+        );
+    }
+
+    response
+}
+
 /// Compact segmented control for toolbars and workspace switches.
 pub(crate) fn segmented_sized(
     ui: &mut egui::Ui,
