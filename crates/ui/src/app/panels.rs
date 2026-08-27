@@ -491,56 +491,6 @@ fn parse_pager_window(limit: &str, offset: &str) -> Result<(u64, u64), &'static 
     Ok((limit, offset))
 }
 
-/// Query failures belong in the result surface: this keeps the database's precise message
-/// visible while the user fixes the SQL instead of squeezing it into the one-line status bar.
-fn query_error_state(ui: &mut egui::Ui, error: &str) {
-    let available_width = ui.available_width();
-    ui.add_space((ui.available_height() * 0.18).max(24.0));
-    ui.vertical_centered(|ui| {
-        icons::show_colored(ui, icons::warning(), 34.0, palette::DANGER());
-        ui.add_space(10.0);
-        ui.label(
-            egui::RichText::new("Query failed")
-                .size(15.0)
-                .strong()
-                .color(palette::DANGER()),
-        );
-        ui.add_space(10.0);
-    });
-
-    let box_width = (available_width * 0.72)
-        .clamp(280.0, 760.0)
-        .min(available_width);
-    let left_space = ((available_width - box_width) * 0.5).max(0.0);
-    ui.horizontal(|ui| {
-        ui.add_space(left_space);
-        egui::Frame::new()
-            .fill(palette::CODE_BG())
-            .stroke(egui::Stroke::new(1.0, palette::DANGER()))
-            .corner_radius(egui::CornerRadius::same(style::radius::SM))
-            .inner_margin(egui::Margin::same(12))
-            .show(ui, |ui| {
-                ui.set_width((box_width - 24.0).max(0.0));
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(error)
-                            .monospace()
-                            .color(palette::TEXT()),
-                    )
-                    .wrap()
-                    .selectable(true),
-                );
-            });
-    });
-    ui.add_space(8.0);
-    ui.vertical_centered(|ui| {
-        ui.label(
-            egui::RichText::new("Fix the SQL and run again  ·  Cmd/Ctrl+Enter")
-                .color(palette::TEXT_FAINT()),
-        );
-    });
-}
-
 fn field_test_status(state: &ConnTestState, field: ConnField) -> Option<bool> {
     match state {
         ConnTestState::Success => Some(true),
@@ -1650,16 +1600,21 @@ impl DbGuiApp {
                     ui.allocate_exact_size(egui::vec2(8.0, row_h), egui::Sense::hover());
                 ui.painter().circle_filled(dot_rect.center(), 3.0, dot);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let can_run = self.active().is_some() && self.busy == Busy::Idle;
-                    if components::primary_button(ui, icons::play(), "Run", can_run)
-                        .on_hover_text("Cmd/Ctrl+Enter")
-                        .clicked()
-                    {
+                    let can_run = self.active().is_some() && self.busy == Busy::Idle && has_sql;
+                    let run = components::run_button(ui, can_run, has_sql);
+                    if run.run_current || run.run_all {
                         // A split pane is a real workspace in its own right. Remember which
                         // pane launched Run so the action executes against that pane's SQL and
                         // stores rows in that pane's result view.
                         self.split_focus = self.split_tab == Some(self.active_query_tab);
-                        actions.push(Action::RunQuery);
+                        actions.push(if run.run_current {
+                            Action::RunCurrentQuery
+                        } else {
+                            Action::RunQuery
+                        });
+                    }
+                    if run.save_query {
+                        actions.push(Action::SaveCurrentAsFavorite);
                     }
                     if parameter_count > 0
                         && components::button::soft_icon_button_state(
@@ -1684,12 +1639,6 @@ impl DbGuiApp {
                     }
                     if resp.prefs_changed {
                         self.persist_settings();
-                    }
-                    if components::button(ui, icons::save(), "Save query", has_sql)
-                        .on_hover_text("Save the current editor query")
-                        .clicked()
-                    {
-                        actions.push(Action::SaveCurrentAsFavorite);
                     }
                 });
             });
@@ -1834,7 +1783,7 @@ impl DbGuiApp {
                             .split_sql
                             .as_mut()
                             .expect("split buffer initialized above");
-                        let response = egui::TextEdit::multiline(split_sql)
+                        let output = egui::TextEdit::multiline(split_sql)
                             .id_source(("sql_editor", tab_id, "split"))
                             .code_editor()
                             .frame(egui::Frame::NONE)
@@ -1842,17 +1791,18 @@ impl DbGuiApp {
                             .desired_rows(rows)
                             .desired_width(f32::INFINITY)
                             .layouter(&mut layouter)
-                            .hint_text("SELECT ...")
-                            .show(ui)
-                            .response;
-                        response.response.widget_info(|| {
+                            .show(ui);
+                        output.response.widget_info(|| {
                             egui::WidgetInfo::labeled(
                                 egui::WidgetType::TextEdit,
                                 true,
                                 "Split SQL editor",
                             )
                         });
-                        if response.response.changed() {
+                        if let Some(range) = output.cursor_range {
+                            self.tabs[idx].primary_cursor = range.as_sorted_char_range();
+                        }
+                        if output.response.changed() {
                             let tab = &mut self.tabs[idx];
                             tab.editor_pane = super::EditorPane::Split;
                             tab.edits.source = None;
@@ -1861,7 +1811,7 @@ impl DbGuiApp {
                             tab.mark_sql_changed();
                             self.workspace_dirty = true;
                         }
-                        if response.response.has_focus() {
+                        if output.response.has_focus() {
                             self.tabs[idx].editor_pane = super::EditorPane::Split;
                         }
                     });
@@ -2272,7 +2222,6 @@ impl DbGuiApp {
                                             .desired_rows(rows)
                                             .desired_width(f32::INFINITY)
                                             .layouter(&mut layouter)
-                                            .hint_text("SELECT ...")
                                             .show(ui);
                                         let (shifts, refused_undo) = buffer.finish();
                                         (gutter_rect, output, shifts, refused_undo)
@@ -4382,6 +4331,49 @@ impl DbGuiApp {
         }
     }
 
+    /// One compact app-native tab per statement returned by Run All.
+    pub(super) fn batch_result_bar(&mut self, root: &mut egui::Ui) {
+        let idx = self.active_query_tab;
+        let count = self.tabs[idx].batch_results.len();
+        if self.tabs[idx].kind != crate::components::QueryTabKind::Query || count <= 1 {
+            return;
+        }
+        let selected = self.tabs[idx].active_batch_result.min(count - 1);
+        let labels: Vec<String> = (1..=count)
+            .map(|number| format!("Query {number}"))
+            .collect();
+        let items: Vec<_> = labels
+            .iter()
+            .enumerate()
+            .map(|(index, label)| {
+                let icon = if self.tabs[idx].batch_result_has_error(index) {
+                    icons::warning()
+                } else {
+                    icons::table()
+                };
+                (icon, label.as_str())
+            })
+            .collect();
+        let mut choice = selected;
+        egui::Panel::top(egui::Id::new(("batch_result_bar", self.tabs[idx].id)))
+            .resizable(false)
+            .exact_size(34.0)
+            .frame(
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(6, 3))
+                    .fill(palette::PANEL()),
+            )
+            .show_separator_line(true)
+            .show_inside(root, |ui| {
+                choice =
+                    components::segmented_sized(ui, &items, selected, count as f32 * 104.0, true);
+            });
+        if choice != selected {
+            self.tabs[idx].activate_batch_result(choice);
+            self.touch_result(idx);
+        }
+    }
+
     /// The TablePlus-style filter strip directly above the grid. Only shown when toggled on
     /// and a result with columns is loaded. Edits mutate `self.filter` directly; Apply or
     /// Clear rebuilds the view.
@@ -4422,8 +4414,8 @@ impl DbGuiApp {
         }
     }
 
-    /// Contextual result switch next to the query toolbar. Query tabs show Data / Message /
-    /// Chart; table and view tabs expose their editable Structure and Indexes directly.
+    /// Contextual result switch. Query tabs dock Data / Message / Chart beneath the result;
+    /// table and view tabs expose their editable Structure and Indexes by the data surface.
     pub(super) fn view_mode_bar(
         &mut self,
         root: &mut egui::Ui,
@@ -4461,9 +4453,13 @@ impl DbGuiApp {
                 };
             }
         }
-        let panel = match placement {
-            QueryEditorPlacement::Top => egui::Panel::top("view_mode_bar"),
-            QueryEditorPlacement::Bottom => egui::Panel::bottom("view_mode_bar"),
+        let panel = match (query_result_tabs, placement) {
+            // Query result modes belong beneath the data surface, matching the statement tabs
+            // above it. Table/view modes keep following their data-first editor placement.
+            (true, _) | (false, QueryEditorPlacement::Bottom) => {
+                egui::Panel::bottom("view_mode_bar")
+            }
+            (false, QueryEditorPlacement::Top) => egui::Panel::top("view_mode_bar"),
         };
         panel
             .resizable(false)
@@ -4517,43 +4513,6 @@ impl DbGuiApp {
                             self.result_filter_button(ui, actions);
                         });
                         return;
-                    }
-                    // Staged row-edit history only applies to the Data surface. Keep these
-                    // controls contextual; the table pager below remains stable across all
-                    // three surfaces.
-                    if self.tabs[idx].view == TabView::Data && self.tabs[idx].edits.editable() {
-                        let (can_undo, can_redo) = {
-                            let e = &self.tabs[idx].edits;
-                            (e.can_undo(), e.can_redo())
-                        };
-                        let hint = |ui: &egui::Ui, shift: bool| {
-                            let mods = if shift {
-                                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT
-                            } else {
-                                egui::Modifiers::COMMAND
-                            };
-                            ui.ctx()
-                                .format_shortcut(&egui::KeyboardShortcut::new(mods, egui::Key::Z))
-                        };
-                        let undo_hint = format!("Undo  ({})", hint(ui, false));
-                        let redo_hint = format!("Redo  ({})", hint(ui, true));
-                        if components::Btn::ghost_icon(icons::undo())
-                            .enabled(can_undo)
-                            .tooltip(&undo_hint)
-                            .show(ui)
-                            .clicked()
-                        {
-                            actions.push(Action::Undo);
-                        }
-                        if components::Btn::ghost_icon(icons::redo())
-                            .enabled(can_redo)
-                            .tooltip(&redo_hint)
-                            .show(ui)
-                            .clicked()
-                        {
-                            actions.push(Action::Redo);
-                        }
-                        ui.separator();
                     }
                     let editing = self.tabs[idx].schema_editor.is_some();
                     let modes = [TabView::Data, TabView::Structure, TabView::Indexes];
@@ -4636,33 +4595,51 @@ impl DbGuiApp {
         if self.tabs[idx].kind == crate::components::QueryTabKind::Query {
             match self.tabs[idx].view {
                 TabView::Message => {
-                    let message = self.tabs[idx]
-                        .result
-                        .as_ref()
-                        .map(result_status)
-                        .unwrap_or_else(|| "Run a query to see execution details".to_string());
+                    let query_error = self.tabs[idx].query_error.as_deref();
+                    if query_error.is_none() && self.tabs[idx].result.is_none() {
+                        egui::CentralPanel::default().show_inside(root, crate::pet::show);
+                        return;
+                    }
+                    let message = query_error.map(str::to_owned).unwrap_or_else(|| {
+                        self.tabs[idx]
+                            .result
+                            .as_ref()
+                            .map(result_status)
+                            .unwrap_or_else(|| "Run a query to see execution details".to_string())
+                    });
+                    let color = if query_error.is_some() {
+                        palette::DANGER()
+                    } else {
+                        palette::TEXT_WEAK()
+                    };
                     egui::CentralPanel::default()
                         .frame(
                             egui::Frame::central_panel(root.style())
                                 .inner_margin(egui::Margin::same(12)),
                         )
                         .show_inside(root, |ui| {
-                            ui.label(
-                                egui::RichText::new(message)
-                                    .monospace()
-                                    .color(palette::TEXT_WEAK()),
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(message).monospace().color(color),
+                                )
+                                .wrap()
+                                .selectable(true),
                             );
                         });
                     return;
                 }
                 TabView::Chart => {
                     egui::CentralPanel::default().show_inside(root, |ui| {
-                        components::empty_state(
-                            ui,
-                            icons::diagram(),
-                            "Chart",
-                            "Chart visualization is coming soon",
-                        );
+                        if self.tabs[idx].result.is_none() && self.tabs[idx].query_error.is_none() {
+                            crate::pet::show(ui);
+                        } else {
+                            components::empty_state(
+                                ui,
+                                icons::diagram(),
+                                "Chart",
+                                "Chart visualization is coming soon",
+                            );
+                        }
                     });
                     return;
                 }
@@ -4699,8 +4676,8 @@ impl DbGuiApp {
         } = &mut self.tabs[idx];
         let sort = *sort;
         egui::CentralPanel::default().show_inside(root, |ui| {
-            if let Some(error) = query_error.as_deref() {
-                query_error_state(ui, error);
+            if query_error.is_some() {
+                crate::pet::show(ui);
                 return;
             }
             match result.as_ref() {

@@ -80,7 +80,7 @@ rustls-native-certs = "0.8"
 # --- SSH tunnel (connect to a database through a bastion host) ---
 # Pure-Rust SSH on tokio. The `ring` backend (instead of the default aws-lc-rs) keeps the
 # whole tree on the single ring crypto stack that rustls/tiberius/sqlx already use.
-russh = { version = "0.54", default-features = false, features = ["flate2", "ring", "rsa"] }
+russh = { version = "0.62.6", default-features = false, features = ["flate2", "ring", "rsa"] }
 
 # --- data analysis ---
 polars = { version = "0.54", default-features = false, features = ["lazy", "describe", "dtype-full"] }

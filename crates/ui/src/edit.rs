@@ -501,11 +501,13 @@ impl Edits {
         self.end_undo_group();
     }
 
-    /// Whether there is a step to undo / redo (drives menu + shortcut enablement).
+    /// Test-only visibility into the two history stacks.
+    #[cfg(test)]
     pub fn can_undo(&self) -> bool {
         !self.history.undo.is_empty()
     }
 
+    #[cfg(test)]
     pub fn can_redo(&self) -> bool {
         !self.history.redo.is_empty()
     }

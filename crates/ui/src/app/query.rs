@@ -254,6 +254,39 @@ impl DbGuiApp {
             super::EditorPane::Primary => &tab.sql,
             super::EditorPane::Split => tab.split_sql.as_ref().unwrap_or(&tab.sql),
         };
+        self.resolve_tab_sql(tab, source_sql)
+    }
+
+    pub(super) fn resolved_current_sql_for(&mut self, idx: usize) -> Result<String, String> {
+        let Some(tab) = self.tabs.get_mut(idx) else {
+            return Err("Query tab is no longer open.".into());
+        };
+        tab.sync_query_parameters();
+        self.resolved_current_sql_snapshot_for(idx)
+    }
+
+    pub(super) fn resolved_current_sql_snapshot_for(&self, idx: usize) -> Result<String, String> {
+        let Some(tab) = self.tabs.get(idx) else {
+            return Err("Query tab is no longer open.".into());
+        };
+        let source_sql = match tab.editor_pane {
+            super::EditorPane::Primary => &tab.sql,
+            super::EditorPane::Split => tab.split_sql.as_ref().unwrap_or(&tab.sql),
+        };
+        let chars: Vec<char> = source_sql.chars().collect();
+        let range = if tab.primary_cursor.is_empty() {
+            crate::sqlctx::statement_range(&chars, tab.primary_cursor.start)
+        } else {
+            tab.primary_cursor.start.min(chars.len())..tab.primary_cursor.end.min(chars.len())
+        };
+        let current: String = chars[range].iter().collect();
+        if current.trim().is_empty() {
+            return Err("Place the cursor inside a SQL statement to run it.".into());
+        }
+        self.resolve_tab_sql(tab, &current)
+    }
+
+    fn resolve_tab_sql(&self, tab: &super::QueryTab, source_sql: &str) -> Result<String, String> {
         let kind = tab
             .conn_id
             .as_deref()
@@ -270,13 +303,85 @@ impl DbGuiApp {
                     })
             })
             .unwrap_or(dbcore::DbKind::Sqlite);
+        let needed = dbcore::query_parameter_names(source_sql);
         let values = tab
             .query_parameters
             .iter()
+            .filter(|parameter| needed.contains(&parameter.name))
             .map(|parameter| Ok((parameter.name.clone(), parameter.parse()?)))
             .collect::<Result<Vec<_>, String>>()?;
         dbcore::resolve_query_parameters(source_sql, kind, &values)
             .map_err(|error| error.to_string())
+    }
+
+    pub(super) fn start_resolved_query(&mut self, idx: usize, sql: String) {
+        self.start_resolved_query_batch(idx, sql);
+    }
+
+    pub(super) fn start_resolved_query_batch(&mut self, idx: usize, sql: String) {
+        let statements: Vec<String> = dbcore::split_query_statements(&sql)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        if statements.len() <= 1 {
+            self.start_query_sql(idx, sql, false, None, None);
+            return;
+        }
+        let Some(tab) = self.tabs.get(idx) else {
+            return;
+        };
+        let tab_id = tab.id;
+        let Some(conn_id) = tab.conn_id.clone() else {
+            self.tabs[idx].set_query_error("Not connected.".to_string());
+            return;
+        };
+        let Some(db) = self
+            .active_connections
+            .iter()
+            .find(|connection| connection.config_id == conn_id)
+            .map(|connection| connection.db.clone())
+        else {
+            self.tabs[idx].set_query_error("Not connected.".to_string());
+            return;
+        };
+
+        if let Some(previous) = self.query_cancel.take() {
+            previous.cancel();
+        }
+        self.query_seq += 1;
+        let seq = self.query_seq;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        self.query_cancel = Some(cancel.clone());
+        self.busy = Busy::Querying;
+        self.querying_tab_id = Some(tab_id);
+        self.tabs[idx].query_error = None;
+        self.tabs[idx].stream = None;
+        self.tabs[idx].clear_batch_results();
+        self.tabs[idx].view = TabView::Data;
+        self.error = None;
+
+        let tx = self.tx.clone();
+        self.rt.spawn(async move {
+            let mut results = Vec::with_capacity(statements.len());
+            let mut canceled = false;
+            for statement in statements {
+                let result = db
+                    .execute_capped_cancellable(&statement, MAX_FETCH_ROWS, cancel.clone())
+                    .await;
+                if matches!(result, Err(dbcore::CoreError::Canceled)) {
+                    canceled = true;
+                    break;
+                }
+                results.push((statement, result.map_err(|error| error.to_string())));
+            }
+            let _ = tx.send(AppMessage::BatchQueried {
+                tab_id,
+                conn_id,
+                results,
+                canceled,
+                seq,
+            });
+        });
     }
 
     /// Hold a destructive production query, run only read-only preflight checks in the
@@ -385,8 +490,7 @@ impl DbGuiApp {
         let base_sql = match self.resolved_sql_for(idx) {
             Ok(sql) => sql.trim().to_string(),
             Err(message) => {
-                self.tabs[idx].query_error = Some(message);
-                self.tabs[idx].view = TabView::Data;
+                self.tabs[idx].set_query_error(message);
                 self.status_msg = "Query parameters need attention.".into();
                 return;
             }
@@ -468,8 +572,7 @@ impl DbGuiApp {
         let tab_id = tab.id;
         let tab_conn_id = tab.conn_id.clone();
         let conn_id = tab_conn_id.clone().unwrap_or_default();
-        // A new execution always returns to the primary result surface, so fresh data and
-        // query errors cannot remain hidden behind Message or the Chart placeholder.
+        // A new execution starts on Data; a failure moves query tabs to Message.
         self.tabs[idx].view = TabView::Data;
         let db = match tab_conn_id
             .as_deref()
@@ -478,7 +581,7 @@ impl DbGuiApp {
             Some(active) => active.db.clone(),
             None => {
                 let message = "Not connected.".to_string();
-                self.tabs[idx].query_error = Some(message.clone());
+                self.tabs[idx].set_query_error(message.clone());
                 self.error = None;
                 self.status_msg = "Ready".to_string();
                 return;
@@ -518,6 +621,7 @@ impl DbGuiApp {
             received_rows: 0,
         });
         if !append {
+            self.tabs[idx].clear_batch_results();
             self.tabs[idx].page_exhausted = false;
         }
         self.error = None;

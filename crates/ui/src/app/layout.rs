@@ -121,6 +121,9 @@ impl DbGuiApp {
             self.query_console(root, editor_placement, actions);
         }
         if !diagram_tab && !designing {
+            self.batch_result_bar(root);
+        }
+        if !diagram_tab && !designing {
             self.filter_bar(root);
         }
         if show_view_mode_bar {
@@ -254,9 +257,13 @@ impl DbGuiApp {
             return;
         }
 
-        // Global shortcut: Cmd/Ctrl+Enter runs the query.
+        // Cmd/Ctrl+Enter runs the selection/current statement; Shift adds the whole buffer.
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter)) {
-            actions.push(Action::RunQuery);
+            actions.push(if ctx.input(|i| i.modifiers.shift) {
+                Action::RunQuery
+            } else {
+                Action::RunCurrentQuery
+            });
         }
         let editing_table_schema = self.schema_pending.is_none()
             && matches!(self.tab().view, TabView::Structure | TabView::Indexes)
@@ -542,6 +549,7 @@ impl DbGuiApp {
                 self.live_log_panel(ui_root, self.tab().id, mode_bar_in_live_log, &mut actions);
             }
             if !diagram_tab && !designing {
+                self.batch_result_bar(ui_root);
                 // A top panel after left/right carves the strip directly above the grid.
                 self.filter_bar(ui_root);
             }

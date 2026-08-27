@@ -326,16 +326,104 @@ impl DbGuiApp {
                         }
                         Err(e) => {
                             tab.stream = None;
-                            tab.view = TabView::Data;
-                            tab.query_error = Some(e.clone());
+                            tab.set_database_error(&sql, e.clone());
                             if is_active {
-                                // Query failures already own the result surface. Keep the global
-                                // status strip quiet so the same error is not shown twice.
+                                // Query failures already own Message. Keep the global status
+                                // strip quiet so the same error is not shown twice.
                                 self.error = None;
                                 self.status_msg = "Ready".to_string();
                             }
                         }
                     }
+                }
+                AppMessage::BatchQueried {
+                    tab_id,
+                    conn_id,
+                    results,
+                    canceled,
+                    seq,
+                } => {
+                    let stale = seq != self.query_seq;
+                    if !stale {
+                        self.busy = Busy::Idle;
+                        self.querying_tab_id = None;
+                        self.query_cancel = None;
+                    }
+                    for (sql, result) in &results {
+                        match result {
+                            Ok(result) => {
+                                let rows = result
+                                    .stats
+                                    .rows_affected
+                                    .unwrap_or(result.row_count() as u64);
+                                self.record_history(
+                                    dbcore::audit::AuditAction::Query,
+                                    &conn_id,
+                                    sql,
+                                    true,
+                                    None,
+                                    Some(rows),
+                                    result.stats.elapsed_ms,
+                                );
+                            }
+                            Err(error) => self.record_history(
+                                dbcore::audit::AuditAction::Query,
+                                &conn_id,
+                                sql,
+                                false,
+                                Some(error.clone()),
+                                None,
+                                0.0,
+                            ),
+                        }
+                    }
+                    if stale {
+                        continue;
+                    }
+                    let is_active = self
+                        .tabs
+                        .get(self.active_query_tab)
+                        .is_some_and(|tab| tab.id == tab_id);
+                    let disconnected = self
+                        .tabs
+                        .iter()
+                        .find(|tab| tab.id == tab_id)
+                        .and_then(|tab| tab.conn_id.as_deref())
+                        .is_some_and(|id| {
+                            !self
+                                .active_connections
+                                .iter()
+                                .any(|connection| connection.config_id == id)
+                        });
+                    if disconnected {
+                        continue;
+                    }
+                    if results.is_empty() {
+                        if canceled && is_active {
+                            self.status_msg = "Query cancelled".to_string();
+                            self.error = None;
+                        }
+                        continue;
+                    }
+                    let finished = results.len();
+                    let failed = results.iter().filter(|(_, result)| result.is_err()).count();
+                    let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+                        continue;
+                    };
+                    tab.edits.pending_source = None;
+                    tab.edits.clear();
+                    tab.set_batch_results(results);
+                    if is_active {
+                        self.status_msg = if canceled {
+                            format!("Query cancelled — {finished} statements finished")
+                        } else if failed > 0 {
+                            format!("{finished} statements finished — {failed} failed")
+                        } else {
+                            format!("{finished} statements finished")
+                        };
+                        self.error = None;
+                    }
+                    self.enforce_result_memory_budget();
                 }
                 AppMessage::QueryTotal { tab_id, total, seq } => {
                     if seq != self.query_seq {
@@ -579,7 +667,6 @@ impl DbGuiApp {
                         Err(error) => {
                             tab.stream = None;
                             tab.page_exhausted = false;
-                            tab.view = TabView::Data;
                             // A continuation/replacement failure should not cover useful rows
                             // already on screen with an error page.
                             if tab.result.is_some() {
@@ -589,7 +676,7 @@ impl DbGuiApp {
                                     self.error = Some(error);
                                 }
                             } else {
-                                tab.query_error = Some(error);
+                                tab.set_database_error(&sql, error);
                             }
                             if is_active && tab.result.is_none() {
                                 self.status_msg = "Ready".to_string();

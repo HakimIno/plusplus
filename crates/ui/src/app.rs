@@ -133,6 +133,15 @@ enum AppMessage {
         /// run (`seq != query_seq`) are logged to history but never touch UI state.
         seq: u64,
     },
+    /// A Run All batch finished. Each statement keeps its own result or error so the result
+    /// area can expose them as independent tabs instead of discarding every set but one.
+    BatchQueried {
+        tab_id: u64,
+        conn_id: String,
+        results: Vec<(String, Result<QueryResult, String>)>,
+        canceled: bool,
+        seq: u64,
+    },
     /// Exact row count for the simple table query associated with `seq`. Networked backends
     /// count beside the page fetch; serialized embedded backends count just after it.
     QueryTotal {
@@ -234,6 +243,7 @@ enum Busy {
 #[derive(Clone, Copy)]
 enum ProductionGuardContinuation {
     Query,
+    QueryCurrent,
     Edits,
     Schema,
     Import,
@@ -522,6 +532,11 @@ struct QueryStreamUi {
     received_rows: usize,
 }
 
+struct StoredQueryResult {
+    result: Option<QueryResult>,
+    query_error: Option<String>,
+}
+
 struct SqlEditorLayoutCache {
     colors: crate::highlight::SqlColors,
     font: egui::FontId,
@@ -724,6 +739,11 @@ struct QueryTab {
     /// query tab that produced it instead of existing only in the global status bar.
     query_error: Option<String>,
     result: Option<QueryResult>,
+    /// Results produced by Run All. The active entry temporarily lends its result/error to the
+    /// ordinary fields above, letting the existing grid, filter, Message, and Chart views work
+    /// unchanged while inactive entries remain parked here.
+    batch_results: Vec<StoredQueryResult>,
+    active_batch_result: usize,
     /// Monotonic access stamp used by the global result-memory manager.
     result_last_used: u64,
     /// True when the global budget released this result from an inactive tab.
@@ -791,6 +811,8 @@ impl QueryTab {
             editor_size: None,
             query_error: None,
             result: None,
+            batch_results: Vec::new(),
+            active_batch_result: 0,
             result_last_used: 0,
             result_evicted: false,
             row_order: Vec::new(),
@@ -820,6 +842,19 @@ impl QueryTab {
 
     fn mark_sql_changed(&mut self) {
         self.sql_revision = self.sql_revision.wrapping_add(1);
+    }
+
+    fn set_query_error(&mut self, error: String) {
+        self.query_error = Some(error);
+        self.view = if self.kind == crate::components::QueryTabKind::Query {
+            TabView::Message
+        } else {
+            TabView::Data
+        };
+    }
+
+    fn set_database_error(&mut self, sql: &str, error: String) {
+        self.set_query_error(crate::query_error::explain(sql, &error));
     }
 
     fn sync_query_parameters(&mut self) {
@@ -863,6 +898,82 @@ impl QueryTab {
         self.result = Some(res);
         self.result_evicted = false;
         self.recompute_view();
+    }
+
+    fn clear_batch_results(&mut self) {
+        self.batch_results.clear();
+        self.active_batch_result = 0;
+    }
+
+    fn set_batch_results(&mut self, results: Vec<(String, Result<QueryResult, String>)>) {
+        self.result = None;
+        self.query_error = None;
+        self.batch_results = results
+            .into_iter()
+            .map(|(sql, result)| match result {
+                Ok(result) => StoredQueryResult {
+                    result: Some(result),
+                    query_error: None,
+                },
+                Err(error) => StoredQueryResult {
+                    query_error: Some(crate::query_error::explain(&sql, &error)),
+                    result: None,
+                },
+            })
+            .collect();
+        self.active_batch_result = 0;
+        self.reset_result_interaction();
+        self.load_batch_result(0);
+    }
+
+    fn activate_batch_result(&mut self, index: usize) {
+        if index >= self.batch_results.len() || index == self.active_batch_result {
+            return;
+        }
+        if let Some(current) = self.batch_results.get_mut(self.active_batch_result) {
+            current.result = self.result.take();
+            current.query_error = self.query_error.take();
+        }
+        self.active_batch_result = index;
+        self.reset_result_interaction();
+        self.load_batch_result(index);
+    }
+
+    fn batch_result_has_error(&self, index: usize) -> bool {
+        if index == self.active_batch_result {
+            self.query_error.is_some()
+        } else {
+            self.batch_results
+                .get(index)
+                .is_some_and(|result| result.query_error.is_some())
+        }
+    }
+
+    fn reset_result_interaction(&mut self) {
+        self.result = None;
+        self.query_error = None;
+        self.row_order.clear();
+        self.sort = None;
+        self.selection.clear();
+        self.edits = Edits::default();
+        self.filter = FilterState::default();
+        self.stream = None;
+        self.page_exhausted = true;
+        self.total_rows = None;
+        self.total_rows_pending = false;
+    }
+
+    fn load_batch_result(&mut self, index: usize) {
+        let Some(stored) = self.batch_results.get_mut(index) else {
+            return;
+        };
+        let result = stored.result.take();
+        let query_error = stored.query_error.take();
+        if let Some(result) = result {
+            self.set_result(result);
+        } else if let Some(error) = query_error {
+            self.set_query_error(error);
+        }
     }
 
     /// Rebuild `row_order` from the current result by applying the filter, then the active
@@ -1408,6 +1519,7 @@ enum Action {
     BrowseSslClientKey,
     BrowseSshKey,
     RunQuery,
+    RunCurrentQuery,
     /// Reformat the active tab's SQL in its connection's dialect (Beautify, Cmd/Ctrl+I).
     BeautifySql,
     /// Open a table's rows from the sidebar. `source` makes the result editable. `pin` opens

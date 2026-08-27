@@ -34,7 +34,9 @@ pub use bookmarks::Bookmark;
 pub use clipboard::{copy_rows, CopyFormat};
 pub use coerce::{CoerceError, EditorKind};
 pub use connection::connect;
-pub use database::{returns_rows as query_returns_rows, Database};
+pub use database::{
+    returns_rows as query_returns_rows, split_statements as split_query_statements, Database,
+};
 pub use erd::{DesignColumn, DesignForeignKey, DesignIndex, DesignTable, ErDesign};
 pub use error::{CoreError, Result};
 pub use export::{ExportFormat, RowSink};

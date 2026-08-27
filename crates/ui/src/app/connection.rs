@@ -37,6 +37,7 @@ impl DbGuiApp {
         for tab in &mut self.tabs {
             if tab.conn_id.as_deref() == Some(id) {
                 tab.result = None;
+                tab.clear_batch_results();
                 tab.row_order.clear();
                 tab.sort = None;
                 tab.selection.clear();

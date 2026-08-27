@@ -8,6 +8,12 @@ impl QueryTab {
             .result
             .as_ref()
             .map_or(0, QueryResult::estimated_memory_bytes);
+        let parked_batch_results = self
+            .batch_results
+            .iter()
+            .filter_map(|stored| stored.result.as_ref())
+            .map(QueryResult::estimated_memory_bytes)
+            .sum::<usize>();
         let display_order = self.row_order.capacity() * std::mem::size_of::<usize>();
         let pending_stream = self.stream.as_ref().map_or(0, |stream| {
             stream.pending_rows.capacity() * std::mem::size_of::<Vec<dbcore::Value>>()
@@ -27,7 +33,7 @@ impl QueryTab {
                     })
                     .sum::<usize>()
         });
-        result + display_order + pending_stream
+        result + parked_batch_results + display_order + pending_stream
     }
 }
 
@@ -58,7 +64,11 @@ impl DbGuiApp {
                 .enumerate()
                 .filter(|(idx, tab)| {
                     *idx != self.active_query_tab
-                        && tab.result.is_some()
+                        && (tab.result.is_some()
+                            || tab
+                                .batch_results
+                                .iter()
+                                .any(|stored| stored.result.is_some()))
                         && tab.stream.is_none()
                         && !tab.edits.has_pending()
                 })
@@ -70,6 +80,7 @@ impl DbGuiApp {
             let before = self.tabs[idx].estimated_result_memory_bytes();
             let tab = &mut self.tabs[idx];
             tab.result = None;
+            tab.clear_batch_results();
             tab.row_order.clear();
             tab.row_order.shrink_to_fit();
             tab.sort = None;

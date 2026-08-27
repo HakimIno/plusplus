@@ -18,6 +18,7 @@ mod grid;
 mod highlight;
 mod icons;
 mod pet;
+mod query_error;
 mod schema;
 mod sqlctx;
 mod style;

@@ -365,7 +365,7 @@ fn skip_block_comment(s: &str) -> &str {
 /// `CREATE FUNCTION … $$ … ; … $$` stays one statement). Returned slices are trimmed and
 /// empty statements are dropped. This is a lexical split only — it does not parse or validate
 /// SQL — but it's robust enough to classify the statements in a batch.
-pub(crate) fn split_statements(sql: &str) -> Vec<&str> {
+pub fn split_statements(sql: &str) -> Vec<&str> {
     let bytes = sql.as_bytes();
     let n = bytes.len();
     let mut statements = Vec::new();

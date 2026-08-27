@@ -2077,6 +2077,23 @@ fn independent_split_query_uses_the_focused_pane() {
 }
 
 #[test]
+fn run_current_prefers_selection_then_the_statement_at_the_cursor() {
+    let mut app = DbGuiApp::construct();
+    app.tab_mut().sql = "SELECT 1;\nSELECT 2;".into();
+    app.tab_mut().primary_cursor = 12..12;
+    assert_eq!(
+        app.resolved_current_sql_snapshot_for(0).unwrap().trim(),
+        "SELECT 2"
+    );
+
+    app.tab_mut().primary_cursor = 0..8;
+    assert_eq!(
+        app.resolved_current_sql_snapshot_for(0).unwrap(),
+        "SELECT 1"
+    );
+}
+
+#[test]
 fn closing_split_repairs_an_active_hidden_pane_index() {
     let mut app = DbGuiApp::construct();
     app.tabs[0].editor_split = true;
@@ -2151,7 +2168,7 @@ fn adaptive_editor_renders_on_the_expected_side_of_results() {
         harness
     };
 
-    let query = build(
+    let mut query = build(
         crate::components::QueryTabKind::Query,
         None,
         egui::vec2(1000.0, 700.0),
@@ -2177,12 +2194,17 @@ fn adaptive_editor_renders_on_the_expected_side_of_results() {
         "the query editor must reach the panel edge without an outer inset"
     );
     assert!(
-        (query.get_by_label("Save query").rect().center().y
+        (query.get_by_label("Run Current").rect().center().y
             - query.get_by_label("SQL workspace").rect().center().y)
             .abs()
             < 0.1,
         "query tabs and actions must share one footer row"
     );
+    assert!(query.query_by_label("Save query").is_none());
+    query.get_by_label("Run options").click();
+    query.run_steps(2);
+    assert!(query.query_by_label("Run All").is_some());
+    assert!(query.query_by_label("Save query").is_some());
 
     let table = build(
         crate::components::QueryTabKind::Table,
@@ -2209,8 +2231,17 @@ fn adaptive_editor_renders_on_the_expected_side_of_results() {
     );
     let editor_y = compact.get_by_label("SQL workspace").rect().center().y;
     let result_y = compact.get_by_label("Empty state mark").rect().center().y;
+    let result_modes_y = compact.get_by_label("Data").rect().center().y;
+    let live_log_y = compact.get_by_label("Live log").rect().center().y;
     assert!(editor_y < result_y);
-    assert!(result_y - editor_y > 80.0, "compact result area collapsed");
+    assert!(
+        result_y - editor_y > 50.0,
+        "compact result area collapsed: editor={editor_y}, result={result_y}"
+    );
+    assert!(
+        result_y < result_modes_y && result_modes_y < live_log_y,
+        "query result modes must dock below the result and above Live log"
+    );
 }
 
 #[test]
@@ -2528,7 +2559,7 @@ fn query_result_controls_sit_between_query_toolbar_and_grid() {
         });
     harness.run_steps(4);
 
-    let query_y = harness.get_by_label("Save query").rect().center().y;
+    let query_y = harness.get_by_label("Run Current").rect().center().y;
     let data_y = harness.get_by_label("Data").rect().center().y;
     let grid_y = harness.get_by_label("col0").rect().center().y;
     assert!(harness.query_by_label("Message").is_some());
@@ -2540,8 +2571,8 @@ fn query_result_controls_sit_between_query_toolbar_and_grid() {
         "Query tabs must not show table-browser paging controls"
     );
     assert!(
-        query_y < data_y && data_y < grid_y,
-        "Query toolbar, result controls, and grid must form one continuous top-to-bottom stack"
+        query_y < grid_y && grid_y < data_y,
+        "Query toolbar, grid, and result controls must form one continuous top-to-bottom stack"
     );
 
     harness.get_by_label("Message").click();
@@ -2556,6 +2587,83 @@ fn query_result_controls_sit_between_query_toolbar_and_grid() {
     assert!(harness
         .query_by_label("Chart visualization is coming soon")
         .is_some());
+}
+
+#[test]
+fn run_all_result_tabs_render_between_the_toolbar_and_result_modes() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    connect_fake(&mut app, fake_schema(2, 3));
+    app.tab_mut().sql = "SELECT 1; SELECT 2;".into();
+    app.tab_mut().set_batch_results(vec![
+        ("SELECT 1".into(), Ok(fake_result(1, 1))),
+        ("SELECT 2".into(), Ok(fake_result(2, 2))),
+    ]);
+
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+        });
+    harness.run_steps(4);
+
+    let toolbar_y = harness.get_by_label("Run Current").rect().center().y;
+    let query_1_y = harness.get_by_label("Query 1").rect().center().y;
+    let modes_y = harness.get_by_label("Data").rect().center().y;
+    harness.get_by_label("Query 2");
+    assert!(
+        toolbar_y < query_1_y && query_1_y < modes_y,
+        "statement tabs must sit between the query toolbar and Data / Message / Chart"
+    );
+}
+
+#[test]
+fn untouched_message_and_chart_views_show_only_the_empty_illustration() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+        });
+    harness.run_steps(4);
+
+    harness.get_by_label("Message").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Empty state mark").is_some());
+    assert!(harness
+        .query_by_label("Run a query to see execution details")
+        .is_none());
+
+    harness.get_by_label("Chart").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Empty state mark").is_some());
+    assert!(harness
+        .query_by_label("Chart visualization is coming soon")
+        .is_none());
 }
 
 /// A result arriving from a superseded run (the user started a newer query before the old
@@ -2665,6 +2773,48 @@ fn duckdb_counts_the_full_table_after_loading_the_visible_page() {
     assert_eq!(app.tab().result.as_ref().unwrap().row_count(), 100);
     assert_eq!(app.tab().total_rows, Some(250));
     assert!(!app.tab().total_rows_pending);
+}
+
+#[test]
+fn run_all_keeps_each_statement_result_in_its_own_result_tab() {
+    let mut app = DbGuiApp::construct();
+    let config = dbcore::ConnectionConfig::new(dbcore::DbKind::DuckDb);
+    let db = std::sync::Arc::new(dbcore::backends::duckdb::DuckDb::connect(&config).unwrap());
+    app.active_connections.push(ActiveConnection {
+        config_id: "duck-batch".into(),
+        name: "DuckDB".into(),
+        db,
+        schema: SchemaTree::default(),
+        databases: Vec::new(),
+    });
+    app.tab_mut().conn_id = Some("duck-batch".into());
+
+    app.start_resolved_query_batch(
+        0,
+        "SELECT 11 AS first_value; SELECT 22 AS second_value;".into(),
+    );
+    let ctx = egui::Context::default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline && app.busy != Busy::Idle {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        app.poll_messages(&ctx);
+    }
+
+    assert_eq!(app.tab().batch_results.len(), 2);
+    assert_eq!(
+        app.tab().result.as_ref().unwrap().rows[0][0],
+        Value::Int(11)
+    );
+    app.tab_mut().activate_batch_result(1);
+    assert_eq!(
+        app.tab().result.as_ref().unwrap().rows[0][0],
+        Value::Int(22)
+    );
+    app.tab_mut().activate_batch_result(0);
+    assert_eq!(
+        app.tab().result.as_ref().unwrap().rows[0][0],
+        Value::Int(11)
+    );
 }
 
 #[test]
@@ -3186,7 +3336,7 @@ fn run_query_is_refused_while_busy() {
 }
 
 #[test]
-fn query_failure_is_kept_on_its_tab_and_rendered_in_results() {
+fn query_failure_is_kept_on_its_tab_and_rendered_in_message_view() {
     use egui_kittest::kittest::Queryable;
 
     let mut app = DbGuiApp::construct();
@@ -3209,11 +3359,11 @@ fn query_failure_is_kept_on_its_tab_and_rendered_in_results() {
         .unwrap();
     app.poll_messages(&egui::Context::default());
 
-    assert_eq!(
-        app.tab().query_error.as_deref(),
-        Some("no such column: missing_column")
-    );
-    assert!(app.tab().view == TabView::Data);
+    let rendered_error = app.tab().query_error.clone().unwrap();
+    assert!(rendered_error.contains("Line 1, column 8"));
+    assert!(rendered_error.contains("Column \"missing_column\" was not found."));
+    assert!(rendered_error.contains("SELECT missing_column FROM customers"));
+    assert!(app.tab().view == TabView::Message);
     assert_eq!(app.status_msg, "Ready");
     assert!(
         app.error.is_none(),
@@ -3232,10 +3382,14 @@ fn query_failure_is_kept_on_its_tab_and_rendered_in_results() {
             app.draw(ui, None);
         });
     harness.run_steps(4);
-    assert!(harness.query_by_label("Query failed").is_some());
-    assert!(harness
-        .query_by_label("no such column: missing_column")
-        .is_some());
+    assert!(harness.query_by_label("Empty state mark").is_none());
+    assert!(harness.query_by_label("Query failed").is_none());
+    assert!(harness.query_by_label(&rendered_error).is_some());
+
+    harness.get_by_label("Data").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Empty state mark").is_some());
+    assert!(harness.query_by_label(&rendered_error).is_none());
 }
 
 /// Opening tables: the single italic preview tab is reused, an already-open table is
@@ -4194,6 +4348,7 @@ fn snapshot_query_error_state() {
     app.tab_mut().sql = "SELECT customer_nam FROM customers;".into();
     app.tab_mut().query_error =
         Some("SQLite error: no such column: customer_nam\nat line 1, column 8".into());
+    app.tab_mut().view = TabView::Message;
     app.status_msg = "Ready".into();
     render_and_snapshot(app, "query_error_state", false);
 }

@@ -639,7 +639,8 @@ impl DbGuiApp {
                     }
                 }
             }
-            Action::RunQuery => {
+            run_action @ (Action::RunQuery | Action::RunCurrentQuery) => {
+                let run_current = matches!(run_action, Action::RunCurrentQuery);
                 // The Run button is disabled while busy, but the Cmd+Enter / Cmd+R shortcuts
                 // land here unconditionally. Refuse instead of silently racing a second run
                 // against the one in flight (or against a connect/import in progress).
@@ -656,11 +657,14 @@ impl DbGuiApp {
                 } else {
                     self.active_query_tab
                 };
-                let resolved_sql = match self.resolved_sql_for(idx) {
+                let resolved_sql = match if run_current {
+                    self.resolved_current_sql_for(idx)
+                } else {
+                    self.resolved_sql_for(idx)
+                } {
                     Ok(sql) => sql.trim().to_string(),
                     Err(message) => {
-                        self.tabs[idx].query_error = Some(message);
-                        self.tabs[idx].view = TabView::Data;
+                        self.tabs[idx].set_query_error(message);
                         self.status_msg = "Query parameters need attention.".into();
                         return;
                     }
@@ -668,7 +672,11 @@ impl DbGuiApp {
                 // Editability is re-derived from the SQL itself on every run: any simple
                 // single-table `SELECT *` — including a hand-tuned LIMIT/WHERE/ORDER BY —
                 // stays editable; anything else runs as a read-only ad-hoc query.
-                self.tabs[idx].edits.pending_source = self.derive_edit_source(idx);
+                self.tabs[idx].edits.pending_source = if run_current {
+                    None
+                } else {
+                    self.derive_edit_source(idx)
+                };
                 let guardian_enabled = self.tab_connection_is_production(idx);
                 let read_only = self.tab_connection_is_read_only(idx);
                 if guardian_enabled || read_only {
@@ -707,13 +715,21 @@ impl DbGuiApp {
                                 idx,
                                 resolved_sql,
                                 found,
-                                ProductionGuardContinuation::Query,
+                                if run_current {
+                                    ProductionGuardContinuation::QueryCurrent
+                                } else {
+                                    ProductionGuardContinuation::Query
+                                },
                             );
                             return;
                         }
                     }
                 }
-                self.start_query_for(idx);
+                if run_current {
+                    self.start_resolved_query(idx, resolved_sql);
+                } else {
+                    self.start_resolved_query_batch(idx, resolved_sql);
+                }
             }
             Action::ConfirmDangerQuery => {
                 let Some(pending) = self.danger_pending.as_ref() else {
@@ -738,6 +754,9 @@ impl DbGuiApp {
                 let source_unchanged = match pending.continuation {
                     ProductionGuardContinuation::Query => self
                         .resolved_sql_snapshot_for(idx)
+                        .is_ok_and(|sql| sql.trim() == pending.sql),
+                    ProductionGuardContinuation::QueryCurrent => self
+                        .resolved_current_sql_snapshot_for(idx)
                         .is_ok_and(|sql| sql.trim() == pending.sql),
                     ProductionGuardContinuation::Edits => self
                         .commit_pending
@@ -780,7 +799,12 @@ impl DbGuiApp {
                 // guarded tab explicitly in case selection changed while preflight was running.
                 self.active_query_tab = idx;
                 match pending.continuation {
-                    ProductionGuardContinuation::Query => self.start_query_for(idx),
+                    ProductionGuardContinuation::Query => {
+                        self.start_resolved_query_batch(idx, pending.sql)
+                    }
+                    ProductionGuardContinuation::QueryCurrent => {
+                        self.start_resolved_query(idx, pending.sql)
+                    }
                     ProductionGuardContinuation::Edits => self.confirm_edits(),
                     ProductionGuardContinuation::Schema => self.apply_schema_confirmed(),
                     ProductionGuardContinuation::Import => self.confirm_import_guarded(),

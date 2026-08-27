@@ -188,6 +188,266 @@ pub(crate) fn toolbar_icon_button(
     resp
 }
 
+#[derive(Default)]
+pub(crate) struct RunResponse {
+    pub run_current: bool,
+    pub run_all: bool,
+    pub save_query: bool,
+}
+
+const SHORTCUT_ICON_SIZE: f32 = 11.0;
+const SHORTCUT_ICON_GAP: f32 = 2.0;
+
+fn command_key_icon() -> egui::ImageSource<'static> {
+    if cfg!(target_os = "macos") {
+        icons::keyboard_command()
+    } else {
+        icons::keyboard_control()
+    }
+}
+
+fn shortcut_icons_width(count: usize) -> f32 {
+    count as f32 * SHORTCUT_ICON_SIZE + count.saturating_sub(1) as f32 * SHORTCUT_ICON_GAP
+}
+
+fn paint_shortcut_icons(
+    ui: &egui::Ui,
+    right: f32,
+    center_y: f32,
+    shortcut_icons: &[egui::ImageSource<'static>],
+    color: egui::Color32,
+) {
+    let mut x = right - shortcut_icons_width(shortcut_icons.len());
+    for icon in shortcut_icons {
+        egui::Image::new(icon.clone())
+            .fit_to_exact_size(egui::Vec2::splat(SHORTCUT_ICON_SIZE))
+            .tint(color)
+            .paint_at(
+                ui,
+                egui::Rect::from_center_size(
+                    egui::pos2(x + SHORTCUT_ICON_SIZE * 0.5, center_y),
+                    egui::Vec2::splat(SHORTCUT_ICON_SIZE),
+                ),
+            );
+        x += SHORTCUT_ICON_SIZE + SHORTCUT_ICON_GAP;
+    }
+}
+
+/// Split Run control: the main segment executes the selection/current statement, while the
+/// chevron exposes both run scopes and the query-saving action in one compact menu.
+pub(crate) fn run_button(ui: &mut egui::Ui, can_run: bool, can_save: bool) -> RunResponse {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let text_color = if can_run {
+        palette::TEXT()
+    } else {
+        palette::TEXT_FAINT()
+    };
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        "Run Current",
+        0.0,
+        egui::TextFormat {
+            font_id: font.clone(),
+            color: text_color,
+            ..Default::default()
+        },
+    );
+    let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+    let h = 24.0;
+    let pad_x = 9.0;
+    let icon_size = 13.0;
+    let icon_gap = 5.0;
+    let shortcut_gap = 7.0;
+    let current_shortcut = [command_key_icon(), icons::keyboard_return()];
+    let chevron_w = 24.0;
+    let main_w = icon_size
+        + icon_gap
+        + galley.size().x
+        + shortcut_gap
+        + shortcut_icons_width(current_shortcut.len())
+        + pad_x * 2.0;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(main_w + chevron_w, h), egui::Sense::hover());
+    let main_rect = egui::Rect::from_min_size(rect.min, egui::vec2(main_w, h));
+    let chevron_rect = egui::Rect::from_min_size(
+        egui::pos2(main_rect.right(), rect.top()),
+        egui::vec2(chevron_w, h),
+    );
+    let main = ui.interact(main_rect, ui.id().with("run_current"), egui::Sense::click());
+    main.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, can_run, "Run Current")
+    });
+    let chevron = ui.interact(
+        chevron_rect,
+        ui.id().with("run_options"),
+        egui::Sense::click(),
+    );
+    chevron
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Run options"));
+
+    if ui.is_rect_visible(rect) {
+        let radius = egui::CornerRadius::same(5);
+        ui.painter().rect(
+            rect,
+            radius,
+            palette::SURFACE(),
+            egui::Stroke::new(1.0, palette::BORDER()),
+            egui::StrokeKind::Outside,
+        );
+        if can_run && main.hovered() {
+            ui.painter().rect_filled(
+                main_rect,
+                egui::CornerRadius {
+                    nw: 5,
+                    sw: 5,
+                    ne: 0,
+                    se: 0,
+                },
+                palette::SURFACE_HOVER(),
+            );
+        }
+        if chevron.hovered() {
+            ui.painter().rect_filled(
+                chevron_rect,
+                egui::CornerRadius {
+                    nw: 0,
+                    sw: 0,
+                    ne: 5,
+                    se: 5,
+                },
+                palette::SURFACE_HOVER(),
+            );
+        }
+        ui.painter().vline(
+            chevron_rect.left(),
+            rect.top() + 5.0..=rect.bottom() - 5.0,
+            egui::Stroke::new(1.0, palette::BORDER()),
+        );
+        egui::Image::new(icons::play())
+            .fit_to_exact_size(egui::Vec2::splat(icon_size))
+            .tint(text_color)
+            .paint_at(
+                ui,
+                egui::Rect::from_center_size(
+                    egui::pos2(
+                        main_rect.left() + pad_x + icon_size * 0.5,
+                        main_rect.center().y,
+                    ),
+                    egui::Vec2::splat(icon_size),
+                ),
+            );
+        ui.painter().galley(
+            egui::pos2(
+                main_rect.left() + pad_x + icon_size + icon_gap,
+                main_rect.center().y - galley.size().y * 0.5,
+            ),
+            galley,
+            text_color,
+        );
+        paint_shortcut_icons(
+            ui,
+            main_rect.right() - pad_x,
+            main_rect.center().y,
+            &current_shortcut,
+            palette::TEXT_FAINT(),
+        );
+        egui::Image::new(icons::chevron_down())
+            .fit_to_exact_size(egui::Vec2::splat(12.0))
+            .tint(palette::TEXT_WEAK())
+            .paint_at(
+                ui,
+                egui::Rect::from_center_size(chevron_rect.center(), egui::Vec2::splat(12.0)),
+            );
+    }
+
+    let mut out = RunResponse {
+        run_current: can_run && main.clicked(),
+        ..Default::default()
+    };
+    egui::Popup::menu(&chevron)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_width(164.0);
+            if run_menu_item(
+                ui,
+                icons::play(),
+                "Run All",
+                &[
+                    icons::keyboard_shift(),
+                    command_key_icon(),
+                    icons::keyboard_return(),
+                ],
+                can_run,
+            ) {
+                out.run_all = true;
+                ui.close();
+            }
+            if run_menu_item(
+                ui,
+                icons::play(),
+                "Run Current",
+                &[command_key_icon(), icons::keyboard_return()],
+                can_run,
+            ) {
+                out.run_current = true;
+                ui.close();
+            }
+            ui.separator();
+            if run_menu_item(ui, icons::save(), "Save query", &[], can_save) {
+                out.save_query = true;
+                ui.close();
+            }
+        });
+    out
+}
+
+fn run_menu_item(
+    ui: &mut egui::Ui,
+    icon: egui::ImageSource<'static>,
+    label: &str,
+    shortcut_icons: &[egui::ImageSource<'static>],
+    enabled: bool,
+) -> bool {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    if ui.is_rect_visible(rect) {
+        if enabled && response.hovered() {
+            ui.painter()
+                .rect_filled(rect, egui::CornerRadius::same(5), palette::SELECTION());
+        }
+        let color = if enabled {
+            palette::TEXT()
+        } else {
+            palette::TEXT_FAINT()
+        };
+        egui::Image::new(icon)
+            .fit_to_exact_size(egui::Vec2::splat(14.0))
+            .tint(color)
+            .paint_at(
+                ui,
+                egui::Rect::from_center_size(
+                    egui::pos2(rect.left() + 15.0, rect.center().y),
+                    egui::Vec2::splat(14.0),
+                ),
+            );
+        ui.painter().text(
+            egui::pos2(rect.left() + 28.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::TextStyle::Body.resolve(ui.style()),
+            color,
+        );
+        paint_shortcut_icons(
+            ui,
+            rect.right() - 8.0,
+            rect.center().y,
+            shortcut_icons,
+            palette::TEXT_FAINT(),
+        );
+    }
+    enabled && response.clicked()
+}
+
 /// Outcome of the Beautify split button.
 pub(crate) struct BeautifyResponse {
     /// The main segment was clicked: format the active tab's SQL.

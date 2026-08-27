@@ -657,6 +657,10 @@ fn build_grid(
                 .resizable(true),
         );
     }
+    // Keep data columns fitted and readable while a blank remainder cell carries header/row
+    // painting across unused horizontal space. Stretching the final data column would move its
+    // centered header far away from the values beneath it.
+    builder = builder.column(Column::remainder().clip(true));
     if reset_widths {
         builder.reset();
     }
@@ -687,6 +691,7 @@ fn build_grid(
                 let col = &result.columns[i];
                 header.col(|ui| header_cell(ui, i, col, sort, out, grid_id, visible_cols.len()));
             }
+            header.col(components::paint_table_header_cell);
         })
         .body(|body| {
             let new_rows = edits.new_rows;
@@ -1013,6 +1018,10 @@ fn build_grid(
                         }
                     });
                 }
+
+                // Paint the stripe/selection/edit tint through the unused right side without
+                // turning it into a fake data column or changing keyboard navigation.
+                row.col(|ui| tint_row(ui, state));
 
                 let row_resp = row.response();
                 if !filling && !follow_click && row_resp.clicked() {
