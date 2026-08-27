@@ -2,11 +2,8 @@ name: Vercel Production
 
 on:
   push:
-    branches: [main]
-    paths:
-      - "website/**"
-      - ".github/workflows/website-production.yml"
-  workflow_dispatch:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
 
 permissions:
   contents: read
@@ -16,9 +13,34 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  verify-tag:
+    name: Verify tag is releasable from main
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify version tag
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not point to a commit on main"
+            exit 1
+          fi
+          # shellcheck source=scripts/version.sh
+          source scripts/version.sh
+          version="$(plusplus_read_version "$PWD")"
+          if [ "$GITHUB_REF_NAME" != "v${version}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}"
+            exit 1
+          fi
+
   deploy-production:
     name: Deploy production
-    if: github.ref == 'refs/heads/main'
+    needs: verify-tag
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment:

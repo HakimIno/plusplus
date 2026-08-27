@@ -3,48 +3,33 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - "v[0-9]+.[0-9]+.[0-9]+"
 
 permissions:
   contents: write
 
 jobs:
-  # Linux tests are the hard compile+logic gate. macOS/Windows tests still run
-  # and still block *publish*, but they no longer delay packaging: a Windows
-  # MSVC + DuckDB test run was adding an hour of idle time before any DMG,
-  # AppImage, or zip started building.
-  ci-linux:
-    name: CI (Linux)
-    uses: ./.github/workflows/ci.yml
-    with:
-      runners: '["ubuntu-latest"]'
-      run-clippy: false
-
-  ci-macos:
-    name: CI (macOS)
-    uses: ./.github/workflows/ci.yml
-    with:
-      runners: '["macos-latest"]'
-      run-clippy: false
-
-  ci-windows:
-    name: CI (Windows)
-    uses: ./.github/workflows/ci.yml
-    with:
-      runners: '["windows-latest"]'
-      run-clippy: false
-
   # A tag whose name disagrees with Cargo.toml breaks auto-update permanently and
   # silently: the packaging scripts name assets from Cargo.toml, while every client asks
   # GitHub for `plusplus-<tag version>.dmg` and gets "no such asset" forever after. The
   # happy path (`scripts/release.sh --tag`) derives the tag from Cargo.toml, but this
-  # workflow fires on any pushed `v*` tag — including a hand-typed one. Fail before building.
+  # workflow fires on any pushed semantic-version tag — including a hand-typed one.
   verify-version:
-    name: Verify tag matches Cargo.toml
+    name: Verify tag is releasable from main
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag commit belongs to main
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not point to a commit on main"
+            exit 1
+          fi
 
       - name: Compare tag against workspace version
         run: |
@@ -58,6 +43,34 @@ jobs:
             exit 1
           fi
           echo "✓ ${tag} matches Cargo.toml ${version}"
+
+  # Linux tests are the hard compile+logic gate. macOS/Windows tests still run
+  # and still block *publish*, but they no longer delay packaging: a Windows
+  # MSVC + DuckDB test run was adding an hour of idle time before any DMG,
+  # AppImage, or zip started building.
+  ci-linux:
+    name: CI (Linux)
+    needs: verify-version
+    uses: ./.github/workflows/ci.yml
+    with:
+      runners: '["ubuntu-latest"]'
+      run-clippy: false
+
+  ci-macos:
+    name: CI (macOS)
+    needs: verify-version
+    uses: ./.github/workflows/ci.yml
+    with:
+      runners: '["macos-latest"]'
+      run-clippy: false
+
+  ci-windows:
+    name: CI (Windows)
+    needs: verify-version
+    uses: ./.github/workflows/ci.yml
+    with:
+      runners: '["windows-latest"]'
+      run-clippy: false
 
   macos:
     needs: [ci-linux, verify-version]
