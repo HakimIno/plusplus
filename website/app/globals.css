@@ -595,7 +595,7 @@ h3,
 
 .engine-grid {
   display: grid;
-  gap: clamp(0.75rem, 1.5vw, 1rem);
+  gap: clamp(1rem, 2vw, 1.5rem);
 }
 
 @media (min-width: 640px) {
@@ -611,13 +611,96 @@ h3,
 }
 
 .engine-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 1rem;
+  background: var(--bd-black);
+  border: 1px solid var(--bd-border);
+  transition:
+    border-color 0.25s ease,
+    background 0.25s ease,
+    transform 0.25s ease;
+}
+
+.engine-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(
+    135deg,
+    rgba(59, 130, 246, 0.55) 0%,
+    rgba(34, 211, 238, 0.35) 45%,
+    rgba(251, 146, 60, 0.25) 100%
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+
+.engine-card:hover {
+  background: var(--bd-panel);
+  transform: translateY(-2px);
+}
+
+.engine-card:hover::before {
+  opacity: 1;
+}
+
+.engine-card__icon {
   display: flex;
   align-items: center;
-  gap: 1rem;
-  padding: 1.25rem 1.5rem;
-  background: var(--bd-panel);
-  border: 1px solid var(--bd-border);
-  border-radius: 0.625rem;
+  justify-content: center;
+  min-height: 7.5rem;
+  padding: 2rem 1.5rem 1.5rem;
+  border-bottom: 1px solid var(--bd-border);
+  background:
+    radial-gradient(
+      70% 80% at 80% 20%,
+      rgba(59, 130, 246, 0.06) 0%,
+      transparent 70%
+    ),
+    var(--bd-black);
+  transition: background 0.25s ease;
+}
+
+.engine-card:hover .engine-card__icon {
+  background:
+    radial-gradient(
+      70% 80% at 80% 20%,
+      rgba(34, 211, 238, 0.1) 0%,
+      rgba(251, 191, 36, 0.04) 40%,
+      transparent 70%
+    ),
+    var(--bd-panel);
+}
+
+.engine-card__body {
+  flex: 1;
+  padding: 1.25rem 1.5rem 1.75rem;
+}
+
+.engine-card h3 {
+  margin: 0 0 0.75rem;
+  font-size: 1.0625rem;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--bd-text);
+}
+
+.engine-card p {
+  margin: 0;
+  font-size: 0.875rem;
+  line-height: 1.7;
+  color: var(--bd-muted);
 }
 
 .split-section {

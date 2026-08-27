@@ -1,133 +1,204 @@
-
+<h1 align="center">plusplus</h1>
 
 <p align="center">
-  <strong>A fast, native SQL client that makes production mistakes harder.</strong><br>
-  PostgreSQL · MySQL / MariaDB · SQL Server · SQLite · DuckDB · macOS · Windows · Linux
+  A fast, native database client designed to make production mistakes harder.
+</p>
+
+<p align="center">
+  PostgreSQL · MySQL · MariaDB · SQL Server · SQLite · DuckDB · Cassandra · ScyllaDB
+  <br>
+  macOS · Windows · Linux
 </p>
 
 <p align="center">
   <a href="https://github.com/HakimIno/plusplus/releases/latest"><strong>Download</strong></a>
-  · <a href="#try-it-in-two-minutes">Try it</a>
-  · <a href="#why-plusplus">Why plusplus</a>
+  · <a href="#quick-start">Quick start</a>
+  · <a href="#features">Features</a>
+  · <a href="SECURITY.md">Security</a>
   · <a href="ROADMAP.md">Roadmap</a>
   · <a href="CONTRIBUTING.md">Contribute</a>
 </p>
 
 <p align="center">
+  <a href="https://github.com/HakimIno/plusplus/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/HakimIno/plusplus/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/HakimIno/plusplus/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/HakimIno/plusplus"></a>
-  <a href="LICENSE-MIT"><img alt="MIT or Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue"></a>
+  <a href="LICENSE-MIT"><img alt="MIT or Apache-2.0 license" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue"></a>
   <img alt="No Electron" src="https://img.shields.io/badge/Electron-none-6e8eff">
   <img alt="No telemetry" src="https://img.shields.io/badge/telemetry-none-4acf8b">
 </p>
 
 <p align="center">
-  <img src="crates/ui/tests/snapshots/demo.png" alt="plusplus database client showing its schema browser and SQL editor" width="100%">
+  <img src="website/public/screenshots/image1.png" alt="The plusplus schema browser and data grid" width="100%">
 </p>
 
-plusplus is an open-source desktop database client built in Rust. Browse schemas, run SQL,
-page through large tables, stage row edits, and export complete datasets without sending
-queries or results to a third party.
+plusplus is an open-source desktop database client built in Rust. It brings schema browsing,
+SQL and CQL editing, paged results, staged row changes, data transfer, and database design into
+one focused native application. Queries, results, and credentials stay on your machine.
 
-## Why plusplus
+## Why plusplus?
 
-| What matters | What plusplus does |
+Most database clients make it easy to run a query. plusplus also makes the context and risk of
+that query visible before it reaches a database.
+
+| Principle | What it means in plusplus |
 | --- | --- |
-| Safety profiles | Development, Staging, Production, and Custom profiles turn the existing safeguards into clear connection policies. |
-| Safer production access | Classifies every write, blocks it on read-only connections, and requires audited confirmation plus bounded preflight checks in production. |
-| Read-only that actually blocks writes | Enforces read-only mode in the application and, where supported, in the database session itself. |
-| Responsive work on large tables | Uses a virtualized grid, keyset pagination when a safe primary key is available, and a configurable cross-tab memory budget. |
-| A focused native app | Ships as a Rust desktop app with no Electron, browser runtime, cloud account, or telemetry. |
-| One familiar workflow | Uses the same schema browser, SQL editor, result grid, shortcuts, and staged edits across server and embedded databases. |
+| **Safety first** | Development, Staging, Production, and Custom profiles apply clear safeguards to each connection. |
+| **Writes are deliberate** | Risky statements are classified before execution; production changes require review, and read-only connections reject writes. |
+| **Local by design** | There is no cloud account, telemetry, or query proxy. Secrets are stored in the operating system keychain. |
+| **Native performance** | The Rust desktop app uses a virtualized grid, background operations, bounded result memory, and no Electron runtime. |
+| **One consistent workflow** | Server, embedded, SQL, and CQL databases share the same connection sidebar, editor, result grid, and shortcuts. |
 
-### Built for everyday database work
+## Features
 
-- **Explore quickly.** Filter tables, columns, keys, indexes, views, routines, and triggers; preview rows with one click.
-- **Design once, target any connection.** Edit ER models, keep them as portable JSON, and preview dialect-specific DDL before applying it to PostgreSQL, MySQL/MariaDB, SQL Server, SQLite, or DuckDB.
-- **Keep working during long operations.** Queries, counts, and exports run away from the UI thread.
-- **Edit deliberately.** Cell edits, inserted rows, and deletions remain staged until you save or discard them.
-- **Move complete datasets.** Stream table exports to CSV or JSON without loading the whole table into memory.
-- **Connect through real infrastructure.** Use TLS, mutual TLS where supported, and SSH tunnels with host-key verification.
-- **Keep secrets local.** Passwords stay in the OS keychain; query history and the optional audit trail stay on your machine.
+### Query and explore
 
-See the [security model](SECURITY.md) for the exact guarantees and known platform-signing limitations.
+- Browse tables, columns, primary and foreign keys, indexes, views, routines, and triggers.
+- Write SQL or CQL with syntax highlighting, formatting, saved queries, history, and schema-aware autocomplete.
+- Navigate large tables with pagination and keyset paging when a safe primary key is available.
+- Run queries, counts, and exports away from the UI thread, with cancellation support.
 
-## Try it in two minutes
+### Edit and move data
+
+- Stage cell edits, inserted rows, and deletions before saving or discarding them as a group.
+- Import CSV and JSON with a preview step.
+- Stream complete tables to CSV or JSON without loading the whole dataset into memory.
+- Copy result data to the clipboard and filter, sort, or inspect it in place.
+
+### Design and customize
+
+- Create and edit ER diagrams, save portable JSON models, and preview dialect-specific DDL.
+- Restore open workspaces and query tabs between launches.
+- Choose from built-in themes or install a custom JSON theme without recompiling.
+- Configure interface and editor fonts, result-memory limits, history, auditing, and update checks.
+
+### Connect securely
+
+- Use TLS policies from Disable through Verify Full, including mutual TLS where supported.
+- Reach server databases through SSH tunnels with host-key verification.
+- Keep database passwords and SSH secrets in macOS Keychain, Windows Credential Manager, or
+  the Linux Secret Service—not in connection files.
+- Record an optional, local, append-only audit trail for connections and data-changing actions.
+
+The exact guarantees, implementation references, and current signing limitations are documented
+in the [security model](SECURITY.md).
+
+## Supported databases
+
+| Database | Connection type | Notes |
+| --- | --- | --- |
+| PostgreSQL | Server · SQL | TLS, SSH tunnels, schema introspection, queries, and staged edits |
+| MySQL / MariaDB | Server · SQL | A shared workflow with backend-specific SQL behavior |
+| Microsoft SQL Server | Server · SQL | Native TDS connectivity and SQL Server-aware query handling |
+| SQLite | Embedded · SQL | Bundled engine; open a local file and work entirely offline |
+| DuckDB | Embedded · SQL | File or in-memory analytics, including direct Parquet and CSV queries |
+| Apache Cassandra | Server · CQL | Native CQL protocol and wide-column schema browsing |
+| ScyllaDB | Server · CQL | Cassandra-compatible connectivity through the shared CQL backend |
+
+Database engines differ in their DDL and session-level read-only capabilities. See
+[SECURITY.md](SECURITY.md) for the enforcement details and [ROADMAP.md](ROADMAP.md) for planned
+coverage.
+
+## Quick start
 
 ### Download a release
 
-Download the latest package from [GitHub Releases](https://github.com/HakimIno/plusplus/releases/latest).
+Get the latest package from [GitHub Releases](https://github.com/HakimIno/plusplus/releases/latest).
 
-| Platform | Package | Current signing status |
+| Platform | Package | Architecture |
 | --- | --- | --- |
-| macOS | Universal `.dmg` | Minisign verified; Apple notarization is still pending. |
-| Windows | x86_64 `.zip` | Minisign verified; Authenticode signing is still pending. |
-| Linux | x86_64 `.AppImage` | Minisign verified. |
+| macOS | Universal `.dmg` | Apple Silicon and Intel |
+| Windows | Portable `.zip` | x86_64 |
+| Linux | `.AppImage` | x86_64 |
 
-Your operating system may warn about the macOS and Windows packages until native platform
-signing is available. Every release asset has a detached Minisign signature; verification
-instructions are in [Release signing](docs/RELEASE_SIGNING.md).
-Native certificate setup is documented separately in [Platform signing](docs/PLATFORM_SIGNING.md).
+Each release asset includes a detached Minisign signature. macOS notarization and Windows
+Authenticode signing are still in progress, so those operating systems may show a warning on
+first launch. See [release verification](docs/RELEASE_SIGNING.md) and
+[platform signing status](docs/PLATFORM_SIGNING.md) for details.
 
 ### Run from source
 
-SQLite support is bundled, so no database server is required:
+You need the stable Rust toolchain specified in `rust-toolchain.toml`, a C/C++ compiler, and
+CMake. On Linux, install the native windowing dependencies first:
+
+```bash
+# Ubuntu, Fedora, Arch, and openSUSE families
+scripts/linux-deps.sh
+```
+
+Then start the app from the repository root:
 
 ```bash
 cargo run --bin plusplus
 ```
 
-Add `examples/sample.sqlite` as a SQLite connection. The sample contains a small Thai
-e-commerce schema and realistic linked data for trying schema navigation, queries, paging,
-filters, and staged editing.
+No database server is required for a first run. Add `examples/sample.sqlite` as a SQLite
+connection to try schema navigation, queries, pagination, filtering, and staged editing with a
+small Thai e-commerce dataset. For local analytics, add a DuckDB connection using `:memory:` or
+a `.duckdb` file.
 
-For local analytics, add a DuckDB connection with `:memory:` or a `.duckdb` file. DuckDB SQL can
-query Parquet/CSV directly (for example, `SELECT * FROM read_parquet('events/*.parquet')`) while
-PlusPlus streams visible rows through the same global result-memory ceiling.
-
-### Build on your platform
-
-```bash
-# macOS
-scripts/release.sh --install
-
-# Linux
-scripts/linux-build.sh --install-deps --install-rust --release --smoke
-```
-
-Windows portable ZIPs are built by CI; use the release download unless you are developing
-the app itself.
-
-## Keyboard-first
+## Keyboard shortcuts
 
 | Shortcut | Action |
 | --- | --- |
-| `Cmd/Ctrl + Enter` | Run query |
-| `Cmd/Ctrl + S` | Save staged edits |
-| `Cmd/Ctrl + R` | Reload result |
-| `Esc` | Discard unsaved edits |
-| `Backspace / Delete` | Mark row for deletion |
-| `Cmd/Ctrl + T / W` | Open / close tab |
-| `Cmd/Ctrl + F` | Toggle filter bar |
+| `Cmd/Ctrl + Enter` | Run the current query |
+| `Cmd/Ctrl + S` | Save staged changes |
+| `Cmd/Ctrl + R` | Reload the current result |
+| `Cmd/Ctrl + T` | Open a new tab |
+| `Cmd/Ctrl + W` | Close the current tab |
+| `Cmd/Ctrl + F` | Toggle the filter bar |
+| `Backspace` / `Delete` | Mark the selected row for deletion |
+| `Esc` | Discard unsaved changes |
+
+## Development
+
+The workspace keeps database logic independent from the UI so core behavior can be tested
+without opening a window.
+
+```text
+crates/
+├── app/        Application entry point and platform packaging hooks
+├── core/       Connections, backends, schema models, safety, import, and export
+├── analysis/   Data-analysis primitives
+└── ui/         Desktop interface and application workflows
+website/        Next.js product and download site
+examples/       Sample database, themes, and ScyllaDB environment
+scripts/        Build, benchmark, release, and packaging helpers
+```
+
+Run the standard checks before opening a pull request:
+
+```bash
+cargo fmt --all -- --check
+cargo check --workspace --all-targets
+cargo test --workspace --no-fail-fast
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+For benchmarks and reproducible performance artifacts, see
+[Performance measurements](docs/PERFORMANCE.md). For contribution conventions and theme
+authoring, see [CONTRIBUTING.md](CONTRIBUTING.md) and [Custom themes](docs/THEMES.md).
 
 ## Project status
 
-plusplus is pre-1.0 and under active development. SQLite is the easiest evaluation path;
-before using any pre-1.0 database client against production, review the
-[security checklist](SECURITY.md), keep backups, and start with a read-only account.
+plusplus is pre-1.0 and under active development. SQLite is the easiest evaluation path. Before
+using any pre-1.0 database client against production, keep current backups and begin with a
+database account that has only the permissions you need.
 
-The current priorities and explicit non-goals are in [ROADMA
-P.md](ROADMAP.md). Releases are
-listed in the [changelog](CHANGELOG.md).
+- Follow current priorities and explicit non-goals in the [roadmap](ROADMAP.md).
+- Review user-visible changes in the [changelog](CHANGELOG.md).
+- Report bugs or request features through [GitHub Issues](https://github.com/HakimIno/plusplus/issues).
+- Report suspected vulnerabilities privately through
+  [GitHub Security Advisories](https://github.com/HakimIno/plusplus/security/advisories/new).
 
 ## Contributing
 
-Bug reports, database-specific test cases, UX feedback, themes, documentation, and focused
-pull requests are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) and look for
+Focused bug fixes, database-specific test cases, accessibility improvements, themes,
+documentation, and small UX improvements are welcome. Start with the
+[contribution guide](CONTRIBUTING.md) and browse issues labeled
 [`good first issue`](https://github.com/HakimIno/plusplus/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
 or [`help wanted`](https://github.com/HakimIno/plusplus/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22).
 
-Please use private vulnerability reporting rather than a public issue for security-sensitive reports.
+## License
 
----
-
-<p align="center"><sub>Built with Rust · Dual-licensed under MIT or Apache-2.0</sub></p>
+plusplus is dual-licensed under your choice of [MIT](LICENSE-MIT) or
+[Apache License 2.0](LICENSE-APACHE).
