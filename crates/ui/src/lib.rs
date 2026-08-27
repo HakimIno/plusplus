@@ -24,6 +24,7 @@ mod style;
 mod theme;
 mod title_bar;
 mod update;
+mod value_viewer;
 
 pub use app::DbGuiApp;
 

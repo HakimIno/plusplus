@@ -105,7 +105,7 @@ mod tests {
         .unwrap();
         assert_eq!(sql, r"UPDATE `logs` SET `path` = 'C:\\tmp' WHERE `id` = 1;");
 
-        // A NULL key matches with IS NULL, and binary SET values are rejected.
+        // A NULL key matches with IS NULL, and binary SET values use SQLite BLOB syntax.
         let sql = build_update_sql(
             DbKind::Sqlite,
             None,
@@ -115,14 +115,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sql, r#"UPDATE "t" SET "v" = NULL WHERE "k" IS NULL;"#);
-        assert!(build_update_sql(
-            DbKind::Sqlite,
-            None,
-            "t",
-            &[("v", &Value::Bytes(vec![1, 2]))],
-            &[("k", &Value::Int(1))]
-        )
-        .is_none());
+        assert_eq!(
+            build_update_sql(
+                DbKind::Sqlite,
+                None,
+                "t",
+                &[("v", &Value::Bytes(vec![1, 2]))],
+                &[("k", &Value::Int(1))]
+            ),
+            Some(r#"UPDATE "t" SET "v" = X'0102' WHERE "k" = 1;"#.into())
+        );
     }
 
     /// Coerce every record of `path` against `targets` and insert them in one transaction —

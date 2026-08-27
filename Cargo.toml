@@ -34,8 +34,8 @@ eframe = { version = "0.34", default-features = false, features = ["default_font
 egui = "0.34"
 egui_extras = { version = "0.34", features = ["datepicker", "svg", "image"] }
 egui_plot = "0.34"
-# PNG decode for egui_extras' image loader (feature is off by default there).
-image = { version = "0.25", default-features = false, features = ["png"] }
+# Common database-image formats for egui_extras' in-app BLOB viewer.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 # --- async runtime ---
 # net + io-util back the SSH tunnel's local listener and byte pump.

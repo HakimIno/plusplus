@@ -4326,6 +4326,7 @@ fn probe_details_panel_typed_columns() {
         ("born", "DATE"),
         ("seen", "TIMESTAMP"),
         ("name", "TEXT"),
+        ("image", "BLOB"),
     ];
     let result = QueryResult {
         columns: columns
@@ -4344,9 +4345,10 @@ fn probe_details_panel_typed_columns() {
                 Value::Text("2024-05-01".into()),
                 Value::Text("2024-05-01 10:30:00".into()),
                 Value::Text("ปลาทู".into()),
+                Value::Bytes(include_bytes!("../../assets/illus/empty-chameleon.png").to_vec()),
             ],
             // A NULL-heavy row exercises the NULL fallbacks of every kind.
-            vec![Value::Null; 7],
+            vec![Value::Null; 8],
         ],
         stats: QueryStats::default(),
         truncated: false,
@@ -4382,6 +4384,50 @@ fn probe_details_panel_typed_columns() {
         clashes.is_empty(),
         "ID clashes in typed Details panel:\n{}",
         clashes.join("\n")
+    );
+}
+
+#[test]
+fn staged_image_blob_builds_a_saveable_update() {
+    let mut app = DbGuiApp::construct();
+    app.active_connections.push(ActiveConnection {
+        config_id: "c1".into(),
+        name: "local".into(),
+        db: std::sync::Arc::new(DummyDb),
+        databases: Vec::new(),
+        schema: fake_schema(1, 1),
+    });
+    app.tab_mut().conn_id = Some("c1".into());
+    app.tab_mut().set_result(QueryResult {
+        columns: vec![
+            ColumnMeta {
+                name: "id".into(),
+                type_name: "INTEGER".into(),
+            },
+            ColumnMeta {
+                name: "image".into(),
+                type_name: "BLOB".into(),
+            },
+        ],
+        rows: vec![vec![Value::Int(1), Value::Bytes(vec![0])]],
+        ..QueryResult::default()
+    });
+    app.tab_mut().edits.source = Some(EditSource {
+        schema: None,
+        table: "images".into(),
+        pk_cols: vec!["id".into()],
+    });
+    app.tab_mut().edits.stage(
+        0,
+        1,
+        Value::Bytes(vec![0x89, 0x50, 0x4e, 0x47]),
+        &Value::Bytes(vec![0]),
+    );
+
+    let statements = app.build_commit_statements().expect("saveable BLOB update");
+    assert_eq!(
+        statements,
+        ["UPDATE \"images\" SET \"image\" = X'89504E47' WHERE \"id\" = 1;"]
     );
 }
 

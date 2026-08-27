@@ -500,7 +500,7 @@ impl DbGuiApp {
             self.left_panel(ui_root, &mut actions);
         }
         if self.show_details_panel {
-            self.right_panel(ui_root);
+            self.right_panel(ui_root, &mut actions);
         }
         let workspace_drop_rect = ui_root.available_rect_before_wrap();
         if self.split_tab.is_some() {
@@ -559,6 +559,13 @@ impl DbGuiApp {
         self.favorite_folder_dialog(&ctx, &mut actions);
         self.danger_confirm_dialog(&ctx, &mut actions);
         self.import_dialog(&ctx, &mut actions);
+        if self
+            .value_viewer
+            .as_ref()
+            .is_some_and(|viewer| viewer.show(&ctx))
+        {
+            self.value_viewer = None;
+        }
         self.update_dialog(&ctx, &mut actions);
         self.whats_new_dialog(&ctx, &mut actions);
 

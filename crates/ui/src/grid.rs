@@ -351,6 +351,11 @@ pub struct GridResponse {
     /// right-click "Follow →" menu): the *raw* result-row index and the column. The app resolves
     /// the FK target and opens a filtered tab on it.
     pub follow_fk: Option<(usize, usize)>,
+    /// Open a read-only JSON/BLOB/Image viewer. Carries an owned snapshot so a subsequent
+    /// query refresh cannot change the value underneath the dialog.
+    pub view_value: Option<(String, String, Value)>,
+    /// A binary cell asked to stage a file replacement (raw result-row index, column).
+    pub replace_blob: Option<(usize, usize)>,
     /// A cell was double-clicked → start editing it (*display* row index, column index).
     pub begin_edit: Option<(usize, usize)>,
     /// A boolean cell was double-clicked → flip it (*display* row index, column index).
@@ -916,7 +921,22 @@ fn build_grid(
                         && (col_resp.double_clicked()
                             || manual_dbl
                             || (edits.active.is_some() && col_resp.clicked()));
-                    if editable
+                    let shown = edits.staged(r, c).unwrap_or(stored);
+                    let inspect_double = col_resp.double_clicked() || manual_dbl;
+                    let opens_viewer = inspect_double
+                        && (matches!(shown, Value::Bytes(_)) || !editable)
+                        && crate::value_viewer::ValueViewer::kind(
+                            &result.columns[c].type_name,
+                            shown,
+                        )
+                        .is_some();
+                    if opens_viewer {
+                        out.view_value = Some((
+                            result.columns[c].name.clone(),
+                            result.columns[c].type_name.clone(),
+                            shown.clone(),
+                        ));
+                    } else if editable
                         && start_edit
                         && state != crate::edit::RowState::Deleted
                         && !matches!(stored, Value::Bytes(_))
@@ -942,6 +962,30 @@ fn build_grid(
                     // Copy targets this row; the app copies the whole selection, or just this
                     // row when it was right-clicked while unselected (TablePlus-style).
                     col_resp.context_menu(|ui| {
+                        if let Some(kind) = crate::value_viewer::ValueViewer::kind(
+                            &result.columns[c].type_name,
+                            shown,
+                        ) {
+                            if ui.button(kind.action_label()).clicked() {
+                                out.view_value = Some((
+                                    result.columns[c].name.clone(),
+                                    result.columns[c].type_name.clone(),
+                                    shown.clone(),
+                                ));
+                                ui.close();
+                            }
+                            ui.separator();
+                        }
+                        if editable
+                            && matches!(kind, RowKind::Stored(_))
+                            && dbcore::import::is_binary_type(&result.columns[c].type_name)
+                        {
+                            if ui.button("Add file…").clicked() {
+                                out.replace_blob = Some((r, c));
+                                ui.close();
+                            }
+                            ui.separator();
+                        }
                         if let (Some(raw), Some(ref_t)) = (fk_raw, fk_ref) {
                             if components::button(
                                 ui,
@@ -956,11 +1000,6 @@ fn build_grid(
                             }
                             ui.separator();
                         }
-                        ui.label(
-                            egui::RichText::new("Copy selected rows")
-                                .small()
-                                .color(palette::TEXT_FAINT()),
-                        );
                         for fmt in [
                             dbcore::CopyFormat::Tsv,
                             dbcore::CopyFormat::Csv,

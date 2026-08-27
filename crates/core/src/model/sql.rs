@@ -1,10 +1,11 @@
 //! SQL DML builders, single-table query recognition, and pagination helpers.
 
+use std::fmt::Write as _;
+
 use super::{ColumnMeta, DbKind};
 use crate::value::Value;
 
-/// Render `value` as a SQL literal for `kind`, safely escaping strings. Returns `None` for
-/// [`Value::Bytes`], which has no portable literal form (those cells aren't editable).
+/// Render `value` as a SQL literal for `kind`, safely escaping strings and binary bytes.
 pub(crate) fn value_to_literal(value: &Value, kind: DbKind) -> Option<String> {
     Some(match value {
         Value::Null => "NULL".to_string(),
@@ -29,13 +30,30 @@ pub(crate) fn value_to_literal(value: &Value, kind: DbKind) -> Option<String> {
             };
             format!("'{escaped}'")
         }
-        Value::Bytes(_) => return None,
+        Value::Bytes(bytes) => return binary_literal(bytes, kind),
+    })
+}
+
+fn binary_literal(bytes: &[u8], kind: DbKind) -> Option<String> {
+    if bytes.is_empty() && kind.is_cql() {
+        // CQL's blob grammar requires at least one hexadecimal digit after `0x`.
+        return None;
+    }
+    let mut hex = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        let _ = write!(hex, "{byte:02X}");
+    }
+    Some(match kind {
+        DbKind::Postgres => format!("decode('{hex}', 'hex')"),
+        DbKind::MySql | DbKind::MariaDb | DbKind::Sqlite => format!("X'{hex}'"),
+        DbKind::SqlServer | DbKind::Cassandra | DbKind::ScyllaDb => format!("0x{hex}"),
+        DbKind::DuckDb => format!("from_hex('{hex}')"),
     })
 }
 
 /// Build a single-row `UPDATE` statement: `SET` the given `sets`, matched by the `keys`
 /// (typically primary-key columns). Returns `None` if any value can't be rendered as a
-/// literal (e.g. binary data). Identifiers and string values are escaped for `kind`.
+/// literal. Identifiers and string values are escaped for `kind`.
 pub fn build_update_sql(
     kind: DbKind,
     schema: Option<&str>,
@@ -119,7 +137,11 @@ pub fn build_select_where_sql(
     keys: &[(&str, &Value)],
     limit: u32,
 ) -> Option<String> {
-    if keys.is_empty() {
+    if keys.is_empty()
+        || keys
+            .iter()
+            .any(|(_, value)| matches!(value, Value::Bytes(_)))
+    {
         return None;
     }
     let table_ref = match schema {
@@ -175,7 +197,7 @@ pub fn build_insert_sql(
 
 /// Build one multi-row `INSERT` covering every column, for every row in `rows` (each row's
 /// length matching `columns`). Used by "Copy as SQL INSERT". Returns `None` if there are no
-/// columns/rows or any value has no literal form (binary — [`Value::Bytes`]). Identifiers and
+/// columns/rows or any row contains binary data. Identifiers and
 /// string values are escaped for `kind`.
 pub fn build_multi_insert_sql(
     kind: DbKind,
@@ -192,8 +214,9 @@ pub fn build_multi_insert_sql(
 /// actually maps, leaving the rest to their database defaults. Each row's length must match
 /// `col_names`.
 ///
-/// Returns `None` if there are no columns/rows, or any value has no literal form (binary —
-/// [`Value::Bytes`]). `col_names` are quoted as identifiers for `kind` and values escaped as
+/// Returns `None` if there are no columns/rows or any row contains binary data. File import
+/// and clipboard SQL deliberately remain text-only; binary cell editing uses single-row DML.
+/// `col_names` are quoted as identifiers for `kind` and values escaped as
 /// literals, so neither may originate from an untrusted file: import passes the *table's* own
 /// introspected column names here.
 pub fn build_multi_insert_for(
@@ -203,7 +226,12 @@ pub fn build_multi_insert_for(
     col_names: &[&str],
     rows: &[&[Value]],
 ) -> Option<String> {
-    if col_names.is_empty() || rows.is_empty() {
+    if col_names.is_empty()
+        || rows.is_empty()
+        || rows
+            .iter()
+            .any(|row| row.iter().any(|value| matches!(value, Value::Bytes(_))))
+    {
         return None;
     }
     let table_ref = match schema {

@@ -1458,6 +1458,13 @@ enum Action {
     LoadMoreRows,
     /// Copy the currently selected result rows to the clipboard in the given format.
     CopyRows(dbcore::CopyFormat),
+    /// Open a read-only JSON/BLOB/Image cell snapshot.
+    OpenValueViewer(crate::value_viewer::ValueViewer),
+    /// Pick an image file and stage its bytes into an existing binary cell.
+    ReplaceBlobFromFile {
+        row: usize,
+        col: usize,
+    },
     /// Paste clipboard text (TSV) into the active editable table as new (staged) insert rows.
     PasteRows(String),
     /// Export an entire table (every row, streamed server-side) to a file in the chosen
@@ -1680,6 +1687,10 @@ pub struct DbGuiApp {
     /// Text staged for the OS clipboard this frame (e.g. copied result rows). Flushed to the
     /// clipboard at the end of `draw`, where the egui `Context` is available.
     copy_buffer: Option<String>,
+    /// Read-only structured/binary cell inspector. It owns a snapshot of the opened value.
+    value_viewer: Option<crate::value_viewer::ValueViewer>,
+    /// Lazily decoded thumbnail for the selected image BLOB in the Details panel.
+    details_image_preview: crate::value_viewer::ImagePreviewCache,
     /// Rasterizes colour emoji from the OS font for inline display in grid cells (lazy; macOS).
     emoji: crate::emoji::EmojiAtlas,
     /// SQL statements staged for the commit-preview dialog. `None` = dialog closed;
@@ -1938,6 +1949,8 @@ impl DbGuiApp {
             status_msg: "Ready".to_string(),
             error: None,
             copy_buffer: None,
+            value_viewer: None,
+            details_image_preview: crate::value_viewer::ImagePreviewCache::default(),
             emoji: crate::emoji::EmojiAtlas::default(),
             show_connection_tabs: true,
             show_schema_panel: true,

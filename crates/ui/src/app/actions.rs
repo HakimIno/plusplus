@@ -17,6 +17,61 @@ impl DbGuiApp {
                     self.disconnect_conn(&id);
                 }
             }
+            Action::OpenValueViewer(viewer) => self.value_viewer = Some(viewer),
+            Action::ReplaceBlobFromFile { row, col } => {
+                const MAX_BLOB_FILE_BYTES: u64 = 16 * 1024 * 1024;
+                let editable = self.tab().edits.editable();
+                let original = self
+                    .tab()
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.rows.get(row))
+                    .and_then(|values| values.get(col))
+                    .cloned();
+                let is_binary_column = self
+                    .tab()
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.columns.get(col))
+                    .is_some_and(|column| dbcore::import::is_binary_type(&column.type_name));
+                if !editable || !is_binary_column || original.is_none() {
+                    self.error = Some("This BLOB cell is read-only.".into());
+                    return;
+                }
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Image", &["png", "jpg", "jpeg", "gif", "webp"])
+                    .pick_file()
+                else {
+                    return;
+                };
+                let size = match std::fs::metadata(&path) {
+                    Ok(metadata) => metadata.len(),
+                    Err(error) => {
+                        self.error = Some(format!("Could not read image: {error}"));
+                        return;
+                    }
+                };
+                if size > MAX_BLOB_FILE_BYTES {
+                    self.error = Some("Image is larger than the 16 MiB upload limit.".into());
+                    return;
+                }
+                let bytes = match std::fs::read(&path) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        self.error = Some(format!("Could not read image: {error}"));
+                        return;
+                    }
+                };
+                if !crate::value_viewer::ValueViewer::is_decodable_image(&bytes) {
+                    self.error = Some("Choose a valid PNG, JPEG, GIF, or WebP image.".to_string());
+                    return;
+                }
+                let value = dbcore::Value::Bytes(bytes);
+                let original = original.expect("checked above");
+                self.tab_mut().edits.stage(row, col, value, &original);
+                self.status_msg = format!("Staged image from {}", path.display());
+                self.error = None;
+            }
             Action::NewTab => {
                 self.settings_open = false;
                 self.new_tab();

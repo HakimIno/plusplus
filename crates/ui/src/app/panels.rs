@@ -924,6 +924,51 @@ fn mix_color(base: egui::Color32, accent: egui::Color32, accent_weight: f32) -> 
     )
 }
 
+/// Keep the review dialog responsive when a BLOB is represented by a large hexadecimal
+/// literal. The complete statement remains in `commit_pending` and is what gets executed.
+fn commit_statement_preview(statement: &str) -> std::borrow::Cow<'_, str> {
+    const HEAD_BYTES: usize = 24 * 1024;
+    const TAIL_BYTES: usize = 2 * 1024;
+    if statement.len() <= HEAD_BYTES + TAIL_BYTES {
+        return std::borrow::Cow::Borrowed(statement);
+    }
+
+    let mut head_end = HEAD_BYTES;
+    while !statement.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = statement.len() - TAIL_BYTES;
+    while !statement.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    let omitted = tail_start - head_end;
+    std::borrow::Cow::Owned(format!(
+        "{}\n/* … {} bytes omitted from preview … */\n{}",
+        &statement[..head_end],
+        omitted,
+        &statement[tail_start..]
+    ))
+}
+
+#[cfg(test)]
+mod commit_statement_preview_tests {
+    use super::commit_statement_preview;
+
+    #[test]
+    fn large_binary_sql_is_bounded_without_changing_the_statement() {
+        let sql = format!(
+            "UPDATE t SET image = X'{}' WHERE id = 'ภาษาไทย';",
+            "AB".repeat(40_000)
+        );
+        let preview = commit_statement_preview(&sql);
+
+        assert!(preview.len() < 30_000);
+        assert!(preview.contains("bytes omitted from preview"));
+        assert!(preview.ends_with("WHERE id = 'ภาษาไทย';"));
+        assert!(sql.len() > 80_000);
+    }
+}
+
 impl DbGuiApp {
     pub(super) fn top_bar(
         &mut self,
@@ -3287,11 +3332,12 @@ impl DbGuiApp {
     }
 
     /// Right-hand Details panel: the selected row's columns and values.
-    pub(super) fn right_panel(&mut self, root: &mut egui::Ui) {
+    pub(super) fn right_panel(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
         // The details panel only makes sense for a selected row; with nothing selected we
         // hide it entirely so the grid gets the full width (rather than showing an empty
         // placeholder panel).
         let idx = self.active_query_tab;
+        let tab_id = self.tabs[idx].id;
         let tab = &mut self.tabs[idx];
         // The selected row belongs to the data grid, which every other result surface hides.
         if tab.view != TabView::Data {
@@ -3308,6 +3354,7 @@ impl DbGuiApp {
         // Disjoint field borrows alongside `tab` above.
         let details_filter = &mut self.details_filter;
         let details_date_pick = &mut self.details_date_pick;
+        let details_image_preview = &mut self.details_image_preview;
 
         egui::Panel::right("details_panel")
             .resizable(true)
@@ -3341,10 +3388,15 @@ impl DbGuiApp {
                 let scroll = egui::ScrollArea::vertical()
                     .id_salt("details_scroll")
                     .auto_shrink([false, true]);
+                let has_image = columns.iter().any(|&c| {
+                    let shown = edits.staged(row_idx, c).unwrap_or(&res.rows[row_idx][c]);
+                    crate::value_viewer::ValueViewer::kind(&res.columns[c].type_name, shown)
+                        == Some(crate::value_viewer::ViewerKind::Image)
+                });
 
-                if details_date_pick.is_some() {
-                    // The inline calendar has variable height, so keep normal layout while it
-                    // is open. The common path below stays fixed-height and virtualized.
+                if details_date_pick.is_some() || has_image {
+                    // Inline calendars and image thumbnails have variable height, so keep
+                    // normal layout while either is visible. The common path stays virtualized.
                     scroll.show(ui, |ui| {
                         for &c in &columns {
                             details_field(
@@ -3356,6 +3408,9 @@ impl DbGuiApp {
                                 &res.rows[row_idx][c],
                                 editable,
                                 details_date_pick,
+                                details_image_preview,
+                                tab_id,
+                                actions,
                             );
                         }
                     });
@@ -3372,6 +3427,9 @@ impl DbGuiApp {
                                 &res.rows[row_idx][c],
                                 editable,
                                 details_date_pick,
+                                details_image_preview,
+                                tab_id,
+                                actions,
                             );
                         }
                     });
@@ -4687,6 +4745,16 @@ impl DbGuiApp {
                     // "Follow →" on a foreign-key cell: open the referenced table, filtered.
                     if let Some((row, col)) = resp.follow_fk {
                         actions.push(Action::FollowForeignKey { row, col });
+                    }
+                    if let Some((column, type_name, value)) = resp.view_value {
+                        if let Some(viewer) =
+                            crate::value_viewer::ValueViewer::new(&column, &type_name, &value)
+                        {
+                            actions.push(Action::OpenValueViewer(viewer));
+                        }
+                    }
+                    if let Some((row, col)) = resp.replace_blob {
+                        actions.push(Action::ReplaceBlobFromFile { row, col });
                     }
                     use crate::edit::{
                         begin_cell_edit, disp_to_raw, original_value, settle_active,
@@ -6400,7 +6468,7 @@ impl DbGuiApp {
         }) {
             return;
         }
-        let Some(stmts) = self.commit_pending.clone() else {
+        let Some(stmts) = self.commit_pending.as_ref() else {
             return;
         };
 
@@ -6433,9 +6501,10 @@ impl DbGuiApp {
                                 ui.separator();
                                 ui.add_space(4.0);
                             }
+                            let preview = commit_statement_preview(stmt);
                             let job = crate::highlight::highlight_sql_cached(
                                 ui.ctx(),
-                                stmt,
+                                preview.as_ref(),
                                 font.clone(),
                             );
                             ui.label(job);
@@ -9682,6 +9751,7 @@ const DETAILS_VALUE_H: f32 = 26.0;
 /// Fixed height of one name/type/value field. A stable height lets `ScrollArea::show_rows`
 /// build only the fields intersecting the viewport, even for very wide result schemas.
 const DETAILS_FIELD_H: f32 = 64.0;
+const DETAILS_IMAGE_H: f32 = 176.0;
 /// More than can fit in the panel, but bounded so a multi-megabyte JSON/text cell does not
 /// get cloned and shaped in full on every frame.
 const DETAILS_PREVIEW_CHARS: usize = 256;
@@ -9696,13 +9766,21 @@ fn details_field(
     value: &dbcore::Value,
     editable: bool,
     date_pick: &mut Option<(usize, usize)>,
+    image_preview: &mut crate::value_viewer::ImagePreviewCache,
+    tab_id: u64,
+    actions: &mut Vec<Action>,
 ) {
     let kind = edits.col_kind(c);
-    let row_h = if *date_pick == Some((row_idx, c)) {
-        DETAILS_FIELD_H + ui.spacing().interact_size.y + ui.spacing().item_spacing.y + 2.0
-    } else {
-        DETAILS_FIELD_H
-    };
+    let shown = edits.staged(row_idx, c).unwrap_or(value);
+    let has_image = crate::value_viewer::ValueViewer::kind(&col.type_name, shown)
+        == Some(crate::value_viewer::ViewerKind::Image);
+    let mut row_h = DETAILS_FIELD_H;
+    if *date_pick == Some((row_idx, c)) {
+        row_h += ui.spacing().interact_size.y + ui.spacing().item_spacing.y + 2.0;
+    }
+    if has_image {
+        row_h += DETAILS_IMAGE_H + ui.spacing().item_spacing.y;
+    }
     let (row_rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), row_h),
         egui::Sense::hover(),
@@ -9730,9 +9808,111 @@ fn details_field(
                     );
                 });
             });
-            details_value_box(ui, edits, kind, row_idx, c, value, editable, date_pick);
+            details_value_box(
+                ui, edits, kind, row_idx, c, col, value, editable, date_pick, actions,
+            );
+            let shown = edits.staged(row_idx, c).unwrap_or(value);
+            if let dbcore::Value::Bytes(bytes) = shown {
+                if crate::value_viewer::ValueViewer::kind(&col.type_name, shown)
+                    == Some(crate::value_viewer::ViewerKind::Image)
+                {
+                    ui.add_space(ui.spacing().item_spacing.y);
+                    details_image_thumbnail(
+                        ui,
+                        image_preview,
+                        crate::value_viewer::ImagePreviewKey::new(tab_id, row_idx, c, bytes),
+                        bytes,
+                        col,
+                        shown,
+                        actions,
+                    );
+                }
+            }
         },
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn details_image_thumbnail(
+    ui: &mut egui::Ui,
+    cache: &mut crate::value_viewer::ImagePreviewCache,
+    key: crate::value_viewer::ImagePreviewKey,
+    bytes: &[u8],
+    col: &dbcore::ColumnMeta,
+    value: &dbcore::Value,
+    actions: &mut Vec<Action>,
+) {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), DETAILS_IMAGE_H),
+        egui::Sense::click(),
+    );
+    let response = response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Open full-size image");
+    let stroke = if response.hovered() {
+        palette::ACCENT()
+    } else {
+        palette::BORDER()
+    };
+    ui.painter().rect(
+        rect,
+        egui::CornerRadius::same(5),
+        palette::CODE_BG(),
+        egui::Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
+    );
+
+    match cache.get(ui.ctx(), key, bytes) {
+        Ok(preview) => {
+            let caption_h = 24.0;
+            let image_area = egui::Rect::from_min_max(
+                rect.min + egui::vec2(8.0, 8.0),
+                egui::pos2(rect.right() - 8.0, rect.bottom() - caption_h),
+            );
+            let source = egui::vec2(preview.width as f32, preview.height as f32);
+            let scale = (image_area.width() / source.x)
+                .min(image_area.height() / source.y)
+                .min(1.0);
+            let image_rect = egui::Rect::from_center_size(image_area.center(), source * scale);
+            ui.painter().image(
+                preview.texture.id(),
+                image_rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+            let caption = format!(
+                "{}  ·  {} × {} px  ·  {}",
+                preview.format.to_ascii_uppercase(),
+                preview.width,
+                preview.height,
+                crate::value_viewer::format_bytes(preview.bytes_len as u64)
+            );
+            ui.painter().text(
+                egui::pos2(rect.center().x, rect.bottom() - 10.0),
+                egui::Align2::CENTER_CENTER,
+                caption,
+                egui::FontId::monospace(10.0),
+                palette::TEXT_FAINT(),
+            );
+        }
+        Err(error) => {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                error,
+                egui::FontId::proportional(11.0),
+                palette::TEXT_FAINT(),
+            );
+        }
+    }
+
+    if response.clicked() {
+        if let Some(viewer) =
+            crate::value_viewer::ValueViewer::new(&col.name, &col.type_name, value)
+        {
+            actions.push(Action::OpenValueViewer(viewer));
+        }
+    }
 }
 
 fn details_value_preview(value: &dbcore::Value, kind: crate::edit::EditorKind) -> String {
@@ -9795,9 +9975,11 @@ fn details_value_box(
     kind: crate::edit::EditorKind,
     row_idx: usize,
     c: usize,
+    col: &dbcore::ColumnMeta,
     value: &dbcore::Value,
     editable: bool,
     date_pick: &mut Option<(usize, usize)>,
+    actions: &mut Vec<Action>,
 ) {
     use crate::edit::EditorKind as K;
 
@@ -9855,6 +10037,10 @@ fn details_value_box(
     let is_staged = staged.is_some();
     let shown = staged.as_ref().unwrap_or(value);
     let can_edit = editable && !matches!(value, dbcore::Value::Bytes(_));
+    // A BLOB column may currently be NULL; it must still be possible to add the
+    // first file. Determine this from the declared column type, not the runtime
+    // value, because NULL carries no type information by itself.
+    let can_replace_blob = editable && dbcore::import::is_binary_type(&col.type_name);
 
     // --- the box: one allocation, a separate hit zone for the ⌄ at the right edge ---
     let h = DETAILS_VALUE_H;
@@ -9949,11 +10135,40 @@ fn details_value_box(
                 edits.begin(row_idx, c, &shown, crate::edit::EditOrigin::Details);
             }
         }
+    } else if resp.double_clicked()
+        && crate::value_viewer::ValueViewer::kind(&col.type_name, shown).is_some()
+    {
+        if let Some(viewer) =
+            crate::value_viewer::ValueViewer::new(&col.name, &col.type_name, shown)
+        {
+            actions.push(Action::OpenValueViewer(viewer));
+        }
     }
 
     // The ⌄ actions menu: Copy always; mutating actions only when editable.
     egui::Popup::menu(&chev_resp).show(|ui| {
         ui.set_min_width(150.0);
+        if let Some(viewer_kind) = crate::value_viewer::ValueViewer::kind(&col.type_name, shown) {
+            if ui.button(viewer_kind.action_label()).clicked() {
+                if let Some(viewer) =
+                    crate::value_viewer::ValueViewer::new(&col.name, &col.type_name, shown)
+                {
+                    actions.push(Action::OpenValueViewer(viewer));
+                }
+                ui.close();
+            }
+            ui.separator();
+        }
+        if can_replace_blob {
+            if ui.button("Add file…").clicked() {
+                actions.push(Action::ReplaceBlobFromFile {
+                    row: row_idx,
+                    col: c,
+                });
+                ui.close();
+            }
+            ui.separator();
+        }
         if ui.button("Copy value").clicked() {
             ui.ctx().copy_text(shown.as_text());
         }

@@ -862,12 +862,36 @@ fn build_insert_quotes_and_escapes() {
     );
     // No columns ⇒ nothing to insert.
     assert_eq!(build_insert_sql(DbKind::Postgres, None, "users", &[]), None);
-    // Binary has no portable literal form.
+    // Binary uses the target dialect's literal form.
     let blob = Value::Bytes(vec![1, 2, 3]);
     assert_eq!(
         build_insert_sql(DbKind::Postgres, None, "t", &[("data", &blob)]),
-        None
+        Some("INSERT INTO \"t\" (\"data\") VALUES (decode('010203', 'hex'));".to_string())
     );
+}
+
+#[test]
+fn binary_literals_follow_each_database_dialect() {
+    let blob = Value::Bytes(vec![0x00, 0x7f, 0xff]);
+    let update = |kind| {
+        build_update_sql(
+            kind,
+            None,
+            "images",
+            &[("data", &blob)],
+            &[("id", &Value::Int(1))],
+        )
+        .unwrap()
+    };
+
+    assert!(update(DbKind::Postgres).contains("decode('007FFF', 'hex')"));
+    assert!(update(DbKind::MySql).contains("X'007FFF'"));
+    assert!(update(DbKind::MariaDb).contains("X'007FFF'"));
+    assert!(update(DbKind::Sqlite).contains("X'007FFF'"));
+    assert!(update(DbKind::SqlServer).contains("0x007FFF"));
+    assert!(update(DbKind::DuckDb).contains("from_hex('007FFF')"));
+    assert!(update(DbKind::Cassandra).contains("0x007FFF"));
+    assert!(update(DbKind::ScyllaDb).contains("0x007FFF"));
 }
 
 #[test]

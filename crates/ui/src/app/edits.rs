@@ -265,7 +265,7 @@ impl DbGuiApp {
             return None;
         };
 
-        let cant_write = "Cannot save: a value can't be written (e.g. binary data).";
+        let cant_write = "Cannot save: a value can't be written.";
         let mut updates = Vec::new();
         let mut deletes = Vec::new();
         let mut inserts = Vec::new();

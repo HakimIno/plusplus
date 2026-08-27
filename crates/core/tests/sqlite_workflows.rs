@@ -76,6 +76,35 @@ async fn executes_select_and_decodes_values() {
 }
 
 #[tokio::test]
+async fn generated_update_persists_blob_bytes() {
+    let (db, _guard) = temp_db().await;
+    db.execute("CREATE TABLE images (id INTEGER PRIMARY KEY, data BLOB)")
+        .await
+        .unwrap();
+    db.execute("INSERT INTO images (id, data) VALUES (1, X'00')")
+        .await
+        .unwrap();
+
+    let id = Value::Int(1);
+    let image = Value::Bytes(vec![0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]);
+    let sql = build_update_sql(
+        DbKind::Sqlite,
+        None,
+        "images",
+        &[("data", &image)],
+        &[("id", &id)],
+    )
+    .expect("SQLite BLOB update");
+    db.execute(&sql).await.unwrap();
+
+    let result = db
+        .execute("SELECT data FROM images WHERE id = 1")
+        .await
+        .unwrap();
+    assert_eq!(result.rows, vec![vec![image]]);
+}
+
+#[tokio::test]
 async fn select_stops_materializing_at_the_row_cap() {
     let (db, _guard) = temp_db().await;
     db.execute("CREATE TABLE t (id INTEGER)").await.unwrap();
