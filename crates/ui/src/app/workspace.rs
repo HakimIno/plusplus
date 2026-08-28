@@ -186,6 +186,7 @@ impl DbGuiApp {
         settings.code_font = self.code_font.clone();
         settings.beautify_uppercase = Some(self.beautify.uppercase);
         settings.beautify_indent = Some(self.beautify.indent);
+        settings.run_all_by_default = Some(self.run_all_by_default);
         settings.welcomed = Some(!self.show_welcome);
         settings.history_enabled = Some(self.history_enabled);
         settings.audit_enabled = Some(self.audit_enabled);

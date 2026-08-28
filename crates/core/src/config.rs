@@ -98,6 +98,10 @@ pub struct Settings {
     /// SQL beautifier: indent width in spaces. `None` = the default (2).
     #[serde(default)]
     pub beautify_indent: Option<u8>,
+    /// Scope used by the Run button when no explicit item is chosen. `None` = current
+    /// statement, preserving the historic behaviour.
+    #[serde(default)]
+    pub run_all_by_default: Option<bool>,
     /// Whether the user has completed the first-run welcome flow. `None` = not yet.
     #[serde(default)]
     pub welcomed: Option<bool>,

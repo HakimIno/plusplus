@@ -193,49 +193,18 @@ pub(crate) struct RunResponse {
     pub run_current: bool,
     pub run_all: bool,
     pub save_query: bool,
+    /// A newly selected main-button scope. `None` means the preference was unchanged.
+    pub default_run_all: Option<bool>,
 }
 
-const SHORTCUT_ICON_SIZE: f32 = 11.0;
-const SHORTCUT_ICON_GAP: f32 = 2.0;
-
-fn command_key_icon() -> egui::ImageSource<'static> {
-    if cfg!(target_os = "macos") {
-        icons::keyboard_command()
-    } else {
-        icons::keyboard_control()
-    }
-}
-
-fn shortcut_icons_width(count: usize) -> f32 {
-    count as f32 * SHORTCUT_ICON_SIZE + count.saturating_sub(1) as f32 * SHORTCUT_ICON_GAP
-}
-
-fn paint_shortcut_icons(
-    ui: &egui::Ui,
-    right: f32,
-    center_y: f32,
-    shortcut_icons: &[egui::ImageSource<'static>],
-    color: egui::Color32,
-) {
-    let mut x = right - shortcut_icons_width(shortcut_icons.len());
-    for icon in shortcut_icons {
-        egui::Image::new(icon.clone())
-            .fit_to_exact_size(egui::Vec2::splat(SHORTCUT_ICON_SIZE))
-            .tint(color)
-            .paint_at(
-                ui,
-                egui::Rect::from_center_size(
-                    egui::pos2(x + SHORTCUT_ICON_SIZE * 0.5, center_y),
-                    egui::Vec2::splat(SHORTCUT_ICON_SIZE),
-                ),
-            );
-        x += SHORTCUT_ICON_SIZE + SHORTCUT_ICON_GAP;
-    }
-}
-
-/// Split Run control: the main segment executes the selection/current statement, while the
-/// chevron exposes both run scopes and the query-saving action in one compact menu.
-pub(crate) fn run_button(ui: &mut egui::Ui, can_run: bool, can_save: bool) -> RunResponse {
+/// Split Run control whose main segment follows the selected default scope. The chevron exposes
+/// both one-off run actions, the saved default, and query saving.
+pub(crate) fn run_button(
+    ui: &mut egui::Ui,
+    can_run: bool,
+    can_save: bool,
+    run_all_by_default: bool,
+) -> RunResponse {
     let font = egui::TextStyle::Body.resolve(ui.style());
     let text_color = if can_run {
         palette::TEXT()
@@ -243,8 +212,13 @@ pub(crate) fn run_button(ui: &mut egui::Ui, can_run: bool, can_save: bool) -> Ru
         palette::TEXT_FAINT()
     };
     let mut job = egui::text::LayoutJob::default();
+    let default_label = if run_all_by_default {
+        "Run All"
+    } else {
+        "Run Current"
+    };
     job.append(
-        "Run Current",
+        default_label,
         0.0,
         egui::TextFormat {
             font_id: font.clone(),
@@ -255,26 +229,17 @@ pub(crate) fn run_button(ui: &mut egui::Ui, can_run: bool, can_save: bool) -> Ru
     let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
     let h = 24.0;
     let pad_x = 9.0;
-    let icon_size = 13.0;
-    let icon_gap = 5.0;
-    let shortcut_gap = 7.0;
-    let current_shortcut = [command_key_icon(), icons::keyboard_return()];
     let chevron_w = 24.0;
-    let main_w = icon_size
-        + icon_gap
-        + galley.size().x
-        + shortcut_gap
-        + shortcut_icons_width(current_shortcut.len())
-        + pad_x * 2.0;
+    let main_w = galley.size().x + pad_x * 2.0;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(main_w + chevron_w, h), egui::Sense::hover());
     let main_rect = egui::Rect::from_min_size(rect.min, egui::vec2(main_w, h));
     let chevron_rect = egui::Rect::from_min_size(
         egui::pos2(main_rect.right(), rect.top()),
         egui::vec2(chevron_w, h),
     );
-    let main = ui.interact(main_rect, ui.id().with("run_current"), egui::Sense::click());
+    let main = ui.interact(main_rect, ui.id().with("run_default"), egui::Sense::click());
     main.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, can_run, "Run Current")
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, can_run, default_label)
     });
     let chevron = ui.interact(
         chevron_rect,
@@ -322,33 +287,13 @@ pub(crate) fn run_button(ui: &mut egui::Ui, can_run: bool, can_save: bool) -> Ru
             rect.top() + 5.0..=rect.bottom() - 5.0,
             egui::Stroke::new(1.0, palette::BORDER()),
         );
-        egui::Image::new(icons::play())
-            .fit_to_exact_size(egui::Vec2::splat(icon_size))
-            .tint(text_color)
-            .paint_at(
-                ui,
-                egui::Rect::from_center_size(
-                    egui::pos2(
-                        main_rect.left() + pad_x + icon_size * 0.5,
-                        main_rect.center().y,
-                    ),
-                    egui::Vec2::splat(icon_size),
-                ),
-            );
         ui.painter().galley(
             egui::pos2(
-                main_rect.left() + pad_x + icon_size + icon_gap,
+                main_rect.left() + pad_x,
                 main_rect.center().y - galley.size().y * 0.5,
             ),
             galley,
             text_color,
-        );
-        paint_shortcut_icons(
-            ui,
-            main_rect.right() - pad_x,
-            main_rect.center().y,
-            &current_shortcut,
-            palette::TEXT_FAINT(),
         );
         egui::Image::new(icons::chevron_down())
             .fit_to_exact_size(egui::Vec2::splat(12.0))
@@ -360,39 +305,37 @@ pub(crate) fn run_button(ui: &mut egui::Ui, can_run: bool, can_save: bool) -> Ru
     }
 
     let mut out = RunResponse {
-        run_current: can_run && main.clicked(),
+        run_current: can_run && main.clicked() && !run_all_by_default,
+        run_all: can_run && main.clicked() && run_all_by_default,
         ..Default::default()
     };
     egui::Popup::menu(&chevron)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             ui.set_width(164.0);
-            if run_menu_item(
-                ui,
-                icons::play(),
-                "Run All",
-                &[
-                    icons::keyboard_shift(),
-                    command_key_icon(),
-                    icons::keyboard_return(),
-                ],
-                can_run,
-            ) {
+            if run_menu_item(ui, "Run All", can_run) {
                 out.run_all = true;
                 ui.close();
             }
-            if run_menu_item(
-                ui,
-                icons::play(),
-                "Run Current",
-                &[command_key_icon(), icons::keyboard_return()],
-                can_run,
-            ) {
+            if run_menu_item(ui, "Run Current", can_run) {
                 out.run_current = true;
                 ui.close();
             }
             ui.separator();
-            if run_menu_item(ui, icons::save(), "Save query", &[], can_save) {
+            ui.menu_button("Default run", |ui| {
+                if ui
+                    .selectable_label(!run_all_by_default, "Run Current")
+                    .clicked()
+                {
+                    out.default_run_all = Some(false);
+                    ui.close();
+                }
+                if ui.selectable_label(run_all_by_default, "Run All").clicked() {
+                    out.default_run_all = Some(true);
+                    ui.close();
+                }
+            });
+            if run_menu_item(ui, "Save query", can_save) {
                 out.save_query = true;
                 ui.close();
             }
@@ -400,13 +343,7 @@ pub(crate) fn run_button(ui: &mut egui::Ui, can_run: bool, can_save: bool) -> Ru
     out
 }
 
-fn run_menu_item(
-    ui: &mut egui::Ui,
-    icon: egui::ImageSource<'static>,
-    label: &str,
-    shortcut_icons: &[egui::ImageSource<'static>],
-    enabled: bool,
-) -> bool {
+fn run_menu_item(ui: &mut egui::Ui, label: &str, enabled: bool) -> bool {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
@@ -420,29 +357,12 @@ fn run_menu_item(
         } else {
             palette::TEXT_FAINT()
         };
-        egui::Image::new(icon)
-            .fit_to_exact_size(egui::Vec2::splat(14.0))
-            .tint(color)
-            .paint_at(
-                ui,
-                egui::Rect::from_center_size(
-                    egui::pos2(rect.left() + 15.0, rect.center().y),
-                    egui::Vec2::splat(14.0),
-                ),
-            );
         ui.painter().text(
-            egui::pos2(rect.left() + 28.0, rect.center().y),
+            egui::pos2(rect.left() + 12.0, rect.center().y),
             egui::Align2::LEFT_CENTER,
             label,
             egui::TextStyle::Body.resolve(ui.style()),
             color,
-        );
-        paint_shortcut_icons(
-            ui,
-            rect.right() - 8.0,
-            rect.center().y,
-            shortcut_icons,
-            palette::TEXT_FAINT(),
         );
     }
     enabled && response.clicked()

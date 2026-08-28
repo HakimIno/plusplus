@@ -949,6 +949,29 @@ impl QueryTab {
         }
     }
 
+    fn close_batch_result(&mut self, index: usize) {
+        if index >= self.batch_results.len() {
+            return;
+        }
+        if index == self.active_batch_result {
+            self.result = None;
+            self.query_error = None;
+            self.batch_results.remove(index);
+            if self.batch_results.is_empty() {
+                self.reset_result_interaction();
+                return;
+            }
+            self.active_batch_result = index.min(self.batch_results.len() - 1);
+            self.reset_result_interaction();
+            self.load_batch_result(self.active_batch_result);
+        } else {
+            self.batch_results.remove(index);
+            if index < self.active_batch_result {
+                self.active_batch_result -= 1;
+            }
+        }
+    }
+
     fn reset_result_interaction(&mut self) {
         self.result = None;
         self.query_error = None;
@@ -1874,6 +1897,9 @@ pub struct DbGuiApp {
     custom_fonts: Vec<crate::fonts::FontOption>,
     /// SQL beautifier preferences (persisted to settings.json).
     beautify: crate::format::BeautifyPrefs,
+    /// Whether the main Run segment executes all statements rather than the current one.
+    /// Persisted with the other application preferences.
+    run_all_by_default: bool,
 
     // --- first-run ---
     /// Show the welcome screen (true only on first launch; cleared when user clicks "Get Started").
@@ -1993,6 +2019,7 @@ impl DbGuiApp {
                 .unwrap_or(beautify_defaults.uppercase),
             indent: settings.beautify_indent.unwrap_or(beautify_defaults.indent),
         };
+        let run_all_by_default = settings.run_all_by_default.unwrap_or(false);
         let show_welcome = !settings.welcomed.unwrap_or(false);
         let mut show_whats_new = false;
         if !show_welcome {
@@ -2076,6 +2103,7 @@ impl DbGuiApp {
             code_font,
             custom_fonts,
             beautify,
+            run_all_by_default,
             commit_pending: None,
             schema_pending: None,
             danger_pending: None,

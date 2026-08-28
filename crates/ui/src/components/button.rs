@@ -162,9 +162,8 @@ impl<'a> Btn<'a> {
     }
 }
 
-/// Compact raised icon control used across toolbars. The outer surface is always visible,
-/// while hover/press feedback sits inside it like a soft hardware keycap. `active` changes the
-/// glyph colour (for layout toggles) without turning every selected control into a loud fill.
+/// Compact icon control used across toolbars. It stays visually quiet until hovered or pressed;
+/// `active` changes the glyph colour without giving every selected control a persistent fill.
 pub(crate) fn soft_icon_button_state(
     ui: &mut Ui,
     src: ImageSource<'static>,
@@ -182,21 +181,13 @@ pub(crate) fn soft_icon_button_state(
 
     if ui.is_rect_visible(rect) {
         let radius = egui::CornerRadius::same(7);
-        ui.painter().rect(
-            rect,
-            radius,
-            palette::SURFACE(),
-            egui::Stroke::new(1.0, palette::BORDER()),
-            egui::StrokeKind::Inside,
-        );
         if enabled && (resp.hovered() || resp.is_pointer_button_down_on()) {
             let fill = if resp.is_pointer_button_down_on() {
                 palette::SELECTION()
             } else {
                 palette::SURFACE_HOVER()
             };
-            ui.painter()
-                .rect_filled(rect.shrink(3.0), egui::CornerRadius::same(5), fill);
+            ui.painter().rect_filled(rect, radius, fill);
         }
         if resp.has_focus() {
             ui.painter().rect_stroke(

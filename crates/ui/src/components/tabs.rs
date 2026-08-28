@@ -523,6 +523,123 @@ pub(crate) fn query_tab_item(
     }
 }
 
+/// Interaction outcome for a tab representing one result set from a multi-statement run.
+pub(crate) struct ResultTabResponse {
+    pub clicked: bool,
+    pub close: bool,
+}
+
+/// A compact result-set tab that deliberately shares the active waves and contour of the main
+/// query tabs, with a close control for short-lived query output.
+pub(crate) fn result_tab_item(
+    ui: &mut egui::Ui,
+    title: &str,
+    selected: bool,
+    failed: bool,
+) -> ResultTabResponse {
+    let label: String = title.chars().take(14).collect();
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let pad = 8.0;
+    let action_w = 16.0;
+    let text_w = ui
+        .painter()
+        .layout_no_wrap(label.clone(), font.clone(), egui::Color32::WHITE)
+        .size()
+        .x;
+    let size = egui::vec2(
+        pad + 16.0 + TAB_ICON_GAP + text_w + 5.0 + action_w + pad,
+        29.0,
+    );
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let close_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.right() - pad - action_w * 0.5, rect.center().y),
+        egui::vec2(action_w, action_w),
+    );
+    let close_response = ui.interact(close_rect, response.id.with("close"), egui::Sense::click());
+    close_response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Close {title}"))
+    });
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, selected, title)
+    });
+
+    let select_t = tick_tab_select(ui, response.id.with("select_anim"), selected);
+    let text_color = crate::style::mix(palette::TEXT_WEAK(), palette::TEXT(), select_t);
+    let fill = crate::style::mix(
+        if response.hovered() {
+            palette::SURFACE_HOVER()
+        } else {
+            palette::PANEL()
+        },
+        palette::SURFACE(),
+        select_t,
+    );
+    if ui.is_rect_visible(rect) {
+        let rounding = egui::CornerRadius {
+            nw: 4,
+            ne: 4,
+            sw: 0,
+            se: 0,
+        };
+        ui.painter().rect_filled(rect, rounding, fill);
+        if select_t > 0.01 {
+            paint_tab_waves(
+                ui.painter(),
+                rect,
+                palette::ACCENT(),
+                select_t * 12.0,
+                select_t,
+            );
+        }
+        let icon_color = if failed {
+            palette::DANGER()
+        } else {
+            crate::style::mix(palette::TEXT_FAINT(), palette::ACCENT(), select_t)
+        };
+        let icon_rect = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + pad + 7.0, rect.center().y),
+            egui::vec2(TAB_ICON_SIZE, TAB_ICON_SIZE),
+        );
+        egui::Image::new(if failed {
+            icons::warning()
+        } else {
+            icons::table()
+        })
+        .fit_to_exact_size(icon_rect.size())
+        .tint(icon_color)
+        .paint_at(ui, icon_rect);
+        let galley = ui.painter().layout_no_wrap(label, font, text_color);
+        ui.painter().galley(
+            egui::pos2(
+                icon_rect.right() + TAB_ICON_GAP,
+                rect.center().y - galley.size().y * 0.5,
+            ),
+            galley,
+            text_color,
+        );
+        let close_color = if close_response.hovered() {
+            palette::DANGER()
+        } else {
+            palette::TEXT_FAINT()
+        };
+        if close_response.hovered() {
+            ui.painter().circle_filled(
+                close_rect.center(),
+                7.0,
+                translucent(palette::DANGER(), 28),
+            );
+        }
+        egui::Image::new(icons::close())
+            .fit_to_exact_size(egui::Vec2::splat(12.0))
+            .tint(close_color)
+            .paint_at(ui, close_rect.shrink(2.0));
+    }
+    ResultTabResponse {
+        clicked: response.clicked() && !close_response.hovered(),
+        close: close_response.clicked(),
+    }
+}
+
 /// Selected utility tab used by Settings. It deliberately stays outside the persisted query
 /// tab model while matching the same strip geometry and close affordance.
 pub(crate) fn settings_tab_item(ui: &mut egui::Ui) -> QueryTabResponse {

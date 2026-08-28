@@ -2818,6 +2818,29 @@ fn run_all_keeps_each_statement_result_in_its_own_result_tab() {
 }
 
 #[test]
+fn closing_a_result_tab_keeps_the_other_statement_results() {
+    let mut app = DbGuiApp::construct();
+    app.tab_mut().set_batch_results(vec![
+        ("SELECT 1".into(), Ok(fake_result(1, 1))),
+        ("SELECT 2".into(), Ok(fake_result(2, 1))),
+        ("SELECT 3".into(), Ok(fake_result(3, 1))),
+    ]);
+
+    app.tab_mut().close_batch_result(1);
+    assert_eq!(app.tab().batch_results.len(), 2);
+    assert_eq!(app.tab().active_batch_result, 0);
+    assert_eq!(app.tab().result.as_ref().unwrap().row_count(), 1);
+
+    app.tab_mut().activate_batch_result(1);
+    assert_eq!(app.tab().result.as_ref().unwrap().row_count(), 3);
+    app.tab_mut().close_batch_result(1);
+
+    assert_eq!(app.tab().batch_results.len(), 1);
+    assert_eq!(app.tab().active_batch_result, 0);
+    assert_eq!(app.tab().result.as_ref().unwrap().row_count(), 1);
+}
+
+#[test]
 fn duckdb_filter_searches_rows_beyond_the_loaded_page() {
     let mut app = DbGuiApp::construct();
     let config = dbcore::ConnectionConfig::new(dbcore::DbKind::DuckDb);

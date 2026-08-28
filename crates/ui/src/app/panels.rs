@@ -1601,7 +1601,11 @@ impl DbGuiApp {
                 ui.painter().circle_filled(dot_rect.center(), 3.0, dot);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let can_run = self.active().is_some() && self.busy == Busy::Idle && has_sql;
-                    let run = components::run_button(ui, can_run, has_sql);
+                    let run = components::run_button(ui, can_run, has_sql, self.run_all_by_default);
+                    if let Some(run_all_by_default) = run.default_run_all {
+                        self.run_all_by_default = run_all_by_default;
+                        self.persist_settings();
+                    }
                     if run.run_current || run.run_all {
                         // A split pane is a real workspace in its own right. Remember which
                         // pane launched Run so the action executes against that pane's SQL and
@@ -4331,7 +4335,7 @@ impl DbGuiApp {
         }
     }
 
-    /// One compact app-native tab per statement returned by Run All.
+    /// One closable, scrollable tab per statement returned by Run All.
     pub(super) fn batch_result_bar(&mut self, root: &mut egui::Ui) {
         let idx = self.active_query_tab;
         let count = self.tabs[idx].batch_results.len();
@@ -4339,37 +4343,48 @@ impl DbGuiApp {
             return;
         }
         let selected = self.tabs[idx].active_batch_result.min(count - 1);
-        let labels: Vec<String> = (1..=count)
-            .map(|number| format!("Query {number}"))
-            .collect();
-        let items: Vec<_> = labels
-            .iter()
-            .enumerate()
-            .map(|(index, label)| {
-                let icon = if self.tabs[idx].batch_result_has_error(index) {
-                    icons::warning()
-                } else {
-                    icons::table()
-                };
-                (icon, label.as_str())
-            })
-            .collect();
-        let mut choice = selected;
+        let tab_id = self.tabs[idx].id;
+        let mut choice = None;
+        let mut close = None;
         egui::Panel::top(egui::Id::new(("batch_result_bar", self.tabs[idx].id)))
             .resizable(false)
-            .exact_size(34.0)
+            .exact_size(35.0)
             .frame(
                 egui::Frame::new()
-                    .inner_margin(egui::Margin::symmetric(6, 3))
+                    .inner_margin(egui::Margin::symmetric(6, 2))
                     .fill(palette::PANEL()),
             )
             .show_separator_line(true)
             .show_inside(root, |ui| {
-                choice =
-                    components::segmented_sized(ui, &items, selected, count as f32 * 104.0, true);
+                egui::ScrollArea::horizontal()
+                    .id_salt(("batch_result_scroll", tab_id))
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            for index in 0..count {
+                                ui.push_id(("batch_result", index), |ui| {
+                                    let response = components::result_tab_item(
+                                        ui,
+                                        &format!("Query {}", index + 1),
+                                        index == selected,
+                                        self.tabs[idx].batch_result_has_error(index),
+                                    );
+                                    if response.close {
+                                        close = Some(index);
+                                    } else if response.clicked {
+                                        choice = Some(index);
+                                    }
+                                });
+                            }
+                        });
+                    });
             });
-        if choice != selected {
-            self.tabs[idx].activate_batch_result(choice);
+        if let Some(index) = close {
+            self.tabs[idx].close_batch_result(index);
+            self.touch_result(idx);
+        } else if let Some(index) = choice.filter(|index| *index != selected) {
+            self.tabs[idx].activate_batch_result(index);
             self.touch_result(idx);
         }
     }
