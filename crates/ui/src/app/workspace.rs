@@ -184,6 +184,8 @@ impl DbGuiApp {
         settings.theme = Some(self.theme.clone());
         settings.ui_font = self.ui_font.clone();
         settings.code_font = self.code_font.clone();
+        settings.editor_font_size = Some(self.editor_font_size);
+        settings.editor_wrap_lines = Some(self.editor_wrap_lines);
         settings.beautify_uppercase = Some(self.beautify.uppercase);
         settings.beautify_indent = Some(self.beautify.indent);
         settings.run_all_by_default = Some(self.run_all_by_default);

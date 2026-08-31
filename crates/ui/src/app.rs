@@ -726,6 +726,9 @@ struct QueryTab {
     editor_split_size: Option<f32>,
     split_sql: Option<String>,
     editor_pane: EditorPane,
+    /// The editor that should regain keyboard focus after a toolbar action such as Run.
+    /// Keeping this by tab id avoids restoring focus into a different tab after a switch.
+    restore_editor_focus: Option<(u64, EditorPane)>,
     /// Source-coordinate selections beyond egui's primary caret.
     extra_cursors: Vec<std::ops::Range<usize>>,
     primary_cursor: std::ops::Range<usize>,
@@ -805,6 +808,7 @@ impl QueryTab {
             editor_split_size: None,
             split_sql: None,
             editor_pane: EditorPane::Primary,
+            restore_editor_focus: None,
             extra_cursors: Vec::new(),
             primary_cursor: 0..0,
             editor_assist: EditorAssistState::default(),
@@ -1895,6 +1899,9 @@ pub struct DbGuiApp {
     code_font: Option<String>,
     /// Valid font files currently available in the app-owned font library.
     custom_fonts: Vec<crate::fonts::FontOption>,
+    /// SQL editor presentation preferences, persisted independently of the selected code face.
+    editor_font_size: f32,
+    editor_wrap_lines: bool,
     /// SQL beautifier preferences (persisted to settings.json).
     beautify: crate::format::BeautifyPrefs,
     /// Whether the main Run segment executes all statements rather than the current one.
@@ -2011,6 +2018,8 @@ impl DbGuiApp {
         };
         let ui_font = available(settings.ui_font.clone());
         let code_font = available(settings.code_font.clone());
+        let editor_font_size = settings.editor_font_size.unwrap_or(14.0).clamp(9.0, 24.0);
+        let editor_wrap_lines = settings.editor_wrap_lines.unwrap_or(true);
         crate::theme::set_current(themes.theme_of(&theme));
         let beautify_defaults = crate::format::BeautifyPrefs::default();
         let beautify = crate::format::BeautifyPrefs {
@@ -2102,6 +2111,8 @@ impl DbGuiApp {
             ui_font,
             code_font,
             custom_fonts,
+            editor_font_size,
+            editor_wrap_lines,
             beautify,
             run_all_by_default,
             commit_pending: None,

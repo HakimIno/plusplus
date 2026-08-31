@@ -1676,7 +1676,7 @@ impl DbGuiApp {
                 });
                 ui.add_space(5.0);
 
-                egui::ScrollArea::vertical()
+                egui::ScrollArea::both()
                     .id_salt(("query_parameters", self.tabs[idx].id))
                     .max_height(118.0)
                     .show(ui, |ui| {
@@ -1755,6 +1755,7 @@ impl DbGuiApp {
     fn split_sql_editor(&mut self, ui: &mut egui::Ui, font: &egui::FontId) {
         let idx = self.active_query_tab;
         let tab_id = self.tabs[idx].id;
+        let wrap_lines = self.editor_wrap_lines;
         egui::Frame::new()
             .fill(palette::CODE_BG())
             .inner_margin(egui::Margin::ZERO)
@@ -1768,7 +1769,7 @@ impl DbGuiApp {
                     .id_salt(("sql_scroll", tab_id, "split"))
                     .auto_shrink(false)
                     .show(ui, |ui| {
-                        let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
+                        let row_height = ui.fonts_mut(|fonts| fonts.row_height(font));
                         let rows = (ui.available_height() / row_height).floor().max(5.0) as usize;
                         let mut layouter =
                             |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
@@ -1777,7 +1778,11 @@ impl DbGuiApp {
                                     font.clone(),
                                     &[],
                                 );
-                                job.wrap.max_width = wrap_width;
+                                job.wrap.max_width = if wrap_lines {
+                                    wrap_width
+                                } else {
+                                    f32::INFINITY
+                                };
                                 ui.ctx().fonts_mut(|fonts| fonts.layout_job(job))
                             };
                         if self.tabs[idx].split_sql.is_none() {
@@ -1803,8 +1808,10 @@ impl DbGuiApp {
                                 "Split SQL editor",
                             )
                         });
-                        if let Some(range) = output.cursor_range {
-                            self.tabs[idx].primary_cursor = range.as_sorted_char_range();
+                        if output.response.has_focus() || output.response.clicked() {
+                            if let Some(range) = output.cursor_range {
+                                self.tabs[idx].primary_cursor = range.as_sorted_char_range();
+                            }
                         }
                         if output.response.changed() {
                             let tab = &mut self.tabs[idx];
@@ -1817,6 +1824,12 @@ impl DbGuiApp {
                         }
                         if output.response.has_focus() {
                             self.tabs[idx].editor_pane = super::EditorPane::Split;
+                        }
+                        if self.tabs[idx].restore_editor_focus
+                            == Some((tab_id, super::EditorPane::Split))
+                        {
+                            output.response.request_focus();
+                            self.tabs[idx].restore_editor_focus = None;
                         }
                     });
             });
@@ -1960,6 +1973,7 @@ impl DbGuiApp {
     ) {
         let idx = self.active_query_tab;
         let tab_id = self.tabs[idx].id;
+        let wrap_lines = self.editor_wrap_lines;
         let kind = self.tabs[idx].kind;
         let available = root.available_height();
         let (contextual_default, min_size, max_ratio) = match kind {
@@ -2042,7 +2056,8 @@ impl DbGuiApp {
                     footer(self, ui, QueryEditorPlacement::Top, actions);
                 }
                 self.query_parameter_panel(ui);
-                let font = egui::TextStyle::Monospace.resolve(ui.style());
+                let mut font = egui::TextStyle::Monospace.resolve(ui.style());
+                font.size = self.editor_font_size;
 
                 if self.tabs[idx].editor_split && self.split_tab.is_none() {
                     let split_id = egui::Id::new(("sql_editor_split", tab_id));
@@ -2107,7 +2122,7 @@ impl DbGuiApp {
                     .fill(palette::CODE_BG())
                     .inner_margin(egui::Margin::ZERO)
                     .show(ui, |ui| {
-                        egui::ScrollArea::vertical()
+                        egui::ScrollArea::both()
                             .id_salt("sql_scroll")
                             .auto_shrink(false)
                             .show(ui, |ui| {
@@ -2116,7 +2131,7 @@ impl DbGuiApp {
                                 // dragged-open panel mostly empty. Derive the row count from the space the
                                 // scroll area gives us so the box tracks the resize; content longer than
                                 // that scrolls internally.
-                                let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
+                                let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font));
                                 // Leave room for the editor's own vertical margin so the widget doesn't
                                 // overflow the viewport by a few pixels and trigger a permanent scrollbar.
                                 let avail = ui.available_height();
@@ -2158,7 +2173,11 @@ impl DbGuiApp {
                                             font.clone(),
                                             markers,
                                         );
-                                        job.wrap.max_width = wrap_width;
+                                        job.wrap.max_width = if wrap_lines {
+                                            wrap_width
+                                        } else {
+                                            f32::INFINITY
+                                        };
                                         let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
                                         if cacheable {
                                             *layout_cache = Some(super::SqlEditorLayoutCache {
@@ -2174,12 +2193,8 @@ impl DbGuiApp {
                                 let line_count = editor_cache.view.source_lines.len();
                                 let digits =
                                     self.tabs[idx].sql.lines().count().max(1).to_string().len();
-                                let digit_width = ui.fonts_mut(|fonts| {
-                                    fonts.glyph_width(
-                                        &egui::TextStyle::Monospace.resolve(ui.style()),
-                                        '0',
-                                    )
-                                });
+                                let digit_width =
+                                    ui.fonts_mut(|fonts| fonts.glyph_width(&font, '0'));
                                 let gutter_width =
                                     digits as f32 * digit_width + 14.0 + FOLD_CHEVRON_W;
                                 let editor_id = egui::Id::new(("sql_editor", tab_id, "primary"));
@@ -2322,8 +2337,16 @@ impl DbGuiApp {
                                     editor_cache.view.to_source(sorted.start)
                                         ..editor_cache.view.to_source_end(sorted.end)
                                 });
-                                if let Some(source_range) = source_range.clone() {
-                                    self.tabs[idx].primary_cursor = source_range;
+                                if focused || resp.clicked() {
+                                    if let Some(source_range) = source_range.clone() {
+                                        self.tabs[idx].primary_cursor = source_range;
+                                    }
+                                }
+                                if self.tabs[idx].restore_editor_focus
+                                    == Some((tab_id, super::EditorPane::Primary))
+                                {
+                                    resp.request_focus();
+                                    self.tabs[idx].restore_editor_focus = None;
                                 }
                                 if resp.clicked() {
                                     let command_click = ui.input(|input| input.modifiers.command);
@@ -5383,6 +5406,8 @@ impl DbGuiApp {
         let mut chosen = self.theme.clone();
         let mut ui_font = self.ui_font.clone();
         let mut code_font = self.code_font.clone();
+        let mut editor_font_size = self.editor_font_size;
+        let mut editor_wrap_lines = self.editor_wrap_lines;
         let mut import_font = false;
         let custom_fonts = self.custom_fonts.clone();
         let mut section = self.settings_section;
@@ -5722,6 +5747,47 @@ impl DbGuiApp {
                                     );
                                     ui.add_space(10.0);
 
+                                    let row_width = ui.available_width();
+                                    ui.horizontal(|ui| {
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2((row_width - 230.0).max(180.0), 50.0),
+                                            egui::Layout::top_down(egui::Align::Min),
+                                            |ui| {
+                                                ui.set_min_width((row_width - 230.0).max(180.0));
+                                                ui.label(
+                                                    egui::RichText::new("Editor font size")
+                                                        .size(14.0)
+                                                        .color(palette::TEXT()),
+                                                );
+                                                ui.add_space(3.0);
+                                                ui.label(
+                                                    egui::RichText::new(
+                                                        "Applies to SQL editors and line numbers.",
+                                                    )
+                                                    .size(12.0)
+                                                    .color(palette::TEXT_WEAK()),
+                                                );
+                                            },
+                                        );
+                                        ui.add_sized(
+                                            egui::vec2(210.0, 28.0),
+                                            egui::Slider::new(&mut editor_font_size, 9.0..=24.0)
+                                                .suffix(" pt"),
+                                        );
+                                    });
+                                    ui.add_space(12.0);
+                                    ui.separator();
+                                    ui.add_space(12.0);
+                                    settings_toggle_row(
+                                        ui,
+                                        &mut editor_wrap_lines,
+                                        "Wrap long lines",
+                                        "Keep long SQL statements visible without horizontal scrolling.",
+                                    );
+                                    ui.add_space(14.0);
+                                    ui.separator();
+                                    ui.add_space(28.0);
+
                                     for (id, title, description, selection, default) in [
                                                 (
                                                     "interface_font",
@@ -5978,11 +6044,15 @@ impl DbGuiApp {
         let preferences_changed = history_enabled != self.history_enabled
             || audit_enabled != self.audit_enabled
             || update_check_enabled != self.update_check_enabled
+            || editor_font_size != self.editor_font_size
+            || editor_wrap_lines != self.editor_wrap_lines
             || result_memory_budget_mb as usize * 1024 * 1024 != self.result_memory_budget;
         if preferences_changed {
             self.history_enabled = history_enabled;
             self.audit_enabled = audit_enabled;
             self.update_check_enabled = update_check_enabled;
+            self.editor_font_size = editor_font_size;
+            self.editor_wrap_lines = editor_wrap_lines;
             self.result_memory_budget = result_memory_budget_mb as usize * 1024 * 1024;
             self.enforce_result_memory_budget();
             self.persist_settings();

@@ -2094,6 +2094,19 @@ fn run_current_prefers_selection_then_the_statement_at_the_cursor() {
 }
 
 #[test]
+fn run_current_uses_the_nearest_statement_when_the_caret_is_just_after_a_separator() {
+    let mut app = DbGuiApp::construct();
+    app.tab_mut().sql = "SELECT 1;\nSELECT 2;".into();
+    let end = app.tab().sql.chars().count();
+    app.tab_mut().primary_cursor = end..end;
+
+    assert_eq!(
+        app.resolved_current_sql_snapshot_for(0).unwrap().trim(),
+        "SELECT 2"
+    );
+}
+
+#[test]
 fn closing_split_repairs_an_active_hidden_pane_index() {
     let mut app = DbGuiApp::construct();
     app.tabs[0].editor_split = true;

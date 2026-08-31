@@ -217,6 +217,14 @@ pub(crate) fn run_button(
     } else {
         "Run Current"
     };
+    let run_current_shortcut = ui.ctx().format_shortcut(&egui::KeyboardShortcut::new(
+        egui::Modifiers::COMMAND,
+        egui::Key::Enter,
+    ));
+    let run_all_shortcut = ui.ctx().format_shortcut(&egui::KeyboardShortcut::new(
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        egui::Key::Enter,
+    ));
     job.append(
         default_label,
         0.0,
@@ -313,29 +321,29 @@ pub(crate) fn run_button(
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             ui.set_width(164.0);
-            if run_menu_item(ui, "Run All", can_run) {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            if run_menu_item(ui, "Run All", can_run, Some(&run_all_shortcut)) {
                 out.run_all = true;
                 ui.close();
             }
-            if run_menu_item(ui, "Run Current", can_run) {
+            if run_menu_item(ui, "Run Current", can_run, Some(&run_current_shortcut)) {
                 out.run_current = true;
                 ui.close();
             }
             ui.separator();
-            ui.menu_button("Default run", |ui| {
-                if ui
-                    .selectable_label(!run_all_by_default, "Run Current")
-                    .clicked()
-                {
+            run_submenu(ui, "Default run", |ui| {
+                ui.set_width(152.0);
+                ui.spacing_mut().item_spacing.y = 2.0;
+                if run_default_menu_item(ui, "Run Current", !run_all_by_default) {
                     out.default_run_all = Some(false);
                     ui.close();
                 }
-                if ui.selectable_label(run_all_by_default, "Run All").clicked() {
+                if run_default_menu_item(ui, "Run All", run_all_by_default) {
                     out.default_run_all = Some(true);
                     ui.close();
                 }
             });
-            if run_menu_item(ui, "Save query", can_save) {
+            if run_menu_item(ui, "Save query", can_save, None) {
                 out.save_query = true;
                 ui.close();
             }
@@ -343,7 +351,68 @@ pub(crate) fn run_button(
     out
 }
 
-fn run_menu_item(ui: &mut egui::Ui, label: &str, enabled: bool) -> bool {
+/// A default-scope row inside the Default run submenu. The reserved check column keeps both
+/// choices aligned whether selected or not.
+fn run_default_menu_item(ui: &mut egui::Ui, label: &str, selected: bool) -> bool {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, selected, label)
+    });
+    if ui.is_rect_visible(rect) {
+        if response.hovered() {
+            ui.painter()
+                .rect_filled(rect, egui::CornerRadius::same(5), palette::SELECTION());
+        }
+        if selected {
+            ui.painter().text(
+                egui::pos2(rect.left() + 12.0, rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                "✓",
+                egui::TextStyle::Button.resolve(ui.style()),
+                palette::ACCENT(),
+            );
+        }
+        ui.painter().text(
+            egui::pos2(rect.left() + 29.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::TextStyle::Body.resolve(ui.style()),
+            palette::TEXT(),
+        );
+    }
+    response.clicked()
+}
+
+/// A submenu row painted with the same inset as the surrounding custom run-menu rows.
+fn run_submenu<R>(ui: &mut egui::Ui, label: &str, add_contents: impl FnOnce(&mut egui::Ui) -> R) {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    if ui.is_rect_visible(rect) {
+        if response.hovered() {
+            ui.painter()
+                .rect_filled(rect, egui::CornerRadius::same(5), palette::SELECTION());
+        }
+        ui.painter().text(
+            egui::pos2(rect.left() + 12.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::TextStyle::Body.resolve(ui.style()),
+            palette::TEXT(),
+        );
+        ui.painter().text(
+            egui::pos2(rect.right() - 12.0, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            "⏵",
+            egui::TextStyle::Button.resolve(ui.style()),
+            palette::TEXT_WEAK(),
+        );
+    }
+    let _ = egui::containers::menu::SubMenu::new().show(ui, &response, add_contents);
+}
+
+fn run_menu_item(ui: &mut egui::Ui, label: &str, enabled: bool, shortcut: Option<&str>) -> bool {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
@@ -364,6 +433,15 @@ fn run_menu_item(ui: &mut egui::Ui, label: &str, enabled: bool) -> bool {
             egui::TextStyle::Body.resolve(ui.style()),
             color,
         );
+        if let Some(shortcut) = shortcut {
+            ui.painter().text(
+                egui::pos2(rect.right() - 12.0, rect.center().y),
+                egui::Align2::RIGHT_CENTER,
+                shortcut,
+                egui::TextStyle::Body.resolve(ui.style()),
+                palette::TEXT_FAINT(),
+            );
+        }
     }
     enabled && response.clicked()
 }

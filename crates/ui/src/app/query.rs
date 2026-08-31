@@ -279,7 +279,27 @@ impl DbGuiApp {
         } else {
             tab.primary_cursor.start.min(chars.len())..tab.primary_cursor.end.min(chars.len())
         };
-        let current: String = chars[range].iter().collect();
+        let mut current: String = chars[range].iter().collect();
+        // A toolbar click can arrive one frame after a caret was moved. If that stale caret is
+        // just past a terminating `;`, prefer the closest real statement instead of reporting
+        // a misleading "place the cursor" error. A non-empty selection/range always wins.
+        if current.trim().is_empty() && tab.primary_cursor.is_empty() {
+            let cursor = tab.primary_cursor.start.min(chars.len());
+            let nearby = chars[..cursor]
+                .iter()
+                .rposition(|character| !character.is_whitespace())
+                .or_else(|| {
+                    chars[cursor..]
+                        .iter()
+                        .position(|character| !character.is_whitespace())
+                        .map(|offset| cursor + offset)
+                });
+            if let Some(nearby) = nearby {
+                current = chars[crate::sqlctx::statement_range(&chars, nearby)]
+                    .iter()
+                    .collect();
+            }
+        }
         if current.trim().is_empty() {
             return Err("Place the cursor inside a SQL statement to run it.".into());
         }

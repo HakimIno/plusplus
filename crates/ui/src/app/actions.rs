@@ -657,6 +657,11 @@ impl DbGuiApp {
                 } else {
                     self.active_query_tab
                 };
+                // Clicking a toolbar button temporarily takes egui focus. Keep the last editor
+                // pane focused once the frame completes, so its stored caret still defines
+                // Run Current and typing can continue immediately after a run.
+                self.tabs[idx].restore_editor_focus =
+                    Some((self.tabs[idx].id, self.tabs[idx].editor_pane));
                 let resolved_sql = match if run_current {
                     self.resolved_current_sql_for(idx)
                 } else {

@@ -92,6 +92,12 @@ pub struct Settings {
     /// interface font.
     #[serde(default)]
     pub code_font: Option<String>,
+    /// SQL editor font size in points. `None` uses the default (14).
+    #[serde(default)]
+    pub editor_font_size: Option<f32>,
+    /// Whether long SQL lines wrap in the editor. `None` uses the default (on).
+    #[serde(default)]
+    pub editor_wrap_lines: Option<bool>,
     /// SQL beautifier: convert reserved keywords to ALL CAPS. `None` = the default (on).
     #[serde(default)]
     pub beautify_uppercase: Option<bool>,
@@ -356,5 +362,7 @@ mod tests {
         assert!(settings.schema_table_order.is_empty());
         assert!(settings.ui_font.is_none());
         assert!(settings.code_font.is_none());
+        assert!(settings.editor_font_size.is_none());
+        assert!(settings.editor_wrap_lines.is_none());
     }
 }
