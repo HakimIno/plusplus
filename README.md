@@ -27,9 +27,16 @@
   <img alt="No telemetry" src="https://img.shields.io/badge/telemetry-none-4acf8b">
 </p>
 
-<p align="center">
-  <img src="website/public/screenshots/image1.png" alt="The plusplus schema browser and data grid" width="100%">
-</p>
+<table>
+  <tr>
+    <td width="50%"><img src="website/public/screenshots/image1.png" alt="The plusplus schema browser and data grid" /></td>
+    <td width="50%"><img src="website/public/screenshots/image4.png" alt="The plusplus schema browser and data grid" /></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="website/public/screenshots/image5.png" alt="The plusplus schema browser and data grid" /></td>
+    <td width="50%"><img src="website/public/screenshots/image6.png" alt="The plusplus schema browser and data grid" /></td>
+  </tr>
+</table>
 
 plusplus is an open-source desktop database client built in Rust. It brings schema browsing,
 SQL and CQL editing, paged results, staged row changes, data transfer, and database design into
