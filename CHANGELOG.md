@@ -3,6 +3,13 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
+## 0.4.4 — 2026-08-31
+
+- Added a BLOB value viewer with image decoding and richer binary-value handling.
+- Added run-all execution with batch result navigation and clearer query-error reporting.
+- Refined the SQL editor toolbar, keyboard shortcuts, settings, and focus management.
+- Tightened release and website deployment verification around version tags from `main`.
+
 ## 0.4.3 — 2026-08-26
 
 - Added independent, resizable split workspaces with per-pane SQL editors, results, filters, autocomplete, ghost suggestions, diagnostics, and query parameters.

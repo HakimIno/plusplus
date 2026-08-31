@@ -278,7 +278,7 @@ impl SshTunnel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use russh::server::{self, Auth, Msg, Session};
+    use russh::server::{self, Auth, ChannelOpenHandle, Msg, Session};
     use russh::Channel;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
@@ -338,16 +338,18 @@ mod tests {
             port_to_connect: u32,
             _originator_address: &str,
             _originator_port: u32,
+            reply: ChannelOpenHandle,
             _session: &mut Session,
-        ) -> std::result::Result<bool, Self::Error> {
+        ) -> std::result::Result<(), Self::Error> {
             let target = (host_to_connect.to_string(), port_to_connect as u16);
+            reply.accept().await;
             tokio::spawn(async move {
                 if let Ok(mut tcp) = TcpStream::connect(target).await {
                     let mut stream = channel.into_stream();
                     let _ = tokio::io::copy_bidirectional(&mut tcp, &mut stream).await;
                 }
             });
-            Ok(true)
+            Ok(())
         }
     }
 
