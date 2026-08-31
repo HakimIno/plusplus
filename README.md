@@ -27,14 +27,14 @@
   <img alt="No telemetry" src="https://img.shields.io/badge/telemetry-none-4acf8b">
 </p>
 
-<table>
+<table width="100%">
   <tr>
-    <td width="50%"><img src="website/public/screenshots/image1.png" alt="The plusplus schema browser and data grid" /></td>
-    <td width="50%"><img src="website/public/screenshots/image4.png" alt="The plusplus schema browser and data grid" /></td>
+    <td width="50%"><img src="website/public/screenshots/image1.png" alt="The plusplus schema browser and data grid" width="100%" /></td>
+    <td width="50%"><img src="website/public/screenshots/image4.png" alt="The plusplus schema browser and data grid" width="100%" /></td>
   </tr>
   <tr>
-    <td width="50%"><img src="website/public/screenshots/image5.png" alt="The plusplus schema browser and data grid" /></td>
-    <td width="50%"><img src="website/public/screenshots/image6.png" alt="The plusplus schema browser and data grid" /></td>
+    <td width="50%"><img src="website/public/screenshots/image5.png" alt="The plusplus schema browser and data grid" width="100%" /></td>
+    <td width="50%"><img src="website/public/screenshots/image6.png" alt="The plusplus schema browser and data grid" width="100%" /></td>
   </tr>
 </table>
 
