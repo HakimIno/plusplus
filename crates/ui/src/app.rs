@@ -765,6 +765,8 @@ struct QueryTab {
     server_filter_predicate: Option<String>,
     /// Data vs Structure view in the central panel (table tabs only).
     view: TabView,
+    /// Per-query chart choices. Kept with the tab so switching workspaces preserves the axes.
+    chart: crate::chart::ChartState,
     /// In-flight bounded page stream. Keeping this beside the visible result lets a replacement
     /// retain the old rows until its first new batch arrives, while an automatic continuation
     /// appends without resetting selection or staged edits.
@@ -826,6 +828,7 @@ impl QueryTab {
             filter: FilterState::default(),
             server_filter_predicate: None,
             view: TabView::default(),
+            chart: crate::chart::ChartState::default(),
             stream: None,
             page_exhausted: false,
             total_rows: None,
@@ -899,6 +902,7 @@ impl QueryTab {
         self.filter.clamp_columns(res.column_count());
         // Classify each column once so the cell editors can be type-aware.
         self.edits.set_columns(&res.columns);
+        self.chart.sync(&res);
         self.result = Some(res);
         self.result_evicted = false;
         self.recompute_view();
@@ -984,6 +988,7 @@ impl QueryTab {
         self.selection.clear();
         self.edits = Edits::default();
         self.filter = FilterState::default();
+        self.chart = crate::chart::ChartState::default();
         self.stream = None;
         self.page_exhausted = true;
         self.total_rows = None;
@@ -1612,6 +1617,8 @@ enum Action {
         table: TableInfo,
         format: dbcore::ExportFormat,
     },
+    /// Export the active query chart, using the current axes, series, sort, filter, and theme.
+    ExportChart,
     /// Pick a CSV/JSON file and open the import mapping dialog for this table. Sidebar action.
     ImportIntoTable(TableInfo),
     /// Point a target column at a source column of the open import (or `None` to skip it).

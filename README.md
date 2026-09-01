@@ -36,6 +36,10 @@
     <td width="50%"><img src="website/public/screenshots/image5.png" alt="The plusplus schema browser and data grid" width="100%" /></td>
     <td width="50%"><img src="website/public/screenshots/image6.png" alt="The plusplus schema browser and data grid" width="100%" /></td>
   </tr>
+  <tr>
+    <td width="50%"><img src="website/public/screenshots/image7.png" alt="The plusplus schema browser and data grid" width="100%" /></td>
+    <td width="50%"><img src="website/public/screenshots/image8.png" alt="The plusplus schema browser and data grid" width="100%" /></td>
+  </tr>
 </table>
 
 plusplus is an open-source desktop database client built in Rust. It brings schema browsing,
@@ -63,6 +67,7 @@ that query visible before it reaches a database.
 - Write SQL or CQL with syntax highlighting, formatting, saved queries, history, and schema-aware autocomplete.
 - Navigate large tables with pagination and keyset paging when a safe primary key is available.
 - Run queries, counts, and exports away from the UI thread, with cancellation support.
+- Turn filtered or sorted query results into line, bar, or scatter charts and export themed SVGs.
 
 ### Edit and move data
 

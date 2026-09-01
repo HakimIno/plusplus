@@ -1126,7 +1126,7 @@ fn header_cell(
     let color = if sorted_dir.is_some() {
         palette::ACCENT()
     } else {
-        palette::TEXT_WEAK()
+        palette::TEXT()
     };
     let text = egui::RichText::new(&col.name)
         .font(egui::TextStyle::Heading.resolve(ui.style()))
@@ -1306,7 +1306,7 @@ fn header_menu_item(
     let image = egui::Image::new(icon)
         .fit_to_exact_size(egui::vec2(13.0, 13.0))
         .tint(if enabled {
-            palette::TEXT_WEAK()
+            palette::TEXT()
         } else {
             palette::TEXT_FAINT()
         });

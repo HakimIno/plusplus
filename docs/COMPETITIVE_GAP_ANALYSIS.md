@@ -42,7 +42,7 @@ preserving its local-first, native Rust architecture.
 | Query diagnostics | Production Guardian can perform bounded count and EXPLAIN preflight checks | A user-facing EXPLAIN/ANALYZE viewer, plan visualization, profiling, and process/session monitor |
 | Schema management | Editors for tables, views, routines, and triggers; ER designer; dialect-specific forward-engineering preview | Compare two live schemas, generate a migration diff, review it, and safely deploy it |
 | Import/export | CSV and JSON import; complete streaming CSV/JSON export | SQL dump, Excel, saved/re-runnable transfer jobs, URL sources, scripting, and richer format options |
-| Analysis and visualization | A Chart result tab and an analysis crate are wired into the application | The Chart view and analysis APIs are placeholders; no aggregation UI, dashboard, or map view yet |
+| Analysis and visualization | Query results can be charted as configurable line, bar, or scatter views with multiple numeric series and themed SVG export | No aggregation UI, saved chart configuration, dashboard, or map view yet |
 | Database operations | Production safeguards, TLS/SSH, local secrets, query cancellation | Backup/restore hand-off, users/roles, server processes, maintenance, and administrative views |
 | Database coverage | PostgreSQL, MySQL, MariaDB, SQL Server, SQLite, DuckDB, Cassandra, and ScyllaDB are represented by the current backend model | Oracle, Redis, MongoDB, ClickHouse, Snowflake, Redshift, CockroachDB, Firebird, and other competitor-supported engines |
 | Extensibility | Drop-in themes and imported fonts | Stable plugin API, driver SDK, contribution points, and plugin discovery |
@@ -173,12 +173,12 @@ hand-offs rather than replace database-native administration tools.
 
 ### 7. Charts and result analysis
 
-Finish the existing Chart tab incrementally:
+Extend the query-result Chart tab incrementally:
 
-1. Detect numeric, category, and time columns.
+1. Extend the current numeric/category detection with explicit time-axis handling.
 2. Offer table summary and descriptive statistics.
-3. Add line, bar, area, scatter, and pie charts only where the result shape is valid.
-4. Allow explicit X, Y, grouping, and aggregation selection.
+3. Extend the current line, bar, and scatter charts with area and pie only where the result shape is valid.
+4. Extend the current explicit X and multi-series Y selection with grouping and aggregation.
 5. Save chart configuration with a query tab or favorite.
 6. Consider dashboards and scheduled refresh only after a single-query chart is stable.
 

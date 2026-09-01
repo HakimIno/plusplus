@@ -2597,9 +2597,44 @@ fn query_result_controls_sit_between_query_toolbar_and_grid() {
 
     harness.get_by_label("Chart").click();
     harness.run_steps(2);
-    assert!(harness
-        .query_by_label("Chart visualization is coming soon")
-        .is_some());
+    assert!(harness.query_by_label("Export SVG…").is_some());
+    assert!(harness.query_by_label("Line").is_some());
+    assert!(harness.query_by_label("Y · col0").is_some());
+    assert!(harness.query_by_label("X · Row number").is_some());
+    assert!(harness.query_by_label("Style").is_some());
+    assert!(harness.query_by_label("Reset").is_some());
+
+    harness.get_by_label("Line").click();
+    harness.run_steps(2);
+    for kind in [
+        "Area chart",
+        "Bar chart",
+        "Stacked bar",
+        "Scatter plot",
+        "Donut chart",
+    ] {
+        assert!(harness.query_by_label(kind).is_some());
+    }
+    harness.get_by_label("Area chart").click();
+    harness.run_steps(2);
+    harness.get_all_by_label("Style").next().unwrap().click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Title").is_some());
+    assert!(harness.query_by_label("Show legend").is_some());
+
+    harness.get_all_by_label("Style").next().unwrap().click();
+    harness.run_steps(2);
+    harness.get_by_label("X · Row number").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("X axis").is_some());
+    assert!(harness.query_by_label("Row number").is_some());
+
+    harness.get_by_label("X · Row number").click();
+    harness.run_steps(2);
+    harness.get_by_label("Y · col0").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Y values").is_some());
+    assert!(harness.query_by_label("col0").is_some());
 }
 
 #[test]
@@ -4387,6 +4422,55 @@ fn snapshot_query_error_state() {
     app.tab_mut().view = TabView::Message;
     app.status_msg = "Ready".into();
     render_and_snapshot(app, "query_error_state", false);
+}
+
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_chart_view() {
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    app.show_query_console = false;
+    app.tab_mut().set_result(QueryResult {
+        columns: vec![
+            ColumnMeta {
+                name: "month".into(),
+                type_name: "TEXT".into(),
+            },
+            ColumnMeta {
+                name: "revenue".into(),
+                type_name: "NUMERIC".into(),
+            },
+            ColumnMeta {
+                name: "orders".into(),
+                type_name: "INTEGER".into(),
+            },
+        ],
+        rows: [
+            ("Jan", 42_000.0, 318),
+            ("Feb", 51_500.0, 354),
+            ("Mar", 49_200.0, 341),
+            ("Apr", 63_800.0, 422),
+            ("May", 71_200.0, 465),
+            ("Jun", 79_400.0, 508),
+            ("Jul", 74_300.0, 481),
+            ("Aug", 88_600.0, 557),
+        ]
+        .into_iter()
+        .map(|(month, revenue, orders)| {
+            vec![
+                Value::Text(month.into()),
+                Value::Float(revenue),
+                Value::Int(orders),
+            ]
+        })
+        .collect(),
+        ..QueryResult::default()
+    });
+    app.tab_mut().view = TabView::Chart;
+    render_and_snapshot(app, "chart_view", false);
 }
 
 /// Screenshot generator (ignored): the live syntax check — a red squiggle under the token

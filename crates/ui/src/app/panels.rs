@@ -4668,15 +4668,15 @@ impl DbGuiApp {
                 }
                 TabView::Chart => {
                     egui::CentralPanel::default().show_inside(root, |ui| {
-                        if self.tabs[idx].result.is_none() && self.tabs[idx].query_error.is_none() {
+                        let tab = &mut self.tabs[idx];
+                        if tab.result.is_none() && tab.query_error.is_none() {
                             crate::pet::show(ui);
-                        } else {
-                            components::empty_state(
-                                ui,
-                                icons::diagram(),
-                                "Chart",
-                                "Chart visualization is coming soon",
-                            );
+                        } else if let Some(result) = tab.result.as_ref() {
+                            let response =
+                                crate::chart::show(ui, result, &tab.row_order, &mut tab.chart);
+                            if response.export_requested {
+                                actions.push(Action::ExportChart);
+                            }
                         }
                     });
                     return;

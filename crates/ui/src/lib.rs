@@ -5,6 +5,7 @@
 
 mod app;
 mod autocomplete;
+mod chart;
 mod components;
 mod edit;
 mod emoji;

@@ -5,6 +5,7 @@ while pre-1.0 releases may still change workflows and configuration formats.
 
 ## 0.4.4 — 2026-08-31
 
+- Added query-result charts with automatic numeric-series detection, configurable line/bar/scatter views, multi-series hover values, and themed SVG export.
 - Added a BLOB value viewer with image decoding and richer binary-value handling.
 - Added run-all execution with batch result navigation and clearer query-error reporting.
 - Refined the SQL editor toolbar, keyboard shortcuts, settings, and focus management.

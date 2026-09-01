@@ -352,6 +352,42 @@ impl DbGuiApp {
                     Err(error) => self.error = Some(format!("Could not export ER design: {error}")),
                 }
             }
+            Action::ExportChart => {
+                let Some((result, row_order, chart)) = self
+                    .tab()
+                    .result
+                    .as_ref()
+                    .map(|result| (result, self.tab().row_order.as_slice(), &self.tab().chart))
+                else {
+                    self.error = Some("Run a query before exporting a chart.".into());
+                    return;
+                };
+                let file_name = crate::chart::suggested_file_name(result, chart);
+                let svg =
+                    match crate::chart::to_svg(result, row_order, chart, crate::theme::current()) {
+                        Ok(svg) => svg,
+                        Err(error) => {
+                            self.error = Some(format!("Could not export chart: {error}"));
+                            return;
+                        }
+                    };
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Scalable Vector Graphic", &["svg"])
+                    .set_file_name(&file_name)
+                    .save_file()
+                else {
+                    return;
+                };
+                match std::fs::write(&path, svg) {
+                    Ok(()) => {
+                        self.status_msg = format!("Chart saved to {}", path.display());
+                        self.error = None;
+                    }
+                    Err(error) => {
+                        self.error = Some(format!("Could not export chart: {error}"));
+                    }
+                }
+            }
             Action::ForwardEngineerErd => {
                 if self.tab_connection_is_read_only(self.active_query_tab) {
                     self.refuse_read_only("an ER design can't be forward-engineered.");
