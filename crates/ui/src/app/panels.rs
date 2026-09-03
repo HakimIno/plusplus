@@ -1057,7 +1057,7 @@ impl DbGuiApp {
                                 let mut rects = Vec::with_capacity(self.tabs.len());
                                 let pointer_x = ui.ctx().pointer_interact_pos().map(|p| p.x);
                                 for idx in 0..self.tabs.len() {
-                                    if self.split_tab == Some(idx) {
+                                    if self.tab_is_in_split_group(idx) {
                                         continue;
                                     }
                                     let selected =
@@ -1176,6 +1176,80 @@ impl DbGuiApp {
                             });
                         });
                 });
+            });
+    }
+
+    /// A split workspace owns an independent tab group in each pane. Keeping these headers
+    /// inside each pane makes ownership explicit and aligns them across the divider.
+    pub(super) fn split_pane_tab_bar(
+        &mut self,
+        root: &mut egui::Ui,
+        active_idx: usize,
+        right: bool,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(active_id) = self.tabs.get(active_idx).map(|tab| tab.id) else {
+            return;
+        };
+        let indices: Vec<usize> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, tab)| (self.split_tab_ids.contains(&tab.id) == right).then_some(idx))
+            .collect();
+        egui::Panel::top(egui::Id::new(("split_pane_tabs", right)))
+            .resizable(false)
+            .exact_size(34.0)
+            .frame(
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(6, 4))
+                    .fill(palette::PANEL()),
+            )
+            .show_separator_line(true)
+            .show_inside(root, |ui| {
+                egui::ScrollArea::horizontal()
+                    .id_salt(("split_pane_tab_scroll", right))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            for idx in indices {
+                                let label = self.tab_label(idx);
+                                let kind = self.tab_kind(idx);
+                                let db_kind = (kind == crate::components::QueryTabKind::Query)
+                                    .then(|| self.tab_db_kind(idx))
+                                    .flatten();
+                                let response = components::query_tab_item(
+                                    ui,
+                                    &label,
+                                    kind,
+                                    db_kind,
+                                    self.tabs[idx].id == active_id,
+                                    self.tabs[idx].preview,
+                                    None,
+                                );
+                                if response.close {
+                                    actions.push(Action::CloseSplitPaneTab { idx, right });
+                                } else if response.pinned {
+                                    actions.push(Action::PinSplitPaneTab { idx, right });
+                                } else if response.clicked {
+                                    actions.push(Action::SelectSplitPaneTab { idx, right });
+                                }
+                            }
+                            if components::toolbar_icon_button(
+                                ui,
+                                icons::plus(),
+                                if right {
+                                    "New query tab in right pane"
+                                } else {
+                                    "New query tab in left pane"
+                                },
+                            )
+                            .clicked()
+                            {
+                                actions.push(Action::NewSplitPaneTab(right));
+                            }
+                        });
+                    });
             });
     }
 
@@ -1347,7 +1421,7 @@ impl DbGuiApp {
         )
         .clicked()
         {
-            actions.push(Action::ToggleFilter);
+            actions.push(Action::ToggleFilter(self.tab().id));
         }
     }
 
@@ -2051,7 +2125,7 @@ impl DbGuiApp {
             .show_inside(root, |ui| {
                 if placement == QueryEditorPlacement::Bottom {
                     if mode_bar_height > 0.0 {
-                        self.view_mode_bar(ui, QueryEditorPlacement::Top, actions);
+                        self.view_mode_bar(ui, QueryEditorPlacement::Top, false, actions);
                     }
                     footer(self, ui, QueryEditorPlacement::Top, actions);
                 }
@@ -2524,7 +2598,7 @@ impl DbGuiApp {
                 )
                 .show_inside(root, |ui| {
                     if include_mode_bar {
-                        self.view_mode_bar(ui, QueryEditorPlacement::Top, actions);
+                        self.view_mode_bar(ui, QueryEditorPlacement::Top, true, actions);
                     }
                     let mut clear = false;
                     let mut close = false;
@@ -3974,6 +4048,35 @@ impl DbGuiApp {
             pinned,
         };
         row_resp.dnd_set_drag_payload(payload);
+        if row_resp.dragged() {
+            if let Some(pointer) = ui.ctx().pointer_interact_pos() {
+                egui::Area::new(id.with("drag_ghost"))
+                    .order(egui::Order::Tooltip)
+                    .interactable(false)
+                    .fixed_pos(pointer + egui::vec2(14.0, 14.0))
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::new()
+                            .fill(palette::SURFACE())
+                            .stroke(egui::Stroke::new(1.0, palette::BORDER_STRONG()))
+                            .corner_radius(egui::CornerRadius::same(6))
+                            .inner_margin(egui::Margin::symmetric(9, 6))
+                            .show(ui, |ui| {
+                                ui.horizontal_centered(|ui| {
+                                    ui.add(
+                                        egui::Image::new(icons::table())
+                                            .fit_to_exact_size(egui::Vec2::splat(14.0))
+                                            .tint(palette::ACCENT()),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(&table.name)
+                                            .strong()
+                                            .color(palette::TEXT()),
+                                    );
+                                });
+                            });
+                    });
+            }
+        }
         if let Some(source) = row_resp.dnd_hover_payload::<SchemaTableDrag>() {
             let same_table = source.conn_id == active.config_id
                 && source.schema == table.schema
@@ -4433,7 +4536,7 @@ impl DbGuiApp {
         };
 
         let mut event: Option<FilterEvent> = None;
-        egui::Panel::top("filter_bar")
+        egui::Panel::top(egui::Id::new(("filter_bar", self.tabs[idx].id)))
             .resizable(false)
             .frame(
                 egui::Frame::new()
@@ -4458,6 +4561,7 @@ impl DbGuiApp {
         &mut self,
         root: &mut egui::Ui,
         placement: QueryEditorPlacement,
+        force_top: bool,
         actions: &mut Vec<Action>,
     ) {
         let idx = self.active_query_tab;
@@ -4491,13 +4595,14 @@ impl DbGuiApp {
                 };
             }
         }
-        let panel = match (query_result_tabs, placement) {
+        let panel = match (force_top, query_result_tabs, placement) {
+            (true, _, _) => egui::Panel::top("view_mode_bar"),
             // Query result modes belong beneath the data surface, matching the statement tabs
             // above it. Table/view modes keep following their data-first editor placement.
-            (true, _) | (false, QueryEditorPlacement::Bottom) => {
+            (false, true, _) | (false, false, QueryEditorPlacement::Bottom) => {
                 egui::Panel::bottom("view_mode_bar")
             }
-            (false, QueryEditorPlacement::Top) => egui::Panel::top("view_mode_bar"),
+            (false, false, QueryEditorPlacement::Top) => egui::Panel::top("view_mode_bar"),
         };
         panel
             .resizable(false)
@@ -4744,7 +4849,7 @@ impl DbGuiApp {
                         });
                     }
                     if let Some(col) = resp.filter_column {
-                        actions.push(Action::FilterColumn(col));
+                        actions.push(Action::FilterColumn { tab_id, col });
                     }
                     if let Some(click) = resp.selected {
                         selection.apply_click(click);

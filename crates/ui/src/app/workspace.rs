@@ -47,6 +47,9 @@ impl DbGuiApp {
     /// selected but idle.
     pub(super) fn restore_workspace(&mut self) {
         let saved = dbcore::config::load_workspace();
+        let saved_active_tab = saved.active_tab;
+        let saved_active_split_tab = saved.active_split_tab;
+        let split_flags: Vec<bool> = saved.tabs.iter().map(|tab| tab.split_pane).collect();
         let mut next_tab_id = 0u64;
         let tabs: Vec<QueryTab> = saved
             .tabs
@@ -81,9 +84,36 @@ impl DbGuiApp {
         if tabs.is_empty() {
             return; // no saved tabs → keep the default query tab from `construct`
         }
-        self.active_query_tab = saved.active_tab.min(tabs.len() - 1);
+        self.active_query_tab = saved_active_tab.min(tabs.len() - 1);
         self.next_tab_id = next_tab_id;
         self.tabs = tabs;
+        self.split_tab_ids = self
+            .tabs
+            .iter()
+            .zip(split_flags)
+            .filter_map(|(tab, right)| right.then_some(tab.id))
+            .collect();
+        if !self.split_tab_ids.is_empty() {
+            if self.tab_is_in_split_group(self.active_query_tab) {
+                self.active_query_tab = self
+                    .tabs
+                    .iter()
+                    .position(|tab| !self.split_tab_ids.contains(&tab.id))
+                    .unwrap_or(0);
+            }
+            self.split_tab = saved_active_split_tab
+                .filter(|idx| *idx < self.tabs.len() && self.tab_is_in_split_group(*idx))
+                .or_else(|| {
+                    self.tabs
+                        .iter()
+                        .position(|tab| self.split_tab_ids.contains(&tab.id))
+                });
+            self.tabs[self.active_query_tab].editor_split = true;
+            if let Some(split_idx) = self.split_tab {
+                self.tabs[self.active_query_tab].split_sql = Some(self.tabs[split_idx].sql.clone());
+            }
+            return;
+        }
         // Rehydrate the hidden right-hand workspace pane for a persisted split. Only the
         // active tab can have an open split in the current UI, so keep restoration deterministic
         // even when older workspace files contain split metadata on several tabs.
@@ -112,6 +142,7 @@ impl DbGuiApp {
             split.editor_size = editor_size;
             split.preview = false;
             self.split_tab = Some(self.tabs.len());
+            self.split_tab_ids.push(split.id);
             self.tabs.push(split);
         }
     }
@@ -120,24 +151,17 @@ impl DbGuiApp {
     /// Diagram tabs are skipped: their content is a schema snapshot that can't be
     /// rebuilt without a live connection, so they simply don't survive a restart.
     pub(super) fn snapshot_workspace(&self) -> dbcore::config::Workspace {
-        // The right side of a split workspace is represented internally as a hidden tab so it
-        // can own its SQL, result and connection state. It must not leak into the persisted tab
-        // list as a second top-level workspace tab.
-        let split_id = self
-            .split_tab
-            .and_then(|idx| self.tabs.get(idx))
-            .map(|t| t.id);
-        let saved = |t: &&QueryTab| {
-            t.kind != crate::components::QueryTabKind::Diagram && Some(t.id) != split_id
-        };
+        let saved = |t: &&QueryTab| t.kind != crate::components::QueryTabKind::Diagram;
         dbcore::config::Workspace {
-            // The saved index must count only the tabs that are actually saved.
             active_tab: self
                 .tabs
                 .iter()
                 .take(self.active_query_tab)
                 .filter(saved)
                 .count(),
+            active_split_tab: self
+                .split_tab
+                .map(|idx| self.tabs.iter().take(idx).filter(saved).count()),
             tabs: self
                 .tabs
                 .iter()
@@ -147,6 +171,7 @@ impl DbGuiApp {
                     conn_id: t.conn_id.clone(),
                     sql: t.sql.clone(),
                     kind: Some(save_tab_kind(t.kind)),
+                    split_pane: self.split_tab_ids.contains(&t.id),
                     editor_size: t.editor_size,
                     editor_split: t.editor_split,
                     editor_split_size: t.editor_split_size,

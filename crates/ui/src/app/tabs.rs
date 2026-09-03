@@ -3,20 +3,29 @@
 use super::*;
 
 impl DbGuiApp {
+    pub(super) fn tab_is_in_split_group(&self, idx: usize) -> bool {
+        self.tabs
+            .get(idx)
+            .is_some_and(|tab| self.split_tab_ids.contains(&tab.id))
+    }
+
     pub(super) fn install_split_tab(&mut self, mut split: QueryTab, run: bool) {
-        self.close_split_workspace();
         if self.active_query_tab >= self.tabs.len() {
             return;
         }
-        let primary_idx = self.active_query_tab;
-        self.tabs[primary_idx].editor_split = true;
-        self.tabs[primary_idx].split_sql = Some(split.sql.clone());
-        self.tabs[primary_idx].editor_size = None;
+        if self.split_tab.is_none() {
+            let primary_idx = self.active_query_tab;
+            self.tabs[primary_idx].editor_split = true;
+            self.tabs[primary_idx].editor_size = None;
+        }
         split.editor_size = None;
         split.preview = false;
+        let split_id = split.id;
         let split_idx = self.tabs.len();
         self.tabs.push(split);
+        self.split_tab_ids.push(split_id);
         self.split_tab = Some(split_idx);
+        self.tabs[self.active_query_tab].split_sql = Some(self.tabs[split_idx].sql.clone());
         self.split_focus = true;
         self.workspace_dirty = true;
         if run {
@@ -40,8 +49,10 @@ impl DbGuiApp {
         split.sql = primary.sql.clone();
         split.editor_size = None;
         split.preview = false;
+        let split_id = split.id;
         self.split_tab = Some(self.tabs.len());
         self.tabs.push(split);
+        self.split_tab_ids.push(split_id);
         self.workspace_dirty = true;
     }
 
@@ -51,24 +62,28 @@ impl DbGuiApp {
         let Some(split_idx) = self.split_tab.take() else {
             return;
         };
+        let mut split_ids = std::mem::take(&mut self.split_tab_ids);
+        if split_ids.is_empty() {
+            if let Some(split_id) = self.tabs.get(split_idx).map(|tab| tab.id) {
+                split_ids.push(split_id);
+            }
+        }
         let primary_id = self
             .tabs
             .get(self.active_query_tab)
-            .filter(|_| self.active_query_tab != split_idx)
+            .filter(|tab| !split_ids.contains(&tab.id))
             .map(|tab| tab.id)
             .or_else(|| {
                 self.tabs
                     .iter()
-                    .enumerate()
-                    .find(|(idx, tab)| *idx != split_idx && tab.editor_split)
-                    .map(|(_, tab)| tab.id)
+                    .find(|tab| !split_ids.contains(&tab.id) && tab.editor_split)
+                    .map(|tab| tab.id)
             })
             .or_else(|| {
                 self.tabs
                     .iter()
-                    .enumerate()
-                    .find(|(idx, _)| *idx != split_idx)
-                    .map(|(_, tab)| tab.id)
+                    .find(|tab| !split_ids.contains(&tab.id))
+                    .map(|tab| tab.id)
             });
 
         if let Some(primary_id) = primary_id {
@@ -78,14 +93,86 @@ impl DbGuiApp {
                 primary.editor_pane = super::EditorPane::Primary;
             }
         }
-        if split_idx < self.tabs.len() {
-            self.tabs.remove(split_idx);
-        }
+        self.tabs.retain(|tab| !split_ids.contains(&tab.id));
         self.active_query_tab = primary_id
             .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
             .unwrap_or(0)
             .min(self.tabs.len().saturating_sub(1));
         self.split_focus = false;
+        self.workspace_dirty = true;
+    }
+
+    pub(super) fn select_split_pane_tab(&mut self, idx: usize, right: bool) {
+        if idx >= self.tabs.len() || self.tab_is_in_split_group(idx) != right {
+            return;
+        }
+        if right {
+            self.split_tab = Some(idx);
+            self.split_focus = true;
+            self.tabs[self.active_query_tab].split_sql = Some(self.tabs[idx].sql.clone());
+        } else {
+            self.active_query_tab = idx;
+            self.split_focus = false;
+        }
+        self.touch_result(idx);
+        self.workspace_dirty = true;
+    }
+
+    pub(super) fn close_split_pane_tab(&mut self, idx: usize, right: bool) {
+        if idx >= self.tabs.len() || self.tab_is_in_split_group(idx) != right {
+            return;
+        }
+        let closing_id = self.tabs[idx].id;
+        let primary_id = self.tabs.get(self.active_query_tab).map(|tab| tab.id);
+        let active_split_id = self
+            .split_tab
+            .and_then(|split_idx| self.tabs.get(split_idx))
+            .map(|tab| tab.id);
+        if right {
+            self.split_tab_ids.retain(|id| *id != closing_id);
+            self.tabs.remove(idx);
+            self.active_query_tab = primary_id
+                .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
+                .unwrap_or(0)
+                .min(self.tabs.len().saturating_sub(1));
+            if self.split_tab_ids.is_empty() {
+                self.split_tab = None;
+                let primary_idx = self.active_query_tab.min(self.tabs.len().saturating_sub(1));
+                if let Some(primary) = self.tabs.get_mut(primary_idx) {
+                    primary.editor_split = false;
+                    primary.split_sql = None;
+                }
+                self.active_query_tab =
+                    self.active_query_tab.min(self.tabs.len().saturating_sub(1));
+                self.split_focus = false;
+            } else {
+                let next_id = active_split_id
+                    .filter(|id| *id != closing_id && self.split_tab_ids.contains(id))
+                    .unwrap_or_else(|| *self.split_tab_ids.last().unwrap());
+                self.split_tab = self.tabs.iter().position(|tab| tab.id == next_id);
+            }
+        } else {
+            let left_count = self
+                .tabs
+                .iter()
+                .filter(|tab| !self.split_tab_ids.contains(&tab.id))
+                .count();
+            if left_count <= 1 {
+                return;
+            }
+            self.tabs.remove(idx);
+            self.split_tab =
+                active_split_id.and_then(|id| self.tabs.iter().position(|tab| tab.id == id));
+            self.active_query_tab = primary_id
+                .filter(|id| *id != closing_id)
+                .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
+                .or_else(|| {
+                    self.tabs
+                        .iter()
+                        .position(|tab| !self.split_tab_ids.contains(&tab.id))
+                })
+                .unwrap_or(0);
+        }
         self.workspace_dirty = true;
     }
 
@@ -105,6 +192,35 @@ impl DbGuiApp {
         self.status_msg = "New query tab".to_string();
         self.error = None;
         self.workspace_dirty = true;
+    }
+
+    pub(super) fn new_tab_in_split_pane(&mut self, right: bool) {
+        if self.split_tab.is_none() {
+            self.new_tab();
+            return;
+        }
+        let source_idx = if right {
+            self.split_tab.unwrap_or(self.active_query_tab)
+        } else {
+            self.active_query_tab
+        };
+        let id = self.next_tab_id;
+        self.next_tab_id = self.next_tab_id.wrapping_add(1);
+        let mut tab = QueryTab::new(id, String::new());
+        tab.conn_id = self
+            .tabs
+            .get(source_idx)
+            .and_then(|tab| tab.conn_id.clone());
+        if right {
+            self.install_split_tab(tab, false);
+        } else {
+            self.tabs.push(tab);
+            self.active_query_tab = self.tabs.len() - 1;
+            self.split_focus = false;
+            self.workspace_dirty = true;
+        }
+        self.status_msg = "New query tab".to_string();
+        self.error = None;
     }
 
     /// Land history SQL in a Query tab instead of overwriting a table/diagram/designer tab.

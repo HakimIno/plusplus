@@ -1590,7 +1590,10 @@ fn header_filter_action_targets_the_selected_column() {
     let mut app = DbGuiApp::construct();
     app.tab_mut().set_result(fake_result(3, 3));
 
-    app.apply_action(Action::FilterColumn(2));
+    app.apply_action(Action::FilterColumn {
+        tab_id: app.tab().id,
+        col: 2,
+    });
 
     assert!(app.tab().filter.visible);
     assert_eq!(app.tab().filter.conditions.len(), 1);
@@ -1600,16 +1603,16 @@ fn header_filter_action_targets_the_selected_column() {
 #[test]
 fn toggle_filter_requires_a_result_and_cmd_f_flips_it() {
     let mut app = DbGuiApp::construct();
-    app.apply_action(Action::ToggleFilter);
+    app.apply_action(Action::ToggleFilter(app.tab().id));
     assert!(
         !app.tab().filter.visible,
         "no result means there is nothing to filter"
     );
 
     let (ctx, mut app) = grid_nav_app(3, 3);
-    app.apply_action(Action::ToggleFilter);
+    app.apply_action(Action::ToggleFilter(app.tab().id));
     assert!(app.tab().filter.visible);
-    app.apply_action(Action::ToggleFilter);
+    app.apply_action(Action::ToggleFilter(app.tab().id));
     assert!(!app.tab().filter.visible);
 
     run_frame(
@@ -1627,6 +1630,34 @@ fn toggle_filter_requires_a_result_and_cmd_f_flips_it() {
         vec![key(egui::Key::F, egui::Modifiers::COMMAND)],
     );
     assert!(!app.tab().filter.visible);
+}
+
+#[test]
+fn split_filter_actions_stay_with_the_originating_pane() {
+    let mut app = DbGuiApp::construct();
+    app.tab_mut().set_result(fake_result(3, 3));
+    let left_id = app.tab().id;
+    app.new_tab();
+    app.tab_mut().set_result(fake_result(3, 3));
+    let right = app.active_query_tab;
+    let right_id = app.tab().id;
+    app.split_tab = Some(right);
+    app.active_query_tab = 0;
+
+    app.apply_action(Action::ToggleFilter(right_id));
+    app.apply_action(Action::FilterColumn {
+        tab_id: right_id,
+        col: 2,
+    });
+
+    let left = app.tabs.iter().find(|tab| tab.id == left_id).unwrap();
+    let right = app.tabs.iter().find(|tab| tab.id == right_id).unwrap();
+    assert!(!left.filter.visible, "the left pane must remain unchanged");
+    assert!(
+        right.filter.visible,
+        "the right pane must own its filter bar"
+    );
+    assert_eq!(right.filter.conditions[0].column, 2);
 }
 
 /// A new app always has exactly one tab, and `active()` resolves through the active tab's
@@ -1814,6 +1845,26 @@ fn find_text_pos(shapes: &[egui::epaint::ClippedShape], needle: &str) -> Option<
     out
 }
 
+fn has_painted_text_near(
+    shapes: &[egui::epaint::ClippedShape],
+    needle: &str,
+    point: egui::Pos2,
+) -> bool {
+    fn walk(shape: &egui::epaint::Shape, needle: &str, point: egui::Pos2) -> bool {
+        match shape {
+            egui::epaint::Shape::Text(text) => {
+                text.galley.text().contains(needle) && text.pos.distance(point) < 120.0
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                shapes.iter().any(|shape| walk(shape, needle, point))
+            }
+            _ => false,
+        }
+    }
+
+    shapes.iter().any(|shape| walk(&shape.shape, needle, point))
+}
+
 /// End-to-end drag-to-reorder: simulate a real pointer press → move → release over
 /// the tab strip and assert the tab order actually changes.
 #[test]
@@ -1949,6 +2000,115 @@ fn dragging_a_tab_to_the_workspace_opens_a_split_pane() {
 }
 
 #[test]
+fn dragging_a_schema_table_paints_its_name_beside_the_pointer() {
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    connect_fake(&mut app, fake_schema(2, 3));
+
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+    let run = |app: &mut DbGuiApp, events: Vec<egui::Event>| {
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            },
+            |ui| app.draw(ui, None),
+        )
+    };
+    let out = run(&mut app, vec![]);
+    let table = find_text_pos(&out.shapes, "table_1").expect("schema table not painted");
+    let start = table + egui::vec2(4.0, 6.0);
+    let pointer = egui::pos2(820.0, 360.0);
+
+    run(&mut app, vec![egui::Event::PointerMoved(start)]);
+    run(
+        &mut app,
+        vec![egui::Event::PointerButton {
+            pos: start,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        }],
+    );
+    for step in 1..=8 {
+        let t = step as f32 / 8.0;
+        run(
+            &mut app,
+            vec![egui::Event::PointerMoved(start + (pointer - start) * t)],
+        );
+    }
+    let dragged = run(&mut app, vec![egui::Event::PointerMoved(pointer)]);
+    assert!(
+        has_painted_text_near(&dragged.shapes, "table_1", pointer),
+        "the table drag ghost must show its name beside the pointer"
+    );
+}
+
+#[test]
+fn dropping_a_schema_table_into_an_open_split_adds_a_right_tab() {
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    connect_fake(&mut app, fake_schema(2, 3));
+    app.open_split_workspace();
+    assert_eq!(app.split_tab_ids.len(), 1);
+
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+    let run = |app: &mut DbGuiApp, events: Vec<egui::Event>| {
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            },
+            |ui| app.draw(ui, None),
+        )
+    };
+    let out = run(&mut app, vec![]);
+    let table = find_text_pos(&out.shapes, "table_1").expect("schema table not painted");
+    let start = table + egui::vec2(4.0, 6.0);
+    let drop = egui::pos2(820.0, 360.0);
+
+    run(&mut app, vec![egui::Event::PointerMoved(start)]);
+    run(
+        &mut app,
+        vec![egui::Event::PointerButton {
+            pos: start,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        }],
+    );
+    for step in 1..=8 {
+        let t = step as f32 / 8.0;
+        run(
+            &mut app,
+            vec![egui::Event::PointerMoved(start + (drop - start) * t)],
+        );
+    }
+    run(
+        &mut app,
+        vec![egui::Event::PointerButton {
+            pos: drop,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        }],
+    );
+
+    assert_eq!(app.split_tab_ids.len(), 2);
+    assert_eq!(app.tabs[app.split_tab.unwrap()].title, "table_1");
+}
+
+#[test]
 fn schema_table_payload_opens_an_editable_table_in_split() {
     let mut app = DbGuiApp::construct();
     connect_fake(&mut app, fake_schema(2, 3));
@@ -2055,6 +2215,8 @@ fn workspace_snapshot_keeps_tab_kind_and_editor_size() {
     app.tab_mut().editor_size = Some(212.0);
 
     let saved = app.snapshot_workspace();
+    let json = serde_json::to_vec(&saved).unwrap();
+    let saved: dbcore::config::Workspace = serde_json::from_slice(&json).unwrap();
     assert_eq!(saved.tabs.len(), 1);
     assert_eq!(saved.tabs[0].title, "active_users");
     assert_eq!(
@@ -2062,6 +2224,33 @@ fn workspace_snapshot_keeps_tab_kind_and_editor_size() {
         Some(dbcore::config::WorkspaceTabKind::View)
     );
     assert_eq!(saved.tabs[0].editor_size, Some(212.0));
+}
+
+#[test]
+fn workspace_snapshot_keeps_every_right_split_tab() {
+    let mut app = DbGuiApp::construct();
+    app.tab_mut().title = "left".into();
+    app.open_split_workspace();
+    let first = app.split_tab.unwrap();
+    app.tabs[first].title = "right_one".into();
+    app.new_tab_in_split_pane(true);
+    let second = app.split_tab.unwrap();
+    app.tabs[second].title = "right_two".into();
+
+    let saved = app.snapshot_workspace();
+    let json = serde_json::to_vec(&saved).unwrap();
+    let saved: dbcore::config::Workspace = serde_json::from_slice(&json).unwrap();
+
+    assert_eq!(saved.tabs.len(), 3);
+    assert_eq!(saved.active_tab, 0);
+    assert_eq!(saved.active_split_tab, Some(2));
+    let right_titles: Vec<&str> = saved
+        .tabs
+        .iter()
+        .filter(|tab| tab.split_pane)
+        .map(|tab| tab.title.as_str())
+        .collect();
+    assert_eq!(right_titles, ["right_one", "right_two"]);
 }
 
 #[test]
@@ -2149,6 +2338,102 @@ fn split_panes_keep_independent_editor_assistance_state() {
     assert!(app.tabs[right].editor_assist.autocomplete.prefix.is_empty());
     assert!(app.tabs[right].editor_assist.ghost_suggestion.is_none());
     assert!(app.tabs[right].editor_assist.syntax_checked.is_empty());
+}
+
+#[test]
+fn split_group_adds_selects_and_closes_tabs_independently() {
+    let mut app = DbGuiApp::construct();
+    app.open_split_workspace();
+    let first_id = app.tabs[app.split_tab.unwrap()].id;
+
+    app.new_tab_in_split_pane(true);
+    let second_id = app.tabs[app.split_tab.unwrap()].id;
+    assert_eq!(app.split_tab_ids, [first_id, second_id]);
+    assert_eq!(app.tabs.len(), 3);
+
+    let first_idx = app.tabs.iter().position(|tab| tab.id == first_id).unwrap();
+    app.select_split_pane_tab(first_idx, true);
+    assert_eq!(app.tabs[app.split_tab.unwrap()].id, first_id);
+
+    app.close_split_pane_tab(first_idx, true);
+    assert_eq!(app.split_tab_ids, [second_id]);
+    assert_eq!(app.tabs[app.split_tab.unwrap()].id, second_id);
+    let second_idx = app.tabs.iter().position(|tab| tab.id == second_id).unwrap();
+    app.close_split_pane_tab(second_idx, true);
+    assert!(app.split_tab.is_none());
+    assert!(app.split_tab_ids.is_empty());
+    assert_eq!(app.tabs.len(), 1);
+}
+
+#[test]
+fn dragging_more_tables_into_an_open_split_adds_right_group_tabs() {
+    let mut app = DbGuiApp::construct();
+    connect_fake(&mut app, fake_schema(3, 3));
+
+    for table in ["table_0", "table_1"] {
+        app.open_schema_table_in_split(SchemaTableDrag {
+            conn_id: "c1".into(),
+            schema: None,
+            table: table.into(),
+            pinned: false,
+        });
+    }
+
+    assert_eq!(app.split_tab_ids.len(), 2);
+    let right_titles: Vec<&str> = app
+        .tabs
+        .iter()
+        .filter(|tab| app.split_tab_ids.contains(&tab.id))
+        .map(|tab| tab.title.as_str())
+        .collect();
+    assert_eq!(right_titles, ["table_0", "table_1"]);
+    assert_eq!(app.tabs[app.split_tab.unwrap()].title, "table_1");
+}
+
+#[test]
+fn split_workspace_renders_a_tab_header_inside_each_pane() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    app.tab_mut().title = "left_query".into();
+    app.open_split_workspace();
+    let right = app.split_tab.unwrap();
+    app.tabs[right].title = "right_query".into();
+    app.new_tab_in_split_pane(true);
+    let second_right = app.split_tab.unwrap();
+    app.tabs[second_right].title = "right_table".into();
+
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+        });
+    harness.run_steps(4);
+
+    let left = harness.get_by_label("left_query").rect();
+    let right = harness.get_by_label("right_query").rect();
+    let right_table = harness.get_by_label("right_table").rect();
+    assert!(
+        left.center().x < 500.0 && right.center().x > 500.0 && right_table.center().x > 500.0,
+        "each split pane must own its tab header"
+    );
+    assert!(
+        (left.center().y - right.center().y).abs() < 1.0,
+        "split tab headers must align across the divider"
+    );
+    harness.get_by_label("Close left_query");
+    harness.get_by_label("Close right_query");
+    harness.get_by_label("Close right_table");
 }
 
 #[test]
@@ -2246,6 +2531,7 @@ fn adaptive_editor_renders_on_the_expected_side_of_results() {
     let result_y = compact.get_by_label("Empty state mark").rect().center().y;
     let result_modes_y = compact.get_by_label("Data").rect().center().y;
     let live_log_y = compact.get_by_label("Live log").rect().center().y;
+    let log_dock = compact.get_by_label("Live log dock");
     assert!(editor_y < result_y);
     assert!(
         result_y - editor_y > 50.0,
@@ -2254,6 +2540,10 @@ fn adaptive_editor_renders_on_the_expected_side_of_results() {
     assert!(
         result_y < result_modes_y && result_modes_y < live_log_y,
         "query result modes must dock below the result and above Live log"
+    );
+    assert!(
+        log_dock.rect().top() <= compact.get_by_label("Data").rect().top(),
+        "the Live log resize boundary must sit above the query result modes"
     );
 }
 

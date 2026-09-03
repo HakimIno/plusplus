@@ -194,6 +194,9 @@ pub struct WorkspaceTab {
     /// legacy tab with a source as a table and every other legacy tab as a query.
     #[serde(default)]
     pub kind: Option<WorkspaceTabKind>,
+    /// Whether this tab belongs to the right-hand split group.
+    #[serde(default)]
+    pub split_pane: bool,
     /// Last user-selected SQL editor height, in egui points. `None` uses the contextual default.
     #[serde(default)]
     pub editor_size: Option<f32>,
@@ -216,6 +219,9 @@ pub struct WorkspaceTab {
 pub struct Workspace {
     #[serde(default)]
     pub active_tab: usize,
+    /// Saved-tab index of the active tab in the right-hand split group.
+    #[serde(default)]
+    pub active_split_tab: Option<usize>,
     #[serde(default)]
     pub tabs: Vec<WorkspaceTab>,
 }
@@ -262,12 +268,14 @@ mod tests {
     fn workspace_round_trips_through_json() {
         let ws = Workspace {
             active_tab: 1,
+            active_split_tab: Some(0),
             tabs: vec![
                 WorkspaceTab {
                     title: "Query 1".into(),
                     conn_id: Some("conn-abc".into()),
                     sql: "SELECT * FROM users;".into(),
                     kind: Some(WorkspaceTabKind::Table),
+                    split_pane: true,
                     editor_size: Some(184.0),
                     editor_split: true,
                     editor_split_size: Some(320.0),
@@ -283,6 +291,7 @@ mod tests {
                     conn_id: None,
                     sql: "SELECT 1;".into(),
                     kind: Some(WorkspaceTabKind::Query),
+                    split_pane: false,
                     editor_size: None,
                     editor_split: false,
                     editor_split_size: None,
@@ -296,10 +305,12 @@ mod tests {
         let back: Workspace = serde_json::from_slice(&json).unwrap();
 
         assert_eq!(back.active_tab, 1);
+        assert_eq!(back.active_split_tab, Some(0));
         assert_eq!(back.tabs.len(), 2);
         assert_eq!(back.tabs[0].conn_id.as_deref(), Some("conn-abc"));
         assert_eq!(back.tabs[0].sql, "SELECT * FROM users;");
         assert_eq!(back.tabs[0].kind, Some(WorkspaceTabKind::Table));
+        assert!(back.tabs[0].split_pane);
         assert_eq!(back.tabs[0].editor_size, Some(184.0));
         assert!(back.tabs[0].editor_split);
         assert_eq!(back.tabs[0].editor_split_size, Some(320.0));

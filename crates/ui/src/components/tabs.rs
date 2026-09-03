@@ -430,6 +430,12 @@ pub(crate) fn query_tab_item(
             egui::Sense::click()
         },
     );
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, selected, title)
+    });
+    close_resp.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Close {title}"))
+    });
 
     let idle_fill = if resp.hovered() {
         palette::SURFACE_HOVER()

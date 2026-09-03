@@ -23,7 +23,7 @@ impl DbGuiApp {
         workspace: egui::Rect,
         actions: &mut Vec<Action>,
     ) {
-        if self.split_tab.is_some() || workspace.width() < 440.0 {
+        if workspace.width() < 440.0 {
             if ui.input(|input| input.pointer.any_released()) {
                 self.tab_drag = None;
             }
@@ -38,8 +38,7 @@ impl DbGuiApp {
             .contains_pointer()
             .then(|| egui::DragAndDrop::payload::<SchemaTableDrag>(ui.ctx()))
             .flatten();
-        let tab_drag = response
-            .contains_pointer()
+        let tab_drag = (self.split_tab.is_none() && response.contains_pointer())
             .then_some(self.tab_drag)
             .flatten();
         if table_drag.is_none() && tab_drag.is_none() {
@@ -49,14 +48,16 @@ impl DbGuiApp {
             return;
         }
 
-        // The right edge is the intentional split target, matching editor-group DnD in VS Code.
-        // Keeping the centre/left quiet prevents an ordinary click-drag over the grid from
-        // looking like a destructive takeover of the current pane.
-        let target = egui::Rect::from_min_max(
-            egui::pos2(workspace.center().x, workspace.top()),
-            workspace.max,
-        )
-        .shrink(10.0);
+        // Before a split exists, the right half creates one. Afterwards the existing right pane
+        // remains the target so every dropped table becomes another tab in that group.
+        let target_left = if self.split_tab.is_some() {
+            workspace.left() + workspace.width() * self.split_workspace_ratio + 6.0
+        } else {
+            workspace.center().x
+        };
+        let target =
+            egui::Rect::from_min_max(egui::pos2(target_left, workspace.top()), workspace.max)
+                .shrink(10.0);
         let pointer_in_target = ui
             .ctx()
             .pointer_interact_pos()
@@ -127,7 +128,7 @@ impl DbGuiApp {
             self.filter_bar(root);
         }
         if show_view_mode_bar {
-            self.view_mode_bar(root, editor_placement, actions);
+            self.view_mode_bar(root, editor_placement, false, actions);
         }
         self.central_panel(root, actions);
     }
@@ -150,6 +151,7 @@ impl DbGuiApp {
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     self.active_query_tab = primary;
+                    self.split_pane_tab_bar(ui, primary, false, actions);
                     self.draw_workspace_pane(ui, actions);
                 },
             );
@@ -175,6 +177,7 @@ impl DbGuiApp {
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     self.active_query_tab = split;
+                    self.split_pane_tab_bar(ui, split, true, actions);
                     self.draw_workspace_pane(ui, actions);
                 },
             );
@@ -478,16 +481,32 @@ impl DbGuiApp {
         }
         // Cmd/Ctrl+T opens a new query tab; Cmd/Ctrl+W closes the active one.
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::T)) {
-            actions.push(Action::NewTab);
+            if self.split_tab.is_some() {
+                actions.push(Action::NewSplitPaneTab(self.split_focus));
+            } else {
+                actions.push(Action::NewTab);
+            }
         }
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::W)) {
-            actions.push(Action::CloseTab(self.active_query_tab));
+            if let Some(split_idx) = self.split_tab {
+                let right = self.split_focus;
+                actions.push(Action::CloseSplitPaneTab {
+                    idx: if right {
+                        split_idx
+                    } else {
+                        self.active_query_tab
+                    },
+                    right,
+                });
+            } else {
+                actions.push(Action::CloseTab(self.active_query_tab));
+            }
         }
         // Cmd/Ctrl+F toggles the filter bar (when there's a result to filter); Esc hides it.
         if self.tab().result.is_some()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F))
         {
-            actions.push(Action::ToggleFilter);
+            actions.push(Action::ToggleFilter(self.tab().id));
         }
         if self.tab().filter.visible && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.tab_mut().filter.visible = false;
@@ -498,7 +517,9 @@ impl DbGuiApp {
         // the SQL editor so they run the full height; the editor stays confined to the central
         // column. Table/View tabs are data workspaces, so SQL authoring stays in Query tabs.
         self.top_bar(ui_root, frame, &mut actions);
-        self.query_tab_bar(ui_root, &mut actions);
+        if self.split_tab.is_none() {
+            self.query_tab_bar(ui_root, &mut actions);
+        }
         self.status_bar(ui_root);
         if self.show_connection_tabs {
             self.connection_tabs(ui_root, &mut actions);
@@ -534,11 +555,10 @@ impl DbGuiApp {
                 || (designing
                     && !diagram_tab
                     && self.tab().kind != crate::components::QueryTabKind::Query);
-            // On data-first tabs the mode bar and Live log form one bottom stack. Put the bar
-            // inside the resizable panel so its drag edge stays above Data / Structure / Indexes.
-            let mode_bar_in_live_log = self.show_live_log
-                && show_view_mode_bar
-                && editor_placement == QueryEditorPlacement::Bottom;
+            // The mode bar and Live log form one bottom stack. Put the bar inside the resizable
+            // panel so its drag edge stays above Data / Message / Chart on query tabs and above
+            // Data / Structure / Indexes on data-first tabs.
+            let mode_bar_in_live_log = self.show_live_log && show_view_mode_bar;
             if console_visible {
                 self.query_console(ui_root, editor_placement, &mut actions);
             }
@@ -553,10 +573,9 @@ impl DbGuiApp {
                 // A top panel after left/right carves the strip directly above the grid.
                 self.filter_bar(ui_root);
             }
-            // Without Live log the mode bar remains its own dock. Query-tab result controls also
-            // stay standalone because their top placement is not adjacent to the bottom log.
+            // Without Live log the mode bar remains its own dock.
             if self.split_tab.is_none() && show_view_mode_bar && !mode_bar_in_live_log {
-                self.view_mode_bar(ui_root, editor_placement, &mut actions);
+                self.view_mode_bar(ui_root, editor_placement, false, &mut actions);
             }
             self.central_panel(ui_root, &mut actions);
         }
@@ -585,6 +604,9 @@ impl DbGuiApp {
                     | Action::CloseOtherTabs(_)
                     | Action::CloseTabsToRight(_)
                     | Action::CloseAllTabs
+                    | Action::NewSplitPaneTab(_)
+                    | Action::SelectSplitPaneTab { .. }
+                    | Action::CloseSplitPaneTab { .. }
                     | Action::SelectTab(_)
                     | Action::Connect(_)
                     | Action::BindConnection(_)

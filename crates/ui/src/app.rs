@@ -1432,6 +1432,19 @@ enum Action {
     NewTab,
     SelectTab(usize),
     CloseTab(usize),
+    NewSplitPaneTab(bool),
+    SelectSplitPaneTab {
+        idx: usize,
+        right: bool,
+    },
+    CloseSplitPaneTab {
+        idx: usize,
+        right: bool,
+    },
+    PinSplitPaneTab {
+        idx: usize,
+        right: bool,
+    },
     CloseOtherTabs(usize),
     CloseTabsToRight(usize),
     CloseAllTabs,
@@ -1587,9 +1600,12 @@ enum Action {
     /// Header menu: drop the sort, back to natural row order.
     ClearSort,
     /// Header menu: reveal the filter bar and target a condition at this result column.
-    FilterColumn(usize),
+    FilterColumn {
+        tab_id: u64,
+        col: usize,
+    },
     /// Show or hide the result filter bar (pager control and Cmd/Ctrl+F).
-    ToggleFilter,
+    ToggleFilter(u64),
     /// Pager: jump to another page of a paged table tab. Rewrites the tab's LIMIT/OFFSET
     /// in place (the SQL editor always shows what runs) and re-runs the query.
     Page(PageNav),
@@ -1787,8 +1803,10 @@ pub struct DbGuiApp {
     /// Open query tabs. Always non-empty.
     tabs: Vec<QueryTab>,
     active_query_tab: usize,
-    /// Index of the hidden query state rendered in the right split workspace pane.
+    /// Index of the active tab rendered in the right split workspace pane.
     split_tab: Option<usize>,
+    /// Stable ids of every tab assigned to the right split group, in display order.
+    split_tab_ids: Vec<u64>,
     /// Whether the right split pane owns keyboard focus for the next action frame.
     split_focus: bool,
     /// Width of the left pane in the split workspace (0.25..0.75).
@@ -2084,6 +2102,7 @@ impl DbGuiApp {
             tabs: vec![default_tab],
             active_query_tab: 0,
             split_tab: None,
+            split_tab_ids: Vec::new(),
             split_focus: false,
             split_workspace_ratio: 0.5,
             next_tab_id: 1,

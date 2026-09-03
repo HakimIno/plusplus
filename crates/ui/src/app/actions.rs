@@ -81,6 +81,15 @@ impl DbGuiApp {
                 self.select_tab(i);
             }
             Action::CloseTab(i) => self.close_tab(i),
+            Action::NewSplitPaneTab(right) => self.new_tab_in_split_pane(right),
+            Action::SelectSplitPaneTab { idx, right } => self.select_split_pane_tab(idx, right),
+            Action::CloseSplitPaneTab { idx, right } => self.close_split_pane_tab(idx, right),
+            Action::PinSplitPaneTab { idx, right } => {
+                if let Some(tab) = self.tabs.get_mut(idx) {
+                    tab.preview = false;
+                }
+                self.select_split_pane_tab(idx, right);
+            }
             Action::CloseOtherTabs(i) => self.close_other_tabs(i),
             Action::CloseTabsToRight(i) => self.close_tabs_to_right(i),
             Action::CloseAllTabs => self.close_all_tabs(),
@@ -884,8 +893,11 @@ impl DbGuiApp {
             Action::FollowForeignKey { row, col } => self.follow_foreign_key(row, col),
             Action::SetSort { col, asc } => self.tab_mut().set_sort(col, asc),
             Action::ClearSort => self.tab_mut().clear_sort(),
-            Action::FilterColumn(col) => {
-                let filter = &mut self.tab_mut().filter;
+            Action::FilterColumn { tab_id, col } => {
+                let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+                    return;
+                };
+                let filter = &mut tab.filter;
                 filter.visible = true;
                 if let Some(condition) = filter
                     .conditions
@@ -901,12 +913,14 @@ impl DbGuiApp {
                     filter.conditions.push(condition);
                 }
             }
-            Action::ToggleFilter => {
-                if self.tab().result.is_none() {
+            Action::ToggleFilter(tab_id) => {
+                let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+                    return;
+                };
+                if tab.result.is_none() {
                     return;
                 }
-                let visible = self.tab().filter.visible;
-                self.tab_mut().filter.visible = !visible;
+                tab.filter.visible = !tab.filter.visible;
             }
             Action::Page(nav) => self.page_nav(nav),
             Action::SetPageWindow { limit, offset } => self.set_page_window(limit, offset),

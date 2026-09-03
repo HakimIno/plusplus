@@ -44,11 +44,21 @@ impl DbGuiApp {
         let Some(source_idx) = self.tabs.iter().position(|tab| tab.id == id) else {
             return;
         };
+        if self.tab_is_in_split_group(source_idx) {
+            self.select_split_pane_tab(source_idx, true);
+            return;
+        }
         let primary = self
             .tabs
             .iter()
-            .position(|tab| tab.id == primary_id && tab.id != id)
-            .or_else(|| self.tabs.iter().position(|tab| tab.id != id));
+            .position(|tab| {
+                tab.id == primary_id && tab.id != id && !self.split_tab_ids.contains(&tab.id)
+            })
+            .or_else(|| {
+                self.tabs
+                    .iter()
+                    .position(|tab| tab.id != id && !self.split_tab_ids.contains(&tab.id))
+            });
 
         if let Some(primary_idx) = primary {
             let primary_id = self.tabs[primary_idx].id;
