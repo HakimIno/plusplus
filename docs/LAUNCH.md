@@ -33,7 +33,9 @@ the product and installation path are ready.
 
 ## Private beta before public launch
 
-Give the release to 10–20 database users who are not project contributors. Ask each person to:
+Run the [private-beta protocol](PRIVATE_BETA.md) with 10–20 database users who are not project
+contributors. It defines the task script, anonymized feedback form, and measurable exit criteria.
+Ask each person to:
 
 1. Explain what the product does after looking at the repository for 30 seconds.
 2. Install it without help.
@@ -41,7 +43,8 @@ Give the release to 10–20 database users who are not project contributors. Ask
 4. Connect a non-production server database and run a query.
 5. Name the first confusing or untrustworthy moment.
 
-Fix repeated onboarding failures before seeking a larger audience.
+Fix repeated onboarding failures before seeking a larger audience. Do not announce 1.0 until every
+exit criterion in that protocol passes.
 
 ## Public launch window
 

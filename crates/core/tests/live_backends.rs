@@ -9,6 +9,7 @@ fn live_config() -> Option<(ConnectionConfig, String)> {
     let kind = match std::env::var("PLUSPLUS_LIVE_KIND").ok()?.as_str() {
         "postgres" => DbKind::Postgres,
         "mysql" => DbKind::MySql,
+        "mariadb" => DbKind::MariaDb,
         "sqlserver" => DbKind::SqlServer,
         "cassandra" => DbKind::Cassandra,
         "scylladb" => DbKind::ScyllaDb,

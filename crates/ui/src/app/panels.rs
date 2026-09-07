@@ -2425,10 +2425,7 @@ impl DbGuiApp {
                                 if resp.clicked() {
                                     let command_click = ui.input(|input| input.modifiers.command);
                                     if command_click {
-                                        if !self.tabs[idx]
-                                            .extra_cursors
-                                            .iter()
-                                            .any(|range| *range == previous_primary)
+                                        if !self.tabs[idx].extra_cursors.contains(&previous_primary)
                                         {
                                             self.tabs[idx].extra_cursors.push(previous_primary);
                                         }
@@ -10299,7 +10296,7 @@ fn details_value_box(
                 edits.toggle_bool(row_idx, c, value);
             } else {
                 // Prefill from the staged value (if any) so editing continues from it.
-                edits.begin(row_idx, c, &shown, crate::edit::EditOrigin::Details);
+                edits.begin(row_idx, c, shown, crate::edit::EditOrigin::Details);
             }
         }
     } else if resp.double_clicked()
@@ -10341,7 +10338,7 @@ fn details_value_box(
         }
         if can_edit {
             if kind != K::Bool && ui.button("Edit").clicked() {
-                edits.begin(row_idx, c, &shown, crate::edit::EditOrigin::Details);
+                edits.begin(row_idx, c, shown, crate::edit::EditOrigin::Details);
             }
             ui.separator();
             match kind {

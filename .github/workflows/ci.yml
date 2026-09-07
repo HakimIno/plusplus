@@ -103,13 +103,6 @@ jobs:
     if: ${{ inputs.run-clippy != false }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    # Reports but does not block yet: the tree currently has 10 clippy warnings (dead code
-    # in grid.rs, a type_complexity in panels.rs, an incompatible_msrv, and some style
-    # nits). Clear those, then delete this line to make `-D warnings` a real gate. Left
-    # non-blocking rather than removed so the count is visible on every run and can only
-    # go down. `test` is the blocking gate.
-    continue-on-error: true
-
     steps:
       - uses: actions/checkout@v4
 

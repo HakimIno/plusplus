@@ -32,7 +32,8 @@ pub fn query_parameter_names(sql: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     parameter_ranges(sql)
         .into_iter()
-        .filter_map(|(_, _, name)| seen.insert(name.to_string()).then(|| name.to_string()))
+        .filter(|(_, _, name)| seen.insert(*name))
+        .map(|(_, _, name)| name.to_string())
         .collect()
 }
 

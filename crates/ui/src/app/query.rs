@@ -172,71 +172,6 @@ fn keyset_cursor(tab: &QueryTab) -> Option<(Vec<String>, Vec<dbcore::Value>)> {
     Some((source.pk_cols.clone(), values))
 }
 
-#[cfg(test)]
-mod query_sink_tests {
-    use super::*;
-
-    #[test]
-    fn continuation_rows_are_grouped_in_smooth_paint_batches() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let mut sink = UiQuerySink::new(tx, 7, 9, true, usize::MAX, usize::MAX);
-        dbcore::RowSink::begin(&mut sink, &[]).unwrap();
-        assert!(matches!(
-            rx.recv().unwrap(),
-            AppMessage::QueryStreamStarted { append: true, .. }
-        ));
-
-        for _ in 0..QUERY_STREAM_PAINT_ROWS - 1 {
-            dbcore::RowSink::write_row(&mut sink, &[]).unwrap();
-        }
-        assert!(matches!(
-            rx.try_recv(),
-            Err(std::sync::mpsc::TryRecvError::Empty)
-        ));
-
-        dbcore::RowSink::write_row(&mut sink, &[]).unwrap();
-        assert!(matches!(
-            rx.recv().unwrap(),
-            AppMessage::QueryRows { rows, .. } if rows.len() == QUERY_STREAM_PAINT_ROWS
-        ));
-    }
-
-    #[test]
-    fn exact_total_decodes_from_backend_count_results() {
-        let result = QueryResult {
-            rows: vec![vec![dbcore::Value::Int(12_534)]],
-            ..QueryResult::default()
-        };
-        assert_eq!(total_from_count_result(&result), Some(12_534));
-    }
-
-    #[test]
-    fn stream_stops_before_crossing_its_byte_budget() {
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let row = vec![dbcore::Value::Text("x".repeat(1024))];
-        let mut sink = UiQuerySink::new(tx, 1, 1, false, 128, usize::MAX);
-
-        let error = dbcore::RowSink::write_row(&mut sink, &row).unwrap_err();
-
-        assert_eq!(error.kind(), io::ErrorKind::FileTooLarge);
-        assert!(sink.budget_reached);
-        assert_eq!(sink.sent_rows, 0);
-    }
-
-    #[test]
-    fn stream_stops_at_the_global_row_cap_without_buffering_one_more_row() {
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let mut sink = UiQuerySink::new(tx, 1, 1, false, usize::MAX, 1);
-        dbcore::RowSink::write_row(&mut sink, &[dbcore::Value::Int(1)]).unwrap();
-
-        let error = dbcore::RowSink::write_row(&mut sink, &[dbcore::Value::Int(2)]).unwrap_err();
-
-        assert_eq!(error.kind(), io::ErrorKind::FileTooLarge);
-        assert!(sink.row_limit_reached);
-        assert_eq!(sink.rows.len(), 1);
-    }
-}
-
 impl DbGuiApp {
     pub(super) fn resolved_sql_for(&mut self, idx: usize) -> Result<String, String> {
         let Some(tab) = self.tabs.get_mut(idx) else {
@@ -907,5 +842,70 @@ impl DbGuiApp {
             return;
         }
         self.run_page(limit, offset);
+    }
+}
+
+#[cfg(test)]
+mod query_sink_tests {
+    use super::*;
+
+    #[test]
+    fn continuation_rows_are_grouped_in_smooth_paint_batches() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut sink = UiQuerySink::new(tx, 7, 9, true, usize::MAX, usize::MAX);
+        dbcore::RowSink::begin(&mut sink, &[]).unwrap();
+        assert!(matches!(
+            rx.recv().unwrap(),
+            AppMessage::QueryStreamStarted { append: true, .. }
+        ));
+
+        for _ in 0..QUERY_STREAM_PAINT_ROWS - 1 {
+            dbcore::RowSink::write_row(&mut sink, &[]).unwrap();
+        }
+        assert!(matches!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+
+        dbcore::RowSink::write_row(&mut sink, &[]).unwrap();
+        assert!(matches!(
+            rx.recv().unwrap(),
+            AppMessage::QueryRows { rows, .. } if rows.len() == QUERY_STREAM_PAINT_ROWS
+        ));
+    }
+
+    #[test]
+    fn exact_total_decodes_from_backend_count_results() {
+        let result = QueryResult {
+            rows: vec![vec![dbcore::Value::Int(12_534)]],
+            ..QueryResult::default()
+        };
+        assert_eq!(total_from_count_result(&result), Some(12_534));
+    }
+
+    #[test]
+    fn stream_stops_before_crossing_its_byte_budget() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let row = vec![dbcore::Value::Text("x".repeat(1024))];
+        let mut sink = UiQuerySink::new(tx, 1, 1, false, 128, usize::MAX);
+
+        let error = dbcore::RowSink::write_row(&mut sink, &row).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::FileTooLarge);
+        assert!(sink.budget_reached);
+        assert_eq!(sink.sent_rows, 0);
+    }
+
+    #[test]
+    fn stream_stops_at_the_global_row_cap_without_buffering_one_more_row() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut sink = UiQuerySink::new(tx, 1, 1, false, usize::MAX, 1);
+        dbcore::RowSink::write_row(&mut sink, &[dbcore::Value::Int(1)]).unwrap();
+
+        let error = dbcore::RowSink::write_row(&mut sink, &[dbcore::Value::Int(2)]).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::FileTooLarge);
+        assert!(sink.row_limit_reached);
+        assert_eq!(sink.rows.len(), 1);
     }
 }

@@ -54,7 +54,7 @@ jobs:
     uses: ./.github/workflows/ci.yml
     with:
       runners: '["ubuntu-latest"]'
-      run-clippy: false
+      run-clippy: true
 
   ci-macos:
     name: CI (macOS)

@@ -112,12 +112,10 @@ impl DbGuiApp {
         );
         let console_visible =
             self.show_query_console && sql_authoring_tab && !diagram_tab && !designing;
-        let show_view_mode_bar = (!diagram_tab
-            && !designing
-            && (editor_placement == QueryEditorPlacement::Top || !console_visible))
-            || (designing
-                && !diagram_tab
-                && self.tab().kind != crate::components::QueryTabKind::Query);
+        let show_view_mode_bar =
+            (!console_visible || editor_placement == QueryEditorPlacement::Top || designing)
+                && (self.tab().kind != crate::components::QueryTabKind::Query || !designing)
+                && !diagram_tab;
         if console_visible {
             self.query_console(root, editor_placement, actions);
         }
@@ -549,12 +547,10 @@ impl DbGuiApp {
             );
             let console_visible =
                 self.show_query_console && sql_authoring_tab && !diagram_tab && !designing;
-            let show_view_mode_bar = (!diagram_tab
-                && !designing
-                && (editor_placement == QueryEditorPlacement::Top || !console_visible))
-                || (designing
-                    && !diagram_tab
-                    && self.tab().kind != crate::components::QueryTabKind::Query);
+            let show_view_mode_bar =
+                (!console_visible || editor_placement == QueryEditorPlacement::Top || designing)
+                    && (self.tab().kind != crate::components::QueryTabKind::Query || !designing)
+                    && !diagram_tab;
             // The mode bar and Live log form one bottom stack. Put the bar inside the resizable
             // panel so its drag edge stays above Data / Message / Chart on query tabs and above
             // Data / Structure / Indexes on data-first tabs.

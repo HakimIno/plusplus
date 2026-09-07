@@ -1,4 +1,4 @@
-name: Guardian Live Backends
+name: Live Backend Integration
 
 # Same path filters as ci.yml — website/docs/markdown-only changes do not need live
 # DB containers. Concurrency cancels superseded PR runs so rapid pushes do not pile up.
@@ -26,8 +26,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  production-preflight:
-    name: ${{ matrix.kind }} preflight
+  backend:
+    name: ${{ matrix.kind }} integration
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
@@ -44,11 +44,28 @@ jobs:
             port: 3306
             user: root
             database: plusplus
+          - kind: mariadb
+            image: mariadb:11.8
+            port: 3306
+            user: root
+            database: plusplus
           - kind: sqlserver
             image: mcr.microsoft.com/mssql/server:2022-latest
             port: 1433
             user: sa
             database: master
+          - kind: cassandra
+            image: cassandra:5.0
+            port: 9042
+            user: cassandra
+            database: plusplus
+            cql: true
+          - kind: scylladb
+            image: scylladb/scylla:6.2
+            port: 9042
+            user: ""
+            database: plusplus
+            cql: true
 
     services:
       database:
@@ -62,6 +79,7 @@ jobs:
           MYSQL_DATABASE: plusplus
           ACCEPT_EULA: "Y"
           MSSQL_SA_PASSWORD: "Plusplus-ci-2026!"
+          CASSANDRA_AUTHENTICATOR: PasswordAuthenticator
         ports:
           - "${{ matrix.port }}:${{ matrix.port }}"
 
@@ -74,7 +92,29 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential pkg-config libdbus-1-dev
 
-      - name: Verify Production Guardian preflight
+      - name: Create CQL smoke keyspace
+        if: matrix.cql
+        env:
+          DATABASE_CONTAINER: ${{ job.services.database.id }}
+          CQL_USER: ${{ matrix.user }}
+          CQL_PASSWORD: "Plusplus-ci-2026!"
+        run: |
+          set -euo pipefail
+          cqlsh_args=()
+          if [ -n "$CQL_USER" ]; then
+            cqlsh_args=(-u "$CQL_USER" -p "$CQL_PASSWORD")
+          fi
+          for attempt in $(seq 1 40); do
+            if docker exec "$DATABASE_CONTAINER" cqlsh "${cqlsh_args[@]}" -e "CREATE KEYSPACE IF NOT EXISTS plusplus WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}"; then
+              exit 0
+            fi
+            echo "CQL server not ready (${attempt}/40)"
+            sleep 3
+          done
+          echo "CQL server did not become ready" >&2
+          exit 1
+
+      - name: Verify live backend workflow
         env:
           PLUSPLUS_LIVE_KIND: ${{ matrix.kind }}
           PLUSPLUS_LIVE_HOST: 127.0.0.1

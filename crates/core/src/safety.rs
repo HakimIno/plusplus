@@ -152,11 +152,11 @@ impl DangerousStatement {
             return false;
         }
         let sql = self.sql.to_ascii_lowercase();
-        !sql.trim_start().starts_with("replace")
-            && !sql.contains(" or replace ")
-            && !sql.contains(" on duplicate key update")
-            && !(sql.contains(" on conflict") && sql.contains(" do update"))
-            && !sql.contains(" overwrite ")
+        !(sql.trim_start().starts_with("replace")
+            || sql.contains(" or replace ")
+            || sql.contains(" on duplicate key update")
+            || (sql.contains(" on conflict") && sql.contains(" do update"))
+            || sql.contains(" overwrite "))
     }
 
     /// Static severity before the database contributes an exact count or estimated plan rows.
