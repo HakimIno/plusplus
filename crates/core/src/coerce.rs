@@ -87,10 +87,13 @@ impl EditorKind {
         }
     }
 
-    /// Whether values of this kind read best in a fixed-width font (numbers and temporals,
-    /// where digit alignment matters).
+    /// Whether values of this kind read best in a fixed-width font. Dates and times stay in
+    /// the proportional UI face so separators and fractional seconds do not look stretched.
     pub fn monospace_value(self) -> bool {
-        !matches!(self, EditorKind::Text | EditorKind::Bool)
+        matches!(
+            self,
+            EditorKind::Int | EditorKind::Float | EditorKind::Decimal
+        )
     }
 
     /// Whether `s` is a valid value for this kind. An empty string is always valid — it means
