@@ -36,12 +36,14 @@ pub use app::DbGuiApp;
 /// `FontFamily::Name(HEADING_FAMILY.into())`.
 pub const HEADING_FAMILY: &str = "heading";
 
-/// Raw bytes of the fonts the app embeds.
+/// Raw bytes of the legacy/fallback fonts the app embeds. The default Latin and
+/// Thai families are installed by `fonts::install` from the bundled Geist and
+/// Noto Sans Thai assets.
 #[derive(Clone, Copy)]
 pub struct AppFonts {
-    /// Inter Regular — the primary UI font.
+    /// Inter Regular — legacy Latin fallback.
     pub ui_regular: &'static [u8],
-    /// Inter Semibold — the weight for the [`HEADING_FAMILY`] family.
+    /// Inter Semibold — legacy heading fallback.
     pub ui_semibold: &'static [u8],
     /// Anuphan Regular — Thai fallback for proportional and monospace families.
     pub thai_regular: &'static [u8],

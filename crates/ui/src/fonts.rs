@@ -122,6 +122,24 @@ pub(crate) fn install(
 ) -> Result<(), String> {
     let mut fonts = FontDefinitions::default();
     for (name, bytes) in [
+        // egui cannot resolve CSS or OS font-family names portably, so keep a
+        // deterministic app-owned face first.
+        (
+            "geist",
+            include_bytes!("../../app/assets/Geist-Regular.ttf") as &[u8],
+        ),
+        (
+            "geist_semibold",
+            include_bytes!("../../app/assets/Geist-SemiBold.ttf") as &[u8],
+        ),
+        (
+            "noto_thai",
+            include_bytes!("../../app/assets/NotoSansThai.ttf") as &[u8],
+        ),
+        (
+            "jetbrains_mono",
+            include_bytes!("../../app/assets/JetBrainsMono-Regular.ttf") as &[u8],
+        ),
         ("inter", app_fonts.ui_regular),
         ("inter_semibold", app_fonts.ui_semibold),
         ("thai", app_fonts.thai_regular),
@@ -152,22 +170,30 @@ pub(crate) fn install(
     if ui_custom.is_some() {
         proportional.push("custom_ui".to_owned());
     }
-    proportional.extend(["inter".to_owned(), "thai".to_owned(), "unifont".to_owned()]);
+    proportional.extend([
+        "geist".to_owned(),
+        "inter".to_owned(),
+        "noto_thai".to_owned(),
+        "thai".to_owned(),
+        "unifont".to_owned(),
+    ]);
     fonts
         .families
         .insert(FontFamily::Proportional, proportional);
 
-    // egui calls this semantic slot `Monospace`, but plusplus intentionally renders it with
-    // the selected editor/data face (or the interface face by default). This keeps SQL, values,
-    // logs, and metadata readable without a fixed-width typeface while preserving egui's code
-    // styling hooks.
+    // Maps the requested `ui-monospace` stack to the bundled JetBrains Mono face.
+    // User-selected code fonts still take precedence.
     let mut monospace = Vec::new();
     if code_custom.is_some() {
         monospace.push("custom_code".to_owned());
     } else if ui_custom.is_some() {
         monospace.push("custom_ui".to_owned());
     }
-    monospace.extend(["inter".to_owned(), "thai".to_owned(), "unifont".to_owned()]);
+    monospace.extend([
+        "jetbrains_mono".to_owned(),
+        "thai".to_owned(),
+        "unifont".to_owned(),
+    ]);
     fonts.families.insert(FontFamily::Monospace, monospace);
 
     let mut headings = Vec::new();
@@ -175,7 +201,9 @@ pub(crate) fn install(
         headings.push("custom_ui".to_owned());
     }
     headings.extend([
+        "geist_semibold".to_owned(),
         "inter_semibold".to_owned(),
+        "noto_thai".to_owned(),
         "thai_semibold".to_owned(),
         "inter".to_owned(),
         "thai".to_owned(),
@@ -205,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn default_editor_family_is_proportional() {
+    fn default_code_family_is_monospace() {
         let ctx = egui::Context::default();
         install(
             &ctx,
@@ -232,6 +260,9 @@ mod tests {
             };
             (width("iiii"), width("WWWW"))
         });
-        assert!(wide > narrow, "editor/data family must not be fixed-width");
+        assert!(
+            (wide - narrow).abs() < 0.01,
+            "code family must be fixed-width"
+        );
     }
 }
