@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::hint::black_box;
 use std::path::PathBuf;
 
@@ -57,6 +58,87 @@ fn bench_safety_analysis(c: &mut Criterion) {
             &sql,
             |b, sql| {
                 b.iter(|| write_statements(black_box(sql)));
+            },
+        );
+    }
+    group.finish();
+}
+
+fn bench_edit_planning(c: &mut Criterion) {
+    use plusplus_core::edits::{plan_edits, EditBatch, EditSource, NEW_ROW_BASE};
+    use plusplus_core::{ColumnMeta, QueryResult};
+
+    let source = EditSource {
+        schema: None,
+        table: "items".into(),
+        pk_cols: vec!["id".into()],
+    };
+    let deleted = HashSet::new();
+    let mut group = c.benchmark_group("edit_planning");
+    for row_count in [100usize, 10_000, 100_000] {
+        let result = QueryResult {
+            columns: vec![
+                ColumnMeta {
+                    name: "id".into(),
+                    type_name: "INTEGER".into(),
+                },
+                ColumnMeta {
+                    name: "name".into(),
+                    type_name: "TEXT".into(),
+                },
+            ],
+            rows: (0..row_count)
+                .map(|row| vec![Value::Int(row as i64), Value::Text("original".into())])
+                .collect(),
+            ..QueryResult::default()
+        };
+        let updates = HashMap::from([(0, HashMap::from([(1, Value::Text("edited".into()))]))]);
+        group.bench_with_input(
+            BenchmarkId::new("one_update", row_count),
+            &result,
+            |b, result| {
+                b.iter(|| {
+                    plan_edits(
+                        DbKind::Sqlite,
+                        EditBatch {
+                            source: &source,
+                            result: black_box(result),
+                            cells: &updates,
+                            deleted: &deleted,
+                            new_rows: 0,
+                            generated_columns: &[],
+                        },
+                    )
+                    .unwrap()
+                });
+            },
+        );
+        let inserts: HashMap<_, _> = (0..1000)
+            .map(|i| {
+                (
+                    NEW_ROW_BASE + i,
+                    HashMap::from([(0, Value::Int((row_count + i) as i64))]),
+                )
+            })
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::new("1000_inserts", row_count),
+            &result,
+            |b, result| {
+                b.iter(|| {
+                    plan_edits(
+                        DbKind::Sqlite,
+                        EditBatch {
+                            source: &source,
+                            result: black_box(result),
+                            cells: &inserts,
+                            deleted: &deleted,
+                            new_rows: 1000,
+                            generated_columns: &[],
+                        },
+                    )
+                    .unwrap()
+                });
             },
         );
     }
@@ -187,6 +269,7 @@ fn bench_json_preview(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_safety_analysis,
+    bench_edit_planning,
     bench_page_rewrite,
     bench_duckdb_analytics,
     bench_value_sort,
