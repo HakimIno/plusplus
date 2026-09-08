@@ -125,6 +125,8 @@ pub trait Database: Send + Sync {
     /// Execute a batch of DML statements as a single atomic transaction: either every
     /// statement commits, or the first failure rolls back all preceding ones. Returns
     /// the number of statements on success.
+    /// Cassandra/ScyllaDB are an exception: their implementation runs sequentially and
+    /// cannot roll back earlier statements. Callers must disclose this for CQL backends.
     async fn execute_transaction(&self, stmts: &[String]) -> Result<usize>;
 
     /// Stream every row of a row-returning `sql` straight into `sink`, returning the number

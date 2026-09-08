@@ -16,6 +16,7 @@ pub mod coerce;
 pub mod config;
 mod connection;
 pub mod database;
+pub mod edits;
 pub mod erd;
 pub mod error;
 pub mod export;

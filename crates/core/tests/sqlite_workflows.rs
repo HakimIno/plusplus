@@ -34,6 +34,90 @@ async fn temp_db() -> (Arc<dyn Database>, TempDbGuard) {
 }
 
 struct TempDbGuard(std::path::PathBuf);
+
+#[tokio::test]
+async fn edit_plan_executes_and_rolls_back_on_unloaded_key_conflict() {
+    use plusplus_core::edits::{plan_edits, EditBatch, EditSource, NEW_ROW_BASE};
+    use std::collections::{HashMap, HashSet};
+
+    let (db, _guard) = temp_db().await;
+    db.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+        .await
+        .unwrap();
+    db.execute("INSERT INTO items VALUES (1, 'old')")
+        .await
+        .unwrap();
+    let rows = db.execute("SELECT * FROM items").await.unwrap();
+    let source = EditSource {
+        schema: None,
+        table: "items".into(),
+        pk_cols: vec!["id".into()],
+    };
+    let mut cells = HashMap::from([
+        (0, HashMap::from([(1, Value::Text("edited".into()))])),
+        (
+            NEW_ROW_BASE,
+            HashMap::from([(0, Value::Int(2)), (1, Value::Text("new".into()))]),
+        ),
+    ]);
+    let deleted = HashSet::new();
+    let plan = plan_edits(
+        DbKind::Sqlite,
+        EditBatch {
+            source: &source,
+            result: &rows,
+            cells: &cells,
+            deleted: &deleted,
+            new_rows: 1,
+            generated_columns: &[],
+        },
+    )
+    .unwrap();
+    db.execute_transaction(&plan.statements).await.unwrap();
+    let saved = db.execute("SELECT * FROM items ORDER BY id").await.unwrap();
+    assert_eq!(
+        saved.rows,
+        vec![
+            vec![Value::Int(1), Value::Text("edited".into())],
+            vec![Value::Int(2), Value::Text("new".into())]
+        ]
+    );
+
+    // A key absent from the loaded page is still enforced by the database. Its failure
+    // must roll back the UPDATE that preceded the INSERT in this plan.
+    db.execute("INSERT INTO items VALUES (3, 'outside snapshot')")
+        .await
+        .unwrap();
+    cells
+        .get_mut(&0)
+        .unwrap()
+        .insert(1, Value::Text("must roll back".into()));
+    cells
+        .get_mut(&NEW_ROW_BASE)
+        .unwrap()
+        .insert(0, Value::Int(3));
+    let plan = plan_edits(
+        DbKind::Sqlite,
+        EditBatch {
+            source: &source,
+            result: &saved,
+            cells: &cells,
+            deleted: &deleted,
+            new_rows: 1,
+            generated_columns: &[],
+        },
+    )
+    .unwrap();
+    assert!(db.execute_transaction(&plan.statements).await.is_err());
+    assert_eq!(
+        db.execute("SELECT name FROM items WHERE id = 1")
+            .await
+            .unwrap()
+            .rows,
+        vec![vec![Value::Text("edited".into())]]
+    );
+}
+
 impl Drop for TempDbGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
