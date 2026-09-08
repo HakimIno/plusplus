@@ -694,6 +694,13 @@ struct EditorAssistState {
     syntax_dirty_at: Option<f64>,
 }
 
+#[derive(Clone)]
+struct KeyChooserState {
+    tab_id: u64,
+    candidates: Vec<(String, Vec<String>)>,
+    selected: usize,
+}
+
 struct QueryTab {
     /// Stable id, used to route async query/commit results back to the right tab.
     id: u64,
@@ -742,6 +749,8 @@ struct QueryTab {
     /// query tab that produced it instead of existing only in the global status bar.
     query_error: Option<String>,
     result: Option<QueryResult>,
+    /// Changes whenever the displayed result is replaced; invalidates edit previews.
+    result_revision: u64,
     /// Results produced by Run All. The active entry temporarily lends its result/error to the
     /// ordinary fields above, letting the existing grid, filter, Message, and Chart views work
     /// unchanged while inactive entries remain parked here.
@@ -817,6 +826,7 @@ impl QueryTab {
             editor_size: None,
             query_error: None,
             result: None,
+            result_revision: 0,
             batch_results: Vec::new(),
             active_batch_result: 0,
             result_last_used: 0,
@@ -893,6 +903,7 @@ impl QueryTab {
 
     /// Install a freshly returned result and rebuild the display order.
     fn set_result(&mut self, res: QueryResult) {
+        self.result_revision = self.result_revision.wrapping_add(1);
         self.view = TabView::Data;
         self.sort = None;
         self.selection.clear();
@@ -981,6 +992,7 @@ impl QueryTab {
     }
 
     fn reset_result_interaction(&mut self) {
+        self.result_revision = self.result_revision.wrapping_add(1);
         self.result = None;
         self.query_error = None;
         self.row_order.clear();
@@ -1660,6 +1672,13 @@ enum Action {
     ConfirmEdits,
     /// User cancelled the preview dialog without committing.
     CancelEdits,
+    /// Open the row-identity chooser for the active table result.
+    /// Select a candidate row identity in the chooser.
+    SelectKeyCandidate(usize),
+    /// Apply the selected row identity to the table result.
+    ConfirmKeyChooser,
+    /// Close the row-identity chooser without changing the result.
+    CancelKeyChooser,
     /// User confirmed running destructive SQL on a production connection.
     ConfirmDangerQuery,
     /// Update the typed Critical-risk confirmation phrase.
@@ -1857,9 +1876,10 @@ pub struct DbGuiApp {
     details_image_preview: crate::value_viewer::ImagePreviewCache,
     /// Rasterizes colour emoji from the OS font for inline display in grid cells (lazy; macOS).
     emoji: crate::emoji::EmojiAtlas,
-    /// SQL statements staged for the commit-preview dialog. `None` = dialog closed;
-    /// `Some(stmts)` = dialog open, waiting for the user to confirm or cancel.
-    commit_pending: Option<Vec<String>>,
+    /// Previewed SQL bound to its source tab, result revision and live connection.
+    commit_pending: Option<edits::PendingEdits>,
+    /// Candidate primary/unique columns used by UPDATE and DELETE WHERE clauses.
+    key_chooser: Option<KeyChooserState>,
     /// DDL statements staged for the schema-preview dialog. `None` = preview closed.
     /// (The schema editor itself lives on each [`QueryTab`].)
     schema_pending: Option<Vec<String>>,
@@ -2142,6 +2162,7 @@ impl DbGuiApp {
             beautify,
             run_all_by_default,
             commit_pending: None,
+            key_chooser: None,
             schema_pending: None,
             danger_pending: None,
             import_pending: None,

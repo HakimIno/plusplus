@@ -19,7 +19,7 @@ impl DbGuiApp {
             }
             Action::OpenValueViewer(viewer) => self.value_viewer = Some(viewer),
             Action::ReplaceBlobFromFile { row, col } => {
-                const MAX_BLOB_FILE_BYTES: u64 = 16 * 1024 * 1024;
+                const MAX_BLOB_FILE_BYTES: u64 = 64 * 1024 * 1024;
                 let editable = self.tab().edits.editable();
                 let original = self
                     .tab()
@@ -39,7 +39,10 @@ impl DbGuiApp {
                     return;
                 }
                 let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Image", &["png", "jpg", "jpeg", "gif", "webp"])
+                    .add_filter(
+                        "Binary / image",
+                        &["bin", "dat", "png", "jpg", "jpeg", "gif", "webp"],
+                    )
                     .pick_file()
                 else {
                     return;
@@ -47,29 +50,25 @@ impl DbGuiApp {
                 let size = match std::fs::metadata(&path) {
                     Ok(metadata) => metadata.len(),
                     Err(error) => {
-                        self.error = Some(format!("Could not read image: {error}"));
+                        self.error = Some(format!("Could not read BLOB file: {error}"));
                         return;
                     }
                 };
                 if size > MAX_BLOB_FILE_BYTES {
-                    self.error = Some("Image is larger than the 16 MiB upload limit.".into());
+                    self.error = Some("BLOB file is larger than the 64 MiB upload limit.".into());
                     return;
                 }
                 let bytes = match std::fs::read(&path) {
                     Ok(bytes) => bytes,
                     Err(error) => {
-                        self.error = Some(format!("Could not read image: {error}"));
+                        self.error = Some(format!("Could not read BLOB file: {error}"));
                         return;
                     }
                 };
-                if !crate::value_viewer::ValueViewer::is_decodable_image(&bytes) {
-                    self.error = Some("Choose a valid PNG, JPEG, GIF, or WebP image.".to_string());
-                    return;
-                }
                 let value = dbcore::Value::Bytes(bytes);
                 let original = original.expect("checked above");
                 self.tab_mut().edits.stage(row, col, value, &original);
-                self.status_msg = format!("Staged image from {}", path.display());
+                self.status_msg = format!("Staged BLOB from {}", path.display());
                 self.error = None;
             }
             Action::NewTab => {
@@ -811,7 +810,7 @@ impl DbGuiApp {
                     ProductionGuardContinuation::Edits => self
                         .commit_pending
                         .as_ref()
-                        .is_some_and(|statements| statements.join("\n") == pending.sql),
+                        .is_some_and(|plan| plan.statements.join("\n") == pending.sql),
                     ProductionGuardContinuation::Schema => self
                         .schema_pending
                         .as_ref()
@@ -955,13 +954,21 @@ impl DbGuiApp {
             Action::ConfirmImport => self.confirm_import(),
             Action::CancelImport => self.import_pending = None,
             Action::PreviewEdits => {
+                if self.busy != Busy::Idle {
+                    return;
+                }
                 self.commit_edits();
                 self.start_pending_edits_guard(self.active_query_tab);
             }
             Action::Undo => self.undo_edits(),
             Action::Redo => self.redo_edits(),
             Action::ConfirmEdits => {
-                let idx = self.active_query_tab;
+                if self.busy != Busy::Idle {
+                    return;
+                }
+                let Some(idx) = self.pending_edits_tab() else {
+                    return;
+                };
                 if self.start_pending_edits_guard(idx) {
                     return;
                 }
@@ -970,6 +977,15 @@ impl DbGuiApp {
             Action::CancelEdits => {
                 self.commit_pending = None;
             }
+            Action::SelectKeyCandidate(index) => {
+                if let Some(chooser) = self.key_chooser.as_mut() {
+                    if index < chooser.candidates.len() {
+                        chooser.selected = index;
+                    }
+                }
+            }
+            Action::ConfirmKeyChooser => self.confirm_key_chooser(),
+            Action::CancelKeyChooser => self.key_chooser = None,
             Action::OpenNewTable => {
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
                 let schema = self
@@ -1255,7 +1271,7 @@ impl DbGuiApp {
         let Some(statements) = self.commit_pending.as_ref() else {
             return false;
         };
-        let sql = statements.join("\n");
+        let sql = statements.statements.join("\n");
         let Some(kind) = self.tabs[idx]
             .conn_id
             .as_deref()

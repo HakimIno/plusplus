@@ -175,6 +175,7 @@ fn schema_from_design(design: &dbcore::ErDesign) -> SchemaTree {
                         default: column.default.clone(),
                         check: None,
                         comment: None,
+                        generated: false,
                     })
                     .collect(),
                 indexes: table
@@ -619,6 +620,7 @@ mod tests {
             default: None,
             check: None,
             comment: None,
+            generated: false,
         }
     }
 

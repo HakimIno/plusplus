@@ -25,11 +25,11 @@ impl DbGuiApp {
             schema: table.schema.clone(),
             table: table.name.clone(),
             pk_cols: table
-                .columns
-                .iter()
-                .filter(|column| column.primary_key)
-                .map(|column| column.name.clone())
-                .collect(),
+                .edit_key_candidates()
+                .into_iter()
+                .next()
+                .map(|(_, columns)| columns)
+                .unwrap_or_default(),
         };
         let mut split = QueryTab::new(self.next_tab_id, table.name.clone());
         self.next_tab_id = self.next_tab_id.wrapping_add(1);
@@ -234,11 +234,11 @@ impl DbGuiApp {
         });
         let pk_cols = match ref_info {
             Some(t) if !self.tab_connection_is_read_only(idx) => t
-                .columns
-                .iter()
-                .filter(|c| c.primary_key)
-                .map(|c| c.name.clone())
-                .collect(),
+                .edit_key_candidates()
+                .into_iter()
+                .next()
+                .map(|(_, columns)| columns)
+                .unwrap_or_default(),
             _ => Vec::new(),
         };
         Some((

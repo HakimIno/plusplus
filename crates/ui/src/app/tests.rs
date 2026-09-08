@@ -4,6 +4,147 @@ use dbcore::{
 };
 
 struct DummyDb;
+
+fn app_with_staged_edit() -> DbGuiApp {
+    let mut app = DbGuiApp::construct();
+    app.connections.clear();
+    app.active_connections.clear();
+    let mut config = dbcore::ConnectionConfig::new(DbKind::Sqlite);
+    config.id = "edit-connection".into();
+    app.connections.push(config);
+    app.active_connections.push(ActiveConnection {
+        config_id: "edit-connection".into(),
+        name: "edits".into(),
+        db: Arc::new(DummyDb),
+        databases: Vec::new(),
+        schema: fake_schema(1, 1),
+    });
+    app.tab_mut().conn_id = Some("edit-connection".into());
+    app.tab_mut().set_result(QueryResult {
+        columns: vec![ColumnMeta {
+            name: "id".into(),
+            type_name: "INTEGER".into(),
+        }],
+        rows: vec![vec![Value::Int(1)]],
+        ..QueryResult::default()
+    });
+    app.tab_mut().edits.source = Some(EditSource {
+        schema: None,
+        table: "items".into(),
+        pk_cols: vec!["id".into()],
+    });
+    app.tab_mut()
+        .edits
+        .cells
+        .insert(0, HashMap::from([(0, Value::Int(2))]));
+    app
+}
+
+#[test]
+fn edit_preview_commits_to_original_tab_after_selection_changes() {
+    let mut app = app_with_staged_edit();
+    app.apply_action(Action::PreviewEdits);
+    app.apply_action(Action::NewTab);
+    assert_eq!(app.active_query_tab, 1);
+    app.apply_action(Action::ConfirmEdits);
+    assert_eq!(app.active_query_tab, 0);
+    assert_eq!(app.busy, Busy::Querying);
+    assert!(app.commit_pending.is_none());
+}
+
+#[test]
+fn edit_preview_rejects_reloaded_result_even_with_identical_sql() {
+    let mut app = app_with_staged_edit();
+    app.commit_edits();
+    let result = app.tab().result.clone().unwrap();
+    app.tab_mut().set_result(result);
+    app.confirm_edits();
+    assert_eq!(app.busy, Busy::Idle);
+    assert!(app.commit_pending.is_none());
+    assert!(app.error.as_deref().unwrap().contains("changed"));
+    assert!(app.tab().edits.has_pending());
+}
+
+#[test]
+fn edit_preview_rejects_reconnected_database_with_same_config_id() {
+    let mut app = app_with_staged_edit();
+    app.commit_edits();
+    app.active_connections[0].db = Arc::new(DummyDb);
+    app.confirm_edits();
+    assert_eq!(app.busy, Busy::Idle);
+    assert!(app.commit_pending.is_none());
+    assert!(app.error.as_deref().unwrap().contains("connection changed"));
+}
+
+#[test]
+fn edit_preview_rejects_changed_staging_and_read_only_policy() {
+    let mut app = app_with_staged_edit();
+    app.commit_edits();
+    app.tab_mut()
+        .edits
+        .cells
+        .get_mut(&0)
+        .unwrap()
+        .insert(0, Value::Int(3));
+    app.confirm_edits();
+    assert_eq!(app.busy, Busy::Idle);
+    assert!(app
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("staged edits changed"));
+    assert!(app.tab().edits.has_pending());
+
+    app.commit_edits();
+    app.connections[0].read_only = true;
+    app.confirm_edits();
+    assert_eq!(app.busy, Busy::Idle);
+    assert!(app.commit_pending.is_none());
+    assert!(app.error.as_deref().unwrap().contains("read-only"));
+}
+
+#[test]
+fn edit_preview_rejects_closed_or_rebound_tab() {
+    let mut app = app_with_staged_edit();
+    app.commit_edits();
+    app.tab_mut().conn_id = None;
+    app.confirm_edits();
+    assert_eq!(app.busy, Busy::Idle);
+    assert!(app.commit_pending.is_none());
+
+    let mut app = app_with_staged_edit();
+    app.commit_edits();
+    app.tabs.clear();
+    app.confirm_edits();
+    assert_eq!(app.busy, Busy::Idle);
+    assert!(app.commit_pending.is_none());
+}
+
+#[test]
+fn edit_preview_cannot_be_reused_after_invalid_or_empty_save() {
+    let mut app = app_with_staged_edit();
+    app.commit_edits();
+    assert!(app.commit_pending.is_some());
+    app.tab_mut().edits.cells.clear();
+    app.commit_edits();
+    assert!(app.commit_pending.is_none());
+    app.tab_mut().edits.new_rows = 1;
+    app.commit_edits();
+    assert!(
+        app.commit_pending.is_none(),
+        "untouched new rows do not open an empty preview"
+    );
+}
+
+#[test]
+fn edit_preview_confirmation_while_busy_keeps_plan_without_executing() {
+    let mut app = app_with_staged_edit();
+    app.commit_edits();
+    app.busy = Busy::Querying;
+    app.confirm_edits();
+    assert!(app.commit_pending.is_some());
+}
+
 #[async_trait::async_trait]
 impl dbcore::Database for DummyDb {
     fn kind(&self) -> dbcore::DbKind {
@@ -91,6 +232,7 @@ fn fake_schema(tables: usize, cols: usize) -> SchemaTree {
                         default: None,
                         check: None,
                         comment: None,
+                        generated: false,
                     })
                     .collect(),
                 indexes: vec![IndexInfo {
@@ -845,6 +987,7 @@ fn col(name: &str, ty: &str, nullable: bool, pk: bool) -> ColumnInfo {
         default: None,
         check: None,
         comment: None,
+        generated: false,
     }
 }
 
@@ -1245,6 +1388,7 @@ fn pager_survives_on_pk_less_table() {
     for col in &mut schema.tables[0].columns {
         col.primary_key = false; // imported dump: no primary key at all
     }
+    schema.tables[0].indexes.clear(); // and no unique index fallback
     app.active_connections.push(ActiveConnection {
         config_id: "c1".into(),
         name: "conn".into(),
@@ -4990,10 +5134,10 @@ fn staged_image_blob_builds_a_saveable_update() {
     );
 
     let statements = app.build_commit_statements().expect("saveable BLOB update");
-    assert_eq!(
-        statements,
-        ["UPDATE \"images\" SET \"image\" = X'89504E47' WHERE \"id\" = 1;"]
-    );
+    assert_eq!(statements.len(), 1);
+    assert!(statements[0].starts_with(
+        "UPDATE \"images\" SET \"image\" = X'89504E47' WHERE \"id\" = 1 AND \"image\" = X'00';"
+    ));
 }
 
 /// Clicking a Details-panel value box must open the inline editor, give it focus, and
@@ -5799,6 +5943,7 @@ fn snapshot_erd_views() {
         default: None,
         check: None,
         comment: None,
+        generated: false,
     };
     let fk = |cols: &[&str], ref_table: &str| dbcore::ForeignKeyInfo {
         name: format!("fk_{ref_table}"),
@@ -6476,6 +6621,7 @@ fn erd_refresh_keeps_positions_and_disconnect_keeps_snapshot() {
                 default: None,
                 check: None,
                 comment: None,
+                generated: false,
             }],
             indexes: Vec::new(),
             foreign_keys: Vec::new(),

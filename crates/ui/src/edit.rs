@@ -30,21 +30,7 @@ pub(crate) fn as_bool(value: &Value) -> bool {
     }
 }
 
-/// The table a result was read from, plus the primary-key columns needed to target rows in
-/// an `UPDATE`. Built when a table is opened from the schema sidebar.
-#[derive(Clone)]
-pub struct EditSource {
-    pub schema: Option<String>,
-    pub table: String,
-    /// Names of the primary-key columns. Empty ⇒ no PK ⇒ rows can't be edited.
-    pub pk_cols: Vec<String>,
-}
-
-impl EditSource {
-    pub fn editable(&self) -> bool {
-        !self.pk_cols.is_empty()
-    }
-}
+pub use dbcore::edits::{is_new_row, EditSource, NEW_ROW_BASE};
 
 /// The cell currently being typed into (only ever one at a time, across grid and details).
 /// Where an edit was started from. The grid and the Details panel can both display the
@@ -84,17 +70,6 @@ pub enum EditOutcome {
     Commit { advance: Option<CursorDir> },
     /// Abandon the edit.
     Cancel,
-}
-
-/// Row indices at or above this base address *new* (to-be-inserted) rows rather than rows
-/// in `result.rows`. Keeping new rows in the same `usize` address space as stored rows lets
-/// the staging map, the active editor, and the grid all stay `usize`-keyed; helpers below
-/// translate back to the new-row slot when needed.
-pub const NEW_ROW_BASE: usize = 1 << 48;
-
-/// Whether `row` addresses a new (insert) row rather than a stored result row.
-pub fn is_new_row(row: usize) -> bool {
-    row >= NEW_ROW_BASE
 }
 
 /// How a row should be painted / treated, derived from the pending edits on it.

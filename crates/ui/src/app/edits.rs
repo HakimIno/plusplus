@@ -2,18 +2,63 @@
 
 use super::*;
 
+pub(super) struct PendingEdits {
+    pub statements: Vec<String>,
+    tab_id: u64,
+    conn_id: String,
+    db: Arc<dyn Database>,
+    source: EditSource,
+    result_revision: u64,
+}
+
+impl PendingEdits {
+    pub(super) fn is_sequential(&self) -> bool {
+        self.db.kind().is_cql()
+    }
+}
+
+fn edit_key_columns(table: &dbcore::TableInfo) -> Vec<String> {
+    table
+        .edit_key_candidates()
+        .into_iter()
+        .next()
+        .map(|(_, columns)| columns)
+        .unwrap_or_default()
+}
+
 impl DbGuiApp {
+    pub(super) fn confirm_key_chooser(&mut self) {
+        let Some(chooser) = self.key_chooser.take() else {
+            return;
+        };
+        let Some(idx) = self.tabs.iter().position(|tab| tab.id == chooser.tab_id) else {
+            return;
+        };
+        let Some((_, columns)) = chooser.candidates.get(chooser.selected) else {
+            return;
+        };
+        let columns = columns.clone();
+        if let Some(source) = self.tabs[idx].edits.source.as_mut() {
+            source.pk_cols = columns.clone();
+        }
+        if let Some(source) = self.tabs[idx].edits.pending_source.as_mut() {
+            source.pk_cols = columns;
+        }
+        self.commit_pending = None;
+        self.status_msg = "Row key columns updated".into();
+        self.error = None;
+    }
     /// Work out whether the tab's SQL still reads one whole table, and if so build the
     /// [`EditSource`] that makes its rows editable. Matches the table (case-insensitively)
     /// against the bound connection's schema to pick up its primary key; an ambiguous bare
     /// name (same table in several schemas) or a table without a PK stays read-only.
     pub(super) fn derive_edit_source(&self, idx: usize) -> Option<EditSource> {
         let tab = self.tabs.get(idx)?;
-        let (schema, table) = dbcore::simple_select_target(&tab.sql)?;
         let conn = tab
             .conn_id
             .as_deref()
             .and_then(|id| self.active_connections.iter().find(|c| c.config_id == id))?;
+        let (schema, table) = dbcore::edits::editable_select_target(conn.db.kind(), &tab.sql)?;
         let mut matches = conn.schema.tables.iter().filter(|t| {
             t.name.eq_ignore_ascii_case(&table)
                 && schema.as_deref().is_none_or(|s| {
@@ -42,11 +87,7 @@ impl DbGuiApp {
         let pk_cols: Vec<String> = if self.tab_connection_is_read_only(idx) {
             Vec::new()
         } else {
-            info.columns
-                .iter()
-                .filter(|c| c.primary_key)
-                .map(|c| c.name.clone())
-                .collect()
+            edit_key_columns(info)
         };
         // Keep the table identity even when the table has no primary key. The result isn't
         // *editable* (`EditSource::editable()` is false for empty `pk_cols`, so the grid stays
@@ -69,7 +110,7 @@ impl DbGuiApp {
             .active_connections
             .iter()
             .find(|conn| conn.config_id == conn_id)
-            .map(|conn| conn.schema.clone())
+            .map(|conn| &conn.schema)
         else {
             return;
         };
@@ -105,12 +146,7 @@ impl DbGuiApp {
                     continue;
                 }
                 if !read_only {
-                    source.pk_cols = table
-                        .columns
-                        .iter()
-                        .filter(|column| column.primary_key)
-                        .map(|column| column.name.clone())
-                        .collect();
+                    source.pk_cols = edit_key_columns(table);
                 }
             }
         }
@@ -142,30 +178,89 @@ impl DbGuiApp {
     /// Validate staged edits and build the SQL statements, storing them in
     /// `commit_pending` to show the preview dialog. Nothing is executed yet.
     pub(super) fn commit_edits(&mut self) {
+        if self.busy != Busy::Idle {
+            return;
+        }
+        self.commit_pending = None;
         if self.tab_connection_is_read_only(self.active_query_tab) {
             self.refuse_read_only("staged edits can't be saved.");
             return;
         }
         if let Some(stmts) = self.build_commit_statements() {
-            self.commit_pending = Some(stmts);
+            let Some(active) = self.active() else {
+                return;
+            };
+            let tab = self.tab();
+            let Some(source) = tab.edits.source.clone() else {
+                return;
+            };
+            self.commit_pending = Some(PendingEdits {
+                statements: stmts,
+                tab_id: tab.id,
+                conn_id: active.config_id.clone(),
+                db: active.db.clone(),
+                source,
+                result_revision: tab.result_revision,
+            });
         }
     }
-    /// Take the previewed statements and execute them as a single atomic transaction on
-    /// the background runtime. On success the grid reloads; on failure the error is shown.
-    pub(super) fn confirm_edits(&mut self) {
-        if self.tab_connection_is_read_only(self.active_query_tab) {
+
+    /// Select the preview's source, never the currently selected connection. A reconnect
+    /// (even under the same config id), result reload or changed source invalidates it.
+    pub(super) fn pending_edits_tab(&mut self) -> Option<usize> {
+        let pending = self.commit_pending.as_ref()?;
+        let idx = self.tabs.iter().position(|tab| tab.id == pending.tab_id);
+        let valid = idx.is_some_and(|idx| {
+            let tab = &self.tabs[idx];
+            tab.conn_id.as_deref() == Some(pending.conn_id.as_str())
+                && tab.result.is_some()
+                && tab.result_revision == pending.result_revision
+                && tab.edits.source.as_ref() == Some(&pending.source)
+                && self.active_connections.iter().any(|conn| {
+                    conn.config_id == pending.conn_id && Arc::ptr_eq(&conn.db, &pending.db)
+                })
+        });
+        if !valid {
+            self.commit_pending = None;
+            self.error =
+                Some("The edit source or connection changed. Preview the edits again.".into());
+            return None;
+        }
+        let idx = idx?;
+        if self.tab_connection_is_read_only(idx) {
+            self.commit_pending = None;
             self.refuse_read_only("staged edits can't be saved.");
+            return None;
+        }
+        self.active_query_tab = idx;
+        Some(idx)
+    }
+
+    /// Execute the exact preview on its captured connection. CQL is sequential, not atomic.
+    pub(super) fn confirm_edits(&mut self) {
+        if self.busy != Busy::Idle {
             return;
         }
-        let Some(stmts) = self.commit_pending.take() else {
+        let Some(_) = self.pending_edits_tab() else {
             return;
         };
-        let (db, conn_id) = match self.active() {
-            Some(active) => (active.db.clone(), active.config_id.clone()),
-            None => return,
+        // Re-plan only the staged changes; deterministic SQL detects edits made since preview.
+        let current = self.build_commit_statements();
+        if current.as_ref() != self.commit_pending.as_ref().map(|p| &p.statements) {
+            self.commit_pending = None;
+            self.error = Some("The staged edits changed. Preview the edits again.".into());
+            return;
+        }
+        let Some(PendingEdits {
+            statements: stmts,
+            db,
+            conn_id,
+            tab_id,
+            ..
+        }) = self.commit_pending.take()
+        else {
+            return;
         };
-        let idx = self.active_query_tab;
-        let tab_id = self.tabs[idx].id;
         let n = stmts.len();
         let tx = self.tx.clone();
         self.busy = Busy::Querying;
@@ -213,181 +308,56 @@ impl DbGuiApp {
             self.status_msg = "Nothing to redo".to_string();
         }
     }
-    /// Validate staged edits and build UPDATE/DELETE/INSERT statements. Returns `None`
-    /// (and sets `self.error`) if validation fails or there is nothing to commit.
+    /// Flush the UI editor, then delegate validation and SQL planning to the shared core.
     pub(super) fn build_commit_statements(&mut self) -> Option<Vec<String>> {
         let idx = self.active_query_tab;
-        // A cell still being edited with invalid (red) input blocks the whole save.
         if !self.tabs[idx].flush_active_edit() {
             self.error = Some("Fix the highlighted cell before saving.".into());
-            self.status_msg = "Invalid value — not saved".to_string();
+            self.status_msg = "Invalid value — not saved".into();
             return None;
         }
         if !self.tabs[idx].edits.has_pending() {
             return None;
         }
-        // Defence in depth: every staged value must still match its column kind before we
-        // build any SQL, so a malformed value can never reach the database.
-        for colmap in self.tabs[idx].edits.cells.values() {
-            for (&col, value) in colmap {
-                if !self.tabs[idx].edits.col_kind(col).accepts(value) {
-                    self.error =
-                        Some("Cannot save: a cell holds a value invalid for its type.".into());
-                    self.status_msg = "Invalid value — not saved".to_string();
-                    return None;
-                }
-            }
-        }
-        let source = self.tabs[idx].edits.source.clone()?;
-        // Grab the dialect, then drop the `active()` borrow so we can freely touch `self`.
-        let kind = match self.active() {
-            Some(active) => active.db.kind(),
-            None => return None,
-        };
-        let Some(result) = &self.tabs[idx].result else {
-            return None;
-        };
-
-        // Resolve each primary-key column to its position in the result set.
-        let pk_idx: Option<Vec<(String, usize)>> = source
-            .pk_cols
-            .iter()
-            .map(|name| {
-                result
+        let kind = self.active()?.db.kind();
+        let generated_columns: Vec<usize> = self
+            .structure_table(idx)
+            .map(|table| {
+                table
                     .columns
                     .iter()
-                    .position(|c| &c.name == name)
-                    .map(|i| (name.clone(), i))
-            })
-            .collect();
-        let Some(pk_idx) = pk_idx else {
-            self.error = Some("Cannot save: primary key columns are not in the result.".into());
-            return None;
-        };
-
-        let cant_write = "Cannot save: a value can't be written.";
-        let mut updates = Vec::new();
-        let mut deletes = Vec::new();
-        let mut inserts = Vec::new();
-
-        // --- UPDATEs: stored rows with staged cell edits (new rows handled below) ---
-        for (&row, colmap) in &self.tabs[idx].edits.cells {
-            if crate::edit::is_new_row(row) || colmap.is_empty() {
-                continue;
-            }
-            // Owned (name, value) pairs first, then borrow them for the builder.
-            let sets: Vec<(String, dbcore::Value)> = colmap
-                .iter()
-                .map(|(&col, v)| (result.columns[col].name.clone(), v.clone()))
-                .collect();
-            let keys: Vec<(String, dbcore::Value)> = pk_idx
-                .iter()
-                .map(|(name, idx)| (name.clone(), result.rows[row][*idx].clone()))
-                .collect();
-            let set_refs: Vec<(&str, &dbcore::Value)> =
-                sets.iter().map(|(c, v)| (c.as_str(), v)).collect();
-            let key_refs: Vec<(&str, &dbcore::Value)> =
-                keys.iter().map(|(c, v)| (c.as_str(), v)).collect();
-            match dbcore::build_update_sql(
-                kind,
-                source.schema.as_deref(),
-                &source.table,
-                &set_refs,
-                &key_refs,
-            ) {
-                Some(sql) => updates.push(sql),
-                None => {
-                    self.error = Some(cant_write.into());
-                    return None;
-                }
-            }
-        }
-
-        // --- DELETEs: rows marked for deletion, keyed by primary key ---
-        for &row in &self.tabs[idx].edits.deleted {
-            let keys: Vec<(String, dbcore::Value)> = pk_idx
-                .iter()
-                .map(|(name, idx)| (name.clone(), result.rows[row][*idx].clone()))
-                .collect();
-            let key_refs: Vec<(&str, &dbcore::Value)> =
-                keys.iter().map(|(c, v)| (c.as_str(), v)).collect();
-            match dbcore::build_delete_sql(kind, source.schema.as_deref(), &source.table, &key_refs)
-            {
-                Some(sql) => deletes.push(sql),
-                None => {
-                    self.error = Some(cant_write.into());
-                    return None;
-                }
-            }
-        }
-
-        // --- INSERTs: new rows, with strict primary-key validation ---
-        // Existing PK tuples (excluding rows being deleted, whose keys are freed up) plus the
-        // new rows already accepted, so a new row can't duplicate a live primary key.
-        let existing_pks: Vec<Vec<dbcore::Value>> = (0..result.rows.len())
-            .filter(|r| !self.tabs[idx].edits.deleted.contains(r))
-            .map(|r| {
-                pk_idx
-                    .iter()
-                    .map(|(_, i)| result.rows[r][*i].clone())
+                    .enumerate()
+                    .filter(|(_, column)| column.generated)
+                    .map(|(index, _)| index)
                     .collect()
             })
-            .collect();
-        let mut new_pks: Vec<Vec<dbcore::Value>> = Vec::new();
-        for j in 0..self.tabs[idx].edits.new_rows {
-            let id = crate::edit::NEW_ROW_BASE + j;
-            // Entered (column index, value) pairs; an untouched new row is skipped entirely.
-            let entered: Vec<(usize, dbcore::Value)> = self.tabs[idx]
-                .edits
-                .cells
-                .get(&id)
-                .map(|m| m.iter().map(|(&c, v)| (c, v.clone())).collect())
-                .unwrap_or_default();
-            if entered.is_empty() {
-                continue;
-            }
-            // Every primary-key column must be provided and non-NULL.
-            let mut pk_tuple = Vec::with_capacity(pk_idx.len());
-            for (name, i) in &pk_idx {
-                match entered.iter().find(|(c, _)| c == i).map(|(_, v)| v) {
-                    Some(v) if !v.is_null() => pk_tuple.push(v.clone()),
-                    _ => {
-                        self.error = Some(format!(
-                            "Cannot add row: primary key \"{name}\" is required."
-                        ));
-                        self.status_msg = "Missing primary key — not saved".to_string();
-                        return None;
+            .unwrap_or_default();
+        let tab = &self.tabs[idx];
+        let batch = dbcore::edits::EditBatch {
+            source: tab.edits.source.as_ref()?,
+            result: tab.result.as_ref()?,
+            cells: &tab.edits.cells,
+            deleted: &tab.edits.deleted,
+            new_rows: tab.edits.new_rows,
+            generated_columns: &generated_columns,
+        };
+        match dbcore::edits::plan_edits(kind, batch) {
+            Ok(plan) if !plan.statements.is_empty() => Some(plan.statements),
+            Ok(_) => None,
+            Err(error) => {
+                self.status_msg = match &error {
+                    dbcore::edits::EditError::MissingPrimaryKey(_) => {
+                        "Missing primary key — not saved"
                     }
+                    dbcore::edits::EditError::DuplicatePrimaryKey => {
+                        "Duplicate primary key — not saved"
+                    }
+                    _ => "Invalid edits — not saved",
                 }
-            }
-            // No duplicate primary keys (against live rows or other new rows).
-            if existing_pks.contains(&pk_tuple) || new_pks.contains(&pk_tuple) {
-                self.error = Some("Cannot add row: duplicate primary key.".into());
-                self.status_msg = "Duplicate primary key — not saved".to_string();
-                return None;
-            }
-            new_pks.push(pk_tuple);
-            // Build the INSERT from every entered cell (column name → value).
-            let cols_owned: Vec<(String, dbcore::Value)> = entered
-                .iter()
-                .map(|(c, v)| (result.columns[*c].name.clone(), v.clone()))
-                .collect();
-            let col_refs: Vec<(&str, &dbcore::Value)> =
-                cols_owned.iter().map(|(c, v)| (c.as_str(), v)).collect();
-            match dbcore::build_insert_sql(kind, source.schema.as_deref(), &source.table, &col_refs)
-            {
-                Some(sql) => inserts.push(sql),
-                None => {
-                    self.error = Some(cant_write.into());
-                    return None;
-                }
+                .into();
+                self.error = Some(error.to_string());
+                None
             }
         }
-
-        // Run order: UPDATE, then DELETE (frees keys), then INSERT (may reuse them).
-        let mut statements = updates;
-        statements.extend(deletes);
-        statements.extend(inserts);
-        Some(statements)
     }
 }

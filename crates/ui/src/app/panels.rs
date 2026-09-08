@@ -2621,15 +2621,6 @@ impl DbGuiApp {
                             ui.spacing_mut().item_spacing.x = 6.0;
                             icons::show_colored(ui, icons::history(), 14.0, palette::ACCENT());
                             ui.label(egui::RichText::new("Live log").strong().size(12.0));
-                            ui.label(
-                                egui::RichText::new(if count == 1 {
-                                    "1 entry".to_string()
-                                } else {
-                                    format!("{count} entries")
-                                })
-                                .small()
-                                .color(palette::TEXT_FAINT()),
-                            );
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
@@ -4232,11 +4223,11 @@ impl DbGuiApp {
                 schema: table.schema.clone(),
                 table: table.name.clone(),
                 pk_cols: table
-                    .columns
-                    .iter()
-                    .filter(|c| c.primary_key)
-                    .map(|c| c.name.clone())
-                    .collect(),
+                    .edit_key_candidates()
+                    .into_iter()
+                    .next()
+                    .map(|(_, columns)| columns)
+                    .unwrap_or_default(),
             };
             actions.push(Action::OpenTable {
                 sql: active
@@ -5547,7 +5538,6 @@ impl DbGuiApp {
             .frame(
                 egui::Frame::new()
                     .fill(palette::PANEL())
-                    .stroke(egui::Stroke::new(1.0, palette::BORDER()))
                     .inner_margin(egui::Margin::symmetric(24, 34)),
             )
             .show_inside(root, |ui| {
@@ -6632,9 +6622,11 @@ impl DbGuiApp {
         }) {
             return;
         }
-        let Some(stmts) = self.commit_pending.as_ref() else {
+        let Some(plan) = self.commit_pending.as_ref() else {
             return;
         };
+        let stmts = &plan.statements;
+        let sequential = plan.is_sequential();
 
         let title = format!("Review {} Change(s)", stmts.len());
         let mut open = true;
@@ -6646,8 +6638,12 @@ impl DbGuiApp {
             .show(ctx, |ui| {
                 ui.label(
                     egui::RichText::new(
-                        "These statements will run as a single transaction. \
-                         If any fails, all changes are rolled back.",
+                        if sequential {
+                            "These statements run one at a time. If one fails, earlier changes remain saved."
+                        } else {
+                            "These statements will run as a single transaction. \
+                             If any fails, all changes are rolled back."
+                        },
                     )
                     .color(palette::TEXT_WEAK()),
                 );
@@ -6678,7 +6674,7 @@ impl DbGuiApp {
                 components::dialog_footer(ui, |ui| {
                     let can_act = self.busy == Busy::Idle;
                     if components::primary_button(ui, icons::save(), "Commit", can_act)
-                        .on_hover_text("Execute all statements in a single transaction")
+                        .on_hover_text(if sequential { "Execute statements sequentially" } else { "Execute all statements in a single transaction" })
                         .clicked()
                     {
                         actions.push(Action::ConfirmEdits);
@@ -6691,6 +6687,47 @@ impl DbGuiApp {
 
         if !open {
             actions.push(Action::CancelEdits);
+        }
+    }
+
+    /// Choose the columns used to identify one row when a table has no primary key,
+    /// or when a user prefers one of several unique indexes.
+    pub(super) fn key_chooser_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        let Some(chooser) = self.key_chooser.as_ref() else {
+            return;
+        };
+        let mut open = true;
+        let mut selected = chooser.selected;
+        components::dialog_window("Choose Row Key Columns")
+            .open(&mut open)
+            .resizable(false)
+            .default_size([520.0, 0.0])
+            .frame(components::dialog_frame(ctx))
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "Choose columns whose values uniquely identify one row. UPDATE and DELETE will use them in the WHERE clause.",
+                    )
+                    .color(palette::TEXT_WEAK()),
+                );
+                ui.add_space(8.0);
+                for (index, (label, columns)) in chooser.candidates.iter().enumerate() {
+                    ui.radio_value(&mut selected, index, format!("{label}  ({})", columns.join(", ")));
+                }
+                components::dialog_footer(ui, |ui| {
+                    if components::primary_button(ui, icons::key(), "Use key", true).clicked() {
+                        actions.push(Action::SelectKeyCandidate(selected));
+                        actions.push(Action::ConfirmKeyChooser);
+                    }
+                    if components::button(ui, icons::close(), "Cancel", true).clicked() {
+                        actions.push(Action::CancelKeyChooser);
+                    }
+                });
+            });
+        if !open {
+            actions.push(Action::CancelKeyChooser);
+        } else if selected != chooser.selected {
+            actions.push(Action::SelectKeyCandidate(selected));
         }
     }
 

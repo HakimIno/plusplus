@@ -350,6 +350,7 @@ impl SchemaEditor {
                     default: column.default.clone(),
                     check: None,
                     comment: None,
+                    generated: false,
                 });
                 draft.default = column.default.clone().unwrap_or_default();
                 draft
@@ -1170,6 +1171,7 @@ mod object_editor_tests {
                 default: None,
                 check: None,
                 comment: None,
+                generated: false,
             }],
             indexes: vec![IndexInfo {
                 name: "idx_items_sku".into(),

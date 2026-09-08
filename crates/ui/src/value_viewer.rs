@@ -148,10 +148,6 @@ impl ValueViewer {
         }
     }
 
-    pub(crate) fn is_decodable_image(bytes: &[u8]) -> bool {
-        image_metadata(bytes).is_some()
-    }
-
     pub(crate) fn new(column: &str, type_name: &str, value: &Value) -> Option<Self> {
         let content = match value {
             Value::Bytes(bytes) => {
@@ -231,6 +227,27 @@ impl ValueViewer {
                 components::dialog_footer(ui, |ui| {
                     if components::button(ui, crate::icons::close(), "Close", true).clicked() {
                         close_clicked = true;
+                    }
+                    if matches!(
+                        &self.content,
+                        ViewerContent::Blob { .. } | ViewerContent::Image { .. }
+                    ) && ui.button("Save binary…").clicked()
+                    {
+                        let extension = match &self.content {
+                            ViewerContent::Image { format, .. } => *format,
+                            _ => "bin",
+                        };
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_file_name(format!("{}.{}", self.column, extension))
+                            .save_file()
+                        {
+                            let bytes = match &self.content {
+                                ViewerContent::Blob { bytes, .. }
+                                | ViewerContent::Image { bytes, .. } => bytes,
+                                ViewerContent::Json { .. } => unreachable!(),
+                            };
+                            let _ = std::fs::write(path, bytes.as_ref());
+                        }
                     }
                     if ui.button("Copy value").clicked() {
                         match &self.content {

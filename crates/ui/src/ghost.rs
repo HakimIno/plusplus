@@ -427,6 +427,7 @@ mod tests {
             default: None,
             check: None,
             comment: None,
+            generated: false,
         }
     }
 

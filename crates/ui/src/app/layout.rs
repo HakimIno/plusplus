@@ -578,6 +578,7 @@ impl DbGuiApp {
         self.split_drop_overlay(ui_root, workspace_drop_rect, &mut actions);
         self.connection_dialog(&ctx, &mut actions);
         self.commit_preview_dialog(&ctx, &mut actions);
+        self.key_chooser_dialog(&ctx, &mut actions);
         self.favorite_name_dialog(&ctx, &mut actions);
         self.favorite_folder_dialog(&ctx, &mut actions);
         self.danger_confirm_dialog(&ctx, &mut actions);
