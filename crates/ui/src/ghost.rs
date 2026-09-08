@@ -94,7 +94,12 @@ fn history_suggestion(sql: &str, history: &[&str]) -> Option<String> {
         let prefix: String = entry_chars[..typed_len].iter().collect();
         if prefix.eq_ignore_ascii_case(sql) {
             let remainder: String = entry_chars[typed_len..].iter().collect();
-            if !remainder.trim().is_empty() {
+            // A ghost is an inline hint, not a second editor layer. Painting a whole
+            // multi-line history entry at the caret makes existing SQL look duplicated.
+            if !remainder.trim().is_empty()
+                && !remainder.contains('\n')
+                && !remainder.contains('\r')
+            {
                 return Some(remainder);
             }
         }
@@ -492,6 +497,13 @@ mod tests {
         ];
         let g = suggest_end("SELECT * FROM users WHERE id = ", &hist, None).unwrap();
         assert_eq!(g, "2");
+    }
+
+    #[test]
+    fn multiline_history_never_paints_over_the_editor() {
+        let hist = vec!["SELECT\n  *\nFROM orders\nLIMIT 10".to_string()];
+        let g = suggest_end("SELECT", &hist, None);
+        assert_eq!(g.as_deref(), Some(" * FROM "));
     }
 
     #[test]

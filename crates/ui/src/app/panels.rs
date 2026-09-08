@@ -2920,9 +2920,9 @@ impl DbGuiApp {
             return;
         }
 
-        // Paint the remainder in a faint colour, flush against the caret. A multi-line
-        // remainder flows left-aligned from the caret's x — fine for the common single-line
-        // case, which is what history completions almost always are.
+        // Paint the single-line remainder in a faint colour, flush against the caret.
+        // `ghost::suggest` excludes multi-line history entries so this never looks like
+        // another query layered over the editor.
         ui.painter().text(
             egui::pos2(cursor_rect.left(), cursor_rect.center().y),
             egui::Align2::LEFT_CENTER,
