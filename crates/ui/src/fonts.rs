@@ -137,8 +137,8 @@ pub(crate) fn install(
             include_bytes!("../../app/assets/NotoSansThai.ttf") as &[u8],
         ),
         (
-            "jetbrains_mono",
-            include_bytes!("../../app/assets/JetBrainsMono-Regular.ttf") as &[u8],
+            "ibm_plex_mono",
+            include_bytes!("../../app/assets/IBMPlexMono-Regular.ttf") as &[u8],
         ),
         ("inter", app_fonts.ui_regular),
         ("inter_semibold", app_fonts.ui_semibold),
@@ -181,7 +181,7 @@ pub(crate) fn install(
         .families
         .insert(FontFamily::Proportional, proportional);
 
-    // Maps the requested `ui-monospace` stack to the bundled JetBrains Mono face.
+    // Maps the code/data family to the bundled IBM Plex Mono face.
     // User-selected code fonts still take precedence.
     let mut monospace = Vec::new();
     if code_custom.is_some() {
@@ -190,7 +190,7 @@ pub(crate) fn install(
         monospace.push("custom_ui".to_owned());
     }
     monospace.extend([
-        "jetbrains_mono".to_owned(),
+        "ibm_plex_mono".to_owned(),
         "thai".to_owned(),
         "unifont".to_owned(),
     ]);
