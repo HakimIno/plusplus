@@ -216,8 +216,8 @@ impl Database for PostgresDb {
         }
 
         // Columns (ordered by ordinal position).
-        let col_rows: Vec<(String, String, String, String, String, Option<String>, Option<String>)> = sqlx::query_as(AssertSqlSafe(format!(
-            "SELECT c.table_schema, c.table_name, c.column_name, c.data_type, c.is_nullable, c.column_default, \
+        let col_rows: Vec<(String, String, String, String, String, Option<String>, String, Option<String>)> = sqlx::query_as(AssertSqlSafe(format!(
+            "SELECT c.table_schema, c.table_name, c.column_name, c.data_type, c.is_nullable, c.column_default, c.is_generated, \
                     pg_catalog.col_description(pg_catalog.to_regclass(format('%I.%I', c.table_schema, c.table_name))::oid, c.ordinal_position) \
              FROM information_schema.columns c \
              WHERE c.table_schema NOT IN {SYSTEM_SCHEMAS} \
@@ -268,8 +268,14 @@ impl Database for PostgresDb {
                 .push(clause);
         }
 
-        for (schema, table, column, data_type, is_nullable, default, comment) in col_rows {
+        for (schema, table, column, data_type, is_nullable, default, is_generated, comment) in
+            col_rows
+        {
             let key = (schema.clone(), table.clone(), column.clone());
+            let generated = is_generated != "NEVER"
+                || default
+                    .as_deref()
+                    .is_some_and(|value| value.contains("nextval("));
             let col = ColumnInfo {
                 name: column,
                 data_type,
@@ -278,6 +284,7 @@ impl Database for PostgresDb {
                 default,
                 check: checks.get(&key).map(|items| items.join(" AND ")),
                 comment,
+                generated,
             };
             if let Some(info) = tables.get_mut(&(schema.clone(), table.clone())) {
                 info.columns.push(col);

@@ -317,14 +317,25 @@ impl SqliteDb {
         let rows = sqlx::query(AssertSqlSafe(q)).fetch_all(&self.pool).await?;
         Ok(rows
             .iter()
-            .map(|r| ColumnInfo {
-                name: r.try_get::<String, _>("name").unwrap_or_default(),
-                data_type: r.try_get::<String, _>("type").unwrap_or_default(),
-                nullable: r.try_get::<i64, _>("notnull").unwrap_or(0) == 0,
-                primary_key: r.try_get::<i64, _>("pk").unwrap_or(0) > 0,
-                default: r.try_get::<Option<String>, _>("dflt_value").unwrap_or(None),
-                check: None,
-                comment: None,
+            .map(|r| {
+                let data_type = r.try_get::<String, _>("type").unwrap_or_default();
+                let primary_key = r.try_get::<i64, _>("pk").unwrap_or(0) > 0;
+                let default = r.try_get::<Option<String>, _>("dflt_value").unwrap_or(None);
+                ColumnInfo {
+                    name: r.try_get::<String, _>("name").unwrap_or_default(),
+                    data_type: data_type.clone(),
+                    nullable: r.try_get::<i64, _>("notnull").unwrap_or(0) == 0,
+                    primary_key,
+                    default: default.clone(),
+                    check: None,
+                    comment: None,
+                    // SQLite generates ROWIDs for INTEGER PRIMARY KEY columns when omitted.
+                    generated: primary_key && data_type.eq_ignore_ascii_case("INTEGER")
+                        || default.as_deref().is_some_and(|value| {
+                            let value = value.to_ascii_lowercase();
+                            value.contains("generated") || value.contains("strftime(")
+                        }),
+                }
             })
             .collect())
     }

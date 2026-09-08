@@ -650,6 +650,61 @@ fn simple_select_target_rejects_everything_else() {
 }
 
 #[test]
+fn table_edit_key_candidates_prefer_primary_key_then_unique_indexes() {
+    let table = TableInfo {
+        schema: None,
+        name: "users".into(),
+        columns: vec![
+            ColumnInfo {
+                name: "id".into(),
+                data_type: "INTEGER".into(),
+                nullable: false,
+                primary_key: true,
+                default: None,
+                check: None,
+                comment: None,
+                generated: false,
+            },
+            ColumnInfo {
+                name: "email".into(),
+                data_type: "TEXT".into(),
+                nullable: false,
+                primary_key: false,
+                default: None,
+                check: None,
+                comment: None,
+                generated: false,
+            },
+        ],
+        indexes: vec![
+            IndexInfo {
+                name: "users_email_key".into(),
+                unique: true,
+                columns: vec!["email".into()],
+            },
+            IndexInfo {
+                name: "users_email_key_duplicate".into(),
+                unique: true,
+                columns: vec!["email".into()],
+            },
+            IndexInfo {
+                name: "users_name_idx".into(),
+                unique: false,
+                columns: vec!["id".into()],
+            },
+        ],
+        foreign_keys: Vec::new(),
+    };
+    assert_eq!(
+        table.edit_key_candidates(),
+        vec![
+            ("Primary key".into(), vec!["id".into()]),
+            ("Unique index: users_email_key".into(), vec!["email".into()]),
+        ]
+    );
+}
+
+#[test]
 fn parse_page_window_reads_every_dialect() {
     let win = |sql: &str| parse_page_window(sql).unwrap();
     assert_eq!(

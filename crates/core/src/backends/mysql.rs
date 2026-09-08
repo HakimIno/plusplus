@@ -272,8 +272,8 @@ impl Database for MySqlDb {
             }
         }
 
-        let col_rows: Vec<(String, String, String, String, String, Option<String>, String)> = sqlx::query_as(
-            "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, COLUMN_COMMENT \
+        let col_rows: Vec<(String, String, String, String, String, Option<String>, String, String)> = sqlx::query_as(
+            "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, COLUMN_COMMENT, EXTRA \
              FROM information_schema.COLUMNS \
              WHERE TABLE_SCHEMA = DATABASE() \
              ORDER BY TABLE_NAME, ORDINAL_POSITION",
@@ -281,7 +281,7 @@ impl Database for MySqlDb {
         .fetch_all(&self.pool)
         .await?;
 
-        for (table, column, data_type, nullable, key, default, comment) in col_rows {
+        for (table, column, data_type, nullable, key, default, comment, extra) in col_rows {
             let col = ColumnInfo {
                 name: column,
                 data_type,
@@ -290,6 +290,8 @@ impl Database for MySqlDb {
                 default,
                 check: None,
                 comment: (!comment.is_empty()).then_some(comment),
+                generated: extra.to_ascii_lowercase().contains("auto_increment")
+                    || extra.to_ascii_lowercase().contains("generated"),
             };
             if let Some(info) = tables.get_mut(&table) {
                 info.columns.push(col);

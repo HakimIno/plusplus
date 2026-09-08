@@ -17,6 +17,9 @@ pub struct ColumnInfo {
     pub check: Option<String>,
     /// Column comment/description when supported by the backend.
     pub comment: Option<String>,
+    /// The database generates this value when the column is omitted from INSERT
+    /// (identity, auto-increment, computed default, or equivalent).
+    pub generated: bool,
 }
 
 /// An index on a table.
@@ -67,6 +70,38 @@ pub struct TableInfo {
 }
 
 impl TableInfo {
+    /// Candidate row identity columns, ordered by confidence. Primary-key columns
+    /// come first, followed by unique indexes. The order inside each candidate is
+    /// the database-reported constraint order, which matters for composite keys.
+    pub fn edit_key_candidates(&self) -> Vec<(String, Vec<String>)> {
+        let mut candidates = Vec::new();
+        let primary: Vec<String> = self
+            .columns
+            .iter()
+            .filter(|column| column.primary_key)
+            .map(|column| column.name.clone())
+            .collect();
+        if !primary.is_empty() {
+            candidates.push(("Primary key".to_string(), primary));
+        }
+        for index in self
+            .indexes
+            .iter()
+            .filter(|index| index.unique && !index.columns.is_empty())
+        {
+            if !candidates
+                .iter()
+                .any(|(_, columns)| columns == &index.columns)
+            {
+                candidates.push((
+                    format!("Unique index: {}", index.name),
+                    index.columns.clone(),
+                ));
+            }
+        }
+        candidates
+    }
+
     /// Fully-qualified, quote-safe name for use in generated SQL, quoted for `kind`
     /// (backticks on MySQL/MariaDB, ANSI double quotes elsewhere).
     pub fn qualified(&self, kind: DbKind) -> String {

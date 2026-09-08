@@ -191,6 +191,13 @@ impl DuckDb {
         for row in column_rows {
             let (schema, table, name, data_type, nullable, default) = row?;
             let primary_key = primary_keys.contains(&(schema.clone(), table.clone(), name.clone()));
+            let generated = default.as_deref().is_some_and(|value| {
+                let value = value.to_ascii_lowercase();
+                value.contains("nextval(")
+                    || value.contains("uuid")
+                    || value.contains("identity")
+                    || value.contains("generated")
+            });
             columns_by_table
                 .entry((schema, table))
                 .or_default()
@@ -202,6 +209,7 @@ impl DuckDb {
                     default,
                     check: None,
                     comment: None,
+                    generated,
                 });
         }
         for table in &mut tables {

@@ -283,7 +283,8 @@ impl Database for MsSqlDb {
                        THEN '(' + CAST(NUMERIC_PRECISION AS varchar(11)) + ',' \
                                 + CAST(NUMERIC_SCALE AS varchar(11)) + ')' \
                      ELSE '' END AS FULL_TYPE, \
-                   IS_NULLABLE, COLUMN_DEFAULT \
+                   IS_NULLABLE, COLUMN_DEFAULT, \
+                   CAST(COLUMNPROPERTY(OBJECT_ID(TABLE_SCHEMA + '.' + TABLE_NAME), COLUMN_NAME, 'IsIdentity') AS varchar(1)) AS IS_IDENTITY \
                  FROM INFORMATION_SCHEMA.COLUMNS \
                  ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION",
             )
@@ -292,17 +293,24 @@ impl Database for MsSqlDb {
             let schema = get_str(&row, 0);
             let table = get_str(&row, 1);
             let column = get_str(&row, 2);
+            let default = {
+                let value = get_str(&row, 5);
+                (!value.is_empty()).then_some(value)
+            };
+            let identity = get_str(&row, 6) == "1";
+            let generated = identity
+                || default.as_deref().is_some_and(|value| {
+                    value.to_ascii_lowercase().contains("next value for")
+                });
             let col = ColumnInfo {
                 name: column.clone(),
                 data_type: get_str(&row, 3),
                 nullable: get_str(&row, 4).eq_ignore_ascii_case("YES"),
                 primary_key: pk.contains(&(schema.clone(), table.clone(), column)),
-                default: {
-                    let value = get_str(&row, 5);
-                    (!value.is_empty()).then_some(value)
-                },
+                default,
                 check: None,
                 comment: None,
+                generated,
             };
             if let Some(info) = tables.get_mut(&(schema.clone(), table.clone())) {
                 info.columns.push(col);
