@@ -701,6 +701,7 @@ impl DbGuiApp {
                 } else {
                     self.active_query_tab
                 };
+                self.tabs[idx].plan_result = false;
                 // Clicking a toolbar button temporarily takes egui focus. Keep the last editor
                 // pane focused once the frame completes, so its stored caret still defines
                 // Run Current and typing can continue immediately after a run.
@@ -778,6 +779,67 @@ impl DbGuiApp {
                     self.start_resolved_query(idx, resolved_sql);
                 } else {
                     self.start_resolved_query_batch(idx, resolved_sql);
+                }
+            }
+            Action::ExplainQuery { analyze } => {
+                if self.busy != Busy::Idle {
+                    self.status_msg = "Busy — wait for the current operation to finish.".into();
+                    return;
+                }
+                let idx = if self.split_focus {
+                    self.split_tab.unwrap_or(self.active_query_tab)
+                } else {
+                    self.active_query_tab
+                };
+                let sql = match self.resolved_current_sql_for(idx) {
+                    Ok(sql) if !sql.trim().is_empty() => sql,
+                    Ok(_) => {
+                        self.status_msg = "Place the cursor inside a query to explain it.".into();
+                        return;
+                    }
+                    Err(message) => {
+                        self.tabs[idx].set_query_error(message);
+                        return;
+                    }
+                };
+                let Some(kind) = self.tabs[idx]
+                    .conn_id
+                    .as_deref()
+                    .and_then(|id| {
+                        self.active_connections
+                            .iter()
+                            .find(|connection| connection.config_id == id)
+                    })
+                    .map(|connection| connection.db.kind())
+                else {
+                    self.tabs[idx].set_query_error("Not connected.".into());
+                    return;
+                };
+                let safe_to_analyze = is_read_only_plan_target(&sql)
+                    && matches!(
+                        dbcore::safety::evaluate_sql(kind, &sql, false, true),
+                        dbcore::safety::SqlSafetyDecision::Allow
+                    );
+                if analyze && !safe_to_analyze {
+                    self.tabs[idx].set_query_error(
+                        "Explain Analyze executes the statement and is limited to SELECT/WITH/VALUES queries."
+                            .into(),
+                    );
+                    return;
+                }
+                match explain_sql(kind, &sql, analyze) {
+                    Ok(plan_sql) => {
+                        self.tabs[idx].edits.pending_source = None;
+                        self.tabs[idx].plan_result = true;
+                        self.tabs[idx].view = TabView::Data;
+                        self.status_msg = if analyze {
+                            "Running query plan with actual timings…".into()
+                        } else {
+                            "Building query plan…".into()
+                        };
+                        self.start_resolved_query(idx, plan_sql);
+                    }
+                    Err(message) => self.tabs[idx].set_query_error(message),
                 }
             }
             Action::ConfirmDangerQuery => {
@@ -1361,6 +1423,41 @@ impl DbGuiApp {
     }
 }
 
+fn is_read_only_plan_target(sql: &str) -> bool {
+    let first = sql
+        .trim_start_matches(|character: char| character.is_whitespace() || character == ';')
+        .split(|character: char| character.is_whitespace() || character == '(')
+        .next()
+        .unwrap_or_default();
+    matches!(
+        first.to_ascii_uppercase().as_str(),
+        "SELECT" | "WITH" | "VALUES"
+    )
+}
+
+fn explain_sql(kind: DbKind, sql: &str, analyze: bool) -> Result<String, String> {
+    let sql = sql.trim().trim_end_matches(';');
+    let command = match (kind, analyze) {
+        (DbKind::Postgres, false) => format!("EXPLAIN (FORMAT JSON) {sql}"),
+        (DbKind::Postgres, true) => {
+            format!("EXPLAIN (ANALYZE TRUE, BUFFERS TRUE, FORMAT JSON) {sql}")
+        }
+        (DbKind::MySql | DbKind::MariaDb, false) => format!("EXPLAIN FORMAT=JSON {sql}"),
+        (DbKind::MySql | DbKind::MariaDb, true) => format!("EXPLAIN ANALYZE {sql}"),
+        (DbKind::Sqlite, _) => format!("EXPLAIN QUERY PLAN {sql}"),
+        (DbKind::DuckDb, false) => format!("EXPLAIN {sql}"),
+        (DbKind::DuckDb, true) => format!("EXPLAIN ANALYZE {sql}"),
+        (DbKind::SqlServer, false) => format!("SET SHOWPLAN_XML ON;\n{sql};\nSET SHOWPLAN_XML OFF"),
+        (DbKind::SqlServer, true) => {
+            format!("SET STATISTICS XML ON;\n{sql};\nSET STATISTICS XML OFF")
+        }
+        (DbKind::Cassandra | DbKind::ScyllaDb, _) => {
+            return Err("Query plans are not available for Cassandra/ScyllaDB connections.".into())
+        }
+    };
+    Ok(command)
+}
+
 fn default_sql_filename(sql: &str) -> String {
     let stem: String = default_favorite_name(sql)
         .chars()
@@ -1418,4 +1515,33 @@ fn reveal_in_file_manager(path: &std::path::Path) -> std::io::Result<()> {
         std::process::Command::new("xdg-open").arg(dir).spawn()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    #[test]
+    fn explain_uses_each_backends_native_command() {
+        assert!(explain_sql(DbKind::Postgres, "SELECT 1;", false)
+            .unwrap()
+            .starts_with("EXPLAIN (FORMAT JSON)"));
+        assert!(explain_sql(DbKind::MySql, "SELECT 1", true)
+            .unwrap()
+            .starts_with("EXPLAIN ANALYZE"));
+        assert_eq!(
+            explain_sql(DbKind::Sqlite, "SELECT 1", true).unwrap(),
+            "EXPLAIN QUERY PLAN SELECT 1"
+        );
+        assert!(explain_sql(DbKind::Cassandra, "SELECT * FROM t", false).is_err());
+    }
+
+    #[test]
+    fn analyze_accepts_only_read_only_statement_shapes() {
+        assert!(is_read_only_plan_target(" SELECT * FROM users"));
+        assert!(is_read_only_plan_target(
+            "WITH x AS (SELECT 1) SELECT * FROM x"
+        ));
+        assert!(!is_read_only_plan_target("UPDATE users SET active = true"));
+    }
 }

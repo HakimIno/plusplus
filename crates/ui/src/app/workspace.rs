@@ -211,6 +211,8 @@ impl DbGuiApp {
         settings.code_font = self.code_font.clone();
         settings.editor_font_size = Some(self.editor_font_size);
         settings.editor_wrap_lines = Some(self.editor_wrap_lines);
+        settings.autocomplete_enabled = Some(self.autocomplete_enabled);
+        settings.ghost_suggestions_enabled = Some(self.ghost_suggestions_enabled);
         settings.beautify_uppercase = Some(self.beautify.uppercase);
         settings.beautify_indent = Some(self.beautify.indent);
         settings.run_all_by_default = Some(self.run_all_by_default);
@@ -225,7 +227,7 @@ impl DbGuiApp {
         }
     }
     /// Rebuild egui's font families from the selected custom faces and embedded fallbacks.
-    pub(super) fn apply_fonts(&self, ctx: &egui::Context) -> Result<(), String> {
+    pub(super) fn apply_fonts(&mut self, ctx: &egui::Context) -> Result<(), String> {
         let Some(app_fonts) = self.app_fonts else {
             return Ok(());
         };
@@ -234,7 +236,16 @@ impl DbGuiApp {
             app_fonts,
             self.ui_font.as_deref(),
             self.code_font.as_deref(),
-        )
+        )?;
+        // Cached galleys retain their old font metrics. Dropping them immediately prevents
+        // overlapping or stale glyph positions on the first frame after a font switch.
+        for tab in &mut self.tabs {
+            tab.sql_editor_cache.layout = None;
+            tab.editor_assist.ghost_suggestion = None;
+            tab.editor_assist.ghost_key = None;
+        }
+        ctx.request_repaint();
+        Ok(())
     }
     /// Switch the active theme, re-apply the egui style, and persist the choice.
     pub(super) fn set_theme(&mut self, ctx: &egui::Context, key: String) {

@@ -98,6 +98,12 @@ pub struct Settings {
     /// Whether long SQL lines wrap in the editor. `None` uses the default (on).
     #[serde(default)]
     pub editor_wrap_lines: Option<bool>,
+    /// Show schema/keyword autocomplete while typing. `None` uses the default (on).
+    #[serde(default)]
+    pub autocomplete_enabled: Option<bool>,
+    /// Show append-only inline SQL suggestions. `None` uses the default (on).
+    #[serde(default)]
+    pub ghost_suggestions_enabled: Option<bool>,
     /// SQL beautifier: convert reserved keywords to ALL CAPS. `None` = the default (on).
     #[serde(default)]
     pub beautify_uppercase: Option<bool>,

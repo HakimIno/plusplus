@@ -848,4 +848,28 @@ mod tests {
         buffer.finish();
         assert_eq!(text, "SELECT 21;");
     }
+
+    #[test]
+    fn replacing_a_selection_does_not_append_to_the_old_code() {
+        let sql = "SELECT old_value FROM t;";
+        let view = View::whole(sql);
+        let mut text = sql.to_string();
+        let mut buffer = Buffer::new(&mut text, &view);
+        let start = char_index_of(buffer.as_str(), "old_value");
+        buffer.delete_char_range(start..start + "old_value".chars().count());
+        buffer.insert_text("new_value", start);
+        buffer.finish();
+        assert_eq!(text, "SELECT new_value FROM t;");
+    }
+
+    #[test]
+    fn multi_character_ime_text_is_inserted_as_one_edit() {
+        let sql = "SELECT  FROM users;";
+        let view = View::whole(sql);
+        let mut text = sql.to_string();
+        let mut buffer = Buffer::new(&mut text, &view);
+        buffer.insert_text("ชื่อ", 7);
+        buffer.finish();
+        assert_eq!(text, "SELECT ชื่อ FROM users;");
+    }
 }

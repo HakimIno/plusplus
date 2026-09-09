@@ -16,6 +16,125 @@ use crate::title_bar;
 /// `(key, display name, builtin, author)`.
 type ThemeOption = (String, String, bool, Option<String>);
 
+fn flatten_plan_json(
+    value: &serde_json::Value,
+    depth: usize,
+    label: Option<&str>,
+    lines: &mut Vec<(usize, String)>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(label) = label {
+                lines.push((depth, label.to_string()));
+            }
+            for (key, value) in map {
+                flatten_plan_json(
+                    value,
+                    depth + usize::from(label.is_some()),
+                    Some(key),
+                    lines,
+                );
+            }
+        }
+        serde_json::Value::Array(values) => {
+            if let Some(label) = label {
+                lines.push((depth, label.to_string()));
+            }
+            for (index, value) in values.iter().enumerate() {
+                flatten_plan_json(
+                    value,
+                    depth + usize::from(label.is_some()),
+                    Some(&format!("Item {}", index + 1)),
+                    lines,
+                );
+            }
+        }
+        scalar => lines.push((
+            depth,
+            label.map_or_else(|| scalar.to_string(), |label| format!("{label}: {scalar}")),
+        )),
+    }
+}
+
+fn plan_lines(result: &dbcore::QueryResult) -> Vec<(usize, String)> {
+    let mut lines = Vec::new();
+    for (row_index, row) in result.rows.iter().enumerate() {
+        if result.rows.len() > 1 {
+            lines.push((0, format!("Plan row {}", row_index + 1)));
+        }
+        for (column_index, value) in row.iter().enumerate() {
+            let label = result
+                .columns
+                .get(column_index)
+                .map_or("Plan", |column| column.name.as_str());
+            let text = value.display();
+            match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(json) if json.is_array() || json.is_object() => flatten_plan_json(
+                    &json,
+                    usize::from(result.rows.len() > 1),
+                    Some(label),
+                    &mut lines,
+                ),
+                _ => lines.push((
+                    usize::from(result.rows.len() > 1),
+                    format!("{label}: {text}"),
+                )),
+            }
+        }
+    }
+    lines
+}
+
+fn plan_viewer(ui: &mut egui::Ui, result: &dbcore::QueryResult) {
+    ui.horizontal(|ui| {
+        ui.add(egui::Image::new(icons::diagram()).fit_to_exact_size(egui::Vec2::splat(15.0)));
+        ui.label(
+            egui::RichText::new("Query plan")
+                .strong()
+                .color(palette::TEXT()),
+        );
+        ui.weak(format!("{:.1} ms", result.stats.elapsed_ms));
+    });
+    ui.separator();
+    egui::ScrollArea::both().show(ui, |ui| {
+        for (depth, text) in plan_lines(result) {
+            ui.horizontal(|ui| {
+                ui.add_space(depth as f32 * 16.0);
+                if depth > 0 {
+                    ui.label(egui::RichText::new("└").color(palette::TEXT_FAINT()));
+                }
+                ui.add(
+                    egui::Label::new(egui::RichText::new(text).monospace().color(palette::TEXT()))
+                        .selectable(true),
+                );
+            });
+        }
+    });
+}
+
+#[cfg(test)]
+mod query_plan_tests {
+    use super::*;
+
+    #[test]
+    fn json_query_plans_become_hierarchical_rows() {
+        let result = dbcore::QueryResult {
+            columns: vec![dbcore::ColumnMeta {
+                name: "QUERY PLAN".into(),
+                type_name: "json".into(),
+            }],
+            rows: vec![vec![dbcore::Value::Text(
+                r#"[{"Plan":{"Node Type":"Seq Scan","Relation Name":"users"}}]"#.into(),
+            )]],
+            ..Default::default()
+        };
+        let lines = plan_lines(&result);
+        assert!(lines.iter().any(|(depth, line)| {
+            *depth >= 2 && line.contains("Node Type") && line.contains("Seq Scan")
+        }));
+    }
+}
+
 fn settings_nav_item(
     ui: &mut egui::Ui,
     current: &mut SettingsSection,
@@ -1710,6 +1829,18 @@ impl DbGuiApp {
                     {
                         self.tab_mut().parameters_expanded = !self.tab().parameters_expanded;
                     }
+                    ui.add_enabled_ui(can_run, |ui| {
+                        components::menu_button(ui, icons::diagram(), "Plan", |ui| {
+                            if ui.button("Explain").clicked() {
+                                actions.push(Action::ExplainQuery { analyze: false });
+                                ui.close();
+                            }
+                            if ui.button("Explain Analyze").clicked() {
+                                actions.push(Action::ExplainQuery { analyze: true });
+                                ui.close();
+                            }
+                        });
+                    });
                     let resp =
                         components::beautify_button(ui, &mut self.beautify, has_sql, dialect_label);
                     if resp.clicked {
@@ -2132,6 +2263,11 @@ impl DbGuiApp {
                 self.query_parameter_panel(ui);
                 let mut font = egui::TextStyle::Monospace.resolve(ui.style());
                 font.size = self.editor_font_size;
+                let editor_id = egui::Id::new(("sql_editor", tab_id, "primary"));
+
+                if self.tabs[idx].find.open {
+                    self.editor_find_bar(ui, editor_id);
+                }
 
                 if self.tabs[idx].editor_split && self.split_tab.is_none() {
                     let split_id = egui::Id::new(("sql_editor_split", tab_id));
@@ -2184,9 +2320,19 @@ impl DbGuiApp {
                 // Ghost text (fish-shell autosuggestion): when the popup is closed and a
                 // suggestion was trailing the caret last frame, Tab accepts it. Stolen here,
                 // before the editor, so the keystroke drives the suggestion, not a literal tab.
-                let accept_ghost = !self.tabs[idx].editor_assist.autocomplete.open
-                    && self.tabs[idx].editor_assist.ghost_suggestion.is_some()
+                let editor_focused_before = ui
+                    .ctx()
+                    .memory(|memory| memory.focused() == Some(editor_id));
+                let plain_tab = editor_focused_before
+                    && !self.tabs[idx].editor_assist.autocomplete.open
                     && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+                let snippet_handled = plain_tab
+                    && (self.advance_snippet_placeholder(ui.ctx(), editor_id)
+                        || self.expand_snippet_at_caret(ui.ctx(), editor_id));
+                let accept_ghost = self.ghost_suggestions_enabled
+                    && plain_tab
+                    && !snippet_handled
+                    && self.tabs[idx].editor_assist.ghost_suggestion.is_some();
 
                 // Fill the panel's height instead of shrinking to the text: otherwise a long
                 // query would grow the scroll area and push the whole panel taller, fighting
@@ -2271,7 +2417,6 @@ impl DbGuiApp {
                                     ui.fonts_mut(|fonts| fonts.glyph_width(&font, '0'));
                                 let gutter_width =
                                     digits as f32 * digit_width + 14.0 + FOLD_CHEVRON_W;
-                                let editor_id = egui::Id::new(("sql_editor", tab_id, "primary"));
                                 let multi_changed =
                                     self.apply_multi_cursor_input(ui.ctx(), editor_id);
                                 if !self.tabs[idx].editor_assist.autocomplete.open
@@ -2282,6 +2427,7 @@ impl DbGuiApp {
                                     self.add_next_cursor(ui.ctx(), editor_id);
                                 }
                                 let previous_primary = self.tabs[idx].primary_cursor.clone();
+                                let previous_sql_chars = self.tabs[idx].sql.chars().count();
                                 // `.show()` (not `ui.add`) exposes the galley + cursor so the popup can
                                 // anchor under the caret and we can move the caret after an insertion.
                                 let (gutter_rect, output, shifts, refused_undo) = ui
@@ -2405,12 +2551,51 @@ impl DbGuiApp {
                                         .pos_from_cursor(c)
                                         .translate(output.galley_pos.to_vec2())
                                 });
+                                if let Some(caret) = cursor_char {
+                                    Self::paint_matching_brackets(
+                                        ui,
+                                        &self.tabs[idx].sql,
+                                        caret,
+                                        &editor_cache.view,
+                                        &output.galley,
+                                        output.galley_pos,
+                                    );
+                                }
 
                                 let source_range = output.cursor_range.map(|range| {
                                     let sorted = range.as_sorted_char_range();
                                     editor_cache.view.to_source(sorted.start)
                                         ..editor_cache.view.to_source_end(sorted.end)
                                 });
+                                if text_changed && !self.tabs[idx].snippet_placeholders.is_empty() {
+                                    let active = self.tabs[idx].snippet_placeholder;
+                                    let placeholder =
+                                        self.tabs[idx].snippet_placeholders.get(active).cloned();
+                                    if let (Some(placeholder), Some(cursor)) =
+                                        (placeholder, source_range.as_ref())
+                                    {
+                                        if previous_primary.start >= placeholder.start
+                                            && previous_primary.end <= placeholder.end
+                                        {
+                                            let new_len = self.tabs[idx].sql.chars().count();
+                                            let delta =
+                                                new_len as isize - previous_sql_chars as isize;
+                                            self.tabs[idx].snippet_placeholders[active].end =
+                                                cursor.end.max(placeholder.start);
+                                            for later in self.tabs[idx]
+                                                .snippet_placeholders
+                                                .iter_mut()
+                                                .skip(active + 1)
+                                            {
+                                                later.start =
+                                                    later.start.saturating_add_signed(delta);
+                                                later.end = later.end.saturating_add_signed(delta);
+                                            }
+                                        } else {
+                                            self.tabs[idx].snippet_placeholders.clear();
+                                        }
+                                    }
+                                }
                                 if focused || resp.clicked() {
                                     if let Some(source_range) = source_range.clone() {
                                         self.tabs[idx].primary_cursor = source_range;
@@ -2489,38 +2674,56 @@ impl DbGuiApp {
                                         true
                                     });
 
-                                if !toggled {
-                                    self.update_autocomplete(
-                                        &ctx,
-                                        editor_id,
-                                        focused,
-                                        text_changed,
-                                        force,
-                                        cursor_char,
-                                        cursor_rect,
-                                        nav,
-                                    );
+                                let assisted = !toggled
+                                    && text_changed
+                                    && focused
+                                    && cursor_char.is_some_and(|caret| {
+                                        self.apply_typing_assist(&ctx, editor_id, caret)
+                                    });
 
-                                    self.update_ghost(
-                                        ui,
-                                        &ctx,
-                                        editor_id,
-                                        focused,
-                                        cursor_char,
-                                        cursor_rect,
-                                        &font,
-                                        accept_ghost,
-                                    );
+                                if !toggled && !assisted {
+                                    if self.autocomplete_enabled || force {
+                                        self.update_autocomplete(
+                                            &ctx,
+                                            editor_id,
+                                            focused,
+                                            text_changed,
+                                            force,
+                                            cursor_char,
+                                            cursor_rect,
+                                            nav,
+                                        );
+                                    } else {
+                                        self.tabs[idx].editor_assist.autocomplete.open = false;
+                                    }
+
+                                    if self.ghost_suggestions_enabled {
+                                        self.update_ghost(
+                                            ui,
+                                            &ctx,
+                                            editor_id,
+                                            focused,
+                                            cursor_char,
+                                            cursor_rect,
+                                            &font,
+                                            accept_ghost,
+                                        );
+                                    } else {
+                                        self.tabs[idx].editor_assist.ghost_suggestion = None;
+                                        self.tabs[idx].editor_assist.ghost_key = None;
+                                    }
                                 }
 
-                                self.update_diagnostics(
-                                    ui,
-                                    &output.galley,
-                                    output.galley_pos,
-                                    text_changed,
-                                    cursor_char,
-                                    &editor_cache.view,
-                                );
+                                if !assisted {
+                                    self.update_diagnostics(
+                                        ui,
+                                        &output.galley,
+                                        output.galley_pos,
+                                        text_changed,
+                                        cursor_char,
+                                        &editor_cache.view,
+                                    );
+                                }
                                 self.tabs[idx].sql_editor_cache = editor_cache;
                             });
                     });
@@ -2931,6 +3134,346 @@ impl DbGuiApp {
             palette::TEXT_FAINT(),
         );
         self.tabs[idx].editor_assist.ghost_suggestion = Some(remainder);
+    }
+
+    /// Compact editor-local find/replace. Ranges are character offsets so Thai and other
+    /// multi-byte text select and replace correctly.
+    fn editor_find_bar(&mut self, ui: &mut egui::Ui, editor_id: egui::Id) {
+        let idx = self.active_query_tab;
+        let find_id = editor_id.with("find_query");
+        let mut previous = false;
+        let mut next = false;
+        let mut replace = false;
+        let mut replace_all = false;
+        let mut close = false;
+
+        egui::Frame::new()
+            .fill(palette::SURFACE())
+            .inner_margin(egui::Margin::symmetric(8, 5))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    let query = ui.add(
+                        egui::TextEdit::multiline(&mut self.tabs[idx].find.query)
+                            .id(find_id)
+                            .hint_text("Find")
+                            .desired_rows(1)
+                            .desired_width(180.0),
+                    );
+                    if query.changed() {
+                        self.tabs[idx].find.current = 0;
+                    }
+                    if self.tabs[idx].find.focus_pending {
+                        query.request_focus();
+                        self.tabs[idx].find.focus_pending = false;
+                    }
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.tabs[idx].find.replacement)
+                            .hint_text("Replace")
+                            .desired_rows(1)
+                            .desired_width(180.0),
+                    );
+                    let count = crate::editor_tools::matches(
+                        &self.tabs[idx].sql,
+                        &self.tabs[idx].find.query,
+                        self.tabs[idx].find.match_case,
+                    )
+                    .len();
+                    if count == 0 {
+                        ui.weak("0/0");
+                    } else {
+                        let current = self.tabs[idx].find.current.min(count - 1) + 1;
+                        ui.weak(format!("{current}/{count}"));
+                    }
+                    previous = ui
+                        .small_button("↑")
+                        .on_hover_text("Previous match")
+                        .clicked();
+                    next = ui.small_button("↓").on_hover_text("Next match").clicked();
+                    if ui
+                        .selectable_label(self.tabs[idx].find.match_case, "Aa")
+                        .on_hover_text("Match case")
+                        .clicked()
+                    {
+                        self.tabs[idx].find.match_case = !self.tabs[idx].find.match_case;
+                        self.tabs[idx].find.current = 0;
+                    }
+                    replace = ui.small_button("Replace").clicked();
+                    replace_all = ui
+                        .small_button("All")
+                        .on_hover_text("Replace all")
+                        .clicked();
+                    close = ui.small_button("×").on_hover_text("Close").clicked();
+                });
+            });
+
+        close |= ui.input(|input| input.key_pressed(egui::Key::Escape))
+            && ui.ctx().memory(|memory| memory.focused() == Some(find_id));
+        if close {
+            self.tabs[idx].find.open = false;
+            ui.ctx()
+                .memory_mut(|memory| memory.request_focus(editor_id));
+            return;
+        }
+
+        let mut found = crate::editor_tools::matches(
+            &self.tabs[idx].sql,
+            &self.tabs[idx].find.query,
+            self.tabs[idx].find.match_case,
+        );
+        if found.is_empty() {
+            self.tabs[idx].find.current = 0;
+            return;
+        }
+        if previous {
+            self.tabs[idx].find.current =
+                (self.tabs[idx].find.current + found.len() - 1) % found.len();
+        } else if next {
+            self.tabs[idx].find.current = (self.tabs[idx].find.current + 1) % found.len();
+        }
+
+        if replace_all {
+            let query = self.tabs[idx].find.query.clone();
+            let replacement = self.tabs[idx].find.replacement.clone();
+            let match_case = self.tabs[idx].find.match_case;
+            let count = crate::editor_tools::replace_all(
+                &mut self.tabs[idx].sql,
+                &query,
+                &replacement,
+                match_case,
+            );
+            if count > 0 {
+                self.finish_external_editor_edit(idx);
+                self.status_msg = format!("Replaced {count} matches");
+            }
+            self.tabs[idx].find.current = 0;
+            return;
+        }
+        if replace {
+            let current = self.tabs[idx].find.current.min(found.len() - 1);
+            let replacement = self.tabs[idx].find.replacement.clone();
+            let caret = crate::editor_tools::replace_range(
+                &mut self.tabs[idx].sql,
+                found[current].clone(),
+                &replacement,
+            );
+            self.finish_external_editor_edit(idx);
+            found = crate::editor_tools::matches(
+                &self.tabs[idx].sql,
+                &self.tabs[idx].find.query,
+                self.tabs[idx].find.match_case,
+            );
+            self.tabs[idx].find.current = current.min(found.len().saturating_sub(1));
+            self.select_editor_range(ui.ctx(), editor_id, caret..caret);
+        } else if previous || next {
+            let current = self.tabs[idx].find.current.min(found.len() - 1);
+            self.select_editor_range(ui.ctx(), editor_id, found[current].clone());
+        }
+    }
+
+    fn finish_external_editor_edit(&mut self, idx: usize) {
+        let tab = &mut self.tabs[idx];
+        tab.folds.clear();
+        tab.extra_cursors.clear();
+        tab.snippet_placeholders.clear();
+        tab.mark_sql_changed();
+        tab.edits.source = None;
+        tab.preview = false;
+        self.workspace_dirty = true;
+    }
+
+    fn select_editor_range(
+        &mut self,
+        ctx: &egui::Context,
+        editor_id: egui::Id,
+        range: std::ops::Range<usize>,
+    ) {
+        let idx = self.active_query_tab;
+        self.tabs[idx].folds.clear();
+        self.tabs[idx].primary_cursor = range.clone();
+        if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, editor_id) {
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(range.start),
+                    egui::text::CCursor::new(range.end),
+                )));
+            state.store(ctx, editor_id);
+        }
+        ctx.memory_mut(|memory| memory.request_focus(editor_id));
+    }
+
+    /// `sel<Tab>`, `ins<Tab>`, … expand built-in SQL templates. Placeholder ranges remain
+    /// selections, making each subsequent Tab jump to the next value to fill.
+    fn expand_snippet_at_caret(&mut self, ctx: &egui::Context, editor_id: egui::Id) -> bool {
+        let idx = self.active_query_tab;
+        let caret = self.tabs[idx].primary_cursor.end;
+        if self.tabs[idx].primary_cursor.start != caret {
+            return false;
+        }
+        let chars: Vec<char> = self.tabs[idx].sql.chars().collect();
+        let start = chars[..caret.min(chars.len())]
+            .iter()
+            .rposition(|c| !c.is_ascii_alphanumeric() && *c != '_')
+            .map_or(0, |at| at + 1);
+        let trigger: String = chars[start..caret.min(chars.len())].iter().collect();
+        let Some(snippet) = crate::editor_tools::SNIPPETS
+            .iter()
+            .find(|snippet| snippet.trigger.eq_ignore_ascii_case(&trigger))
+        else {
+            return false;
+        };
+        let (expanded, ranges) = crate::editor_tools::expand_snippet(snippet.body);
+        let byte_start = char_to_byte(&self.tabs[idx].sql, start);
+        let byte_end = char_to_byte(&self.tabs[idx].sql, caret);
+        self.tabs[idx]
+            .sql
+            .replace_range(byte_start..byte_end, &expanded);
+        self.tabs[idx].snippet_placeholders = ranges
+            .into_iter()
+            .map(|range| start + range.start..start + range.end)
+            .collect();
+        self.tabs[idx].snippet_placeholder = 0;
+        self.finish_external_editor_edit_preserving_snippet(idx);
+        let range = self.tabs[idx]
+            .snippet_placeholders
+            .first()
+            .cloned()
+            .unwrap_or_else(|| {
+                let end = start + expanded.chars().count();
+                end..end
+            });
+        self.select_editor_range(ctx, editor_id, range);
+        self.status_msg = format!("Inserted {} snippet", snippet.label);
+        true
+    }
+
+    fn advance_snippet_placeholder(&mut self, ctx: &egui::Context, editor_id: egui::Id) -> bool {
+        let idx = self.active_query_tab;
+        if self.tabs[idx].snippet_placeholders.is_empty() {
+            return false;
+        }
+        let next = self.tabs[idx].snippet_placeholder + 1;
+        if next >= self.tabs[idx].snippet_placeholders.len() {
+            self.tabs[idx].snippet_placeholders.clear();
+            return true;
+        }
+        self.tabs[idx].snippet_placeholder = next;
+        let range = self.tabs[idx].snippet_placeholders[next].clone();
+        self.select_editor_range(ctx, editor_id, range);
+        true
+    }
+
+    fn finish_external_editor_edit_preserving_snippet(&mut self, idx: usize) {
+        let placeholders = std::mem::take(&mut self.tabs[idx].snippet_placeholders);
+        self.finish_external_editor_edit(idx);
+        self.tabs[idx].snippet_placeholders = placeholders;
+    }
+
+    /// Add the small pieces TextEdit intentionally leaves to code editors: matching closers
+    /// and indentation after Enter. Multi-character text events and paste are ignored so IME
+    /// composition and bulk insertion remain entirely owned by egui.
+    fn apply_typing_assist(
+        &mut self,
+        ctx: &egui::Context,
+        editor_id: egui::Id,
+        caret: usize,
+    ) -> bool {
+        let events = ctx.input(|input| input.events.clone());
+        let typed = events.iter().rev().find_map(|event| match event {
+            egui::Event::Text(text) if text.chars().count() == 1 => text.chars().next(),
+            _ => None,
+        });
+        let entered = events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::Key {
+                    key: egui::Key::Enter,
+                    pressed: true,
+                    ..
+                }
+            )
+        });
+        let idx = self.active_query_tab;
+
+        let insertion = match typed {
+            Some('(') => Some(")".to_string()),
+            Some('[') => Some("]".to_string()),
+            Some('{') => Some("}".to_string()),
+            Some('\'') => Some("'".to_string()),
+            Some('"') => Some("\"".to_string()),
+            _ if entered => {
+                let indent =
+                    crate::editor_tools::indentation_after_newline(&self.tabs[idx].sql, caret);
+                (!indent.is_empty()).then_some(indent)
+            }
+            _ => None,
+        };
+        let Some(insertion) = insertion else {
+            return false;
+        };
+
+        // Do not double a closer that already follows the caret (common while editing inside
+        // an existing pair). Indentation is allowed to repeat whitespace by design.
+        if !entered
+            && self.tabs[idx]
+                .sql
+                .chars()
+                .nth(caret)
+                .is_some_and(|next| insertion.starts_with(next))
+        {
+            return false;
+        }
+        let byte = char_to_byte(&self.tabs[idx].sql, caret);
+        self.tabs[idx].sql.insert_str(byte, &insertion);
+        self.tabs[idx].mark_sql_changed();
+        self.shift_folds(idx, caret, insertion.chars().count() as isize);
+        self.workspace_dirty = true;
+        // For pairs the caret stays between the characters; after Enter it moves through the
+        // inserted indentation.
+        let target = if entered {
+            caret + insertion.chars().count()
+        } else {
+            caret
+        };
+        self.select_editor_range(ctx, editor_id, target..target);
+        true
+    }
+
+    fn paint_matching_brackets(
+        ui: &egui::Ui,
+        sql: &str,
+        caret: usize,
+        view: &crate::fold::View,
+        galley: &egui::Galley,
+        galley_pos: egui::Pos2,
+    ) {
+        let Some((left, right)) = crate::editor_tools::matching_bracket(sql, caret) else {
+            return;
+        };
+        for source in [left, right] {
+            let (Some(start), Some(end)) = (view.to_display(source), view.to_display(source + 1))
+            else {
+                continue;
+            };
+            let offset = galley_pos.to_vec2();
+            let from = galley
+                .pos_from_cursor(egui::text::CCursor::new(start))
+                .translate(offset);
+            let to = galley
+                .pos_from_cursor(egui::text::CCursor::new(end))
+                .translate(offset);
+            let rect = egui::Rect::from_min_max(
+                egui::pos2(from.left(), from.top()),
+                egui::pos2(to.left().max(from.left() + 3.0), from.bottom()),
+            );
+            ui.painter().rect_stroke(
+                rect.shrink(0.5),
+                egui::CornerRadius::same(2),
+                egui::Stroke::new(1.0, palette::ACCENT()),
+                egui::StrokeKind::Inside,
+            );
+        }
     }
 
     /// Re-check the editor's SQL for syntax errors and mark the first one: a red squiggle
@@ -4777,6 +5320,16 @@ impl DbGuiApp {
                 TabView::Data | TabView::Structure | TabView::Indexes => {}
             }
         }
+        if self.tabs[idx].plan_result && self.tabs[idx].view == TabView::Data {
+            egui::CentralPanel::default().show_inside(root, |ui| {
+                if let Some(result) = self.tabs[idx].result.as_ref() {
+                    plan_viewer(ui, result);
+                } else {
+                    crate::pet::show(ui);
+                }
+            });
+            return;
+        }
         let editable = self.tabs[idx].edits.editable();
         // Per-column FK labels for the grid's link/"Follow →" affordance (owned, so it doesn't
         // hold a borrow across the mutable tab access below).
@@ -5501,6 +6054,8 @@ impl DbGuiApp {
         let mut code_font = self.code_font.clone();
         let mut editor_font_size = self.editor_font_size;
         let mut editor_wrap_lines = self.editor_wrap_lines;
+        let mut autocomplete_enabled = self.autocomplete_enabled;
+        let mut ghost_suggestions_enabled = self.ghost_suggestions_enabled;
         let mut import_font = false;
         let custom_fonts = self.custom_fonts.clone();
         let mut section = self.settings_section;
@@ -5876,6 +6431,24 @@ impl DbGuiApp {
                                         "Wrap long lines",
                                         "Keep long SQL statements visible without horizontal scrolling.",
                                     );
+                                    ui.add_space(12.0);
+                                    ui.separator();
+                                    ui.add_space(12.0);
+                                    settings_toggle_row(
+                                        ui,
+                                        &mut autocomplete_enabled,
+                                        "Autocomplete",
+                                        "Suggest SQL keywords, tables and columns while typing.",
+                                    );
+                                    ui.add_space(12.0);
+                                    ui.separator();
+                                    ui.add_space(12.0);
+                                    settings_toggle_row(
+                                        ui,
+                                        &mut ghost_suggestions_enabled,
+                                        "Inline suggestions",
+                                        "Show a short completion after the caret; press Tab to accept it.",
+                                    );
                                     ui.add_space(14.0);
                                     ui.separator();
                                     ui.add_space(28.0);
@@ -6138,6 +6711,8 @@ impl DbGuiApp {
             || update_check_enabled != self.update_check_enabled
             || editor_font_size != self.editor_font_size
             || editor_wrap_lines != self.editor_wrap_lines
+            || autocomplete_enabled != self.autocomplete_enabled
+            || ghost_suggestions_enabled != self.ghost_suggestions_enabled
             || result_memory_budget_mb as usize * 1024 * 1024 != self.result_memory_budget;
         if preferences_changed {
             self.history_enabled = history_enabled;
@@ -6145,6 +6720,8 @@ impl DbGuiApp {
             self.update_check_enabled = update_check_enabled;
             self.editor_font_size = editor_font_size;
             self.editor_wrap_lines = editor_wrap_lines;
+            self.autocomplete_enabled = autocomplete_enabled;
+            self.ghost_suggestions_enabled = ghost_suggestions_enabled;
             self.result_memory_budget = result_memory_budget_mb as usize * 1024 * 1024;
             self.enforce_result_memory_budget();
             self.persist_settings();

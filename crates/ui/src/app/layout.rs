@@ -500,11 +500,22 @@ impl DbGuiApp {
                 actions.push(Action::CloseTab(self.active_query_tab));
             }
         }
-        // Cmd/Ctrl+F toggles the filter bar (when there's a result to filter); Esc hides it.
-        if self.tab().result.is_some()
-            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F))
+        // Cmd/Ctrl+F belongs to the SQL editor while text has focus; outside the editor it
+        // keeps the existing result-filter shortcut.
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
+            if typing && self.tab().kind == crate::components::QueryTabKind::Query {
+                self.tab_mut().find.open = true;
+                self.tab_mut().find.focus_pending = true;
+            } else if self.tab().result.is_some() {
+                actions.push(Action::ToggleFilter(self.tab().id));
+            }
+        }
+        if typing
+            && self.tab().kind == crate::components::QueryTabKind::Query
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::H))
         {
-            actions.push(Action::ToggleFilter(self.tab().id));
+            self.tab_mut().find.open = true;
+            self.tab_mut().find.focus_pending = true;
         }
         if self.tab().filter.visible && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.tab_mut().filter.visible = false;

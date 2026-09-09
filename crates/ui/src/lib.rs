@@ -8,6 +8,7 @@ mod autocomplete;
 mod chart;
 mod components;
 mod edit;
+mod editor_tools;
 mod emoji;
 mod erd;
 mod filter;

@@ -742,12 +742,17 @@ struct QueryTab {
     /// Autocomplete, ghost text and diagnostics belong to this editor pane. A split pane is
     /// backed by its own `QueryTab`, so neither side can overwrite the other's popup/cache.
     editor_assist: EditorAssistState,
+    find: crate::editor_tools::FindState,
+    snippet_placeholders: Vec<std::ops::Range<usize>>,
+    snippet_placeholder: usize,
     /// Last splitter-selected SQL editor height in egui points. `None` uses the contextual
     /// default; once the user drags the splitter this is persisted with the workspace.
     editor_size: Option<f32>,
     /// Last execution failure for this tab. Kept beside the result so an error follows the
     /// query tab that produced it instead of existing only in the global status bar.
     query_error: Option<String>,
+    /// The current result came from Explain/Analyze and should use the hierarchical plan view.
+    plan_result: bool,
     result: Option<QueryResult>,
     /// Changes whenever the displayed result is replaced; invalidates edit previews.
     result_revision: u64,
@@ -823,8 +828,12 @@ impl QueryTab {
             extra_cursors: Vec::new(),
             primary_cursor: 0..0,
             editor_assist: EditorAssistState::default(),
+            find: crate::editor_tools::FindState::default(),
+            snippet_placeholders: Vec::new(),
+            snippet_placeholder: 0,
             editor_size: None,
             query_error: None,
+            plan_result: false,
             result: None,
             result_revision: 0,
             batch_results: Vec::new(),
@@ -1577,6 +1586,11 @@ enum Action {
     BrowseSshKey,
     RunQuery,
     RunCurrentQuery,
+    /// Run a backend-native query plan for the current statement. `analyze` executes it to
+    /// collect actual timings and is therefore limited to read-only statements.
+    ExplainQuery {
+        analyze: bool,
+    },
     /// Reformat the active tab's SQL in its connection's dialect (Beautify, Cmd/Ctrl+I).
     BeautifySql,
     /// Open a table's rows from the sidebar. `source` makes the result editable. `pin` opens
@@ -1947,6 +1961,8 @@ pub struct DbGuiApp {
     /// SQL editor presentation preferences, persisted independently of the selected code face.
     editor_font_size: f32,
     editor_wrap_lines: bool,
+    autocomplete_enabled: bool,
+    ghost_suggestions_enabled: bool,
     /// SQL beautifier preferences (persisted to settings.json).
     beautify: crate::format::BeautifyPrefs,
     /// Whether the main Run segment executes all statements rather than the current one.
@@ -2065,6 +2081,8 @@ impl DbGuiApp {
         let code_font = available(settings.code_font.clone());
         let editor_font_size = settings.editor_font_size.unwrap_or(14.0).clamp(9.0, 24.0);
         let editor_wrap_lines = settings.editor_wrap_lines.unwrap_or(true);
+        let autocomplete_enabled = settings.autocomplete_enabled.unwrap_or(true);
+        let ghost_suggestions_enabled = settings.ghost_suggestions_enabled.unwrap_or(true);
         crate::theme::set_current(themes.theme_of(&theme));
         let beautify_defaults = crate::format::BeautifyPrefs::default();
         let beautify = crate::format::BeautifyPrefs {
@@ -2159,6 +2177,8 @@ impl DbGuiApp {
             custom_fonts,
             editor_font_size,
             editor_wrap_lines,
+            autocomplete_enabled,
+            ghost_suggestions_enabled,
             beautify,
             run_all_by_default,
             commit_pending: None,
