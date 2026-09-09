@@ -307,6 +307,29 @@ pub fn referenced_tables(chars: &[char]) -> Vec<(String, String)> {
     out
 }
 
+/// Names introduced by a `WITH name AS (...)` clause. This deliberately uses the same
+/// lightweight lexer as completion: incomplete SQL still produces useful suggestions while
+/// a full parser would reject it until the closing parenthesis arrives.
+pub fn cte_names(chars: &[char]) -> Vec<String> {
+    let words = tokenize_words(chars);
+    if !words
+        .first()
+        .is_some_and(|word| word.eq_ignore_ascii_case("WITH"))
+    {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for window in words.windows(3) {
+        if window[1].eq_ignore_ascii_case("AS")
+            && matches!(window[2].to_ascii_uppercase().as_str(), "SELECT" | "WITH")
+            && !is_keyword(&window[0])
+        {
+            out.push(window[0].clone());
+        }
+    }
+    out
+}
+
 /// Split the SQL into bare words for the table/alias scan: identifiers (dotted chains
 /// reduced to their last segment, quotes stripped), skipping strings and comments.
 pub fn tokenize_words(chars: &[char]) -> Vec<String> {
@@ -444,6 +467,16 @@ mod tests {
         assert_eq!(
             referenced_tables(&c),
             vec![("orders".to_string(), "orders".to_string())]
+        );
+    }
+
+    #[test]
+    fn ctes_are_discovered_from_incomplete_editor_sql() {
+        assert_eq!(
+            cte_names(&cv(
+                "WITH recent AS (SELECT * FROM orders) SELECT * FROM rec"
+            )),
+            vec!["recent"]
         );
     }
 }

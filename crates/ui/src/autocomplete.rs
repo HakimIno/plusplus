@@ -9,7 +9,7 @@
 //! lives in [`crate::sqlctx`], shared with the inline ghost suggestion.
 
 use crate::sqlctx::{
-    ident_before, in_string_or_comment, is_ident_char, previous_word, referenced_tables,
+    cte_names, ident_before, in_string_or_comment, is_ident_char, previous_word, referenced_tables,
 };
 use dbcore::{DbKind, SchemaTree};
 
@@ -101,6 +101,21 @@ pub struct NavKeys {
 }
 
 const MAX_ITEMS: usize = 100;
+const FUNCTIONS: &[&str] = &[
+    "AVG",
+    "COALESCE",
+    "COUNT",
+    "CURRENT_DATE",
+    "CURRENT_TIMESTAMP",
+    "LOWER",
+    "MAX",
+    "MIN",
+    "NULLIF",
+    "ROUND",
+    "SUM",
+    "TRIM",
+    "UPPER",
+];
 
 /// Compute suggestions for the identifier being typed at `cursor` (a char index).
 ///
@@ -154,6 +169,7 @@ pub fn complete(
     }
 
     let mut items = Vec::new();
+    let ctes = cte_names(&chars);
 
     if after_dot {
         // `qualifier.` → columns of that table/alias, or tables of that schema.
@@ -170,6 +186,28 @@ pub fn complete(
             if t.name.eq_ignore_ascii_case(&table_name) {
                 found = true;
                 push_columns(&mut items, t, kind, &prefix);
+            }
+        }
+        if !found
+            && ctes
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(&table_name))
+        {
+            // A CTE's exact projection may still be half-written. Use columns from the
+            // physical tables referenced inside it, which is both useful and safe.
+            for (_, referenced) in referenced_tables(&chars) {
+                if ctes
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(&referenced))
+                {
+                    continue;
+                }
+                for table in &schema.tables {
+                    if table.name.eq_ignore_ascii_case(&referenced) {
+                        found = true;
+                        push_columns(&mut items, table, kind, &prefix);
+                    }
+                }
             }
         }
         if !found {
@@ -241,6 +279,17 @@ pub fn complete(
                 }
             }
         }
+        if table_context {
+            for cte in &ctes {
+                if matches_prefix(cte, &prefix) {
+                    items.push(Suggestion {
+                        insert: maybe_quote(cte, kind),
+                        detail: "CTE".to_string(),
+                        kind: SuggestionKind::Table,
+                    });
+                }
+            }
+        }
 
         if !table_context {
             // Keywords lead at a statement start (nothing significant before the
@@ -248,13 +297,28 @@ pub fn complete(
             let lead = prev.is_none();
             let mut keywords: Vec<Suggestion> = crate::highlight::KEYWORDS
                 .iter()
-                .filter(|k| matches_prefix(k, &prefix))
+                .filter(|k| {
+                    matches_prefix(k, &prefix)
+                        && !FUNCTIONS
+                            .iter()
+                            .any(|function| function.eq_ignore_ascii_case(k))
+                })
                 .map(|k| Suggestion {
                     insert: (*k).to_string(),
                     detail: "keyword".to_string(),
                     kind: SuggestionKind::Keyword,
                 })
                 .collect();
+            keywords.extend(
+                FUNCTIONS
+                    .iter()
+                    .filter(|function| matches_prefix(function, &prefix))
+                    .map(|function| Suggestion {
+                        insert: (*function).to_string(),
+                        detail: "function".to_string(),
+                        kind: SuggestionKind::Keyword,
+                    }),
+            );
             if lead {
                 keywords.append(&mut items);
                 items = keywords;
@@ -820,6 +884,25 @@ mod tests {
     fn keywords_without_connection() {
         let c = complete("SEL", 3, None, None, false).unwrap();
         assert_eq!(c.items[0].insert, "SELECT");
+    }
+
+    #[test]
+    fn functions_are_suggested_in_expression_context() {
+        let c = complete("SELECT COU", 10, None, None, false).unwrap();
+        assert!(c
+            .items
+            .iter()
+            .any(|item| item.insert == "COUNT" && item.detail == "function"));
+    }
+
+    #[test]
+    fn ctes_are_suggested_as_tables_without_a_connection() {
+        let sql = "WITH recent AS (SELECT * FROM orders) SELECT * FROM rec";
+        let c = complete(sql, sql.chars().count(), None, None, false).unwrap();
+        assert!(c
+            .items
+            .iter()
+            .any(|item| item.insert == "recent" && item.detail == "CTE"));
     }
 
     /// Apply the chosen suggestion the way `accept_suggestion` does: overwrite
