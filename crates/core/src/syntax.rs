@@ -85,6 +85,23 @@ pub fn check_syntax(kind: Option<DbKind>, sql: &str) -> Option<SyntaxError> {
         .try_with_sql(sql)
         .and_then(|mut parser| parser.parse_statements())
         .err()?;
+
+    // sqlparser 0.62 parses each comma-separated ALTER TABLE item as a complete
+    // operation. SQL Server instead permits one ADD followed by several column
+    // definitions (`ADD a INT, b DATETIME`), so retry that spelling with the
+    // implicit ADDs made explicit before showing a false-positive squiggle.
+    if matches!(kind, Some(DbKind::SqlServer)) {
+        if let Some(rewritten) = mssql_explicit_adds(sql, &tokens) {
+            if Parser::new(dialect)
+                .with_recursion_limit(RECURSION_LIMIT)
+                .try_with_sql(&rewritten)
+                .and_then(|mut parser| parser.parse_statements())
+                .is_ok()
+            {
+                return None;
+            }
+        }
+    }
     let raw = match &error {
         ParserError::TokenizerError(message) | ParserError::ParserError(message) => message,
         // Nesting deeper than the limit is our guard tripping, not the user's typo.
@@ -100,6 +117,60 @@ pub fn check_syntax(kind: Option<DbKind>, sql: &str) -> Option<SyntaxError> {
         range,
         message: humanize(&message),
     })
+}
+
+/// Rewrite SQL Server's `ALTER TABLE t ADD a INT, b INT` into the equivalent shape
+/// understood by sqlparser: `ALTER TABLE t ADD a INT, ADD b INT`.
+fn mssql_explicit_adds(sql: &str, tokens: &[TokenWithSpan]) -> Option<String> {
+    let mut saw_alter = false;
+    let mut saw_table = false;
+    let mut in_add = false;
+    let mut depth = 0usize;
+    let mut insertions = Vec::new();
+
+    for token in tokens.iter().filter(|token| is_significant(token)) {
+        match token.token {
+            Token::LParen => depth += 1,
+            Token::RParen => depth = depth.saturating_sub(1),
+            Token::SemiColon if depth == 0 => {
+                saw_alter = false;
+                saw_table = false;
+                in_add = false;
+            }
+            Token::Comma if depth == 0 && in_add => {
+                insertions.push(char_index(sql, token.span.end));
+            }
+            _ if depth == 0 => {
+                let word = token.token.to_string();
+                if !saw_alter {
+                    saw_alter = word.eq_ignore_ascii_case("ALTER");
+                } else if !saw_table {
+                    saw_table = word.eq_ignore_ascii_case("TABLE");
+                    if !saw_table {
+                        saw_alter = word.eq_ignore_ascii_case("ALTER");
+                    }
+                } else if word.eq_ignore_ascii_case("ADD") {
+                    in_add = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if insertions.is_empty() {
+        return None;
+    }
+
+    let mut rewritten = sql.to_string();
+    for index in insertions.into_iter().rev() {
+        let byte_index = rewritten
+            .char_indices()
+            .nth(index)
+            .map(|(index, _)| index)
+            .unwrap_or(rewritten.len());
+        rewritten.insert_str(byte_index, " ADD");
+    }
+    Some(rewritten)
 }
 
 /// Char index in `sql` of a 1-based tokenizer `(line, column)`. The tokenizer counts
@@ -300,6 +371,20 @@ mod tests {
         let sql = "SELECT `id` FROM `users`";
         assert!(check_syntax(Some(DbKind::MySql), sql).is_none());
         assert!(check_syntax(Some(DbKind::Postgres), sql).is_some());
+    }
+
+    #[test]
+    fn sql_server_accepts_multiple_columns_after_one_add() {
+        let sql = "ALTER TABLE hr_ms_training_tutor\n\
+                   ADD record_id SMALLINT NULL,\n\
+                       record_date DATETIME NULL;";
+        assert!(check_syntax(Some(DbKind::SqlServer), sql).is_none());
+    }
+
+    #[test]
+    fn sql_server_multi_column_add_still_reports_real_errors() {
+        let sql = "ALTER TABLE users ADD first_name VARCHAR(50), second_name VARCHAR(";
+        assert!(check_syntax(Some(DbKind::SqlServer), sql).is_some());
     }
 
     #[test]

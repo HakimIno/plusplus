@@ -333,6 +333,13 @@ fn builtins() -> Vec<ThemeEntry> {
             builtin: true,
             theme: graphite(),
         },
+        ThemeEntry {
+            key: "blue-studio".into(),
+            name: "Blue Studio".into(),
+            author: None,
+            builtin: true,
+            theme: blue_studio(),
+        },
     ]
 }
 
@@ -466,6 +473,32 @@ fn graphite() -> Theme {
     }
 }
 
+/// Focused editor charcoal inspired by professional code workspaces. Neutral surfaces keep
+/// dense data quiet while one crisp blue carries selection, active tabs, links, and SQL keywords.
+fn blue_studio() -> Theme {
+    Theme {
+        is_dark: true,
+        base: rgb(0x18, 0x18, 0x18),
+        panel: rgb(0x20, 0x20, 0x20),
+        surface: rgb(0x25, 0x25, 0x26),
+        surface_hover: rgb(0x2a, 0x2d, 0x2e),
+        code_bg: rgb(0x1f, 0x1f, 0x1f),
+        stripe: rgb(0x24, 0x24, 0x24),
+        selection: rgb(0x26, 0x4f, 0x78),
+        border: rgb(0x2b, 0x2b, 0x2b),
+        border_strong: rgb(0x3c, 0x3c, 0x3c),
+        text: rgb(0xd4, 0xd4, 0xd4),
+        text_weak: rgb(0x9d, 0x9d, 0x9d),
+        text_faint: rgb(0x6e, 0x6e, 0x6e),
+        accent: rgb(0x37, 0x94, 0xff),
+        accent_hover: rgb(0x5a, 0xa7, 0xff),
+        on_accent: rgb(0xff, 0xff, 0xff),
+        success: rgb(0x89, 0xd1, 0x85),
+        danger: rgb(0xf4, 0x87, 0x71),
+        warning: rgb(0xcc, 0xa7, 0x00),
+    }
+}
+
 thread_local! {
     static CURRENT: Cell<Theme> = Cell::new(midnight_conversational());
 }
@@ -502,6 +535,7 @@ mod tests {
             entries: builtins(),
         };
         assert!(reg.get("graphite").is_some_and(|entry| entry.builtin));
+        assert!(reg.get("blue-studio").is_some_and(|entry| entry.builtin));
         for key in ["lotus-dusk", "tidal-ledger", "copper-circuit"] {
             assert!(reg.get(key).is_none());
         }

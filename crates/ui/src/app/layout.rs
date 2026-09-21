@@ -1,7 +1,7 @@
 //! The frame loop: `eframe::App::update` and the panel layout it drives.
 
 use super::*;
-use crate::style::palette;
+use crate::style::{self, palette};
 
 impl eframe::App for DbGuiApp {
     // eframe 0.34 hands us a root `Ui`; panels are added with `show_inside`.
@@ -530,6 +530,14 @@ impl DbGuiApp {
             self.query_tab_bar(ui_root, &mut actions);
         }
         self.status_bar(ui_root);
+        // Paint the shared seam colour once behind the docks. Panel outer margins are transparent
+        // by design, so this keeps the gap visibly darker than either adjacent surface.
+        let workspace_rect = ui_root.available_rect_before_wrap();
+        ui_root.painter().rect_filled(
+            workspace_rect,
+            egui::CornerRadius::ZERO,
+            style::workspace_gap(),
+        );
         if self.show_connection_tabs {
             self.connection_tabs(ui_root, &mut actions);
         }

@@ -3,7 +3,7 @@
 //! The database-vendor logos in `assets/icondb/` are brand marks rather than interface icons,
 //! so they keep their own shapes and colours.
 
-use dbcore::{ConnectionIcon, DbKind};
+use dbcore::DbKind;
 use egui::{include_image, ImageSource};
 
 /// Default on-canvas size for an icon, in points.
@@ -145,67 +145,6 @@ fn image(
     egui::Image::new(src)
         .fit_to_exact_size(egui::vec2(size, size))
         .tint(tint)
-}
-
-/// Map a persisted connection icon to its embedded SVG.
-pub fn connection_icon(icon: ConnectionIcon) -> ImageSource<'static> {
-    match icon {
-        ConnectionIcon::Database => database(),
-        ConnectionIcon::Table => table(),
-        ConnectionIcon::Cloud => conn_cloud(),
-        ConnectionIcon::Storage => conn_storage(),
-        ConnectionIcon::Star => conn_star(),
-        ConnectionIcon::Treasure => conn_treasure(),
-    }
-}
-
-/// Paint a connection sidebar icon at `rect`, tinted to `tint` (Hugeicons glyphs are
-/// single-colour and adopt the theme like every other icon).
-pub fn paint_connection_icon(
-    ui: &egui::Ui,
-    icon: ConnectionIcon,
-    rect: egui::Rect,
-    tint: egui::Color32,
-) {
-    egui::Image::new(connection_icon(icon))
-        .fit_to_exact_size(rect.size())
-        .tint(tint)
-        .paint_at(ui, rect);
-}
-
-/// Compact picker tile for the connection dialog.
-pub fn connection_icon_picker_button(
-    ui: &mut egui::Ui,
-    icon: ConnectionIcon,
-    selected: bool,
-    size: f32,
-) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
-    if ui.is_rect_visible(rect) {
-        if selected {
-            ui.painter().rect_stroke(
-                rect,
-                egui::CornerRadius::same(4),
-                egui::Stroke::new(1.5, crate::style::palette::ACCENT()),
-                egui::StrokeKind::Outside,
-            );
-        } else if resp.hovered() {
-            ui.painter().rect_stroke(
-                rect,
-                egui::CornerRadius::same(4),
-                egui::Stroke::new(1.0, crate::style::palette::BORDER()),
-                egui::StrokeKind::Outside,
-            );
-        }
-        let icon_rect = rect.shrink(5.0);
-        let tint = if selected {
-            crate::style::palette::TEXT()
-        } else {
-            crate::style::palette::TEXT_WEAK()
-        };
-        paint_connection_icon(ui, icon, icon_rect, tint);
-    }
-    resp.on_hover_text(icon.label())
 }
 
 /// Render an inline icon at the theme's primary text colour — the default weight for

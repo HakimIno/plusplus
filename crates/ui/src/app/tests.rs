@@ -2631,11 +2631,6 @@ fn adaptive_editor_renders_on_the_expected_side_of_results() {
         "the live log must dock below the query result, not inside the SQL editor"
     );
     assert!(
-        query.get_by_label("SQL line numbers").rect().left()
-            < query.get_by_label("SQL workspace").rect().left(),
-        "the query editor must reach the panel edge without an outer inset"
-    );
-    assert!(
         (query.get_by_label("Run Current").rect().center().y
             - query.get_by_label("SQL workspace").rect().center().y)
             .abs()

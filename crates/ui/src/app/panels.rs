@@ -1829,18 +1829,6 @@ impl DbGuiApp {
                     {
                         self.tab_mut().parameters_expanded = !self.tab().parameters_expanded;
                     }
-                    ui.add_enabled_ui(can_run, |ui| {
-                        components::menu_button(ui, icons::diagram(), "Plan", |ui| {
-                            if ui.button("Explain").clicked() {
-                                actions.push(Action::ExplainQuery { analyze: false });
-                                ui.close();
-                            }
-                            if ui.button("Explain Analyze").clicked() {
-                                actions.push(Action::ExplainQuery { analyze: true });
-                                ui.close();
-                            }
-                        });
-                    });
                     let resp =
                         components::beautify_button(ui, &mut self.beautify, has_sql, dialect_label);
                     if resp.clicked {
@@ -2252,7 +2240,7 @@ impl DbGuiApp {
             .default_size(panel_default_size)
             .min_size(panel_min_size)
             .max_size(panel_max_size)
-            .frame(egui::Frame::new().inner_margin(egui::Margin::ZERO))
+            .frame(style::workspace_frame(palette::CODE_BG()))
             .show_inside(root, |ui| {
                 if placement == QueryEditorPlacement::Bottom {
                     if mode_bar_height > 0.0 {
@@ -2790,12 +2778,7 @@ impl DbGuiApp {
                 .default_size(default_size)
                 .min_size(min_size)
                 .max_size(max_size)
-                .frame(
-                    egui::Frame::new()
-                        .fill(palette::CODE_BG())
-                        .stroke(egui::Stroke::new(1.0, palette::BORDER()))
-                        .inner_margin(egui::Margin::ZERO),
-                )
+                .frame(style::workspace_frame(palette::PANEL()))
                 .show_inside(root, |ui| {
                     if include_mode_bar {
                         self.view_mode_bar(ui, QueryEditorPlacement::Top, true, actions);
@@ -2861,6 +2844,14 @@ impl DbGuiApp {
                     if ui.available_height() < 8.0 {
                         return;
                     }
+
+                    // Keep the dock chrome consistent with the other workspace panels while
+                    // retaining a dark code well behind timestamps and highlighted SQL.
+                    ui.painter().rect_filled(
+                        ui.available_rect_before_wrap(),
+                        egui::CornerRadius::ZERO,
+                        palette::CODE_BG(),
+                    );
 
                     let font = egui::FontId::new(11.5, egui::FontFamily::Monospace);
                     egui::ScrollArea::vertical()
@@ -3940,7 +3931,8 @@ impl DbGuiApp {
         egui::Panel::right("details_panel")
             .resizable(true)
             .default_size(260.0)
-            .show_separator_line(true)
+            .frame(style::workspace_frame(palette::PANEL()))
+            .show_separator_line(false)
             .show_inside(root, |ui| {
                 ui.add_space(6.0);
                 components::section_header(ui, "Details");
@@ -4027,7 +4019,7 @@ impl DbGuiApp {
                     .inner_margin(egui::Margin::symmetric(6, 2))
                     .fill(palette::PANEL()),
             )
-            .show_separator_line(true)
+            .show_separator_line(false)
             .show_inside(root, |ui| {
                 ui.add_space(4.0);
                 let list_h = ui.available_height();
@@ -4059,7 +4051,7 @@ impl DbGuiApp {
                                     let resp = components::connection_tab_item(
                                         ui,
                                         &conn.name,
-                                        conn.icon,
+                                        conn.kind,
                                         selected,
                                         live,
                                         drag_float_y,
@@ -4247,7 +4239,17 @@ impl DbGuiApp {
             .default_size(280.0)
             .min_size(200.0)
             .max_size(360.0)
-            .show_separator_line(true)
+            .frame(
+                style::workspace_frame(palette::PANEL()).outer_margin(egui::Margin {
+                    // The right seam combines this card and the central card's gutters.
+                    // There is no workspace card on the rail side, so match that total here.
+                    left: style::WORKSPACE_GUTTER * 2,
+                    right: style::WORKSPACE_GUTTER,
+                    top: style::WORKSPACE_GUTTER_Y,
+                    bottom: style::WORKSPACE_GUTTER_Y,
+                }),
+            )
+            .show_separator_line(false)
             .show_inside(root, |ui| {
                 ui.add_space(4.0);
                 // A quiet, unboxed tab rail keeps navigation visible without spending a
@@ -4462,9 +4464,9 @@ impl DbGuiApp {
 
         ui.horizontal(|ui| {
             ui.add(
-                egui::Image::new(icons::db_kind_icon(active.db.kind()))
+                egui::Image::new(icons::database())
                     .fit_to_exact_size(egui::Vec2::splat(icons::DB_KIND_ICON_SIZE))
-                    .tint(icons::db_kind_icon_tint(active.db.kind())),
+                    .tint(palette::TEXT()),
             )
             .on_hover_text(active.db.kind().label());
             components::truncated_label(
@@ -5236,9 +5238,11 @@ impl DbGuiApp {
         let idx = self.active_query_tab;
         // A portable table editor temporarily replaces its Diagram canvas, then returns to it.
         if self.tabs[idx].schema_editor.is_some() {
-            egui::CentralPanel::default().show_inside(root, |ui| {
-                self.schema_editor_view(ui, actions);
-            });
+            egui::CentralPanel::default()
+                .frame(style::workspace_frame(palette::PANEL()))
+                .show_inside(root, |ui| {
+                    self.schema_editor_view(ui, actions);
+                });
             return;
         }
         // A Diagram tab owns the whole central panel (the editor and result bars were
@@ -5247,7 +5251,7 @@ impl DbGuiApp {
         if self.tabs[idx].kind == crate::components::QueryTabKind::Diagram {
             egui::CentralPanel::default()
                 .frame(
-                    egui::Frame::central_panel(root.style())
+                    style::workspace_frame(palette::PANEL())
                         .inner_margin(egui::Margin::symmetric(8, 2)),
                 )
                 .show_inside(root, |ui| {
@@ -5260,9 +5264,11 @@ impl DbGuiApp {
         // so the lookup here always succeeds in Structure mode.
         if self.tabs[idx].view == TabView::Structure {
             if let Some(info) = self.structure_table(idx).cloned() {
-                egui::CentralPanel::default().show_inside(root, |ui| {
-                    structure_view(ui, &info);
-                });
+                egui::CentralPanel::default()
+                    .frame(style::workspace_frame(palette::PANEL()))
+                    .show_inside(root, |ui| {
+                        structure_view(ui, &info);
+                    });
                 return;
             }
         }
@@ -5271,7 +5277,9 @@ impl DbGuiApp {
                 TabView::Message => {
                     let query_error = self.tabs[idx].query_error.as_deref();
                     if query_error.is_none() && self.tabs[idx].result.is_none() {
-                        egui::CentralPanel::default().show_inside(root, crate::pet::show);
+                        egui::CentralPanel::default()
+                            .frame(style::workspace_frame(palette::PANEL()))
+                            .show_inside(root, crate::pet::show);
                         return;
                     }
                     let message = query_error.map(str::to_owned).unwrap_or_else(|| {
@@ -5288,7 +5296,7 @@ impl DbGuiApp {
                     };
                     egui::CentralPanel::default()
                         .frame(
-                            egui::Frame::central_panel(root.style())
+                            style::workspace_frame(palette::PANEL())
                                 .inner_margin(egui::Margin::same(12)),
                         )
                         .show_inside(root, |ui| {
@@ -5303,31 +5311,35 @@ impl DbGuiApp {
                     return;
                 }
                 TabView::Chart => {
-                    egui::CentralPanel::default().show_inside(root, |ui| {
-                        let tab = &mut self.tabs[idx];
-                        if tab.result.is_none() && tab.query_error.is_none() {
-                            crate::pet::show(ui);
-                        } else if let Some(result) = tab.result.as_ref() {
-                            let response =
-                                crate::chart::show(ui, result, &tab.row_order, &mut tab.chart);
-                            if response.export_requested {
-                                actions.push(Action::ExportChart);
+                    egui::CentralPanel::default()
+                        .frame(style::workspace_frame(palette::PANEL()))
+                        .show_inside(root, |ui| {
+                            let tab = &mut self.tabs[idx];
+                            if tab.result.is_none() && tab.query_error.is_none() {
+                                crate::pet::show(ui);
+                            } else if let Some(result) = tab.result.as_ref() {
+                                let response =
+                                    crate::chart::show(ui, result, &tab.row_order, &mut tab.chart);
+                                if response.export_requested {
+                                    actions.push(Action::ExportChart);
+                                }
                             }
-                        }
-                    });
+                        });
                     return;
                 }
                 TabView::Data | TabView::Structure | TabView::Indexes => {}
             }
         }
         if self.tabs[idx].plan_result && self.tabs[idx].view == TabView::Data {
-            egui::CentralPanel::default().show_inside(root, |ui| {
-                if let Some(result) = self.tabs[idx].result.as_ref() {
-                    plan_viewer(ui, result);
-                } else {
-                    crate::pet::show(ui);
-                }
-            });
+            egui::CentralPanel::default()
+                .frame(style::workspace_frame(palette::PANEL()))
+                .show_inside(root, |ui| {
+                    if let Some(result) = self.tabs[idx].result.as_ref() {
+                        plan_viewer(ui, result);
+                    } else {
+                        crate::pet::show(ui);
+                    }
+                });
             return;
         }
         let editable = self.tabs[idx].edits.editable();
@@ -5359,210 +5371,225 @@ impl DbGuiApp {
             ..
         } = &mut self.tabs[idx];
         let sort = *sort;
-        egui::CentralPanel::default().show_inside(root, |ui| {
-            if query_error.is_some() {
-                crate::pet::show(ui);
-                return;
-            }
-            match result.as_ref() {
-                Some(result) if result.column_count() > 0 => {
-                    let resp = results_grid(
-                        ui,
-                        result,
-                        row_order,
-                        sort,
-                        selection,
-                        edits,
-                        editable,
-                        tab_id,
-                        pending_scroll.take(),
-                        emoji,
-                        &fk_cols,
-                    );
-                    if resp.near_end && can_load_more {
-                        actions.push(Action::LoadMoreRows);
-                    }
-                    if let Some(cmd) = resp.sort {
-                        actions.push(match cmd {
-                            crate::grid::SortCmd::Asc(col) => Action::SetSort { col, asc: true },
-                            crate::grid::SortCmd::Desc(col) => Action::SetSort { col, asc: false },
-                            crate::grid::SortCmd::Clear => Action::ClearSort,
-                        });
-                    }
-                    if let Some(col) = resp.filter_column {
-                        actions.push(Action::FilterColumn { tab_id, col });
-                    }
-                    if let Some(click) = resp.selected {
-                        selection.apply_click(click);
-                    }
-                    // Right-click "Copy as …": a row right-clicked while outside the selection
-                    // becomes the sole target first, then the whole selection is copied.
-                    if let Some((disp, fmt)) = resp.copy {
-                        if !selection.contains(disp) {
-                            selection.select_one(disp);
+        egui::CentralPanel::default()
+            .frame(style::workspace_frame(palette::PANEL()))
+            .show_inside(root, |ui| {
+                if query_error.is_some() {
+                    crate::pet::show(ui);
+                    return;
+                }
+                match result.as_ref() {
+                    Some(result) if result.column_count() > 0 => {
+                        let resp = results_grid(
+                            ui,
+                            result,
+                            row_order,
+                            sort,
+                            selection,
+                            edits,
+                            editable,
+                            tab_id,
+                            pending_scroll.take(),
+                            emoji,
+                            &fk_cols,
+                        );
+                        if resp.near_end && can_load_more {
+                            actions.push(Action::LoadMoreRows);
                         }
-                        actions.push(Action::CopyRows(fmt));
-                    }
-                    // "Follow →" on a foreign-key cell: open the referenced table, filtered.
-                    if let Some((row, col)) = resp.follow_fk {
-                        actions.push(Action::FollowForeignKey { row, col });
-                    }
-                    if let Some((column, type_name, value)) = resp.view_value {
-                        if let Some(viewer) =
-                            crate::value_viewer::ValueViewer::new(&column, &type_name, &value)
-                        {
-                            actions.push(Action::OpenValueViewer(viewer));
-                        }
-                    }
-                    if let Some((row, col)) = resp.replace_blob {
-                        actions.push(Action::ReplaceBlobFromFile { row, col });
-                    }
-                    use crate::edit::{
-                        begin_cell_edit, disp_to_raw, original_value, settle_active,
-                    };
-                    if let Some(fill) = resp.fill {
-                        settle_active(edits, result);
-                        if let Some(src_raw) =
-                            disp_to_raw(row_order, edits.new_rows, fill.from_disp)
-                        {
-                            let source = edits
-                                .staged(src_raw, fill.col)
-                                .cloned()
-                                .or_else(|| original_value(result, src_raw, fill.col));
-                            if let Some(value) = source {
-                                // One undo group so the whole fill-drag takes a single Cmd/Ctrl+Z.
-                                edits.begin_undo_group();
-                                for disp in fill.from_disp.min(fill.to_disp)
-                                    ..=fill.from_disp.max(fill.to_disp)
-                                {
-                                    if disp == fill.from_disp {
-                                        continue;
-                                    }
-                                    if let Some(raw) = disp_to_raw(row_order, edits.new_rows, disp)
-                                    {
-                                        if edits.deleted.contains(&raw) {
-                                            continue;
-                                        }
-                                        if let Some(orig) = original_value(result, raw, fill.col) {
-                                            edits.stage(raw, fill.col, value.clone(), &orig);
-                                        }
-                                    }
+                        if let Some(cmd) = resp.sort {
+                            actions.push(match cmd {
+                                crate::grid::SortCmd::Asc(col) => {
+                                    Action::SetSort { col, asc: true }
                                 }
-                                edits.end_undo_group();
-                                selection.select_one(fill.from_disp);
-                                selection.range_to(fill.to_disp);
-                                selection.set_cursor(fill.to_disp, fill.col);
-                                *pending_scroll = Some(fill.to_disp);
+                                crate::grid::SortCmd::Desc(col) => {
+                                    Action::SetSort { col, asc: false }
+                                }
+                                crate::grid::SortCmd::Clear => Action::ClearSort,
+                            });
+                        }
+                        if let Some(col) = resp.filter_column {
+                            actions.push(Action::FilterColumn { tab_id, col });
+                        }
+                        if let Some(click) = resp.selected {
+                            selection.apply_click(click);
+                        }
+                        // Right-click "Copy as …": a row right-clicked while outside the selection
+                        // becomes the sole target first, then the whole selection is copied.
+                        if let Some((disp, fmt)) = resp.copy {
+                            if !selection.contains(disp) {
+                                selection.select_one(disp);
+                            }
+                            actions.push(Action::CopyRows(fmt));
+                        }
+                        // "Follow →" on a foreign-key cell: open the referenced table, filtered.
+                        if let Some((row, col)) = resp.follow_fk {
+                            actions.push(Action::FollowForeignKey { row, col });
+                        }
+                        if let Some((column, type_name, value)) = resp.view_value {
+                            if let Some(viewer) =
+                                crate::value_viewer::ValueViewer::new(&column, &type_name, &value)
+                            {
+                                actions.push(Action::OpenValueViewer(viewer));
                             }
                         }
-                    }
-                    if let Some(advance) = resp.commit_edit {
-                        settle_active(edits, result);
-                        // The commit landed → move the cursor and keep editing there. Up/Down
-                        // retain the column; Tab/Shift+Tab retain the row. Bool/binary cells are
-                        // skipped as editors, though the cursor still parks on them.
-                        if edits.active.is_none() {
-                            if let Some(dir) = advance {
-                                let (dr, dc) = match dir {
-                                    crate::edit::CursorDir::Left => (0, -1),
-                                    crate::edit::CursorDir::Right => (0, 1),
-                                    crate::edit::CursorDir::Up => (-1, 0),
-                                    crate::edit::CursorDir::Down => (1, 0),
-                                };
-                                let len = row_order.len() + edits.new_rows;
-                                if selection.move_cursor(dr, dc, len, result.column_count(), false)
-                                {
-                                    if let Some((nd, nc)) = selection.cursor() {
-                                        *pending_scroll = Some(nd);
+                        if let Some((row, col)) = resp.replace_blob {
+                            actions.push(Action::ReplaceBlobFromFile { row, col });
+                        }
+                        use crate::edit::{
+                            begin_cell_edit, disp_to_raw, original_value, settle_active,
+                        };
+                        if let Some(fill) = resp.fill {
+                            settle_active(edits, result);
+                            if let Some(src_raw) =
+                                disp_to_raw(row_order, edits.new_rows, fill.from_disp)
+                            {
+                                let source = edits
+                                    .staged(src_raw, fill.col)
+                                    .cloned()
+                                    .or_else(|| original_value(result, src_raw, fill.col));
+                                if let Some(value) = source {
+                                    // One undo group so the whole fill-drag takes a single Cmd/Ctrl+Z.
+                                    edits.begin_undo_group();
+                                    for disp in fill.from_disp.min(fill.to_disp)
+                                        ..=fill.from_disp.max(fill.to_disp)
+                                    {
+                                        if disp == fill.from_disp {
+                                            continue;
+                                        }
                                         if let Some(raw) =
-                                            disp_to_raw(row_order, edits.new_rows, nd)
+                                            disp_to_raw(row_order, edits.new_rows, disp)
                                         {
-                                            let bytes = original_value(result, raw, nc)
-                                                .is_some_and(|v| {
-                                                    matches!(v, dbcore::Value::Bytes(_))
-                                                });
-                                            if edits.col_kind(nc) != crate::edit::EditorKind::Bool
-                                                && !bytes
+                                            if edits.deleted.contains(&raw) {
+                                                continue;
+                                            }
+                                            if let Some(orig) =
+                                                original_value(result, raw, fill.col)
                                             {
-                                                begin_cell_edit(edits, result, raw, nc);
+                                                edits.stage(raw, fill.col, value.clone(), &orig);
+                                            }
+                                        }
+                                    }
+                                    edits.end_undo_group();
+                                    selection.select_one(fill.from_disp);
+                                    selection.range_to(fill.to_disp);
+                                    selection.set_cursor(fill.to_disp, fill.col);
+                                    *pending_scroll = Some(fill.to_disp);
+                                }
+                            }
+                        }
+                        if let Some(advance) = resp.commit_edit {
+                            settle_active(edits, result);
+                            // The commit landed → move the cursor and keep editing there. Up/Down
+                            // retain the column; Tab/Shift+Tab retain the row. Bool/binary cells are
+                            // skipped as editors, though the cursor still parks on them.
+                            if edits.active.is_none() {
+                                if let Some(dir) = advance {
+                                    let (dr, dc) = match dir {
+                                        crate::edit::CursorDir::Left => (0, -1),
+                                        crate::edit::CursorDir::Right => (0, 1),
+                                        crate::edit::CursorDir::Up => (-1, 0),
+                                        crate::edit::CursorDir::Down => (1, 0),
+                                    };
+                                    let len = row_order.len() + edits.new_rows;
+                                    if selection.move_cursor(
+                                        dr,
+                                        dc,
+                                        len,
+                                        result.column_count(),
+                                        false,
+                                    ) {
+                                        if let Some((nd, nc)) = selection.cursor() {
+                                            *pending_scroll = Some(nd);
+                                            if let Some(raw) =
+                                                disp_to_raw(row_order, edits.new_rows, nd)
+                                            {
+                                                let bytes = original_value(result, raw, nc)
+                                                    .is_some_and(|v| {
+                                                        matches!(v, dbcore::Value::Bytes(_))
+                                                    });
+                                                if edits.col_kind(nc)
+                                                    != crate::edit::EditorKind::Bool
+                                                    && !bytes
+                                                {
+                                                    begin_cell_edit(edits, result, raw, nc);
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
-                    if resp.cancel_edit {
-                        edits.cancel_active();
-                    }
-                    if let Some((disp, c)) = resp.begin_edit {
-                        if let Some(raw) = disp_to_raw(row_order, edits.new_rows, disp) {
-                            begin_cell_edit(edits, result, raw, c);
-                            // The cursor tracks the editor so Tab-advance moves relative to it.
-                            selection.set_cursor(disp, c);
+                        if resp.cancel_edit {
+                            edits.cancel_active();
                         }
-                    }
-                    // A boolean cell flips in place rather than opening an editor. If another
-                    // cell's editor is still open (e.g. the user clicked straight from it onto this
-                    // bool), settle that first so its typed value isn't silently dropped.
-                    if let Some((disp, c)) = resp.toggle {
-                        if let Some(raw) = disp_to_raw(row_order, edits.new_rows, disp) {
-                            if edits
-                                .active
-                                .as_ref()
-                                .is_some_and(|a| (a.row, a.col) != (raw, c))
-                            {
-                                settle_active(edits, result);
+                        if let Some((disp, c)) = resp.begin_edit {
+                            if let Some(raw) = disp_to_raw(row_order, edits.new_rows, disp) {
+                                begin_cell_edit(edits, result, raw, c);
+                                // The cursor tracks the editor so Tab-advance moves relative to it.
+                                selection.set_cursor(disp, c);
                             }
-                            if let Some(orig) = original_value(result, raw, c) {
-                                edits.toggle_bool(raw, c, &orig);
+                        }
+                        // A boolean cell flips in place rather than opening an editor. If another
+                        // cell's editor is still open (e.g. the user clicked straight from it onto this
+                        // bool), settle that first so its typed value isn't silently dropped.
+                        if let Some((disp, c)) = resp.toggle {
+                            if let Some(raw) = disp_to_raw(row_order, edits.new_rows, disp) {
+                                if edits
+                                    .active
+                                    .as_ref()
+                                    .is_some_and(|a| (a.row, a.col) != (raw, c))
+                                {
+                                    settle_active(edits, result);
+                                }
+                                if let Some(orig) = original_value(result, raw, c) {
+                                    edits.toggle_bool(raw, c, &orig);
+                                }
+                                selection.set_cursor(disp, c);
                             }
-                            selection.set_cursor(disp, c);
+                        }
+                        // Double-clicking empty table space appends a new (insert) row, selects it,
+                        // and opens an editor on the first text-editable column right away.
+                        if resp.add_row {
+                            settle_active(edits, result);
+                            let new_id = edits.add_new_row();
+                            let disp = row_order.len() + edits.new_rows - 1;
+                            selection.select_one(disp);
+                            let first_col = (0..result.column_count())
+                                .find(|&c| edits.col_kind(c) != crate::edit::EditorKind::Bool);
+                            if let Some(c) = first_col {
+                                edits.begin(
+                                    new_id,
+                                    c,
+                                    &dbcore::Value::Null,
+                                    crate::edit::EditOrigin::Grid,
+                                );
+                                selection.set_cursor(disp, c);
+                            }
                         }
                     }
-                    // Double-clicking empty table space appends a new (insert) row, selects it,
-                    // and opens an editor on the first text-editable column right away.
-                    if resp.add_row {
-                        settle_active(edits, result);
-                        let new_id = edits.add_new_row();
-                        let disp = row_order.len() + edits.new_rows - 1;
-                        selection.select_one(disp);
-                        let first_col = (0..result.column_count())
-                            .find(|&c| edits.col_kind(c) != crate::edit::EditorKind::Bool);
-                        if let Some(c) = first_col {
-                            edits.begin(
-                                new_id,
-                                c,
-                                &dbcore::Value::Null,
-                                crate::edit::EditOrigin::Grid,
-                            );
-                            selection.set_cursor(disp, c);
+                    Some(_) => {
+                        components::empty_state(ui, icons::table(), "No columns", status_msg);
+                    }
+                    None => match kind {
+                        crate::components::QueryTabKind::Query => {
+                            components::empty_illustration(ui);
                         }
-                    }
+                        crate::components::QueryTabKind::Function
+                        | crate::components::QueryTabKind::Procedure
+                        | crate::components::QueryTabKind::Trigger => components::empty_state(
+                            ui,
+                            icons::code(),
+                            "No output",
+                            "This definition has not been run",
+                        ),
+                        crate::components::QueryTabKind::Table
+                        | crate::components::QueryTabKind::View
+                        | crate::components::QueryTabKind::Diagram => {
+                            components::empty_illustration(ui);
+                        }
+                    },
                 }
-                Some(_) => {
-                    components::empty_state(ui, icons::table(), "No columns", status_msg);
-                }
-                None => match kind {
-                    crate::components::QueryTabKind::Query => {
-                        components::empty_illustration(ui);
-                    }
-                    crate::components::QueryTabKind::Function
-                    | crate::components::QueryTabKind::Procedure
-                    | crate::components::QueryTabKind::Trigger => components::empty_state(
-                        ui,
-                        icons::code(),
-                        "No output",
-                        "This definition has not been run",
-                    ),
-                    crate::components::QueryTabKind::Table
-                    | crate::components::QueryTabKind::View
-                    | crate::components::QueryTabKind::Diagram => {
-                        components::empty_illustration(ui);
-                    }
-                },
-            }
-        });
+            });
     }
 
     /// Full-page first-run welcome screen. Replaces the entire window; no title bar.
@@ -8188,21 +8215,6 @@ impl DbGuiApp {
                                 let field_w = 440.0;
 
                                 if editor.show_advanced {
-                                    connection_form_label(ui, "Icon");
-                                    ui.horizontal(|ui| {
-                                        for icon in dbcore::ConnectionIcon::ALL {
-                                            let selected = editor.config.icon == icon;
-                                            let resp = icons::connection_icon_picker_button(
-                                                ui, icon, selected, 32.0,
-                                            );
-                                            if resp.clicked() {
-                                                editor.config.icon = icon;
-                                                form_changed = true;
-                                            }
-                                        }
-                                    });
-                                    ui.end_row();
-
                                     connection_form_label(ui, "Title bar color");
                                     ui.horizontal(|ui| {
                                         let mut color = editor

@@ -1,4 +1,4 @@
-use dbcore::{ConnectionIcon, DbKind};
+use dbcore::DbKind;
 
 use crate::icons;
 use crate::style::palette;
@@ -18,7 +18,7 @@ fn compact_connection_label(name: &str) -> String {
 pub(crate) fn connection_tab_item(
     ui: &mut egui::Ui,
     name: &str,
-    icon: ConnectionIcon,
+    kind: DbKind,
     selected: bool,
     connected: bool,
     drag_float_y: Option<f32>,
@@ -30,11 +30,10 @@ pub(crate) fn connection_tab_item(
         ui: &egui::Ui,
         painter: &egui::Painter,
         rect: egui::Rect,
-        icon: ConnectionIcon,
+        kind: DbKind,
         label: &std::sync::Arc<egui::Galley>,
         fill: egui::Color32,
         stroke: egui::Stroke,
-        icon_color: egui::Color32,
         text_color: egui::Color32,
         connected: bool,
     ) {
@@ -57,7 +56,10 @@ pub(crate) fn connection_tab_item(
             egui::pos2(content_rect.center().x, content_rect.top() + 8.0),
             egui::vec2(CONN_ICON_SIZE, CONN_ICON_SIZE),
         );
-        icons::paint_connection_icon(ui, icon, icon_rect, icon_color);
+        egui::Image::new(icons::db_kind_icon(kind))
+            .fit_to_exact_size(icon_rect.size())
+            .tint(icons::db_kind_icon_tint(kind))
+            .paint_at(ui, icon_rect);
         let label_pos = egui::pos2(
             content_rect.center().x - label.size().x * 0.5,
             content_rect.top() + 18.0,
@@ -105,11 +107,10 @@ pub(crate) fn connection_tab_item(
                 ui,
                 &float_painter,
                 float_rect,
-                icon,
+                kind,
                 &label,
                 fill,
                 stroke,
-                icon_color,
                 text_color,
                 connected,
             );
@@ -118,11 +119,10 @@ pub(crate) fn connection_tab_item(
                 ui,
                 ui.painter(),
                 rect,
-                icon,
+                kind,
                 &label,
                 fill,
                 stroke,
-                icon_color,
                 text_color,
                 connected,
             );

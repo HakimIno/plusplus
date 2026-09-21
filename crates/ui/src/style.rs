@@ -127,6 +127,39 @@ pub mod space {
     pub const LG: f32 = 12.0;
 }
 
+/// The horizontal breathing room between independently-resizable workspace surfaces. Adjacent
+/// panels each contribute this margin, so `3` produces a restrained six-point seam.
+pub const WORKSPACE_GUTTER: i8 = 3;
+/// The vertical margin is doubled so the single-sided top/bottom edge matches the visible seam
+/// between adjacent panels (which receives a margin from both sides).
+pub const WORKSPACE_GUTTER_Y: i8 = 6;
+
+/// Dark seam between workspace cards. It is derived from the active base colour so light themes
+/// keep their contrast while charcoal themes get the deeper gutter used by the studio layout.
+pub fn workspace_gap() -> Color32 {
+    palette::BASE().gamma_multiply(0.62)
+}
+
+/// Low-contrast edge for workspace cards. Keeping this below the regular border token prevents
+/// resize seams from reading as bright white rules while still preserving a clear panel boundary.
+pub fn workspace_divider() -> Color32 {
+    mix(palette::BASE(), palette::BORDER(), 0.45)
+}
+
+/// Frame shared by workspace docks: schema/details sidebars, editor, results, and live log.
+/// The base-colour outer margin becomes the visible gutter, while the rounded, hairline frame
+/// keeps each surface legible without reintroducing heavyweight separators.
+pub fn workspace_frame(fill: Color32) -> egui::Frame {
+    egui::Frame::new()
+        .fill(fill)
+        .stroke(Stroke::new(1.0, workspace_divider()))
+        .corner_radius(CornerRadius::same(radius::LG))
+        .outer_margin(Margin::symmetric(WORKSPACE_GUTTER, WORKSPACE_GUTTER_Y))
+        // Full-bleed grids and dock headers paint rectangular child backgrounds. A four-point
+        // inset keeps those fills inside the curved silhouette instead of covering its corners.
+        .inner_margin(Margin::same(4))
+}
+
 /// Font size tokens shared by custom-painted components.
 #[allow(dead_code)]
 pub mod font {

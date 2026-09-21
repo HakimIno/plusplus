@@ -1588,6 +1588,7 @@ enum Action {
     RunCurrentQuery,
     /// Run a backend-native query plan for the current statement. `analyze` executes it to
     /// collect actual timings and is therefore limited to read-only statements.
+    #[allow(dead_code)]
     ExplainQuery {
         analyze: bool,
     },
@@ -2164,6 +2165,8 @@ impl DbGuiApp {
             value_viewer: None,
             details_image_preview: crate::value_viewer::ImagePreviewCache::default(),
             emoji: crate::emoji::EmojiAtlas::default(),
+            // Keep the provider rail visible on first launch so users can switch between
+            // connections immediately; the layout menu can still collapse it when needed.
             show_connection_tabs: true,
             show_schema_panel: true,
             show_details_panel: true,
