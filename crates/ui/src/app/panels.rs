@@ -637,7 +637,7 @@ fn with_field_status<R>(
                     egui::Color32::from_rgba_unmultiplied(danger.r(), danger.g(), danger.b(), 48),
                 )
             };
-            let stroke = egui::Stroke::new(1.5, stroke_color);
+            let stroke = egui::Stroke::new(1.5_f32, stroke_color);
             let visuals = ui.visuals_mut();
             visuals.extreme_bg_color = fill_color;
             visuals.widgets.inactive.bg_fill = fill_color;
@@ -712,7 +712,7 @@ fn paint_tree_guide(ui: &egui::Ui, folder_rect: egui::Rect, body_rect: egui::Rec
             body_rect.top(),
             (body_rect.bottom() - 4.0).max(body_rect.top()),
         ),
-        egui::Stroke::new(1.0, palette::BORDER()),
+        egui::Stroke::new(1.0_f32, palette::BORDER()),
     );
 }
 
@@ -728,7 +728,7 @@ fn paint_drop_line(ui: &egui::Ui, row_rect: egui::Rect, after: bool) {
     ui.painter().hline(
         row_rect.x_range(),
         y,
-        egui::Stroke::new(2.0, palette::ACCENT()),
+        egui::Stroke::new(2.0_f32, palette::ACCENT()),
     );
 }
 
@@ -795,7 +795,7 @@ fn rename_callout(
     let focus_id = popup_id.with("focused");
     let frame = egui::Frame::popup(ui.style())
         .fill(palette::PANEL())
-        .stroke(egui::Stroke::new(1.0, palette::BORDER_STRONG()))
+        .stroke(egui::Stroke::new(1.0_f32, palette::BORDER_STRONG()))
         .corner_radius(egui::CornerRadius::same(10))
         .inner_margin(egui::Margin::same(10));
 
@@ -892,7 +892,7 @@ fn sql_preview_callout(
     }
     let frame = egui::Frame::popup(ui.style())
         .fill(palette::PANEL())
-        .stroke(egui::Stroke::new(1.0, palette::BORDER_STRONG()))
+        .stroke(egui::Stroke::new(1.0_f32, palette::BORDER_STRONG()))
         .corner_radius(egui::CornerRadius::same(10))
         .inner_margin(egui::Margin::same(10));
 
@@ -967,7 +967,7 @@ fn paint_callout_arrow(
         palette::PANEL(),
         egui::Stroke::NONE,
     ));
-    let stroke = egui::Stroke::new(1.0, palette::BORDER_STRONG());
+    let stroke = egui::Stroke::new(1.0_f32, palette::BORDER_STRONG());
     painter.line_segment([tip, base_a], stroke);
     painter.line_segment([tip, base_b], stroke);
 }
@@ -1646,7 +1646,7 @@ impl DbGuiApp {
 
             let popup_frame = egui::Frame::popup(ui.style())
                 .fill(palette::PANEL())
-                .stroke(egui::Stroke::new(1.0, palette::BORDER_STRONG()))
+                .stroke(egui::Stroke::new(1.0_f32, palette::BORDER_STRONG()))
                 .corner_radius(egui::CornerRadius::same(14))
                 .inner_margin(egui::Margin::same(10));
             let popup = egui::Popup::from_toggle_button_response(&pager_button)
@@ -1743,7 +1743,7 @@ impl DbGuiApp {
                     palette::PANEL(),
                     egui::Stroke::NONE,
                 ));
-                let stroke = egui::Stroke::new(1.0, palette::BORDER_STRONG());
+                let stroke = egui::Stroke::new(1.0_f32, palette::BORDER_STRONG());
                 painter.line_segment([left, tip], stroke);
                 painter.line_segment([tip, right], stroke);
                 if let Some((limit, offset)) = response.inner {
@@ -1941,7 +1941,7 @@ impl DbGuiApp {
         ui.painter().hline(
             ui.min_rect().x_range(),
             ui.min_rect().bottom(),
-            egui::Stroke::new(1.0, palette::BORDER()),
+            egui::Stroke::new(1.0_f32, palette::BORDER()),
         );
     }
 
@@ -1956,7 +1956,7 @@ impl DbGuiApp {
                 ui.painter().vline(
                     ui.min_rect().left(),
                     ui.min_rect().y_range(),
-                    egui::Stroke::new(1.0, palette::BORDER_STRONG()),
+                    egui::Stroke::new(1.0_f32, palette::BORDER_STRONG()),
                 );
                 egui::ScrollArea::vertical()
                     .id_salt(("sql_scroll", tab_id, "split"))
@@ -2639,7 +2639,7 @@ impl DbGuiApp {
                                         ui.painter().vline(
                                             from.left(),
                                             egui::Rangef::new(from.top(), from.bottom()),
-                                            egui::Stroke::new(1.5, palette::ACCENT()),
+                                            egui::Stroke::new(1.5_f32, palette::ACCENT()),
                                         );
                                     }
                                 }
@@ -2797,7 +2797,7 @@ impl DbGuiApp {
                     ui.painter().hline(
                         header_rect.x_range(),
                         header_rect.bottom(),
-                        egui::Stroke::new(1.0, palette::BORDER()),
+                        egui::Stroke::new(1.0_f32, palette::BORDER()),
                     );
                     ui.scope_builder(
                         egui::UiBuilder::new()
@@ -2961,7 +2961,7 @@ impl DbGuiApp {
         painter.vline(
             rect.right(),
             rect.y_range(),
-            egui::Stroke::new(1.0, palette::BORDER()),
+            egui::Stroke::new(1.0_f32, palette::BORDER()),
         );
 
         // Open regions only show their chevron while the pointer is over the gutter, the way
@@ -3461,7 +3461,7 @@ impl DbGuiApp {
             ui.painter().rect_stroke(
                 rect.shrink(0.5),
                 egui::CornerRadius::same(2),
-                egui::Stroke::new(1.0, palette::ACCENT()),
+                egui::Stroke::new(1.0_f32, palette::ACCENT()),
                 egui::StrokeKind::Inside,
             );
         }
@@ -3563,7 +3563,7 @@ impl DbGuiApp {
         points.push(egui::pos2(x1, if down { y + WAVE } else { y }));
         ui.painter().add(egui::Shape::line(
             points,
-            egui::Stroke::new(1.0, palette::DANGER()),
+            egui::Stroke::new(1.0_f32, palette::DANGER()),
         ));
 
         // Hover the *token*, not just the two pixels of squiggle under it. Registered after
@@ -4281,7 +4281,7 @@ impl DbGuiApp {
                             ui.painter().hline(
                                 response.rect.center().x - 12.0..=response.rect.center().x + 12.0,
                                 response.rect.bottom() - 1.0,
-                                egui::Stroke::new(2.0, palette::ACCENT()),
+                                egui::Stroke::new(2.0_f32, palette::ACCENT()),
                             );
                         }
                         if response.clicked() {
@@ -4590,7 +4590,7 @@ impl DbGuiApp {
                     .show(ui.ctx(), |ui| {
                         egui::Frame::new()
                             .fill(palette::SURFACE())
-                            .stroke(egui::Stroke::new(1.0, palette::BORDER_STRONG()))
+                            .stroke(egui::Stroke::new(1.0_f32, palette::BORDER_STRONG()))
                             .corner_radius(egui::CornerRadius::same(6))
                             .inner_margin(egui::Margin::symmetric(9, 6))
                             .show(ui, |ui| {
@@ -5692,7 +5692,7 @@ impl DbGuiApp {
                     // Speech-bubble header card.
                     let bubble = egui::Frame::new()
                         .fill(palette::SURFACE())
-                        .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                        .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
                         .corner_radius(egui::CornerRadius::same(16))
                         .inner_margin(egui::Margin::symmetric(24, 20))
                         .show(ui, |ui| {
@@ -5734,7 +5734,7 @@ impl DbGuiApp {
                         palette::SURFACE(),
                         egui::Stroke::NONE,
                     ));
-                    let tail_stroke = egui::Stroke::new(1.0, palette::BORDER());
+                    let tail_stroke = egui::Stroke::new(1.0_f32, palette::BORDER());
                     ui.painter().line_segment([tail[0], tail[2]], tail_stroke);
                     ui.painter().line_segment([tail[1], tail[2]], tail_stroke);
 
@@ -5743,7 +5743,7 @@ impl DbGuiApp {
                     // Content card: feature rows, theme swatches, CTA.
                     let card = egui::Frame::new()
                         .fill(palette::SURFACE())
-                        .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                        .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
                         .corner_radius(egui::CornerRadius::same(16))
                         .inner_margin(egui::Margin::symmetric(24, 20))
                         .show(ui, |ui| {
@@ -5789,7 +5789,7 @@ impl DbGuiApp {
                             ui.painter().hline(
                                 ui.max_rect().x_range(),
                                 sep_y,
-                                egui::Stroke::new(1.0, palette::BORDER()),
+                                egui::Stroke::new(1.0_f32, palette::BORDER()),
                             );
                             ui.add_space(12.0);
 
@@ -5817,13 +5817,13 @@ impl DbGuiApp {
                                         p.circle_stroke(
                                             c,
                                             11.5,
-                                            egui::Stroke::new(1.5, palette::ACCENT()),
+                                            egui::Stroke::new(1.5_f32, palette::ACCENT()),
                                         );
                                     } else {
                                         p.circle_stroke(
                                             c,
                                             10.0,
-                                            egui::Stroke::new(1.0, palette::BORDER_STRONG()),
+                                            egui::Stroke::new(1.0_f32, palette::BORDER_STRONG()),
                                         );
                                     }
                                     let resp = resp
@@ -7511,7 +7511,7 @@ impl DbGuiApp {
 
                             egui::Frame::new()
                                 .fill(palette::SURFACE())
-                                .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                                .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
                                 .corner_radius(egui::CornerRadius::same(10))
                                 .inner_margin(egui::Margin::same(10))
                                 .show(ui, |ui| {
@@ -7600,7 +7600,7 @@ impl DbGuiApp {
                                         job.wrap.max_width = ui.available_width().max(40.0);
                                         egui::Frame::new()
                                             .fill(palette::CODE_BG())
-                                            .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                                            .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
                                             .corner_radius(egui::CornerRadius::same(8))
                                             .inner_margin(egui::Margin::symmetric(10, 8))
                                             .show(ui, |ui| {
@@ -8174,7 +8174,7 @@ impl DbGuiApp {
                 ui.add_space(3.0);
                 egui::Frame::new()
                     .fill(palette::SURFACE())
-                    .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                    .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
                     .corner_radius(egui::CornerRadius::same(8))
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
@@ -8204,7 +8204,7 @@ impl DbGuiApp {
                 ui.add_space(3.0);
                 egui::Frame::new()
                     .fill(palette::SURFACE())
-                    .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                    .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
                     .corner_radius(egui::CornerRadius::same(8))
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
@@ -10267,7 +10267,7 @@ fn erd_canvas(ui: &mut egui::Ui, erd: &mut crate::erd::ErDiagram) {
         } else {
             edge_color
         };
-        let stroke = egui::Stroke::new(if highlighted { 2.0 } else { 1.4 }, color);
+        let stroke = egui::Stroke::new(if highlighted { 2.0_f32 } else { 1.4_f32 }, color);
 
         let from_rect = erd.nodes[edge.from].rect();
         let to_rect = erd.nodes[edge.to].rect();
@@ -10362,12 +10362,12 @@ fn erd_canvas(ui: &mut egui::Ui, erd: &mut crate::erd::ErDiagram) {
         let selected = erd.selected == Some(i);
 
         let border = if selected {
-            egui::Stroke::new(1.6, palette::ACCENT())
+            egui::Stroke::new(1.6_f32, palette::ACCENT())
         } else if resp.hovered() {
-            egui::Stroke::new(1.4, palette::BORDER_STRONG())
+            egui::Stroke::new(1.4_f32, palette::BORDER_STRONG())
         } else {
             // BORDER is invisible against a light canvas; the strong tone works in both.
-            egui::Stroke::new(1.0, palette::BORDER_STRONG())
+            egui::Stroke::new(1.0_f32, palette::BORDER_STRONG())
         };
         painter.rect(rect, 6.0, node_fill, border, egui::StrokeKind::Inside);
         // Header band + title.
@@ -10377,7 +10377,7 @@ fn erd_canvas(ui: &mut egui::Ui, erd: &mut crate::erd::ErDiagram) {
                 egui::pos2(rect.left(), rect.top() + HEADER_H),
                 egui::pos2(rect.right(), rect.top() + HEADER_H),
             ],
-            egui::Stroke::new(1.0, palette::BORDER_STRONG()),
+            egui::Stroke::new(1.0_f32, palette::BORDER_STRONG()),
         );
         let title = painter.layout_no_wrap(node.title.clone(), title_font.clone(), palette::TEXT());
         painter.galley(
@@ -10398,7 +10398,7 @@ fn erd_canvas(ui: &mut egui::Ui, erd: &mut crate::erd::ErDiagram) {
             if col.primary_key {
                 painter.circle_filled(marker, 2.8, palette::ACCENT());
             } else if col.foreign_key {
-                painter.circle_stroke(marker, 2.8, egui::Stroke::new(1.2, palette::ACCENT()));
+                painter.circle_stroke(marker, 2.8, egui::Stroke::new(1.2_f32, palette::ACCENT()));
             }
             let name_color = if col.primary_key {
                 palette::TEXT()
@@ -10648,7 +10648,7 @@ fn details_image_thumbnail(
         rect,
         egui::CornerRadius::same(5),
         palette::CODE_BG(),
-        egui::Stroke::new(1.0, stroke),
+        egui::Stroke::new(1.0_f32, stroke),
         egui::StrokeKind::Inside,
     );
 
@@ -10795,7 +10795,7 @@ fn details_value_box(
                 rect,
                 egui::CornerRadius::same(5),
                 palette::CODE_BG(),
-                egui::Stroke::new(1.0, border),
+                egui::Stroke::new(1.0_f32, border),
                 egui::StrokeKind::Inside,
             );
         }
@@ -10854,7 +10854,7 @@ fn details_value_box(
             rect,
             egui::CornerRadius::same(5),
             palette::CODE_BG(),
-            egui::Stroke::new(1.0, stroke_color),
+            egui::Stroke::new(1.0_f32, stroke_color),
             egui::StrokeKind::Inside,
         );
 
@@ -10903,7 +10903,7 @@ fn details_value_box(
         };
         let cc = chev_rect.center();
         let r = 3.0;
-        let s = egui::Stroke::new(1.3, chev_color);
+        let s = egui::Stroke::new(1.3_f32, chev_color);
         ui.painter().line_segment(
             [cc + egui::vec2(-r, -r * 0.5), cc + egui::vec2(0.0, r * 0.5)],
             s,
@@ -11844,7 +11844,7 @@ fn schema_columns_tab(
 
         let frame = egui::Frame::new()
             .fill(row_color)
-            .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+            .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
             .corner_radius(egui::CornerRadius::same(style::radius::SM))
             .inner_margin(egui::Margin::symmetric(4, 3));
 
@@ -11945,7 +11945,7 @@ fn schema_columns_tab(
     if columns.is_empty() {
         let frame = egui::Frame::new()
             .fill(palette::SURFACE().linear_multiply(0.45))
-            .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+            .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
             .corner_radius(egui::CornerRadius::same(style::radius::SM))
             .inner_margin(egui::Margin::same(12));
         frame.show(ui, |ui| {

@@ -351,7 +351,7 @@ fn blob_view(ui: &mut egui::Ui, bytes: &[u8], hex: &str, truncated: bool) {
 fn code_surface(ui: &mut egui::Ui, id: &'static str, text: &str) {
     egui::Frame::new()
         .fill(palette::CODE_BG())
-        .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+        .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
         .corner_radius(egui::CornerRadius::same(6))
         .inner_margin(egui::Margin::same(10))
         .show(ui, |ui| {
@@ -378,7 +378,7 @@ fn image_view(ui: &mut egui::Ui, bytes: Arc<[u8]>, uri: &str, width: u32, height
     let available = egui::vec2(ui.available_width(), ui.available_height().min(430.0));
     egui::Frame::new()
         .fill(palette::CODE_BG())
-        .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+        .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
         .corner_radius(egui::CornerRadius::same(6))
         .inner_margin(egui::Margin::same(12))
         .show(ui, |ui| {

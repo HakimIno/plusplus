@@ -19,7 +19,7 @@ pub(crate) fn callout(
     let tint = |a: u8| egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a);
     egui::Frame::new()
         .fill(tint(22))
-        .stroke(egui::Stroke::new(1.0, tint(64)))
+        .stroke(egui::Stroke::new(1.0_f32, tint(64)))
         .corner_radius(egui::CornerRadius::same(6))
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {

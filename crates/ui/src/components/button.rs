@@ -122,7 +122,7 @@ impl<'a> Btn<'a> {
         btn = match self.variant {
             ButtonVariant::Primary => btn
                 .fill(palette::ACCENT())
-                .stroke(egui::Stroke::new(1.0, palette::ACCENT_HOVER())),
+                .stroke(egui::Stroke::new(1.0_f32, palette::ACCENT_HOVER())),
             // Destructive actions carry their weight in the red label and icon. They keep the
             // frame of whatever context they sit in — no forced outline: most of them are menu
             // items, and an always-on red box around one row of an otherwise frameless menu
@@ -193,7 +193,7 @@ pub(crate) fn soft_icon_button_state(
             ui.painter().rect_stroke(
                 rect.shrink(0.5),
                 radius,
-                egui::Stroke::new(1.0, palette::ACCENT()),
+                egui::Stroke::new(1.0_f32, palette::ACCENT()),
                 egui::StrokeKind::Inside,
             );
         }
@@ -289,7 +289,7 @@ pub(crate) fn pill_icon_button(ui: &mut Ui, src: ImageSource<'static>, hover: &s
             rect,
             radius,
             palette::SURFACE(),
-            egui::Stroke::new(1.0, palette::BORDER()),
+            egui::Stroke::new(1.0_f32, palette::BORDER()),
             egui::StrokeKind::Inside,
         );
         if resp.hovered() || resp.is_pointer_button_down_on() {
@@ -305,7 +305,7 @@ pub(crate) fn pill_icon_button(ui: &mut Ui, src: ImageSource<'static>, hover: &s
             ui.painter().rect_stroke(
                 rect.shrink(0.5),
                 radius,
-                egui::Stroke::new(1.0, palette::ACCENT()),
+                egui::Stroke::new(1.0_f32, palette::ACCENT()),
                 egui::StrokeKind::Inside,
             );
         }

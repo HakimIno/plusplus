@@ -168,7 +168,7 @@ fn window_button(ui: &mut Ui, kind: WindowButton, hover: &str) -> egui::Response
             egui::StrokeKind::Outside,
         );
 
-        let stroke = egui::Stroke::new(1.4, text_color);
+        let stroke = egui::Stroke::new(1.4_f32, text_color);
         let c = rect.center();
         match kind {
             WindowButton::Minimize => {
@@ -244,7 +244,7 @@ pub fn group_separator(ui: &mut Ui) {
         ui.painter().vline(
             rect.center().x,
             rect.top()..=rect.bottom(),
-            egui::Stroke::new(1.0, palette::BORDER()),
+            egui::Stroke::new(1.0_f32, palette::BORDER()),
         );
     }
     ui.add_space(2.0);

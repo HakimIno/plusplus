@@ -42,7 +42,7 @@ pub(crate) fn dialog_footer(ui: &mut egui::Ui, add_buttons: impl FnOnce(&mut egu
         ui.painter().hline(
             paint_rect.x_range(),
             paint_rect.top(),
-            Stroke::new(1.0, t.border),
+            Stroke::new(1.0_f32, t.border),
         );
     }
 

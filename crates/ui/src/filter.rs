@@ -422,10 +422,9 @@ fn lower_display(v: &Value) -> String {
 fn two_bounds(s: &str) -> Option<(String, String)> {
     let (a, b) = if let Some((a, b)) = s.split_once(',') {
         (a, b)
-    } else if let Some(idx) = s.to_lowercase().find(" and ") {
-        (&s[..idx], &s[idx + 5..])
     } else {
-        return None;
+        let idx = s.to_lowercase().find(" and ")?;
+        (&s[..idx], &s[idx + 5..])
     };
     let (a, b) = (a.trim(), b.trim());
     (!a.is_empty() && !b.is_empty()).then(|| (a.to_string(), b.to_string()))

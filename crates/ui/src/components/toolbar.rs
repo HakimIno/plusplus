@@ -29,7 +29,7 @@ pub(crate) fn layout_menu(ui: &mut egui::Ui, chrome: &mut LayoutChrome<'_>) {
     let grid_w = layout_grid_width();
     let popup_frame = egui::Frame::popup(ui.style())
         .fill(palette::PANEL())
-        .stroke(egui::Stroke::new(1.0, palette::BORDER_STRONG()))
+        .stroke(egui::Stroke::new(1.0_f32, palette::BORDER_STRONG()))
         .corner_radius(egui::CornerRadius::same(14))
         .inner_margin(egui::Margin::symmetric(10, 10));
     let popup = egui::Popup::from_toggle_button_response(&btn)
@@ -73,7 +73,7 @@ pub(crate) fn layout_menu(ui: &mut egui::Ui, chrome: &mut LayoutChrome<'_>) {
             ui.painter().hline(
                 ui.max_rect().x_range(),
                 y,
-                egui::Stroke::new(1.0, palette::BORDER()),
+                egui::Stroke::new(1.0_f32, palette::BORDER()),
             );
             ui.add_space(10.0);
             layout_section(ui, "Editor");
@@ -112,7 +112,7 @@ pub(crate) fn layout_menu(ui: &mut egui::Ui, chrome: &mut LayoutChrome<'_>) {
             palette::PANEL(),
             egui::Stroke::NONE,
         ));
-        let stroke = egui::Stroke::new(1.0, palette::BORDER_STRONG());
+        let stroke = egui::Stroke::new(1.0_f32, palette::BORDER_STRONG());
         painter.line_segment([left, tip], stroke);
         painter.line_segment([tip, right], stroke);
     }
@@ -169,7 +169,7 @@ pub(crate) fn update_outline_button(ui: &mut egui::Ui, label: &str, busy: bool) 
     let text = egui::RichText::new(label).color(accent).strong().size(11.0);
     let btn = egui::Button::new(text)
         .fill(egui::Color32::TRANSPARENT)
-        .stroke(egui::Stroke::new(1.0, accent))
+        .stroke(egui::Stroke::new(1.0_f32, accent))
         .corner_radius(egui::CornerRadius::same(4))
         .min_size(egui::vec2(0.0, 22.0));
     let resp = ui.add_enabled(!busy, btn);
@@ -263,7 +263,7 @@ pub(crate) fn run_button(
             rect,
             radius,
             palette::SURFACE(),
-            egui::Stroke::new(1.0, palette::BORDER()),
+            egui::Stroke::new(1.0_f32, palette::BORDER()),
             egui::StrokeKind::Outside,
         );
         if can_run && main.hovered() {
@@ -293,7 +293,7 @@ pub(crate) fn run_button(
         ui.painter().vline(
             chevron_rect.left(),
             rect.top() + 5.0..=rect.bottom() - 5.0,
-            egui::Stroke::new(1.0, palette::BORDER()),
+            egui::Stroke::new(1.0_f32, palette::BORDER()),
         );
         ui.painter().galley(
             egui::pos2(
@@ -528,7 +528,7 @@ pub(crate) fn beautify_button(
             rect,
             radius,
             palette::SURFACE(),
-            egui::Stroke::new(1.0, palette::BORDER()),
+            egui::Stroke::new(1.0_f32, palette::BORDER()),
             egui::StrokeKind::Outside,
         );
         // Per-segment hover wash, rounded only on its outer corners so it stays inside
@@ -561,7 +561,7 @@ pub(crate) fn beautify_button(
         ui.painter().vline(
             chev_rect.left(),
             rect.top() + 5.0..=rect.bottom() - 5.0,
-            egui::Stroke::new(1.0, palette::BORDER()),
+            egui::Stroke::new(1.0_f32, palette::BORDER()),
         );
         let text_pos = egui::pos2(
             main_rect.left() + pad_x,
@@ -634,7 +634,7 @@ pub(crate) fn toolbar_sep(ui: &mut egui::Ui) {
         ui.painter().vline(
             x,
             rect.top()..=rect.bottom(),
-            egui::Stroke::new(1.0, palette::BORDER()),
+            egui::Stroke::new(1.0_f32, palette::BORDER()),
         );
     }
 }

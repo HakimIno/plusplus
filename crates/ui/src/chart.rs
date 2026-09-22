@@ -205,7 +205,7 @@ fn show_chart_toolbar(ui: &mut egui::Ui, result: &QueryResult, state: &mut Chart
     egui::Frame::new()
         .inner_margin(egui::Margin::symmetric(8, 5))
         .fill(palette::PANEL())
-        .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+        .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -244,7 +244,7 @@ fn show_chart_toolbar(ui: &mut egui::Ui, result: &QueryResult, state: &mut Chart
 fn popup_frame(ui: &egui::Ui) -> egui::Frame {
     egui::Frame::popup(ui.style())
         .fill(palette::PANEL())
-        .stroke(egui::Stroke::new(1.0, palette::BORDER_STRONG()))
+        .stroke(egui::Stroke::new(1.0_f32, palette::BORDER_STRONG()))
         .corner_radius(8)
         .inner_margin(egui::Margin::same(10))
 }
@@ -686,7 +686,7 @@ fn draw_chart(ui: &mut egui::Ui, data: &ChartData, state: &ChartState) {
     painter.rect_stroke(
         rect.shrink(0.5),
         8.0,
-        egui::Stroke::new(1.0, palette::BORDER()),
+        egui::Stroke::new(1.0_f32, palette::BORDER()),
         egui::StrokeKind::Inside,
     );
 
@@ -754,7 +754,7 @@ fn draw_chart(ui: &mut egui::Ui, data: &ChartData, state: &ChartState) {
                     egui::pos2(legend_x, legend_y + 5.0),
                     egui::pos2(legend_x + 16.0, legend_y + 5.0),
                 ],
-                egui::Stroke::new(2.5, color),
+                egui::Stroke::new(2.5_f32, color),
             );
             painter.circle_filled(egui::pos2(legend_x + 8.0, legend_y + 5.0), 2.5, color);
             let galley = painter.layout_no_wrap(
@@ -801,7 +801,7 @@ fn draw_chart(ui: &mut egui::Ui, data: &ChartData, state: &ChartState) {
             painter.line_segment(
                 [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
                 egui::Stroke::new(
-                    if is_zero { 1.2 } else { 1.0 },
+                    if is_zero { 1.2_f32 } else { 1.0_f32 },
                     if is_zero {
                         palette::BORDER_STRONG().gamma_multiply(0.82)
                     } else {
@@ -876,11 +876,11 @@ fn draw_chart(ui: &mut egui::Ui, data: &ChartData, state: &ChartState) {
                     if matches!(kind, ChartKind::Line | ChartKind::Area) && points.len() > 1 {
                         painter.add(egui::Shape::line(
                             points.clone(),
-                            egui::Stroke::new(6.0, translucent(color, 20)),
+                            egui::Stroke::new(6.0_f32, translucent(color, 20)),
                         ));
                         painter.add(egui::Shape::line(
                             points.clone(),
-                            egui::Stroke::new(2.25, color),
+                            egui::Stroke::new(2.25_f32, color),
                         ));
                     }
                     for (point, datum) in points.into_iter().zip(&series.values) {
@@ -914,11 +914,11 @@ fn draw_chart(ui: &mut egui::Ui, data: &ChartData, state: &ChartState) {
                 egui::pos2(cursor_x, plot.top()),
                 egui::pos2(cursor_x, plot.bottom()),
             ],
-            egui::Stroke::new(1.0, palette::TEXT_FAINT().gamma_multiply(0.72)),
+            egui::Stroke::new(1.0_f32, palette::TEXT_FAINT().gamma_multiply(0.72)),
         );
         for (_, _, color, point) in &values {
             painter.circle_filled(*point, 5.5, palette::BASE());
-            painter.circle_stroke(*point, 5.5, egui::Stroke::new(2.0, *color));
+            painter.circle_stroke(*point, 5.5, egui::Stroke::new(2.0_f32, *color));
             painter.circle_filled(*point, 2.4, *color);
         }
         response.on_hover_ui_at_pointer(|ui| {

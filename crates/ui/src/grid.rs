@@ -542,14 +542,14 @@ pub fn results_grid(
         ui.painter().with_clip_rect(grid_rect).rect_stroke(
             rect,
             egui::CornerRadius::ZERO,
-            egui::Stroke::new(1.5, palette::ACCENT()),
+            egui::Stroke::new(1.5_f32, palette::ACCENT()),
             egui::StrokeKind::Inside,
         );
     } else if let Some(rect) = out.cursor_border {
         ui.painter().with_clip_rect(grid_rect).rect_stroke(
             rect,
             egui::CornerRadius::ZERO,
-            egui::Stroke::new(1.0, palette::ACCENT()),
+            egui::Stroke::new(1.0_f32, palette::ACCENT()),
             egui::StrokeKind::Inside,
         );
     }
@@ -563,7 +563,7 @@ pub fn results_grid(
         painter.rect_stroke(
             rect,
             egui::CornerRadius::same(1),
-            egui::Stroke::new(1.0, palette::CODE_BG()),
+            egui::Stroke::new(1.0_f32, palette::CODE_BG()),
             egui::StrokeKind::Inside,
         );
     }
@@ -579,7 +579,7 @@ pub fn results_grid(
         ui.painter().with_clip_rect(grid_rect).rect_stroke(
             rect,
             egui::CornerRadius::ZERO,
-            egui::Stroke::new(1.0, color),
+            egui::Stroke::new(1.0_f32, color),
             egui::StrokeKind::Inside,
         );
     }
@@ -1112,7 +1112,7 @@ fn header_cell(
         ui.painter().hline(
             rect.x_range(),
             rect.bottom() - 1.0,
-            egui::Stroke::new(2.0, palette::ACCENT()),
+            egui::Stroke::new(2.0_f32, palette::ACCENT()),
         );
     }
     let cell_rect = ui.max_rect();

@@ -120,7 +120,7 @@ pub(crate) fn accent_checkbox(
             painter.rect_filled(rect, R, fill);
             let p = rect.min;
             let s = rect.size();
-            let stroke = Stroke::new(2.2, Color32::WHITE);
+            let stroke = Stroke::new(2.2_f32, Color32::WHITE);
             painter.line_segment(
                 [
                     Pos2::new(p.x + s.x * 0.19, p.y + s.y * 0.52),
@@ -139,12 +139,12 @@ pub(crate) fn accent_checkbox(
             let (fill, border) = if resp.hovered() && enabled {
                 (
                     accent.linear_multiply(0.10),
-                    Stroke::new(1.5, accent.linear_multiply(0.65)),
+                    Stroke::new(1.5_f32, accent.linear_multiply(0.65)),
                 )
             } else {
                 (
                     Color32::TRANSPARENT,
-                    Stroke::new(1.5, palette::BORDER_STRONG()),
+                    Stroke::new(1.5_f32, palette::BORDER_STRONG()),
                 )
             };
             painter.rect(rect, R, fill, border, egui::StrokeKind::Inside);
@@ -189,19 +189,19 @@ pub(crate) fn accent_radio<T: PartialEq>(
                 center,
                 outer_r,
                 accent.linear_multiply(0.12),
-                Stroke::new(1.5, accent),
+                Stroke::new(1.5_f32, accent),
             );
             ui.painter().circle_filled(center, outer_r * 0.42, accent);
         } else {
             let (fill, border) = if resp.hovered() {
                 (
                     accent.linear_multiply(0.10),
-                    Stroke::new(1.5, accent.linear_multiply(0.65)),
+                    Stroke::new(1.5_f32, accent.linear_multiply(0.65)),
                 )
             } else {
                 (
                     Color32::TRANSPARENT,
-                    Stroke::new(1.5, palette::BORDER_STRONG()),
+                    Stroke::new(1.5_f32, palette::BORDER_STRONG()),
                 )
             };
             ui.painter().circle(center, outer_r, fill, border);
@@ -244,9 +244,9 @@ pub(crate) fn toggle_switch(ui: &mut egui::Ui, value: &mut bool) -> egui::Respon
             palette::SURFACE()
         };
         let stroke = if *value {
-            Stroke::new(1.0, palette::ACCENT_HOVER())
+            Stroke::new(1.0_f32, palette::ACCENT_HOVER())
         } else {
-            Stroke::new(1.0, palette::BORDER_STRONG())
+            Stroke::new(1.0_f32, palette::BORDER_STRONG())
         };
         ui.painter().rect(
             rect,
@@ -388,7 +388,7 @@ pub(crate) fn db_kind_card(ui: &mut egui::Ui, kind: DbKind) -> egui::Response {
             rect,
             radius,
             Stroke::new(
-                if active { 1.5 } else { 1.0 },
+                if active { 1.5_f32 } else { 1.0_f32 },
                 if active {
                     palette::ACCENT()
                 } else {

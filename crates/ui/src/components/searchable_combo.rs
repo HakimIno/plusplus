@@ -183,7 +183,7 @@ fn searchable_combo_button(
         );
 
         let chevron_center = egui::pos2(rect.right() - 14.0, rect.center().y);
-        let chevron_stroke = egui::Stroke::new(1.5, visuals.fg_stroke.color);
+        let chevron_stroke = egui::Stroke::new(1.5_f32, visuals.fg_stroke.color);
         ui.painter().line_segment(
             [
                 chevron_center + egui::vec2(-4.0, -2.0),

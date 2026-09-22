@@ -572,7 +572,7 @@ pub fn show_popup(
             // rather than a floating card.
             egui::Frame::popup(&ctx.global_style())
                 .fill(palette::PANEL())
-                .stroke(egui::Stroke::new(1.0, palette::BORDER()))
+                .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
                 .shadow(egui::epaint::Shadow::NONE)
                 .corner_radius(egui::CornerRadius::same(5))
                 .inner_margin(POPUP_MARGIN)

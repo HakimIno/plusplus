@@ -668,7 +668,7 @@ pub fn render_editor(
         field = field.frame(
             egui::Frame::new()
                 .fill(palette::CODE_BG())
-                .stroke(egui::Stroke::new(1.0, border))
+                .stroke(egui::Stroke::new(1.0_f32, border))
                 .corner_radius(cr)
                 .inner_margin(inner),
         );

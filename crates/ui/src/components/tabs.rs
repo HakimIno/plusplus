@@ -93,7 +93,7 @@ pub(crate) fn connection_tab_item(
                 rect,
                 egui::CornerRadius::same(4),
                 palette::SURFACE_HOVER(),
-                egui::Stroke::new(1.0, palette::BORDER()),
+                egui::Stroke::new(1.0_f32, palette::BORDER()),
                 egui::StrokeKind::Outside,
             );
             let float_rect =
@@ -448,7 +448,7 @@ pub(crate) fn query_tab_item(
         crate::style::mix(idle_fill, palette::SURFACE(), select_t)
     };
     let stroke = if dragging {
-        egui::Stroke::new(1.0, palette::ACCENT())
+        egui::Stroke::new(1.0_f32, palette::ACCENT())
     } else {
         egui::Stroke::NONE
     };
@@ -467,7 +467,7 @@ pub(crate) fn query_tab_item(
                 rect,
                 egui::CornerRadius::same(4),
                 palette::SURFACE_HOVER(),
-                egui::Stroke::new(1.0, palette::BORDER()),
+                egui::Stroke::new(1.0_f32, palette::BORDER()),
                 egui::StrokeKind::Outside,
             );
             // The chip itself follows the pointer on a foreground layer (above panel

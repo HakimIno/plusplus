@@ -41,11 +41,11 @@ pub(crate) fn interaction_colors(
         egui::Color32::TRANSPARENT
     };
     let stroke = if dragging {
-        egui::Stroke::new(1.0, palette::ACCENT())
+        egui::Stroke::new(1.0_f32, palette::ACCENT())
     } else if selected {
-        egui::Stroke::new(1.0, palette::BORDER_STRONG())
+        egui::Stroke::new(1.0_f32, palette::BORDER_STRONG())
     } else if resp.hovered() {
-        egui::Stroke::new(1.0, palette::BORDER())
+        egui::Stroke::new(1.0_f32, palette::BORDER())
     } else {
         egui::Stroke::NONE
     };

@@ -51,8 +51,11 @@ pub(crate) fn paint_table_header_cell(ui: &mut egui::Ui) {
     let t = crate::theme::current();
     ui.painter()
         .rect_filled(rect, egui::CornerRadius::ZERO, t.panel);
-    ui.painter()
-        .hline(rect.x_range(), rect.bottom(), Stroke::new(1.0, t.border));
+    ui.painter().hline(
+        rect.x_range(),
+        rect.bottom(),
+        Stroke::new(1.0_f32, t.border),
+    );
 }
 
 pub(crate) fn type_badge(ui: &mut egui::Ui, text: &str, color: Color32) {
@@ -69,7 +72,7 @@ pub(crate) fn type_badge(ui: &mut egui::Ui, text: &str, color: Color32) {
             rect,
             egui::CornerRadius::same(3),
             tint(22),
-            egui::Stroke::new(1.0, tint(64)),
+            egui::Stroke::new(1.0_f32, tint(64)),
             egui::StrokeKind::Inside,
         );
         ui.painter().galley(rect.min + pad, galley, color);

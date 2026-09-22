@@ -152,7 +152,7 @@ pub fn workspace_divider() -> Color32 {
 pub fn workspace_frame(fill: Color32) -> egui::Frame {
     egui::Frame::new()
         .fill(fill)
-        .stroke(Stroke::new(1.0, workspace_divider()))
+        .stroke(Stroke::new(1.0_f32, workspace_divider()))
         .corner_radius(CornerRadius::same(radius::LG))
         .outer_margin(Margin::symmetric(WORKSPACE_GUTTER, WORKSPACE_GUTTER_Y))
         // Full-bleed grids and dock headers paint rectangular child backgrounds. A four-point
@@ -266,10 +266,10 @@ fn visuals() -> egui::Visuals {
     v.override_text_color = Some(t.text);
     v.hyperlink_color = t.accent;
     v.selection.bg_fill = t.selection;
-    v.selection.stroke = Stroke::new(1.0, t.accent);
+    v.selection.stroke = Stroke::new(1.0_f32, t.accent);
 
     // Subtle 1px hairlines instead of egui's heavier defaults.
-    v.window_stroke = Stroke::new(1.0, t.border);
+    v.window_stroke = Stroke::new(1.0_f32, t.border);
     v.window_shadow = egui::epaint::Shadow {
         offset: [0, 8],
         blur: 28,
@@ -302,8 +302,8 @@ fn visuals() -> egui::Visuals {
     // soft `border` token (not `border_strong`) in both light and dark so dividers whisper
     // rather than slice the layout — structure is carried by the surface tints, not lines.
     w.noninteractive.bg_fill = t.panel;
-    w.noninteractive.fg_stroke = Stroke::new(1.0, t.text_weak);
-    w.noninteractive.bg_stroke = Stroke::new(1.0, t.border);
+    w.noninteractive.fg_stroke = Stroke::new(1.0_f32, t.text_weak);
+    w.noninteractive.bg_stroke = Stroke::new(1.0_f32, t.border);
 
     // Default (resting) controls. No always-on outline: a resting input/button reads as a
     // raised `surface` fill against the panel, and only grows a visible edge on hover/focus.
@@ -311,25 +311,25 @@ fn visuals() -> egui::Visuals {
     // main source of the "too many hard lines" feel.
     w.inactive.bg_fill = t.surface;
     w.inactive.weak_bg_fill = t.surface;
-    w.inactive.bg_stroke = Stroke::new(1.0, t.border);
-    w.inactive.fg_stroke = Stroke::new(1.0, t.text_weak);
+    w.inactive.bg_stroke = Stroke::new(1.0_f32, t.border);
+    w.inactive.fg_stroke = Stroke::new(1.0_f32, t.text_weak);
 
     // Hover.
     w.hovered.bg_fill = t.surface_hover;
     w.hovered.weak_bg_fill = t.surface_hover;
-    w.hovered.bg_stroke = Stroke::new(1.0, t.border_strong);
-    w.hovered.fg_stroke = Stroke::new(1.0, t.text);
+    w.hovered.bg_stroke = Stroke::new(1.0_f32, t.border_strong);
+    w.hovered.fg_stroke = Stroke::new(1.0_f32, t.text);
 
     // Pressed / active.
     w.active.bg_fill = t.accent;
     w.active.weak_bg_fill = t.accent;
-    w.active.bg_stroke = Stroke::new(1.0, t.accent_hover);
-    w.active.fg_stroke = Stroke::new(1.0, t.on_accent);
+    w.active.bg_stroke = Stroke::new(1.0_f32, t.accent_hover);
+    w.active.fg_stroke = Stroke::new(1.0_f32, t.on_accent);
 
     // Open (combo boxes etc.).
     w.open.bg_fill = t.surface_hover;
     w.open.weak_bg_fill = t.surface_hover;
-    w.open.bg_stroke = Stroke::new(1.0, t.border_strong);
+    w.open.bg_stroke = Stroke::new(1.0_f32, t.border_strong);
 
     v
 }
