@@ -489,7 +489,7 @@ fn drop_routine_per_dialect() {
             RoutineKind::Function,
             &params
         ),
-        "DROP FUNCTION \"dbo\".\"f\";"
+        "DROP FUNCTION [dbo].[f];"
     );
     assert!(routine_supports_replace(DbKind::Postgres));
     assert!(routine_supports_replace(DbKind::SqlServer));
@@ -840,7 +840,7 @@ fn keyset_page_is_stable_composite_and_preserves_filters() {
             512,
         )
         .unwrap(),
-        "SELECT TOP 512 * FROM [events] ORDER BY \"id\";"
+        "SELECT TOP 512 * FROM [events] ORDER BY [id];"
     );
 }
 
@@ -989,7 +989,7 @@ fn build_select_where_follows_a_foreign_key() {
     // SQL Server caps with TOP, not LIMIT.
     assert_eq!(
         build_select_where_sql(DbKind::SqlServer, None, "users", &[("id", &uid)], 100),
-        Some("SELECT TOP 100 * FROM \"users\" WHERE \"id\" = 7;".to_string())
+        Some("SELECT TOP 100 * FROM [users] WHERE [id] = 7;".to_string())
     );
     // Composite FK ANDs the key columns; string values are escaped (no literal breakout).
     let tenant = Value::Text("O'Brien".into());

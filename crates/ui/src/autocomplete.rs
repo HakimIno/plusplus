@@ -979,7 +979,7 @@ mod tests {
         let s = thai_schema();
         assert_eq!(
             accept("SELECT * FROM [ลูก", &s, Some(DbKind::SqlServer), "ลูกค้า"),
-            "SELECT * FROM \"ลูกค้า\""
+            "SELECT * FROM [ลูกค้า]"
         );
     }
 

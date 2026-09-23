@@ -9293,9 +9293,11 @@ fn table_editor_view(
                             &editor.fks,
                             editor.db_kind,
                             &editor.column_filter,
-                            &mut editor.editing_type_row,
-                            &mut editor.grid_selection,
-                            &mut editor.focus_selected_cell,
+                            SchemaStructureGridState {
+                                editing_type_row: &mut editor.editing_type_row,
+                                selection: &mut editor.grid_selection,
+                                focus_selected_cell: &mut editor.focus_selected_cell,
+                            },
                         );
                     } else {
                         schema_columns_tab(ui, &mut editor.columns, editor.mode, editor.db_kind);
@@ -12008,20 +12010,29 @@ fn schema_column_foreign_key(fks: &[crate::schema::FkDraft], column_name: &str) 
 
 /// Editable Structure table for an existing database table. Inputs intentionally have no card
 /// chrome: the table grid provides the alignment and a focused cell supplies its own affordance.
+struct SchemaStructureGridState<'a> {
+    editing_type_row: &'a mut Option<usize>,
+    selection: &'a mut Option<crate::schema::SchemaGridSelection>,
+    focus_selected_cell: &'a mut bool,
+}
+
 fn schema_structure_grid(
     ui: &mut egui::Ui,
     actions: &mut Vec<Action>,
-    columns: &mut Vec<crate::schema::ColumnDraft>,
+    columns: &mut [crate::schema::ColumnDraft],
     fks: &[crate::schema::FkDraft],
     db_kind: dbcore::DbKind,
     column_filter: &str,
-    editing_type_row: &mut Option<usize>,
-    selection: &mut Option<crate::schema::SchemaGridSelection>,
-    focus_selected_cell: &mut bool,
+    state: SchemaStructureGridState<'_>,
 ) {
     use crate::schema::{SchemaGridSelection, SchemaTab};
     use egui_extras::{Column, TableBuilder};
 
+    let SchemaStructureGridState {
+        editing_type_row,
+        selection,
+        focus_selected_cell,
+    } = state;
     let row_height = 24.0;
     let query = column_filter.trim().to_lowercase();
     TableBuilder::new(ui)
@@ -12236,7 +12247,7 @@ fn schema_structure_grid(
 
 fn schema_indexes_grid(
     ui: &mut egui::Ui,
-    indexes: &mut Vec<crate::schema::IndexDraft>,
+    indexes: &mut [crate::schema::IndexDraft],
     selection: &mut Option<crate::schema::SchemaGridSelection>,
     focus_selected_cell: &mut bool,
 ) {
