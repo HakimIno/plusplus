@@ -156,6 +156,77 @@ impl DbGuiApp {
                         }
                     }
                 }
+                AppMessage::TableMetadataLoaded {
+                    tab_id,
+                    conn_id,
+                    schema,
+                    table: requested_table,
+                    result,
+                } => {
+                    let kind = self
+                        .active_connections
+                        .iter()
+                        .find(|connection| connection.config_id == conn_id)
+                        .map(|connection| connection.db.kind())
+                        .unwrap_or(DbKind::Sqlite);
+                    let Some(tab_index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+                        continue;
+                    };
+                    let request_still_matches = self.tabs[tab_index]
+                        .edits
+                        .source
+                        .as_ref()
+                        .or(self.tabs[tab_index].edits.pending_source.as_ref())
+                        .is_some_and(|source| {
+                            source.table.eq_ignore_ascii_case(&requested_table)
+                                && source.schema.as_deref().map(str::to_lowercase)
+                                    == schema.as_deref().map(str::to_lowercase)
+                        });
+                    if !request_still_matches {
+                        continue;
+                    }
+                    self.tabs[tab_index].table_metadata_pending = false;
+                    match result {
+                        Ok(Some(table)) => {
+                            if let Some(connection) = self
+                                .active_connections
+                                .iter_mut()
+                                .find(|connection| connection.config_id == conn_id)
+                            {
+                                if let Some(existing) =
+                                    connection.schema.tables.iter_mut().find(|existing| {
+                                        existing.name.eq_ignore_ascii_case(&table.name)
+                                            && existing.schema.as_deref().map(str::to_lowercase)
+                                                == table.schema.as_deref().map(str::to_lowercase)
+                                    })
+                                {
+                                    *existing = table.clone();
+                                } else {
+                                    connection.schema.tables.push(table.clone());
+                                }
+                            }
+                            if matches!(
+                                self.tabs[tab_index].view,
+                                TabView::Structure | TabView::Indexes
+                            ) && self.tabs[tab_index].schema_editor.is_none()
+                            {
+                                self.tabs[tab_index].schema_editor = Some(ObjectEditor::Table(
+                                    SchemaEditor::edit_table(&table, kind),
+                                ));
+                            }
+                            self.status_msg = format!("Loaded structure for {}", table.name);
+                            self.error = None;
+                        }
+                        Ok(None) => {
+                            self.error = Some("Table metadata is no longer available".into());
+                            self.status_msg = "Table structure unavailable".into();
+                        }
+                        Err(error) => {
+                            self.error = Some(format!("Table structure load failed: {error}"));
+                            self.status_msg = "Table structure load failed".into();
+                        }
+                    }
+                }
                 AppMessage::ConnectionJobFinished { conn_id } => {
                     self.connection_jobs.remove(&conn_id);
                     self.connection_cancels.remove(&conn_id);

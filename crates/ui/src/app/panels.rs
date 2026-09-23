@@ -5098,6 +5098,7 @@ impl DbGuiApp {
         actions: &mut Vec<Action>,
     ) {
         let idx = self.active_query_tab;
+        let tab_id = self.tabs[idx].id;
         let query_result_tabs = self.tabs[idx].kind == crate::components::QueryTabKind::Query;
         let editable_table = self.tabs[idx].kind == crate::components::QueryTabKind::Table;
         if !query_result_tabs && self.structure_table(idx).is_none() {
@@ -5109,13 +5110,15 @@ impl DbGuiApp {
             let schema_view = self.tabs[idx].view;
             if self.tabs[idx].schema_editor.is_none() {
                 if let Some(info) = table_info.as_ref() {
-                    let kind = self
-                        .active()
-                        .map(|active| active.db.kind())
-                        .unwrap_or(dbcore::DbKind::Sqlite);
-                    self.tabs[idx].schema_editor = Some(crate::schema::ObjectEditor::Table(
-                        crate::schema::SchemaEditor::edit_table(info, kind),
-                    ));
+                    if !info.columns.is_empty() {
+                        let kind = self
+                            .active()
+                            .map(|active| active.db.kind())
+                            .unwrap_or(dbcore::DbKind::Sqlite);
+                        self.tabs[idx].schema_editor = Some(crate::schema::ObjectEditor::Table(
+                            crate::schema::SchemaEditor::edit_table(info, kind),
+                        ));
+                    }
                 }
             }
             if let Some(crate::schema::ObjectEditor::Table(editor)) =
@@ -5128,14 +5131,18 @@ impl DbGuiApp {
                 };
             }
         }
+        // A split renders this bar twice in one frame. Its panel id must belong to the tab;
+        // otherwise both bars create the same child Ui and their segmented buttons share click
+        // state, making Data/Structure/Indexes switch in both panes together.
+        let panel_id = egui::Id::new(("view_mode_bar", tab_id));
         let panel = match (force_top, query_result_tabs, placement) {
-            (true, _, _) => egui::Panel::top("view_mode_bar"),
+            (true, _, _) => egui::Panel::top(panel_id),
             // Query result modes belong beneath the data surface, matching the statement tabs
             // above it. Table/view modes keep following their data-first editor placement.
             (false, true, _) | (false, false, QueryEditorPlacement::Bottom) => {
-                egui::Panel::bottom("view_mode_bar")
+                egui::Panel::bottom(panel_id)
             }
-            (false, false, QueryEditorPlacement::Top) => egui::Panel::top("view_mode_bar"),
+            (false, false, QueryEditorPlacement::Top) => egui::Panel::top(panel_id),
         };
         panel
             .resizable(false)
@@ -5211,11 +5218,17 @@ impl DbGuiApp {
                         self.tabs[idx].view = modes[choice];
                         if choice == 0 {
                             if editing {
-                                actions.push(Action::CancelSchema);
+                                actions.push(Action::ForTab {
+                                    tab_id,
+                                    action: Box::new(Action::CancelSchema),
+                                });
                             }
                         } else if !editing {
                             if let Some(info) = table_info.clone() {
-                                actions.push(Action::OpenEditTable(info));
+                                actions.push(Action::ForTab {
+                                    tab_id,
+                                    action: Box::new(Action::OpenEditTable(info)),
+                                });
                             }
                         } else if let Some(crate::schema::ObjectEditor::Table(editor)) =
                             self.tabs[idx].schema_editor.as_mut()
@@ -5225,6 +5238,109 @@ impl DbGuiApp {
                             } else {
                                 crate::schema::SchemaTab::Indexes
                             };
+                        }
+                    }
+                    match self.tabs[idx].view {
+                        TabView::Data => {
+                            ui.add_space(6.0);
+                            let can_add_row = self.tabs[idx].edits.editable();
+                            if components::button(ui, icons::plus(), "Row", can_add_row).clicked() {
+                                actions.push(Action::ForTab {
+                                    tab_id,
+                                    action: Box::new(Action::AddDataRow),
+                                });
+                            }
+                        }
+                        TabView::Structure => {
+                            ui.add_space(6.0);
+                            if components::button(ui, icons::plus(), "Column", editing).clicked() {
+                                actions.push(Action::ForTab {
+                                    tab_id,
+                                    action: Box::new(Action::AddSchemaColumn),
+                                });
+                            }
+                        }
+                        TabView::Indexes => {
+                            ui.add_space(6.0);
+                            if components::button(ui, icons::plus(), "Index", editing).clicked() {
+                                actions.push(Action::ForTab {
+                                    tab_id,
+                                    action: Box::new(Action::AddSchemaIndex),
+                                });
+                            }
+                        }
+                        TabView::Message | TabView::Chart => {}
+                    }
+                    if self.tabs[idx].view == TabView::Structure {
+                        ui.add_space(6.0);
+                        if let (Some(info), Some(kind)) = (
+                            table_info.as_ref(),
+                            self.active().map(|active| active.db.kind()),
+                        ) {
+                            let ddl_button = components::Btn::new("DDL")
+                                .tooltip("Show the table creation DDL")
+                                .show(ui);
+                            let statements = crate::schema::build_table_definition_ddl(info, kind);
+                            let ddl = statements.join("\n\n");
+                            let popup_frame = egui::Frame::popup(ui.style())
+                                .fill(palette::PANEL())
+                                .stroke(egui::Stroke::new(1.0_f32, palette::BORDER_STRONG()))
+                                .corner_radius(egui::CornerRadius::same(14))
+                                .inner_margin(egui::Margin::same(10));
+                            let popup = egui::Popup::from_toggle_button_response(&ddl_button)
+                                .id(ddl_button.id.with("table_ddl"))
+                                .align(egui::RectAlign::TOP_END)
+                                .align_alternatives(&[egui::RectAlign::TOP_START])
+                                .gap(9.0)
+                                .width(720.0)
+                                .frame(popup_frame)
+                                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                                .show(|ui| {
+                                    ui.set_min_width(680.0);
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{} — {} DDL",
+                                            info.name,
+                                            kind.label()
+                                        ))
+                                        .strong()
+                                        .color(palette::TEXT()),
+                                    );
+                                    ui.add_space(6.0);
+                                    let font = egui::TextStyle::Monospace.resolve(ui.style());
+                                    egui::ScrollArea::both()
+                                        .id_salt("table_ddl_preview")
+                                        .max_height(440.0)
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            let job = crate::highlight::highlight_sql_cached(
+                                                ui.ctx(),
+                                                &ddl,
+                                                font,
+                                            );
+                                            ui.add(egui::Label::new(job).selectable(true));
+                                        });
+                                });
+                            if let Some(response) = popup {
+                                let rect = response.response.rect;
+                                let anchor_x = ddl_button
+                                    .rect
+                                    .center()
+                                    .x
+                                    .clamp(rect.left() + 10.0, rect.right() - 10.0);
+                                let left = egui::pos2(anchor_x - 8.0, rect.bottom() - 1.0);
+                                let right = egui::pos2(anchor_x + 8.0, rect.bottom() - 1.0);
+                                let tip = egui::pos2(anchor_x, rect.bottom() + 8.0);
+                                let painter = ui.ctx().layer_painter(response.response.layer_id);
+                                painter.add(egui::Shape::convex_polygon(
+                                    vec![left, right, tip],
+                                    palette::PANEL(),
+                                    egui::Stroke::NONE,
+                                ));
+                                let stroke = egui::Stroke::new(1.0_f32, palette::BORDER_STRONG());
+                                painter.line_segment([left, tip], stroke);
+                                painter.line_segment([tip, right], stroke);
+                            }
                         }
                     }
                     // Paging describes the table result, so its range and navigation stay visible
@@ -5242,6 +5358,21 @@ impl DbGuiApp {
                 .frame(style::workspace_frame(palette::PANEL()))
                 .show_inside(root, |ui| {
                     self.schema_editor_view(ui, actions);
+                });
+            return;
+        }
+        if self.tabs[idx].table_metadata_pending
+            && matches!(self.tabs[idx].view, TabView::Structure | TabView::Indexes)
+        {
+            egui::CentralPanel::default()
+                .frame(style::workspace_frame(palette::PANEL()))
+                .show_inside(root, |ui| {
+                    ui.centered_and_justified(|ui| {
+                        ui.label(
+                            egui::RichText::new("Loading table structure…")
+                                .color(palette::TEXT_WEAK()),
+                        );
+                    });
                 });
             return;
         }
@@ -7218,6 +7349,181 @@ impl DbGuiApp {
         }
     }
 
+    /// Compact relation editor opened from a Structure grid foreign-key cell.
+    pub(super) fn foreign_key_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        let Some(pending) = self.foreign_key_editor.as_ref() else {
+            return;
+        };
+        let tab_id = pending.tab_id;
+        let index = pending.index;
+        let is_new = pending.original.is_none();
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            actions.push(Action::CancelForeignKeyEdit);
+            return;
+        };
+        let Some(crate::schema::ObjectEditor::Table(editor)) = tab.schema_editor.as_mut() else {
+            actions.push(Action::CancelForeignKeyEdit);
+            return;
+        };
+        let Some(foreign_key) = editor.fks.get_mut(index) else {
+            actions.push(Action::CancelForeignKeyEdit);
+            return;
+        };
+
+        let mut open = true;
+        components::dialog_window(if is_new {
+            "Create Foreign Key"
+        } else {
+            "Edit Foreign Key"
+        })
+        .open(&mut open)
+        .resizable(false)
+        .default_size([620.0, 0.0])
+        .frame(components::dialog_frame(ctx))
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new("Connect this column to a key in another table.")
+                    .color(palette::TEXT_WEAK()),
+            );
+            ui.add_space(12.0);
+
+            egui::Frame::new()
+                .fill(palette::SURFACE())
+                .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
+                .corner_radius(egui::CornerRadius::same(8))
+                .inner_margin(egui::Margin::same(12))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.set_width(150.0);
+                            ui.label(
+                                egui::RichText::new("Source column")
+                                    .small()
+                                    .color(palette::TEXT_WEAK()),
+                            );
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&foreign_key.columns_raw)
+                                        .strong()
+                                        .color(palette::TEXT()),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(&foreign_key.columns_raw);
+                        });
+                        ui.add_space(16.0);
+                        icons::show_weak(ui, icons::arrow_right(), 18.0);
+                        ui.add_space(16.0);
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new("Referenced table")
+                                    .small()
+                                    .color(palette::TEXT_WEAK()),
+                            );
+                            components::text_input(
+                                ui,
+                                &mut foreign_key.ref_table,
+                                "schema.table",
+                                180.0,
+                            );
+                        });
+                        ui.add_space(8.0);
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new("Referenced column")
+                                    .small()
+                                    .color(palette::TEXT_WEAK()),
+                            );
+                            components::text_input(
+                                ui,
+                                &mut foreign_key.ref_columns_raw,
+                                "column_name",
+                                160.0,
+                            );
+                        });
+                    });
+                });
+
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.label("Constraint name");
+                components::text_input(
+                    ui,
+                    &mut foreign_key.constraint_name,
+                    "fk_name (optional)",
+                    250.0,
+                );
+                ui.add_space(12.0);
+                ui.label("On delete");
+                egui::ComboBox::from_id_salt("foreign_key_dialog_action")
+                    .selected_text(foreign_key.on_delete.label())
+                    .show_ui(ui, |ui| {
+                        for rule in dbcore::FkAction::ALL {
+                            ui.selectable_value(&mut foreign_key.on_delete, *rule, rule.label());
+                        }
+                    });
+            });
+
+            components::dialog_footer(ui, |ui| {
+                let valid = !foreign_key.ref_table.trim().is_empty()
+                    && !foreign_key.ref_columns_raw.trim().is_empty();
+                if components::primary_button(ui, icons::save(), "Save changes", valid).clicked() {
+                    actions.push(Action::ConfirmForeignKeyEdit);
+                }
+                if components::button(ui, icons::close(), "Cancel", true).clicked() {
+                    actions.push(Action::CancelForeignKeyEdit);
+                }
+            });
+        });
+        if !open {
+            actions.push(Action::CancelForeignKeyEdit);
+        }
+    }
+
+    /// Ask what to do with pending Structure edits before Cmd/Ctrl+R reloads the tab.
+    pub(super) fn schema_reload_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        let Some(tab_id) = self.schema_reload_pending else {
+            return;
+        };
+        let Some(tab_index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            self.schema_reload_pending = None;
+            return;
+        };
+
+        let mut open = true;
+        components::dialog_window("Unsaved Structure Changes")
+            .open(&mut open)
+            .resizable(false)
+            .default_size([460.0, 0.0])
+            .frame(components::dialog_frame(ctx))
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "This table structure has changes that have not been saved. What would you like to do before reloading?",
+                    )
+                    .color(palette::TEXT_WEAK()),
+                );
+                components::dialog_footer(ui, |ui| {
+                    if components::primary_button(ui, icons::save(), "Save", true).clicked() {
+                        actions.push(Action::SelectTab(tab_index));
+                        actions.push(Action::CancelSchemaReload);
+                        actions.push(Action::GenerateSchema);
+                    }
+                    if components::button(ui, icons::trash(), "Discard", true).clicked() {
+                        actions.push(Action::SelectTab(tab_index));
+                        actions.push(Action::CancelSchemaReload);
+                        actions.push(Action::ReloadTableStructure);
+                    }
+                    if components::button(ui, icons::close(), "Cancel", true).clicked() {
+                        actions.push(Action::CancelSchemaReload);
+                    }
+                });
+            });
+        if !open {
+            actions.push(Action::CancelSchemaReload);
+        }
+    }
+
     /// Modal showing the SQL that will be executed, with Commit and Cancel buttons.
     /// Opened by Cmd+S; the user reviews the statements before anything is sent to the DB.
     pub(super) fn commit_preview_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
@@ -8693,6 +8999,7 @@ impl DbGuiApp {
     /// a dialog. Applying DDL on a production connection opens Guardian review.
     fn schema_editor_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let idx = self.active_query_tab;
+        let tab_id = self.tabs[idx].id;
         let editing_existing_table = matches!(
             self.tabs[idx].schema_editor.as_ref(),
             Some(crate::schema::ObjectEditor::Table(editor))
@@ -8711,29 +9018,31 @@ impl DbGuiApp {
         let rect = ui
             .available_rect_before_wrap()
             .shrink2(egui::vec2(10.0, 2.0));
-        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-            match self.tabs[idx].schema_editor.as_mut() {
-                Some(crate::schema::ObjectEditor::Table(editor)) => {
-                    if let Some(section) = table_section {
-                        editor.active_tab = if section == TabView::Indexes {
-                            crate::schema::SchemaTab::Indexes
-                        } else {
-                            crate::schema::SchemaTab::Columns
-                        };
+        ui.push_id(("schema_editor", tab_id), |ui| {
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                match self.tabs[idx].schema_editor.as_mut() {
+                    Some(crate::schema::ObjectEditor::Table(editor)) => {
+                        if let Some(section) = table_section {
+                            editor.active_tab = if section == TabView::Indexes {
+                                crate::schema::SchemaTab::Indexes
+                            } else {
+                                crate::schema::SchemaTab::Columns
+                            };
+                        }
+                        table_editor_view(ui, actions, editor, table_section)
                     }
-                    table_editor_view(ui, actions, editor, table_section)
+                    Some(crate::schema::ObjectEditor::View(editor)) => {
+                        view_editor_view(ui, actions, editor)
+                    }
+                    Some(crate::schema::ObjectEditor::Trigger(editor)) => {
+                        trigger_editor_view(ui, actions, editor)
+                    }
+                    Some(crate::schema::ObjectEditor::Routine(editor)) => {
+                        routine_editor_view(ui, actions, editor)
+                    }
+                    None => {}
                 }
-                Some(crate::schema::ObjectEditor::View(editor)) => {
-                    view_editor_view(ui, actions, editor)
-                }
-                Some(crate::schema::ObjectEditor::Trigger(editor)) => {
-                    trigger_editor_view(ui, actions, editor)
-                }
-                Some(crate::schema::ObjectEditor::Routine(editor)) => {
-                    routine_editor_view(ui, actions, editor)
-                }
-                None => {}
-            }
+            });
         });
     }
 }
@@ -8770,7 +9079,11 @@ fn object_editor_header(ui: &mut egui::Ui, actions: &mut Vec<Action>, title: &st
 
 /// Compact metadata bar used when an existing table is edited in-place. Keeping this separate
 /// from the create-table header makes Structure/Indexes read like data grids, not dialog forms.
-fn embedded_table_editor_header(ui: &mut egui::Ui, editor: &crate::schema::SchemaEditor) {
+fn embedded_table_editor_header(
+    ui: &mut egui::Ui,
+    editor: &mut crate::schema::SchemaEditor,
+    table_section: Option<TabView>,
+) {
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         ui.label(
@@ -8779,20 +9092,15 @@ fn embedded_table_editor_header(ui: &mut egui::Ui, editor: &crate::schema::Schem
                 .strong()
                 .color(palette::TEXT_WEAK()),
         );
-        ui.label(
-            egui::RichText::new(&editor.table_name)
-                .strong()
-                .color(palette::TEXT()),
-        );
+        components::text_input(ui, &mut editor.table_name, "table_name", 240.0);
 
-        let primary = editor
+        let primary_columns = editor
             .columns
             .iter()
             .filter(|column| column.primary_key && !column.drop)
-            .map(|column| column.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        if !primary.is_empty() {
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        if !primary_columns.is_empty() || editor.db_kind == dbcore::DbKind::SqlServer {
             ui.add_space(14.0);
             ui.label(
                 egui::RichText::new("Primary")
@@ -8800,7 +9108,47 @@ fn embedded_table_editor_header(ui: &mut egui::Ui, editor: &crate::schema::Schem
                     .strong()
                     .color(palette::TEXT_WEAK()),
             );
-            components::type_badge(ui, &primary, palette::ACCENT());
+        }
+        if editor.db_kind == dbcore::DbKind::SqlServer {
+            let primary_text = if primary_columns.is_empty() {
+                "No primary key".to_string()
+            } else {
+                primary_columns.join(", ")
+            };
+            egui::ComboBox::from_id_salt("structure_primary_key")
+                .width(220.0)
+                .selected_text(primary_text)
+                .icon(components::combo_chevron_icon)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show_ui(ui, |ui| {
+                    ui.set_min_width(220.0);
+                    for column in editor.columns.iter_mut().filter(|column| !column.drop) {
+                        let name = column.name.clone();
+                        if ui.checkbox(&mut column.primary_key, &name).changed()
+                            && column.primary_key
+                        {
+                            // SQL Server primary-key columns must be NOT NULL.
+                            column.nullable = false;
+                        }
+                    }
+                });
+        } else {
+            for column in primary_columns {
+                components::type_badge(ui, &column, palette::ACCENT());
+            }
+        }
+
+        if table_section == Some(TabView::Structure) {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let search_width = 280.0_f32.min(ui.available_width());
+                components::icon_text_input(
+                    ui,
+                    &mut editor.column_filter,
+                    "Search for column…",
+                    icons::search(),
+                    search_width,
+                );
+            });
         }
     });
     ui.add_space(8.0);
@@ -8850,7 +9198,7 @@ fn table_editor_view(
         ui.separator();
         ui.add_space(10.0);
     } else if table_section.is_some() {
-        embedded_table_editor_header(ui, editor);
+        embedded_table_editor_header(ui, editor, table_section);
     } else {
         object_editor_header(ui, actions, &title);
     }
@@ -8912,33 +9260,59 @@ fn table_editor_view(
         schema_grid_keyboard(ui, editor, table_section);
     }
 
-    egui::ScrollArea::vertical()
+    let viewport_width = ui.available_width();
+    let schema_scroll = if table_section.is_some() {
+        egui::ScrollArea::both()
+    } else {
+        egui::ScrollArea::vertical()
+    };
+
+    schema_scroll
         .id_salt("schema_editor_scroll")
         .auto_shrink([false, false])
-        .show(ui, |ui| match editor.active_tab {
-            SchemaTab::Columns => {
-                if table_section == Some(TabView::Structure) {
-                    schema_structure_grid(
+        .show(ui, |ui| {
+            // TableBuilder sizes columns against its parent. Give live Structure/Indexes grids
+            // their natural width so a narrow panel overflows into this horizontal ScrollArea
+            // instead of clipping the columns on the right.
+            let grid_min_width: f32 = match table_section {
+                Some(TabView::Structure) => 1_164.0,
+                Some(TabView::Indexes) => 634.0,
+                _ => 0.0,
+            };
+            if grid_min_width > 0.0 {
+                ui.set_min_width(grid_min_width.max(viewport_width));
+            }
+
+            match editor.active_tab {
+                SchemaTab::Columns => {
+                    if table_section == Some(TabView::Structure) {
+                        schema_structure_grid(
+                            ui,
+                            actions,
+                            &mut editor.columns,
+                            &editor.fks,
+                            editor.db_kind,
+                            &editor.column_filter,
+                            &mut editor.editing_type_row,
+                            &mut editor.grid_selection,
+                            &mut editor.focus_selected_cell,
+                        );
+                    } else {
+                        schema_columns_tab(ui, &mut editor.columns, editor.mode, editor.db_kind);
+                    }
+                }
+                SchemaTab::Indexes if table_section == Some(TabView::Indexes) => {
+                    schema_indexes_grid(
                         ui,
-                        &mut editor.columns,
-                        &editor.fks,
-                        editor.db_kind,
+                        &mut editor.indexes,
                         &mut editor.grid_selection,
                         &mut editor.focus_selected_cell,
-                    );
-                } else {
-                    schema_columns_tab(ui, &mut editor.columns, editor.mode, editor.db_kind);
+                    )
                 }
+                SchemaTab::Indexes => schema_indexes_tab(ui, &mut editor.indexes),
+                SchemaTab::ForeignKeys if table_section.is_some() => {}
+                SchemaTab::ForeignKeys => schema_fk_tab(ui, &mut editor.fks),
             }
-            SchemaTab::Indexes if table_section == Some(TabView::Indexes) => schema_indexes_grid(
-                ui,
-                &mut editor.indexes,
-                &mut editor.grid_selection,
-                &mut editor.focus_selected_cell,
-            ),
-            SchemaTab::Indexes => schema_indexes_tab(ui, &mut editor.indexes),
-            SchemaTab::ForeignKeys if table_section.is_some() => {}
-            SchemaTab::ForeignKeys => schema_fk_tab(ui, &mut editor.fks),
         });
 }
 
@@ -9509,6 +9883,13 @@ fn table_actions_menu(
             schema: table.schema.clone(),
             table: table.name.clone(),
         });
+        ui.close();
+    }
+    if components::button(ui, icons::code(), "Copy name", true)
+        .on_hover_text("Copy the table name to the clipboard")
+        .clicked()
+    {
+        ui.ctx().copy_text(table.name.clone());
         ui.close();
     }
     ui.separator();
@@ -11367,17 +11748,41 @@ fn schema_grid_text(
     value: &mut String,
     hint: &str,
 ) -> egui::Response {
-    let width = ui.available_width().max(24.0);
+    let edit_id = ui.id().with("schema_grid_text");
+    let focused = enabled && ui.memory(|memory| memory.focused() == Some(edit_id));
+    let text_height = ui.text_style_height(&egui::TextStyle::Body);
+    let vertical_padding = ((ui.available_height() - text_height) / 2.0)
+        .max(0.0)
+        .round() as i8;
     ui.add_enabled_ui(enabled, |ui| {
-        ui.add_sized(
-            egui::vec2(width, 21.0),
+        let response = ui.add(
             egui::TextEdit::singleline(value)
+                .id(edit_id)
                 .hint_text(hint)
                 .font(egui::TextStyle::Body)
                 .vertical_align(egui::Align::Center)
-                .margin(egui::Margin::symmetric(4, 0))
-                .frame(egui::Frame::NONE),
-        )
+                .frame(
+                    egui::Frame::new()
+                        .fill(if focused {
+                            palette::CODE_BG()
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        })
+                        .stroke(egui::Stroke::NONE)
+                        .corner_radius(egui::CornerRadius::ZERO)
+                        .inner_margin(egui::Margin::symmetric(4, vertical_padding)),
+                )
+                .desired_width(f32::INFINITY),
+        );
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                response.rect.shrink(0.5),
+                egui::CornerRadius::ZERO,
+                egui::Stroke::new(1.0_f32, palette::ACCENT()),
+                egui::StrokeKind::Inside,
+            );
+        }
+        response
     })
     .inner
 }
@@ -11417,34 +11822,138 @@ fn schema_grid_bool(
     .inner
 }
 
-fn schema_grid_combo<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    ui.scope(|ui| {
-        let widgets = &mut ui.visuals_mut().widgets;
-        widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
-        widgets.inactive.bg_stroke = egui::Stroke::NONE;
-        widgets.hovered.weak_bg_fill = egui::Color32::TRANSPARENT;
-        widgets.hovered.bg_stroke = egui::Stroke::NONE;
-        widgets.active.weak_bg_fill = egui::Color32::TRANSPARENT;
-        widgets.active.bg_stroke = egui::Stroke::NONE;
-        widgets.open.weak_bg_fill = egui::Color32::TRANSPARENT;
-        widgets.open.bg_stroke = egui::Stroke::NONE;
-        add(ui)
-    })
-    .inner
-}
+fn schema_grid_type_editor(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    value: &mut String,
+    db_kind: dbcore::DbKind,
+    row_index: usize,
+    editing_row: &mut Option<usize>,
+) -> egui::Response {
+    let width = ui.available_width().max(60.0);
+    let input_id = ui.id().with(("structure_column_type_edit", row_index));
+    let editing = enabled && *editing_row == Some(row_index);
+    if editing {
+        let text_height = ui.text_style_height(&egui::TextStyle::Body);
+        let vertical_padding = ((ui.available_height() - text_height) / 2.0)
+            .max(0.0)
+            .round() as i8;
+        let response = ui.add(
+            egui::TextEdit::singleline(value)
+                .id(input_id)
+                .frame(
+                    egui::Frame::new()
+                        .fill(palette::CODE_BG())
+                        .stroke(egui::Stroke::NONE)
+                        .corner_radius(egui::CornerRadius::ZERO)
+                        .inner_margin(egui::Margin::symmetric(4, vertical_padding)),
+                )
+                .desired_width(f32::INFINITY),
+        );
+        ui.painter().rect_stroke(
+            response.rect.shrink(0.5),
+            egui::CornerRadius::ZERO,
+            egui::Stroke::new(1.0_f32, palette::ACCENT()),
+            egui::StrokeKind::Inside,
+        );
+        let finish_editing = response.double_clicked()
+            || response.lost_focus()
+            || (response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+        if finish_editing {
+            *editing_row = None;
+            response.surrender_focus();
+            ui.ctx().request_repaint();
+        } else if !response.has_focus() {
+            response.request_focus();
+        }
+        return response;
+    }
 
-fn schema_grid_combo_icon(
-    ui: &egui::Ui,
-    rect: egui::Rect,
-    visuals: &egui::style::WidgetVisuals,
-    _is_open: bool,
-) {
-    let size = egui::vec2(12.0, 12.0);
-    let icon_rect = egui::Rect::from_center_size(rect.center(), size);
+    let (button_rect, button) = ui.allocate_exact_size(
+        egui::vec2(width, 21.0),
+        if enabled {
+            egui::Sense::click()
+        } else {
+            egui::Sense::hover()
+        },
+    );
+    ui.painter().text(
+        egui::pos2(button_rect.left() + 4.0, button_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        value.as_str(),
+        egui::TextStyle::Body.resolve(ui.style()),
+        if enabled {
+            palette::TEXT()
+        } else {
+            palette::TEXT_FAINT()
+        },
+    );
+    let chevron_rect = egui::Rect::from_center_size(
+        egui::pos2(button.rect.right() - 10.0, button.rect.center().y),
+        egui::vec2(11.0, 11.0),
+    );
     egui::Image::new(icons::chevron_down())
-        .fit_to_exact_size(size)
-        .tint(visuals.fg_stroke.color)
-        .paint_at(ui, icon_rect);
+        .fit_to_exact_size(egui::vec2(11.0, 11.0))
+        .tint(palette::TEXT_WEAK())
+        .paint_at(ui, chevron_rect);
+
+    let popup_id = ui.id().with(("structure_column_type", row_index));
+    if button.double_clicked() && enabled {
+        *editing_row = Some(row_index);
+        egui::Popup::close_id(ui.ctx(), popup_id);
+        ui.ctx().request_repaint();
+        return button;
+    }
+
+    egui::Popup::from_toggle_button_response(&button)
+        .id(popup_id)
+        .align(egui::RectAlign::BOTTOM_START)
+        .align_alternatives(&[egui::RectAlign::TOP_START])
+        .width(button.rect.width().max(180.0))
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_width((button.rect.width() - 20.0).max(160.0));
+            egui::ScrollArea::vertical()
+                .id_salt(("structure_column_types", row_index))
+                .max_height(320.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for data_type in db_type_options(db_kind) {
+                        let data_type = data_type.to_ascii_lowercase();
+                        let selected = value.eq_ignore_ascii_case(&data_type);
+                        let (rect, response) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), 28.0),
+                            egui::Sense::click(),
+                        );
+                        let fill = if selected {
+                            Some(palette::SELECTION())
+                        } else if response.hovered() {
+                            Some(palette::SURFACE_HOVER())
+                        } else {
+                            None
+                        };
+                        if let Some(fill) = fill {
+                            ui.painter().rect_filled(
+                                rect.shrink2(egui::vec2(2.0, 1.0)),
+                                egui::CornerRadius::same(6),
+                                fill,
+                            );
+                        }
+                        ui.painter().with_clip_rect(rect.shrink(2.0)).text(
+                            egui::pos2(rect.left() + 10.0, rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            &data_type,
+                            egui::TextStyle::Body.resolve(ui.style()),
+                            palette::TEXT(),
+                        );
+                        if response.clicked() {
+                            *value = data_type;
+                            ui.close();
+                        }
+                    }
+                });
+        });
+    button
 }
 
 fn schema_grid_select_on_click(
@@ -11501,9 +12010,12 @@ fn schema_column_foreign_key(fks: &[crate::schema::FkDraft], column_name: &str) 
 /// chrome: the table grid provides the alignment and a focused cell supplies its own affordance.
 fn schema_structure_grid(
     ui: &mut egui::Ui,
+    actions: &mut Vec<Action>,
     columns: &mut Vec<crate::schema::ColumnDraft>,
     fks: &[crate::schema::FkDraft],
     db_kind: dbcore::DbKind,
+    column_filter: &str,
+    editing_type_row: &mut Option<usize>,
     selection: &mut Option<crate::schema::SchemaGridSelection>,
     focus_selected_cell: &mut bool,
 ) {
@@ -11511,6 +12023,7 @@ fn schema_structure_grid(
     use egui_extras::{Column, TableBuilder};
 
     let row_height = 24.0;
+    let query = column_filter.trim().to_lowercase();
     TableBuilder::new(ui)
         .id_salt("editable_structure_columns")
         .sense(egui::Sense::click())
@@ -11542,7 +12055,9 @@ fn schema_structure_grid(
             }
         })
         .body(|mut body| {
-            for (row_index, column) in columns.iter_mut().enumerate() {
+            for (row_index, column) in columns.iter_mut().enumerate().filter(|(_, column)| {
+                query.is_empty() || column.name.to_lowercase().contains(&query)
+            }) {
                 body.row(row_height, |mut row| {
                     let is_new = !column.is_existing;
                     let selected = selection.is_some_and(|selected| {
@@ -11578,39 +12093,31 @@ fn schema_structure_grid(
                     });
                     row.col(|ui| {
                         schema_grid_row_tint(ui, column.drop, is_new);
-                        ui.add_enabled_ui(!column.drop, |ui| {
-                            ui.spacing_mut().interact_size.y = 21.0;
-                            let response = schema_grid_combo(ui, |ui| {
-                                egui::ComboBox::from_id_salt(("structure_column_type", row_index))
-                                    .icon(schema_grid_combo_icon)
-                                    .height(320.0)
-                                    .selected_text(egui::RichText::new(&column.data_type))
-                                    .width((ui.available_width() - 4.0).max(60.0))
-                                    .show_ui(ui, |ui| {
-                                        components::text_input(
-                                            ui,
-                                            &mut column.data_type,
-                                            "Manual data type…",
-                                            210.0,
-                                        );
-                                        ui.separator();
-                                        for data_type in db_type_options(db_kind) {
-                                            ui.selectable_value(
-                                                &mut column.data_type,
-                                                data_type.to_string(),
-                                                *data_type,
-                                            );
-                                        }
-                                    })
-                                    .response
+                        let type_changed =
+                            column.original_type.as_deref().is_some_and(|original| {
+                                !original.eq_ignore_ascii_case(column.data_type.trim())
                             });
-                            schema_grid_select_on_click(
-                                &response,
-                                selection,
-                                SchemaTab::Columns,
-                                row_index,
+                        if type_changed && !column.drop {
+                            ui.painter().rect_filled(
+                                ui.available_rect_before_wrap(),
+                                egui::CornerRadius::ZERO,
+                                palette::SUCCESS().linear_multiply(0.16),
                             );
-                        });
+                        }
+                        let response = schema_grid_type_editor(
+                            ui,
+                            !column.drop,
+                            &mut column.data_type,
+                            db_kind,
+                            row_index,
+                            editing_type_row,
+                        );
+                        schema_grid_select_on_click(
+                            &response,
+                            selection,
+                            SchemaTab::Columns,
+                            row_index,
+                        );
                     });
                     row.col(|ui| {
                         schema_grid_row_tint(ui, column.drop, is_new);
@@ -11629,7 +12136,11 @@ fn schema_structure_grid(
                     });
                     row.col(|ui| {
                         schema_grid_row_tint(ui, column.drop, is_new);
-                        let response = schema_grid_metadata(ui, &column.check, "NULL");
+                        let response = if db_kind == dbcore::DbKind::SqlServer {
+                            schema_grid_text(ui, !column.drop, &mut column.check, "NULL")
+                        } else {
+                            schema_grid_metadata(ui, &column.check, "NULL")
+                        };
                         schema_grid_select_on_click(
                             &response,
                             selection,
@@ -11651,7 +12162,46 @@ fn schema_structure_grid(
                     row.col(|ui| {
                         schema_grid_row_tint(ui, column.drop, is_new);
                         let foreign_key = schema_column_foreign_key(fks, &column.name);
-                        let response = schema_grid_metadata(ui, &foreign_key, "EMPTY");
+                        let empty = foreign_key.is_empty();
+                        let label = if empty { "EMPTY" } else { &foreign_key };
+                        let (rect, response) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), 21.0),
+                            if column.drop {
+                                egui::Sense::hover()
+                            } else {
+                                egui::Sense::click()
+                            },
+                        );
+                        let color = if response.hovered() {
+                            palette::TEXT()
+                        } else {
+                            palette::TEXT_WEAK()
+                        };
+                        ui.painter().text(
+                            egui::pos2(rect.left() + 4.0, rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            label,
+                            egui::TextStyle::Body.resolve(ui.style()),
+                            color,
+                        );
+                        egui::Image::new(icons::arrow_right())
+                            .fit_to_exact_size(egui::vec2(13.0, 13.0))
+                            .tint(color)
+                            .paint_at(
+                                ui,
+                                egui::Rect::from_center_size(
+                                    egui::pos2(rect.right() - 10.0, rect.center().y),
+                                    egui::vec2(13.0, 13.0),
+                                ),
+                            );
+                        let response = response.on_hover_text(if empty {
+                            format!("Create a foreign key on {}", column.name)
+                        } else {
+                            format!("Edit the foreign key on {}", column.name)
+                        });
+                        if response.clicked() && !column.drop {
+                            actions.push(Action::OpenForeignKeysForColumn(column.name.clone()));
+                        }
                         schema_grid_select_on_click(
                             &response,
                             selection,
@@ -11661,7 +12211,11 @@ fn schema_structure_grid(
                     });
                     row.col(|ui| {
                         schema_grid_row_tint(ui, column.drop, is_new);
-                        let response = schema_grid_metadata(ui, &column.comment, "NULL");
+                        let response = if db_kind == dbcore::DbKind::SqlServer {
+                            schema_grid_text(ui, !column.drop, &mut column.comment, "NULL")
+                        } else {
+                            schema_grid_metadata(ui, &column.comment, "NULL")
+                        };
                         schema_grid_select_on_click(
                             &response,
                             selection,
@@ -11678,17 +12232,6 @@ fn schema_structure_grid(
                 });
             }
         });
-
-    ui.add_space(6.0);
-    if components::button(ui, icons::plus(), "Column", true).clicked() {
-        let row = columns.len();
-        columns.push(crate::schema::ColumnDraft::new_empty());
-        *selection = Some(SchemaGridSelection {
-            tab: SchemaTab::Columns,
-            row,
-        });
-        *focus_selected_cell = true;
-    }
 }
 
 fn schema_indexes_grid(
@@ -11791,17 +12334,6 @@ fn schema_indexes_grid(
                 });
             }
         });
-
-    ui.add_space(6.0);
-    if components::button(ui, icons::plus(), "Index", true).clicked() {
-        let row = indexes.len();
-        indexes.push(crate::schema::IndexDraft::new_empty());
-        *selection = Some(SchemaGridSelection {
-            tab: SchemaTab::Indexes,
-            row,
-        });
-        *focus_selected_cell = true;
-    }
 }
 
 fn schema_columns_tab(

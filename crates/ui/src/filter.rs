@@ -640,6 +640,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut FilterState, columns: &[String]) -> Opt
                 egui::ComboBox::from_id_salt(("filter_op", i))
                     .width(108.0)
                     .selected_text(cond.op.label())
+                    .icon(crate::components::combo_chevron_icon)
                     .show_ui(ui, |ui| {
                         for (gi, group) in FilterOp::GROUPS.iter().enumerate() {
                             if gi > 0 {
@@ -712,6 +713,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut FilterState, columns: &[String]) -> Opt
                     Conjunction::All => "All",
                     Conjunction::Any => "Any",
                 })
+                .icon(crate::components::combo_chevron_icon)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut conj, Conjunction::All, "All");
                     ui.selectable_value(&mut conj, Conjunction::Any, "Any");

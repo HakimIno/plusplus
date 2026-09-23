@@ -6,7 +6,7 @@
 use crate::components;
 use crate::edit::{EditOutcome, EditorKind, Edits};
 use crate::emoji::{self, EmojiAtlas};
-use crate::style::{self, palette};
+use crate::style::palette;
 use dbcore::{QueryResult, Value};
 use egui_extras::{Column, TableBuilder};
 
@@ -626,12 +626,9 @@ fn build_grid(
     // however, is one continuous band: column gutters split its bottom rule into separate
     // boxes and make the grid look dated. Keep cells flush inside this table only.
     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-    // Keep the table well black and lift alternating rows only a little. A dark stripe on a dark
-    // well disappears behind long values, especially in wide PostgreSQL result sets.
-    let softened_stripe = style::mix(palette::CODE_BG(), palette::STRIPE(), 0.38);
-    ui.painter()
-        .rect_filled(ui.max_rect(), egui::CornerRadius::ZERO, palette::CODE_BG());
-    ui.visuals_mut().faint_bg_color = softened_stripe;
+    // Use the shared table stripe directly so Data and Structure have the same row contrast.
+    // Selection/edit tints are painted separately below and still take precedence.
+    ui.visuals_mut().faint_bg_color = palette::STRIPE();
     let fill_id = egui::Id::new(("results_grid_fill_handle", grid_id));
     let mut fill_drag = ui.data_mut(|d| d.get_temp::<FillDrag>(fill_id));
     let pointer_pos = ui.input(|i| i.pointer.hover_pos());

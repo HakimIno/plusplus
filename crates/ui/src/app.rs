@@ -92,6 +92,15 @@ enum AppMessage {
         elapsed_ms: f64,
         result: Result<SchemaTree, String>,
     },
+    /// Focused metadata for one table, requested when Structure is opened before the full
+    /// connection-wide schema has finished loading.
+    TableMetadataLoaded {
+        tab_id: u64,
+        conn_id: String,
+        schema: Option<String>,
+        table: String,
+        result: Result<Option<TableInfo>, String>,
+    },
     /// Every branch of the initial metadata pipeline exited, so its cancellation handle and job
     /// guard can be released. Kept separate from `SchemaLoaded`: the database-list branch may
     /// still be running, and later schema refreshes use that result message too.
@@ -701,6 +710,12 @@ struct KeyChooserState {
     selected: usize,
 }
 
+struct ForeignKeyEditorPending {
+    tab_id: u64,
+    index: usize,
+    original: Option<crate::schema::FkDraft>,
+}
+
 struct QueryTab {
     /// Stable id, used to route async query/commit results back to the right tab.
     id: u64,
@@ -796,6 +811,8 @@ struct QueryTab {
     /// switching tabs or opening another table never leaves a stale editor on screen —
     /// and in-progress edits survive a tab switch.
     schema_editor: Option<ObjectEditor>,
+    /// A focused metadata request is populating Structure for this tab.
+    table_metadata_pending: bool,
     /// One-shot request to scroll this display row into view next frame (keyboard cursor
     /// moves). Consumed by `central_panel` when it renders the grid.
     pending_scroll: Option<usize>,
@@ -853,6 +870,7 @@ impl QueryTab {
             total_rows: None,
             total_rows_pending: false,
             schema_editor: None,
+            table_metadata_pending: false,
             pending_scroll: None,
             diagram: None,
             design_edit_index: None,
@@ -1441,6 +1459,12 @@ enum ConnTestState {
 /// Deferred UI actions. Collected from panel closures (which only borrow individual
 /// fields) and applied afterwards with full `&mut self`, sidestepping borrow conflicts.
 enum Action {
+    /// Apply a deferred workspace action to the tab that emitted it. Split panes restore the
+    /// primary tab before dispatch, so relying on `active_query_tab` would mutate the left pane.
+    ForTab {
+        tab_id: u64,
+        action: Box<Action>,
+    },
     /// Bind the active tab to a saved connection and (re)connect it.
     Connect(usize),
     /// Bind the active tab to an already-live connection (no reconnect).
@@ -1704,6 +1728,16 @@ enum Action {
     OpenNewTable,
     /// Open the schema editor to modify an existing table.
     OpenEditTable(TableInfo),
+    /// Append a staged row from the Data view's bottom action bar.
+    AddDataRow,
+    /// Append a draft column from the Structure view's bottom action bar.
+    AddSchemaColumn,
+    /// Append a draft index from the Indexes view's bottom action bar.
+    AddSchemaIndex,
+    /// Open the Foreign Keys editor, creating a draft for `column` when none exists.
+    OpenForeignKeysForColumn(String),
+    ConfirmForeignKeyEdit,
+    CancelForeignKeyEdit,
     /// Apply a `CREATE TABLE … AS`/clone migration for a sidebar table.
     CloneTable(TableInfo),
     /// Apply a `TRUNCATE`/empty-rows migration for a sidebar table.
@@ -1747,6 +1781,10 @@ enum Action {
     GenerateSchema,
     /// Restore the live table definition while keeping Structure/Indexes open.
     DiscardSchemaChanges,
+    /// Fetch fresh metadata for the active table from the database.
+    ReloadTableStructure,
+    /// Close the unsaved-Structure reload warning without reloading.
+    CancelSchemaReload,
     /// Close the schema editor without applying.
     CancelSchema,
     /// Open the in-app update dialog.
@@ -1895,9 +1933,13 @@ pub struct DbGuiApp {
     commit_pending: Option<edits::PendingEdits>,
     /// Candidate primary/unique columns used by UPDATE and DELETE WHERE clauses.
     key_chooser: Option<KeyChooserState>,
+    /// Compact editor opened from a Structure foreign-key action cell.
+    foreign_key_editor: Option<ForeignKeyEditorPending>,
     /// DDL statements staged for the schema-preview dialog. `None` = preview closed.
     /// (The schema editor itself lives on each [`QueryTab`].)
     schema_pending: Option<Vec<String>>,
+    /// Tab awaiting a Save/Discard decision before its Structure view is reloaded.
+    schema_reload_pending: Option<u64>,
     /// Destructive statements found when running a query against a production
     /// connection, held for the confirmation dialog. `None` = dialog closed.
     danger_pending: Option<ProductionGuardPending>,
@@ -2186,7 +2228,9 @@ impl DbGuiApp {
             run_all_by_default,
             commit_pending: None,
             key_chooser: None,
+            foreign_key_editor: None,
             schema_pending: None,
+            schema_reload_pending: None,
             danger_pending: None,
             import_pending: None,
             history_enabled,

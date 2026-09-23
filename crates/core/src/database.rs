@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::Result;
 use crate::export::RowSink;
-use crate::model::{DbKind, QueryResult, SchemaTree};
+use crate::model::{DbKind, QueryResult, SchemaTree, TableInfo};
 use crate::safety::{DangerousStatement, ProductionPreflight};
 
 /// A live connection to a database backend.
@@ -27,6 +27,30 @@ pub trait Database: Send + Sync {
     /// after one small metadata query; the default preserves compatibility for wrappers/tests.
     async fn introspect_overview(&self) -> Result<SchemaTree> {
         self.introspect().await
+    }
+
+    /// Load complete metadata for one table. Backends may override this with a focused catalog
+    /// query so opening Structure does not wait for every object in a large database.
+    async fn introspect_table(
+        &self,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Option<TableInfo>> {
+        Ok(self
+            .introspect()
+            .await?
+            .tables
+            .into_iter()
+            .find(|candidate| {
+                candidate.name.eq_ignore_ascii_case(table)
+                    && match (schema, candidate.schema.as_deref()) {
+                        (Some(schema), Some(candidate_schema)) => {
+                            schema.eq_ignore_ascii_case(candidate_schema)
+                        }
+                        (None, _) => true,
+                        (Some(_), None) => false,
+                    }
+            }))
     }
 
     /// Execute an arbitrary SQL statement and return the result set, materializing at most

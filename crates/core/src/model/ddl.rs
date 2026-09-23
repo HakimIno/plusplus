@@ -388,28 +388,38 @@ pub fn build_create_index_sql(
     table: &str,
     idx: &IndexDef,
 ) -> String {
-    let unique = if idx.unique { "UNIQUE " } else { "" };
+    // CQL secondary indexes cannot be declared UNIQUE.
+    let unique = if idx.unique && !kind.is_cql() {
+        "UNIQUE "
+    } else {
+        ""
+    };
     let cols = idx
         .columns
         .iter()
         .map(|c| kind.quote_ident(c))
         .collect::<Vec<_>>()
         .join(", ");
-    // MySQL/MariaDB don't support schema-qualified index names in CREATE INDEX; CQL
-    // likewise names the index bare (it lands in the table's keyspace).
+    // These providers bind the index through the ON table clause and require a bare index
+    // name. Postgres/DuckDB accept a schema-qualified index name. SQLite qualifies the index
+    // name but requires the ON table name to remain unqualified.
     let idx_ref = match kind {
-        DbKind::MySql | DbKind::MariaDb | DbKind::Cassandra | DbKind::ScyllaDb => {
-            kind.quote_ident(&idx.name)
-        }
+        DbKind::MySql
+        | DbKind::MariaDb
+        | DbKind::SqlServer
+        | DbKind::Cassandra
+        | DbKind::ScyllaDb => kind.quote_ident(&idx.name),
         _ => match schema {
             Some(s) => format!("{}.{}", kind.quote_ident(s), kind.quote_ident(&idx.name)),
             None => kind.quote_ident(&idx.name),
         },
     };
-    format!(
-        "CREATE {unique}INDEX {idx_ref} ON {} ({cols});",
+    let table_ref = if kind == DbKind::Sqlite && schema.is_some() {
+        kind.quote_ident(table)
+    } else {
         ddl_table_ref(kind, schema, table)
-    )
+    };
+    format!("CREATE {unique}INDEX {idx_ref} ON {} ({cols});", table_ref)
 }
 
 /// Build a `DROP INDEX` statement (MySQL/SQL Server require `ON table`; others don't).

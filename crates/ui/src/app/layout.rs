@@ -281,10 +281,25 @@ impl DbGuiApp {
                 Action::PreviewEdits
             });
         }
-        // Cmd/Ctrl+R reloads the current result (re-runs the tab's SQL), dropping any
-        // unsaved cell edits — the reloaded result starts from a clean edit slate.
+        // Cmd/Ctrl+R reloads the current result. Structure edits need an explicit decision:
+        // silently rebuilding the editor would lose pending DDL changes.
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::R)) {
-            actions.push(Action::RunQuery);
+            let dirty_schema = self
+                .tab()
+                .schema_editor
+                .as_ref()
+                .and_then(|editor| match editor {
+                    crate::schema::ObjectEditor::Table(editor) => Some(editor.has_changes()),
+                    _ => None,
+                })
+                .unwrap_or(false);
+            if editing_table_schema && dirty_schema {
+                self.schema_reload_pending = Some(self.tab().id);
+            } else if editing_table_schema {
+                actions.push(Action::ReloadTableStructure);
+            } else {
+                actions.push(Action::RunQuery);
+            }
         }
         // Esc discards unsaved cell edits (revert to the stored values) when no cell editor
         // is open — the open-editor case is handled inside `render_editor` (cancel that
@@ -596,6 +611,8 @@ impl DbGuiApp {
         }
         self.split_drop_overlay(ui_root, workspace_drop_rect, &mut actions);
         self.connection_dialog(&ctx, &mut actions);
+        self.schema_reload_dialog(&ctx, &mut actions);
+        self.foreign_key_dialog(&ctx, &mut actions);
         self.commit_preview_dialog(&ctx, &mut actions);
         self.key_chooser_dialog(&ctx, &mut actions);
         self.favorite_name_dialog(&ctx, &mut actions);

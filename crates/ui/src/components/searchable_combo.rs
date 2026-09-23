@@ -7,6 +7,31 @@ use crate::style::{palette, CONTROL_H};
 const MIN_POPUP_WIDTH: f32 = 210.0;
 const MAX_VISIBLE_ROWS: usize = 7;
 
+/// Paint the compact chevron used by dropdown buttons across the app.
+pub(crate) fn combo_chevron_icon(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    visuals: &egui::style::WidgetVisuals,
+    _is_open: bool,
+) {
+    let center = rect.center();
+    let stroke = egui::Stroke::new(1.5_f32, visuals.fg_stroke.color);
+    ui.painter().line_segment(
+        [
+            center + egui::vec2(-4.0, -2.0),
+            center + egui::vec2(0.0, 2.0),
+        ],
+        stroke,
+    );
+    ui.painter().line_segment(
+        [
+            center + egui::vec2(0.0, 2.0),
+            center + egui::vec2(4.0, -2.0),
+        ],
+        stroke,
+    );
+}
+
 /// Show a combo box with a focused search field and a virtualized result list.
 ///
 /// The outer `Option` is `Some` only when the user made a choice. The inner value is the
@@ -183,20 +208,11 @@ fn searchable_combo_button(
         );
 
         let chevron_center = egui::pos2(rect.right() - 14.0, rect.center().y);
-        let chevron_stroke = egui::Stroke::new(1.5_f32, visuals.fg_stroke.color);
-        ui.painter().line_segment(
-            [
-                chevron_center + egui::vec2(-4.0, -2.0),
-                chevron_center + egui::vec2(0.0, 2.0),
-            ],
-            chevron_stroke,
-        );
-        ui.painter().line_segment(
-            [
-                chevron_center + egui::vec2(0.0, 2.0),
-                chevron_center + egui::vec2(4.0, -2.0),
-            ],
-            chevron_stroke,
+        combo_chevron_icon(
+            ui,
+            egui::Rect::from_center_size(chevron_center, egui::Vec2::splat(12.0)),
+            visuals,
+            open,
         );
 
         let text_clip =

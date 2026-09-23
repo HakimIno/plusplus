@@ -72,11 +72,12 @@ impl DbKind {
         }
     }
 
-    /// Quote a table/column identifier for this dialect. MySQL/MariaDB use backticks; the
-    /// rest use ANSI double quotes. Embedded quote characters are doubled to neutralise them.
+    /// Quote a table/column identifier for this dialect. MySQL/MariaDB use backticks,
+    /// SQL Server uses brackets, and the remaining providers use ANSI double quotes.
     pub fn quote_ident(self, ident: &str) -> String {
         match self {
             DbKind::MySql | DbKind::MariaDb => format!("`{}`", ident.replace('`', "``")),
+            DbKind::SqlServer => format!("[{}]", ident.replace(']', "]]")),
             _ => format!("\"{}\"", ident.replace('"', "\"\"")),
         }
     }

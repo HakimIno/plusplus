@@ -20,8 +20,8 @@ pub struct ColumnDraft {
     pub nullable: bool,
     pub primary_key: bool,
     pub default: String,
-    /// Introspected metadata shown in Structure. Editing these requires dialect-specific DDL,
-    /// so the current migration editor presents them read-only.
+    /// Introspected column metadata. SQL Server exposes both as editable Structure cells;
+    /// other providers keep them read-only until their dialect-specific DDL is implemented.
     pub check: String,
     pub comment: String,
     /// Only set for existing columns (ALTER TABLE context).
@@ -30,7 +30,10 @@ pub struct ColumnDraft {
     /// into an `ALTER COLUMN`. `None` for newly added columns.
     pub original_type: Option<String>,
     pub original_nullable: Option<bool>,
+    pub original_primary_key: Option<bool>,
     pub original_default: Option<String>,
+    pub original_check: Option<String>,
+    pub original_comment: Option<String>,
     /// Whether the column existed before editing (vs. being newly added).
     pub is_existing: bool,
     /// Mark for deletion (existing column will get DROP COLUMN).
@@ -50,7 +53,10 @@ impl ColumnDraft {
             original_name: None,
             original_type: None,
             original_nullable: None,
+            original_primary_key: None,
             original_default: None,
+            original_check: None,
+            original_comment: None,
             is_existing: false,
             drop: false,
         }
@@ -68,7 +74,10 @@ impl ColumnDraft {
             original_name: Some(column.name.clone()),
             original_type: Some(column.data_type.clone()),
             original_nullable: Some(column.nullable),
+            original_primary_key: Some(column.primary_key),
             original_default: Some(column.default.clone().unwrap_or_default()),
+            original_check: Some(column.check.clone().unwrap_or_default()),
+            original_comment: Some(column.comment.clone().unwrap_or_default()),
             is_existing: true,
             drop: false,
         }
@@ -90,6 +99,16 @@ impl ColumnDraft {
             .as_deref()
             .is_some_and(|value| value.trim() != self.default.trim());
         type_changed || null_changed || default_changed
+    }
+
+    pub fn check_changed(&self) -> bool {
+        self.is_existing
+            && self.original_check.as_deref().unwrap_or_default().trim() != self.check.trim()
+    }
+
+    pub fn comment_changed(&self) -> bool {
+        self.is_existing
+            && self.original_comment.as_deref().unwrap_or_default().trim() != self.comment.trim()
     }
 
     pub fn to_def(&self) -> ColumnDef {
@@ -275,12 +294,178 @@ pub struct SchemaEditor {
     pub active_tab: SchemaTab,
     pub grid_selection: Option<SchemaGridSelection>,
     pub focus_selected_cell: bool,
-    /// Original table name when editing (used for future rename support).
-    #[allow(dead_code)]
+    /// The single Structure data-type cell currently in direct text-edit mode.
+    pub editing_type_row: Option<usize>,
+    /// Live, case-insensitive filter for the embedded Structure column grid.
+    pub column_filter: String,
+    /// Original table name when editing, used to detect and build a rename.
     pub original_table_name: Option<String>,
 }
 
+fn sqlserver_string(value: &str) -> String {
+    format!("N'{}'", value.replace('\'', "''"))
+}
+
+fn sqlserver_set_column_check(
+    schema: &str,
+    table: &str,
+    column: &str,
+    expression: &str,
+) -> Vec<String> {
+    let kind = DbKind::SqlServer;
+    let table_ref = format!("{}.{}", kind.quote_ident(schema), kind.quote_ident(table));
+    let dynamic_table_ref = table_ref.replace('\'', "''");
+    let object_name = sqlserver_string(&table_ref);
+    let column_value = sqlserver_string(column);
+    let drop_existing = format!(
+        "DECLARE @check_name sysname;\n\
+         SELECT @check_name = cc.name\n\
+         FROM sys.check_constraints cc\n\
+         JOIN sys.columns c ON c.object_id = cc.parent_object_id AND c.column_id = cc.parent_column_id\n\
+         WHERE cc.parent_object_id = OBJECT_ID({object_name}) AND c.name = {column_value};\n\
+         IF @check_name IS NOT NULL\n\
+           EXEC(N'ALTER TABLE {dynamic_table_ref} DROP CONSTRAINT ' + QUOTENAME(@check_name));"
+    );
+    let mut statements = vec![drop_existing];
+    if !expression.trim().is_empty() {
+        let constraint = format!("CK_{table}_{column}")
+            .chars()
+            .take(128)
+            .collect::<String>();
+        statements.push(format!(
+            "ALTER TABLE {table_ref} ADD CONSTRAINT {} CHECK ({});",
+            kind.quote_ident(&constraint),
+            expression.trim()
+        ));
+    }
+    statements
+}
+
+fn rename_table_sql(
+    kind: DbKind,
+    schema: Option<&str>,
+    old_name: &str,
+    new_name: &str,
+) -> Result<String, String> {
+    let old_ref = match schema {
+        Some(schema) => format!(
+            "{}.{}",
+            kind.quote_ident(schema),
+            kind.quote_ident(old_name)
+        ),
+        None => kind.quote_ident(old_name),
+    };
+    let new_ref = match schema {
+        Some(schema) => format!(
+            "{}.{}",
+            kind.quote_ident(schema),
+            kind.quote_ident(new_name)
+        ),
+        None => kind.quote_ident(new_name),
+    };
+    match kind {
+        DbKind::SqlServer => Ok(format!(
+            "EXEC sp_rename {}, {};",
+            sqlserver_string(&old_ref),
+            sqlserver_string(new_name)
+        )),
+        DbKind::MySql | DbKind::MariaDb => Ok(format!("RENAME TABLE {old_ref} TO {new_ref};")),
+        DbKind::Cassandra | DbKind::ScyllaDb => {
+            Err("Renaming an existing CQL table is not supported.".into())
+        }
+        _ => Ok(format!(
+            "ALTER TABLE {old_ref} RENAME TO {};",
+            kind.quote_ident(new_name)
+        )),
+    }
+}
+
+fn sqlserver_replace_primary_key(schema: &str, table: &str, columns: &[String]) -> Vec<String> {
+    let kind = DbKind::SqlServer;
+    let table_ref = format!("{}.{}", kind.quote_ident(schema), kind.quote_ident(table));
+    let dynamic_table_ref = table_ref.replace('\'', "''");
+    let object_name = sqlserver_string(&table_ref);
+    let drop_existing = format!(
+        "DECLARE @pk_name sysname;\n\
+         SELECT @pk_name = kc.name\n\
+         FROM sys.key_constraints kc\n\
+         WHERE kc.parent_object_id = OBJECT_ID({object_name}) AND kc.type = 'PK';\n\
+         IF @pk_name IS NOT NULL\n\
+           EXEC(N'ALTER TABLE {dynamic_table_ref} DROP CONSTRAINT ' + QUOTENAME(@pk_name));"
+    );
+    let mut statements = vec![drop_existing];
+    if !columns.is_empty() {
+        let columns = columns
+            .iter()
+            .map(|column| kind.quote_ident(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        statements.push(format!(
+            "ALTER TABLE {table_ref} ADD PRIMARY KEY ({columns});"
+        ));
+    }
+    statements
+}
+
+fn sqlserver_set_column_comment(schema: &str, table: &str, column: &str, comment: &str) -> String {
+    let schema = sqlserver_string(schema);
+    let table = sqlserver_string(table);
+    let column = sqlserver_string(column);
+    let exists = format!(
+        "EXISTS (SELECT 1 FROM sys.extended_properties ep \
+         JOIN sys.tables t ON t.object_id = ep.major_id \
+         JOIN sys.schemas s ON s.schema_id = t.schema_id \
+         JOIN sys.columns c ON c.object_id = t.object_id AND c.column_id = ep.minor_id \
+         WHERE ep.name = N'MS_Description' AND s.name = {schema} \
+           AND t.name = {table} AND c.name = {column})"
+    );
+    let levels = format!(
+        "@name=N'MS_Description', @level0type=N'SCHEMA', @level0name={schema}, \
+         @level1type=N'TABLE', @level1name={table}, @level2type=N'COLUMN', @level2name={column}"
+    );
+    if comment.trim().is_empty() {
+        format!("IF {exists}\n  EXEC sys.sp_dropextendedproperty {levels};")
+    } else {
+        let value = sqlserver_string(comment.trim());
+        format!(
+            "IF {exists}\n\
+               EXEC sys.sp_updateextendedproperty @name=N'MS_Description', @value={value}, \
+                 @level0type=N'SCHEMA', @level0name={schema}, @level1type=N'TABLE', @level1name={table}, \
+                 @level2type=N'COLUMN', @level2name={column};\n\
+             ELSE\n\
+               EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value={value}, \
+                 @level0type=N'SCHEMA', @level0name={schema}, @level1type=N'TABLE', @level1name={table}, \
+                 @level2type=N'COLUMN', @level2name={column};"
+        )
+    }
+}
+
 impl SchemaEditor {
+    /// Whether reloading would discard any table-definition edits.
+    pub fn has_changes(&self) -> bool {
+        if self.mode != SchemaEditorMode::Edit {
+            return true;
+        }
+        self.original_table_name.as_deref() != Some(self.table_name.trim())
+            || self.columns.iter().any(|column| {
+                column.drop
+                    || !column.is_existing
+                    || column.is_altered()
+                    || column.check_changed()
+                    || column.comment_changed()
+                    || column.original_primary_key.unwrap_or(false) != column.primary_key
+                    || column.original_name.as_deref() != Some(column.name.trim())
+            })
+            || self
+                .indexes
+                .iter()
+                .any(|index| index.drop || !index.is_existing || index.is_altered())
+            || self
+                .fks
+                .iter()
+                .any(|foreign_key| foreign_key.drop || !foreign_key.is_existing)
+    }
+
     pub fn new_table(db_kind: DbKind, default_schema: Option<&str>) -> Self {
         Self {
             mode: SchemaEditorMode::New,
@@ -293,6 +478,8 @@ impl SchemaEditor {
             active_tab: SchemaTab::Columns,
             grid_selection: None,
             focus_selected_cell: false,
+            editing_type_row: None,
+            column_filter: String::new(),
             original_table_name: None,
         }
     }
@@ -324,6 +511,8 @@ impl SchemaEditor {
             active_tab: SchemaTab::Columns,
             grid_selection: None,
             focus_selected_cell: false,
+            editing_type_row: None,
+            column_filter: String::new(),
             original_table_name: Some(table.name.clone()),
         }
     }
@@ -386,6 +575,8 @@ impl SchemaEditor {
             active_tab: SchemaTab::Columns,
             grid_selection: None,
             focus_selected_cell: false,
+            editing_type_row: None,
+            column_filter: String::new(),
             original_table_name: Some(table.name.clone()),
         }
     }
@@ -532,6 +723,51 @@ impl SchemaEditor {
             }
 
             SchemaEditorMode::Edit => {
+                let original_table = self.original_table_name.as_deref().unwrap_or(table);
+                if original_table != table {
+                    stmts.push(rename_table_sql(
+                        self.db_kind,
+                        self.schema(),
+                        original_table,
+                        table,
+                    )?);
+                }
+
+                let original_primary = self
+                    .columns
+                    .iter()
+                    .filter(|column| {
+                        column.is_existing && column.original_primary_key.unwrap_or(false)
+                    })
+                    .map(|column| {
+                        column
+                            .original_name
+                            .clone()
+                            .unwrap_or_else(|| column.name.clone())
+                    })
+                    .collect::<Vec<_>>();
+                let current_primary = self
+                    .columns
+                    .iter()
+                    .filter(|column| !column.drop && column.primary_key)
+                    .map(|column| column.name.trim().to_string())
+                    .collect::<Vec<_>>();
+                let primary_changed = original_primary != current_primary;
+                if primary_changed && self.db_kind != DbKind::SqlServer {
+                    return Err(format!(
+                        "Changing an existing primary key is not yet supported for {}.",
+                        self.db_kind.label()
+                    ));
+                }
+                if primary_changed {
+                    // Drop the old constraint before a primary column is renamed or removed.
+                    stmts.extend(sqlserver_replace_primary_key(
+                        self.schema().unwrap_or("dbo"),
+                        table,
+                        &[],
+                    ));
+                }
+
                 // Dropped columns
                 for col in self.columns.iter().filter(|c| c.is_existing && c.drop) {
                     let orig = col.original_name.as_deref().unwrap_or(&col.name);
@@ -584,12 +820,60 @@ impl SchemaEditor {
                     if col.name.trim().is_empty() {
                         return Err("New columns must have a name.".into());
                     }
+                    let mut definition = col.to_def();
+                    if primary_changed {
+                        // The table-level constraint is added once all new columns exist.
+                        definition.primary_key = false;
+                    }
                     stmts.push(build_add_column_sql(
                         self.db_kind,
                         self.schema(),
                         table,
-                        &col.to_def(),
+                        &definition,
                     ));
+                }
+
+                if primary_changed && !current_primary.is_empty() {
+                    stmts.push(
+                        sqlserver_replace_primary_key(
+                            self.schema().unwrap_or("dbo"),
+                            table,
+                            &current_primary,
+                        )
+                        .pop()
+                        .expect("a non-empty primary key emits an ADD statement"),
+                    );
+                }
+
+                // SQL Server exposes column checks and comments as separate schema objects:
+                // CHECK constraints and MS_Description extended properties.
+                for col in self.columns.iter().filter(|column| !column.drop) {
+                    let check_changed =
+                        col.check_changed() || (!col.is_existing && !col.check.trim().is_empty());
+                    let comment_changed = col.comment_changed()
+                        || (!col.is_existing && !col.comment.trim().is_empty());
+                    if (check_changed || comment_changed) && self.db_kind != DbKind::SqlServer {
+                        return Err(format!(
+                            "Editing column checks and comments is not yet supported for {}.",
+                            self.db_kind.label()
+                        ));
+                    }
+                    if check_changed {
+                        stmts.extend(sqlserver_set_column_check(
+                            self.schema().unwrap_or("dbo"),
+                            table,
+                            col.name.trim(),
+                            &col.check,
+                        ));
+                    }
+                    if comment_changed {
+                        stmts.push(sqlserver_set_column_comment(
+                            self.schema().unwrap_or("dbo"),
+                            table,
+                            col.name.trim(),
+                            &col.comment,
+                        ));
+                    }
                 }
 
                 // Existing index edits are applied portably as drop + recreate; this also makes
@@ -677,6 +961,45 @@ impl SchemaEditor {
 
         Ok(stmts)
     }
+}
+
+/// Render the current introspected table as portable, dialect-specific creation DDL.
+/// This is a read-only definition preview; unlike [`SchemaEditor::build_ddl`] it describes
+/// the whole table instead of only the edits pending against an existing table.
+pub fn build_table_definition_ddl(table: &TableInfo, db_kind: DbKind) -> Vec<String> {
+    let columns = table
+        .columns
+        .iter()
+        .map(ColumnDraft::from_existing)
+        .map(|column| column.to_def())
+        .collect::<Vec<_>>();
+    let foreign_keys = table
+        .foreign_keys
+        .iter()
+        .map(FkDraft::from_existing)
+        .map(|foreign_key| foreign_key.to_def())
+        .collect::<Vec<_>>();
+
+    let mut statements = vec![build_create_table_sql(
+        db_kind,
+        table.schema.as_deref(),
+        &table.name,
+        &columns,
+        &foreign_keys,
+    )];
+    statements.extend(table.indexes.iter().map(|index| {
+        build_create_index_sql(
+            db_kind,
+            table.schema.as_deref(),
+            &table.name,
+            &IndexDef {
+                name: index.name.clone(),
+                columns: index.columns.clone(),
+                unique: index.unique,
+            },
+        )
+    }));
+    statements
 }
 
 // ─── Object editors (views, triggers, routines) ──────────────────────────────
@@ -1187,6 +1510,119 @@ mod object_editor_tests {
         assert_eq!(sql.len(), 2);
         assert!(sql[0].starts_with("DROP INDEX"));
         assert!(sql[1].starts_with("CREATE UNIQUE INDEX"));
+    }
+
+    #[test]
+    fn table_definition_ddl_uses_the_selected_dialect_and_includes_indexes() {
+        let table = TableInfo {
+            schema: Some("dbo".into()),
+            name: "items".into(),
+            columns: vec![ColumnInfo {
+                name: "sku".into(),
+                data_type: "varchar(15)".into(),
+                nullable: false,
+                primary_key: true,
+                default: None,
+                check: None,
+                comment: None,
+                generated: false,
+            }],
+            indexes: vec![IndexInfo {
+                name: "idx_items_sku".into(),
+                unique: true,
+                columns: vec!["sku".into()],
+            }],
+            foreign_keys: Vec::new(),
+        };
+
+        let sql = build_table_definition_ddl(&table, DbKind::SqlServer);
+        assert_eq!(sql.len(), 2);
+        assert!(sql[0].starts_with("CREATE TABLE [dbo].[items]"));
+        assert!(sql[0].contains("[sku] varchar(15) NOT NULL PRIMARY KEY"));
+        assert!(sql[1].starts_with("CREATE UNIQUE INDEX [idx_items_sku]"));
+    }
+
+    #[test]
+    fn sqlserver_column_check_and_comment_changes_build_real_ddl() {
+        let table = TableInfo {
+            schema: Some("dbo".into()),
+            name: "items".into(),
+            columns: vec![ColumnInfo {
+                name: "qty".into(),
+                data_type: "int".into(),
+                nullable: false,
+                primary_key: false,
+                default: None,
+                check: Some("[qty] > 0".into()),
+                comment: Some("Old description".into()),
+                generated: false,
+            }],
+            indexes: Vec::new(),
+            foreign_keys: Vec::new(),
+        };
+        let mut editor = SchemaEditor::edit_table(&table, DbKind::SqlServer);
+        editor.columns[0].check = "[qty] >= 0".into();
+        editor.columns[0].comment = "Available quantity".into();
+
+        assert!(editor.has_changes());
+        let sql = editor.build_ddl().unwrap();
+        assert!(sql
+            .iter()
+            .any(|stmt| stmt.contains("sys.check_constraints")));
+        assert!(sql
+            .iter()
+            .any(|stmt| stmt.contains("ADD CONSTRAINT [CK_items_qty]")));
+        assert!(sql
+            .iter()
+            .any(|stmt| stmt.contains("sp_updateextendedproperty")));
+    }
+
+    #[test]
+    fn sqlserver_table_name_and_primary_key_changes_build_real_ddl() {
+        let table = TableInfo {
+            schema: Some("dbo".into()),
+            name: "items".into(),
+            columns: vec![
+                ColumnInfo {
+                    name: "id".into(),
+                    data_type: "int".into(),
+                    nullable: false,
+                    primary_key: true,
+                    default: None,
+                    check: None,
+                    comment: None,
+                    generated: false,
+                },
+                ColumnInfo {
+                    name: "sku".into(),
+                    data_type: "varchar(15)".into(),
+                    nullable: false,
+                    primary_key: false,
+                    default: None,
+                    check: None,
+                    comment: None,
+                    generated: false,
+                },
+            ],
+            indexes: Vec::new(),
+            foreign_keys: Vec::new(),
+        };
+        let mut editor = SchemaEditor::edit_table(&table, DbKind::SqlServer);
+        editor.table_name = "inventory".into();
+        editor.columns[0].primary_key = false;
+        editor.columns[1].primary_key = true;
+
+        assert!(editor.has_changes());
+        let sql = editor.build_ddl().unwrap();
+        assert_eq!(sql.len(), 3);
+        assert!(sql[0].contains("sp_rename"));
+        assert!(sql[0].contains("[dbo].[items]"));
+        assert!(sql[1].contains("DROP CONSTRAINT"));
+        assert!(sql[1].contains("[dbo].[inventory]"));
+        assert_eq!(
+            sql[2],
+            "ALTER TABLE [dbo].[inventory] ADD PRIMARY KEY ([sku]);"
+        );
     }
 
     #[test]

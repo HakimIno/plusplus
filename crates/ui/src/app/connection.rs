@@ -47,6 +47,7 @@ impl DbGuiApp {
                 tab.page_exhausted = false;
                 // A schema editor against a dropped connection is stale; close it.
                 tab.schema_editor = None;
+                tab.table_metadata_pending = false;
                 tab.design_edit_index = None;
             }
         }

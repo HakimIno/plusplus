@@ -29,6 +29,10 @@ fn mssql_returns_rows(sql: &str) -> bool {
     statements_return_rows(sql, ROW_KEYWORDS) || statements_return_rows(sql, &["exec", "execute"])
 }
 
+fn mssql_string_literal(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
 pub struct MsSqlDb {
     pool: Pool,
 }
@@ -202,6 +206,163 @@ impl Database for MsSqlDb {
             routines: Vec::new(),
             triggers: Vec::new(),
         })
+    }
+
+    async fn introspect_table(
+        &self,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Option<TableInfo>> {
+        let schema = schema.unwrap_or("dbo");
+        let schema_filter = mssql_string_literal(schema);
+        let table_filter = mssql_string_literal(table);
+        let columns_sql = format!(
+            "SELECT c.COLUMN_NAME, \
+               c.DATA_TYPE + CASE \
+                 WHEN c.DATA_TYPE IN ('char','varchar','nchar','nvarchar','binary','varbinary') \
+                   THEN '(' + CASE WHEN c.CHARACTER_MAXIMUM_LENGTH = -1 THEN 'max' \
+                                   ELSE CAST(c.CHARACTER_MAXIMUM_LENGTH AS varchar(11)) END + ')' \
+                 WHEN c.DATA_TYPE IN ('decimal','numeric') \
+                   THEN '(' + CAST(c.NUMERIC_PRECISION AS varchar(11)) + ',' \
+                            + CAST(c.NUMERIC_SCALE AS varchar(11)) + ')' \
+                 ELSE '' END, \
+               c.IS_NULLABLE, COALESCE(c.COLUMN_DEFAULT, ''), \
+               CAST(COLUMNPROPERTY(OBJECT_ID(c.TABLE_SCHEMA + '.' + c.TABLE_NAME), c.COLUMN_NAME, 'IsIdentity') AS varchar(1)), \
+               CASE WHEN pk.COLUMN_NAME IS NULL THEN '0' ELSE '1' END, \
+               COALESCE(cc.definition, ''), COALESCE(CAST(ep.value AS nvarchar(max)), '') \
+             FROM INFORMATION_SCHEMA.COLUMNS c \
+             LEFT JOIN ( \
+               SELECT kcu.TABLE_SCHEMA, kcu.TABLE_NAME, kcu.COLUMN_NAME \
+               FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc \
+               JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu \
+                 ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME \
+                AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA \
+               WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY' \
+             ) pk ON pk.TABLE_SCHEMA = c.TABLE_SCHEMA \
+                 AND pk.TABLE_NAME = c.TABLE_NAME \
+                 AND pk.COLUMN_NAME = c.COLUMN_NAME \
+             LEFT JOIN sys.columns sc \
+               ON sc.object_id = OBJECT_ID(c.TABLE_SCHEMA + '.' + c.TABLE_NAME) \
+              AND sc.name = c.COLUMN_NAME \
+             OUTER APPLY ( \
+               SELECT TOP (1) constraint_row.definition \
+               FROM sys.check_constraints constraint_row \
+               WHERE constraint_row.parent_object_id = sc.object_id \
+                 AND constraint_row.parent_column_id = sc.column_id \
+               ORDER BY constraint_row.object_id \
+             ) cc \
+             LEFT JOIN sys.extended_properties ep \
+               ON ep.major_id = sc.object_id AND ep.minor_id = sc.column_id \
+              AND ep.name = N'MS_Description' \
+             WHERE c.TABLE_SCHEMA = N'{schema_filter}' AND c.TABLE_NAME = N'{table_filter}' \
+             ORDER BY c.ORDINAL_POSITION"
+        );
+        let indexes_sql = format!(
+            "SELECT i.name, i.is_unique, c.name \
+             FROM sys.indexes i \
+             JOIN sys.tables t ON i.object_id = t.object_id \
+             JOIN sys.schemas s ON t.schema_id = s.schema_id \
+             JOIN sys.index_columns ic \
+               ON i.object_id = ic.object_id AND i.index_id = ic.index_id \
+             JOIN sys.columns c \
+               ON ic.object_id = c.object_id AND ic.column_id = c.column_id \
+             WHERE i.name IS NOT NULL AND s.name = N'{schema_filter}' AND t.name = N'{table_filter}' \
+             ORDER BY i.name, ic.key_ordinal"
+        );
+        let foreign_keys_sql = format!(
+            "SELECT fk.name, rs.name, rt.name, pc.name, rc.name, \
+                    fk.delete_referential_action_desc, fk.update_referential_action_desc \
+             FROM sys.foreign_keys fk \
+             JOIN sys.tables t ON fk.parent_object_id = t.object_id \
+             JOIN sys.schemas s ON t.schema_id = s.schema_id \
+             JOIN sys.tables rt ON fk.referenced_object_id = rt.object_id \
+             JOIN sys.schemas rs ON rt.schema_id = rs.schema_id \
+             JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id \
+             JOIN sys.columns pc \
+               ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id \
+             JOIN sys.columns rc \
+               ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id \
+             WHERE s.name = N'{schema_filter}' AND t.name = N'{table_filter}' \
+             ORDER BY fk.name, fkc.constraint_column_id"
+        );
+        let (column_rows, index_rows, foreign_key_rows) = tokio::try_join!(
+            self.fetch(&columns_sql),
+            self.fetch(&indexes_sql),
+            self.fetch(&foreign_keys_sql),
+        )?;
+        if column_rows.is_empty() {
+            return Ok(None);
+        }
+
+        let columns = column_rows
+            .into_iter()
+            .map(|row| {
+                let default = get_str(&row, 3);
+                let identity = get_str(&row, 4) == "1";
+                ColumnInfo {
+                    name: get_str(&row, 0),
+                    data_type: get_str(&row, 1),
+                    nullable: get_str(&row, 2).eq_ignore_ascii_case("YES"),
+                    primary_key: get_str(&row, 5) == "1",
+                    default: (!default.is_empty()).then_some(default.clone()),
+                    check: {
+                        let value = get_str(&row, 6);
+                        (!value.is_empty()).then_some(value)
+                    },
+                    comment: {
+                        let value = get_str(&row, 7);
+                        (!value.is_empty()).then_some(value)
+                    },
+                    generated: identity || default.to_ascii_lowercase().contains("next value for"),
+                }
+            })
+            .collect();
+
+        let mut grouped_indexes: BTreeMap<String, (bool, Vec<String>)> = BTreeMap::new();
+        for row in index_rows {
+            let name = get_str(&row, 0);
+            let unique = row.try_get::<bool, _>(1).ok().flatten().unwrap_or(false);
+            grouped_indexes
+                .entry(name)
+                .or_insert_with(|| (unique, Vec::new()))
+                .1
+                .push(get_str(&row, 2));
+        }
+        let indexes = grouped_indexes
+            .into_iter()
+            .map(|(name, (unique, columns))| IndexInfo {
+                name,
+                unique,
+                columns,
+            })
+            .collect();
+
+        let mut foreign_keys: Vec<ForeignKeyInfo> = Vec::new();
+        for row in foreign_key_rows {
+            let name = get_str(&row, 0);
+            if let Some(foreign_key) = foreign_keys.iter_mut().find(|fk| fk.name == name) {
+                foreign_key.columns.push(get_str(&row, 3));
+                foreign_key.ref_columns.push(get_str(&row, 4));
+            } else {
+                foreign_keys.push(ForeignKeyInfo {
+                    name,
+                    columns: vec![get_str(&row, 3)],
+                    ref_schema: Some(get_str(&row, 1)),
+                    ref_table: get_str(&row, 2),
+                    ref_columns: vec![get_str(&row, 4)],
+                    on_delete: get_str(&row, 5).replace('_', " "),
+                    on_update: get_str(&row, 6).replace('_', " "),
+                });
+            }
+        }
+
+        Ok(Some(TableInfo {
+            schema: Some(schema.to_string()),
+            name: table.to_string(),
+            columns,
+            indexes,
+            foreign_keys,
+        }))
     }
 
     async fn introspect(&self) -> Result<SchemaTree> {

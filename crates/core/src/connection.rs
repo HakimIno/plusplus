@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::database::Database;
 use crate::error::{CoreError, Result};
-use crate::model::{ConnectionConfig, DbKind, QueryResult, SchemaTree};
+use crate::model::{ConnectionConfig, DbKind, QueryResult, SchemaTree, TableInfo};
 use crate::{export, tunnel};
 
 /// Connect to the database described by `cfg`, returning a shareable handle.
@@ -88,6 +88,13 @@ impl Database for Tunneled {
     }
     async fn introspect_overview(&self) -> Result<SchemaTree> {
         self.inner.introspect_overview().await
+    }
+    async fn introspect_table(
+        &self,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Option<TableInfo>> {
+        self.inner.introspect_table(schema, table).await
     }
     async fn execute_capped(&self, sql: &str, max_rows: usize) -> Result<QueryResult> {
         self.inner.execute_capped(sql, max_rows).await

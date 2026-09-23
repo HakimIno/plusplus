@@ -179,7 +179,7 @@ fn create_view_per_dialect() {
     // SQL Server uses OR ALTER instead.
     assert_eq!(
         build_create_view_sql(DbKind::SqlServer, Some("dbo"), "v", "SELECT 1", false, true),
-        "CREATE OR ALTER VIEW \"dbo\".\"v\" AS\nSELECT 1;"
+        "CREATE OR ALTER VIEW [dbo].[v] AS\nSELECT 1;"
     );
     // SQLite has no replace form even when asked (caller drops first).
     assert_eq!(
@@ -320,7 +320,7 @@ fn create_trigger_sqlserver_rejects_before() {
         pg_existing_function: false,
     };
     let sql = build_create_trigger_sql(DbKind::SqlServer, &after).unwrap();
-    assert!(sql[0].contains("CREATE TRIGGER \"trg\" ON \"dbo\".\"t\""));
+    assert!(sql[0].contains("CREATE TRIGGER [trg] ON [dbo].[t]"));
     assert!(sql[0].contains("AFTER INSERT, DELETE"));
     let before = TriggerBuild {
         timing: TriggerTiming::Before,
@@ -345,7 +345,7 @@ fn drop_trigger_per_dialect() {
     );
     assert_eq!(
         build_drop_trigger_sql(DbKind::SqlServer, Some("dbo"), "trg", "t"),
-        "DROP TRIGGER \"dbo\".\"trg\";"
+        "DROP TRIGGER [dbo].[trg];"
     );
 }
 
@@ -415,7 +415,7 @@ fn create_routine_sqlserver_function_and_procedure() {
     };
     assert_eq!(
         build_create_routine_sql(DbKind::SqlServer, &f, true).unwrap()[0],
-        "CREATE OR ALTER FUNCTION \"dbo\".\"f\"(@a int)\nRETURNS int\nAS\nBEGIN RETURN @a; END;"
+        "CREATE OR ALTER FUNCTION [dbo].[f](@a int)\nRETURNS int\nAS\nBEGIN RETURN @a; END;"
     );
     // Procedures list parameters without parentheses.
     let pparams = [param("id", "int", ParamMode::In, None)];
@@ -430,7 +430,7 @@ fn create_routine_sqlserver_function_and_procedure() {
     };
     assert_eq!(
         build_create_routine_sql(DbKind::SqlServer, &p, false).unwrap()[0],
-        "CREATE PROCEDURE \"p\" @id int\nAS\nBEGIN SELECT 1; END;"
+        "CREATE PROCEDURE [p] @id int\nAS\nBEGIN SELECT 1; END;"
     );
 }
 
@@ -602,8 +602,8 @@ fn alter_column_sqlserver_alters_then_adds_default() {
     assert_eq!(
         sql,
         vec![
-            "ALTER TABLE \"dbo\".\"orders\" ALTER COLUMN \"qty\" int NOT NULL;",
-            "ALTER TABLE \"dbo\".\"orders\" ADD DEFAULT 1 FOR \"qty\";",
+            "ALTER TABLE [dbo].[orders] ALTER COLUMN [qty] int NOT NULL;",
+            "ALTER TABLE [dbo].[orders] ADD DEFAULT 1 FOR [qty];",
         ]
     );
 }

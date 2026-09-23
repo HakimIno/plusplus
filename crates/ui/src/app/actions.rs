@@ -3,8 +3,65 @@
 use super::*;
 
 impl DbGuiApp {
+    fn start_table_metadata_load(&mut self, table: &TableInfo) {
+        let tab_id = self.tab().id;
+        let Some(conn_id) = self.tab().conn_id.clone() else {
+            return;
+        };
+        if self.tab().table_metadata_pending {
+            return;
+        }
+        let Some(db) = self
+            .active_connections
+            .iter()
+            .find(|connection| connection.config_id == conn_id)
+            .map(|connection| connection.db.clone())
+        else {
+            return;
+        };
+        self.tab_mut().schema_editor = None;
+        self.tab_mut().table_metadata_pending = true;
+        self.status_msg = format!("Loading structure for {}…", table.name);
+        let schema = table.schema.clone();
+        let table_name = table.name.clone();
+        let tx = self.tx.clone();
+        self.rt.spawn(async move {
+            let requested_schema = schema.clone();
+            let requested_table = table_name.clone();
+            let result = match tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                db.introspect_table(schema.as_deref(), &table_name),
+            )
+            .await
+            {
+                Ok(result) => result.map_err(|error| error.to_string()),
+                Err(_) => Err("table structure load timed out after 30 seconds".into()),
+            };
+            let _ = tx.send(AppMessage::TableMetadataLoaded {
+                tab_id,
+                conn_id,
+                schema: requested_schema,
+                table: requested_table,
+                result,
+            });
+        });
+    }
+
     pub(super) fn apply_action(&mut self, action: Action) {
         match action {
+            Action::ForTab { tab_id, action } => {
+                let Some(target) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+                    return;
+                };
+                let previous_id = self.tabs.get(self.active_query_tab).map(|tab| tab.id);
+                self.active_query_tab = target;
+                self.apply_action(*action);
+                if let Some(previous) =
+                    previous_id.and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
+                {
+                    self.active_query_tab = previous;
+                }
+            }
             Action::Connect(i) => self.bind_connection(i, true),
             Action::BindConnection(i) => self.bind_connection(i, false),
             Action::Disconnect => {
@@ -1061,13 +1118,156 @@ impl DbGuiApp {
                 self.schema_pending = None;
             }
             Action::OpenEditTable(table) => {
-                let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
                 if !matches!(self.tab().view, TabView::Structure | TabView::Indexes) {
                     self.tab_mut().view = TabView::Structure;
                 }
-                self.tab_mut().schema_editor =
-                    Some(ObjectEditor::Table(SchemaEditor::edit_table(&table, kind)));
                 self.schema_pending = None;
+                let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
+                if table.columns.is_empty() || kind == DbKind::SqlServer {
+                    self.start_table_metadata_load(&table);
+                } else {
+                    self.tab_mut().table_metadata_pending = false;
+                    self.tab_mut().schema_editor =
+                        Some(ObjectEditor::Table(SchemaEditor::edit_table(&table, kind)));
+                }
+            }
+            Action::AddDataRow => {
+                let idx = self.active_query_tab;
+                let QueryTab {
+                    result,
+                    row_order,
+                    selection,
+                    edits,
+                    pending_scroll,
+                    ..
+                } = &mut self.tabs[idx];
+                let Some(result) = result.as_ref() else {
+                    return;
+                };
+                if !edits.editable() {
+                    return;
+                }
+
+                crate::edit::settle_active(edits, result);
+                let new_id = edits.add_new_row();
+                let display_row = row_order.len() + edits.new_rows - 1;
+                selection.select_one(display_row);
+                if let Some(column) = (0..result.column_count())
+                    .find(|&column| edits.col_kind(column) != crate::edit::EditorKind::Bool)
+                {
+                    edits.begin(
+                        new_id,
+                        column,
+                        &dbcore::Value::Null,
+                        crate::edit::EditOrigin::Grid,
+                    );
+                    selection.set_cursor(display_row, column);
+                }
+                *pending_scroll = Some(display_row);
+            }
+            Action::AddSchemaColumn => {
+                let Some(ObjectEditor::Table(editor)) = self.tab_mut().schema_editor.as_mut()
+                else {
+                    return;
+                };
+                let row = editor.columns.len();
+                editor.columns.push(crate::schema::ColumnDraft::new_empty());
+                editor.grid_selection = Some(crate::schema::SchemaGridSelection {
+                    tab: crate::schema::SchemaTab::Columns,
+                    row,
+                });
+                editor.focus_selected_cell = true;
+            }
+            Action::AddSchemaIndex => {
+                let Some(ObjectEditor::Table(editor)) = self.tab_mut().schema_editor.as_mut()
+                else {
+                    return;
+                };
+                let row = editor.indexes.len();
+                editor.indexes.push(crate::schema::IndexDraft::new_empty());
+                editor.grid_selection = Some(crate::schema::SchemaGridSelection {
+                    tab: crate::schema::SchemaTab::Indexes,
+                    row,
+                });
+                editor.focus_selected_cell = true;
+            }
+            Action::OpenForeignKeysForColumn(column) => {
+                let tab_id = self.tab().id;
+                let table_name = self.tab().title.clone();
+                let Some(ObjectEditor::Table(editor)) = self.tab_mut().schema_editor.as_mut()
+                else {
+                    return;
+                };
+                let existing = editor.fks.iter().position(|foreign_key| {
+                    foreign_key
+                        .columns_raw
+                        .split(',')
+                        .any(|item| item.trim().eq_ignore_ascii_case(&column))
+                });
+                let (index, original) = if let Some(index) = existing {
+                    (index, Some(editor.fks[index].clone()))
+                } else {
+                    let mut foreign_key = crate::schema::FkDraft::new_empty();
+                    foreign_key.constraint_name = format!("FK_{table_name}_{column}");
+                    foreign_key.columns_raw = column;
+                    editor.fks.push(foreign_key);
+                    (editor.fks.len() - 1, None)
+                };
+                self.foreign_key_editor = Some(ForeignKeyEditorPending {
+                    tab_id,
+                    index,
+                    original,
+                });
+            }
+            Action::ConfirmForeignKeyEdit => {
+                let Some(pending) = self.foreign_key_editor.take() else {
+                    return;
+                };
+                let Some(original) = pending.original else {
+                    return;
+                };
+                let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == pending.tab_id) else {
+                    return;
+                };
+                let Some(ObjectEditor::Table(editor)) = tab.schema_editor.as_mut() else {
+                    return;
+                };
+                let Some(edited) = editor.fks.get(pending.index).cloned() else {
+                    return;
+                };
+                let changed = edited.constraint_name != original.constraint_name
+                    || edited.columns_raw != original.columns_raw
+                    || edited.ref_table != original.ref_table
+                    || edited.ref_schema != original.ref_schema
+                    || edited.ref_columns_raw != original.ref_columns_raw
+                    || edited.on_delete != original.on_delete;
+                if changed {
+                    let mut dropped = original;
+                    dropped.drop = true;
+                    let mut replacement = edited;
+                    replacement.is_existing = false;
+                    replacement.drop = false;
+                    editor.fks[pending.index] = dropped;
+                    editor.fks.insert(pending.index + 1, replacement);
+                }
+            }
+            Action::CancelForeignKeyEdit => {
+                let Some(pending) = self.foreign_key_editor.take() else {
+                    return;
+                };
+                let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == pending.tab_id) else {
+                    return;
+                };
+                let Some(ObjectEditor::Table(editor)) = tab.schema_editor.as_mut() else {
+                    return;
+                };
+                if let Some(original) = pending.original {
+                    if let Some(foreign_key) = editor.fks.get_mut(pending.index) {
+                        *foreign_key = original;
+                    }
+                } else if pending.index < editor.fks.len() {
+                    editor.fks.remove(pending.index);
+                }
             }
             Action::OpenNewView => {
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
@@ -1283,6 +1483,12 @@ impl DbGuiApp {
                     self.status_msg = "Discarded schema changes".to_string();
                 }
             }
+            Action::ReloadTableStructure => {
+                if let Some(table) = self.structure_table(self.active_query_tab).cloned() {
+                    self.start_table_metadata_load(&table);
+                }
+            }
+            Action::CancelSchemaReload => self.schema_reload_pending = None,
             Action::CancelSchema => {
                 if self.schema_pending.is_some() {
                     self.schema_pending = None;
