@@ -153,8 +153,8 @@ impl DbGuiApp {
     }
     /// The introspected [`dbcore::TableInfo`] behind the tab at `idx`: the table it was
     /// opened on (loaded or still in flight), looked up in its live connection's schema.
-    /// `None` for plain query tabs or when the connection is down — the Structure view
-    /// needs this, so without it the tab falls back to Data.
+    /// `None` for plain query tabs, while metadata is still loading, or when the connection
+    /// is down. Structure/Indexes keep their mode and render a loading/unavailable state.
     pub(super) fn structure_table(&self, idx: usize) -> Option<&dbcore::TableInfo> {
         let tab = self.tabs.get(idx)?;
         let source = tab

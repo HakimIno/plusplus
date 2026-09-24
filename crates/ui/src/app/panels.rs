@@ -1108,6 +1108,18 @@ impl DbGuiApp {
                         {
                             actions.push(Action::OpenSettings);
                         }
+                        let open_anything_shortcut = ui.ctx().format_shortcut(
+                            &egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::P),
+                        );
+                        if components::toolbar_icon_button(
+                            ui,
+                            icons::search(),
+                            &format!("Open Anything ({open_anything_shortcut})"),
+                        )
+                        .clicked()
+                        {
+                            self.open_open_anything();
+                        }
                         if components::toolbar_icon_button(
                             ui,
                             icons::split_editor(),
@@ -1174,7 +1186,7 @@ impl DbGuiApp {
                                 // Rects collected per frame so the drag handler below can map
                                 // the pointer to an insertion slot.
                                 let mut rects = Vec::with_capacity(self.tabs.len());
-                                let pointer_x = ui.ctx().pointer_interact_pos().map(|p| p.x);
+                                let pointer = ui.ctx().pointer_interact_pos();
                                 for idx in 0..self.tabs.len() {
                                     if self.tab_is_in_split_group(idx) {
                                         continue;
@@ -1187,11 +1199,13 @@ impl DbGuiApp {
                                         .then(|| self.tab_db_kind(idx))
                                         .flatten();
                                     let preview = self.tabs[idx].preview;
-                                    // While this tab is dragged, its chip floats with its
-                                    // left edge tracking the pointer (minus the grab offset).
-                                    let drag_float_x = match (self.tab_drag, pointer_x) {
-                                        (Some(drag), Some(px)) if drag.id == self.tabs[idx].id => {
-                                            Some(px - drag.grab_x)
+                                    // While this tab is dragged, its chip floats under the
+                                    // pointer while its original slot remains as a placeholder.
+                                    let drag_float_pos = match (self.tab_drag, pointer) {
+                                        (Some(drag), Some(pointer))
+                                            if drag.id == self.tabs[idx].id =>
+                                        {
+                                            Some(pointer - drag.grab_offset)
                                         }
                                         _ => None,
                                     };
@@ -1202,7 +1216,7 @@ impl DbGuiApp {
                                         db_kind,
                                         selected,
                                         preview,
-                                        drag_float_x,
+                                        drag_float_pos,
                                     );
                                     let tab_count = self.tabs.len();
                                     let can_close_others = tab_count > 1;
@@ -1264,8 +1278,8 @@ impl DbGuiApp {
                                         // grab survives the index changing mid-drag.
                                         self.tab_drag = Some(super::TabDrag {
                                             id: self.tabs[idx].id,
-                                            grab_x: pointer_x.unwrap_or(resp.rect.left())
-                                                - resp.rect.left(),
+                                            grab_offset: pointer.unwrap_or(resp.rect.left_top())
+                                                - resp.rect.left_top(),
                                             origin_active_id: self.tabs[self.active_query_tab].id,
                                         });
                                         actions.push(Action::SelectTab(idx));
@@ -1436,7 +1450,7 @@ impl DbGuiApp {
         // chip's centre. Using the floating chip — not the bare pointer — makes the swap
         // fire exactly when the dragged tab visually overlaps a neighbour past its
         // midpoint, Chrome-style, regardless of where inside the tab it was grabbed.
-        let float_center = pointer.x - drag.grab_x + rects[from].width() * 0.5;
+        let float_center = pointer.x - drag.grab_offset.x + rects[from].width() * 0.5;
         let to = rects
             .iter()
             .enumerate()
@@ -2196,12 +2210,15 @@ impl DbGuiApp {
         // On data-first tabs the result-mode bar and query actions belong to the editor's
         // bottom stack. Including them in the resizable panel puts the drag edge above the
         // whole stack instead of between its controls and the SQL editor.
-        let mode_bar_height =
-            if placement == QueryEditorPlacement::Bottom && self.structure_table(idx).is_some() {
-                38.0
-            } else {
-                0.0
-            };
+        let mode_bar_height = if placement == QueryEditorPlacement::Bottom
+            && matches!(
+                kind,
+                crate::components::QueryTabKind::Table | crate::components::QueryTabKind::View
+            ) {
+            38.0
+        } else {
+            0.0
+        };
         let bottom_chrome = if placement == QueryEditorPlacement::Bottom {
             36.0 + mode_bar_height
         } else {
@@ -2225,22 +2242,76 @@ impl DbGuiApp {
                 QueryEditorPlacement::Top => egui::Panel::top(footer_id),
                 QueryEditorPlacement::Bottom => egui::Panel::bottom(footer_id),
             };
-            panel
-                .exact_size(36.0)
-                .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 0)))
+            // On code-first tabs this bar is the header of the result surface. The editor's
+            // bottom margin forms the two-point resize gutter above it.
+            let (height, frame) = if placement == QueryEditorPlacement::Top {
+                (
+                    40.0,
+                    egui::Frame::new()
+                        .fill(palette::PANEL())
+                        .corner_radius(egui::CornerRadius {
+                            nw: style::radius::LG,
+                            ne: style::radius::LG,
+                            sw: 0,
+                            se: 0,
+                        })
+                        .outer_margin(egui::Margin {
+                            left: style::WORKSPACE_GUTTER,
+                            right: style::WORKSPACE_GUTTER,
+                            top: 0,
+                            bottom: 0,
+                        })
+                        .inner_margin(egui::Margin::symmetric(8, 0)),
+                )
+            } else {
+                (
+                    36.0,
+                    egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 0)),
+                )
+            };
+            let response = panel
+                .exact_size(height)
+                .frame(frame)
+                .show_separator_line(false)
                 .show_inside(root, |ui| app.query_workspace_bar(ui, actions));
+            if placement == QueryEditorPlacement::Top {
+                let rect = response.response.rect;
+                // The result panel paints after this header and overlaps its bottom edge.
+                // Keep the divider above that fill so it remains visible at the join.
+                root.ctx()
+                    .layer_painter(egui::LayerId::new(
+                        egui::Order::Foreground,
+                        footer_id.with("bottom_border"),
+                    ))
+                    .hline(
+                        (rect.left() + style::WORKSPACE_GUTTER as f32)
+                            ..=(rect.right() - style::WORKSPACE_GUTTER as f32),
+                        rect.bottom() - 0.5,
+                        egui::Stroke::new(1.0_f32, palette::BORDER()),
+                    );
+            }
         };
 
         let panel = match placement {
             QueryEditorPlacement::Top => egui::Panel::top(panel_id),
             QueryEditorPlacement::Bottom => egui::Panel::bottom(panel_id),
         };
+        let editor_frame = if placement == QueryEditorPlacement::Top {
+            // The bottom stroke would become a full-width rule immediately above the
+            // narrow resize gutter. Preserve the editor's content inset without it.
+            style::workspace_frame(palette::CODE_BG())
+                .stroke(egui::Stroke::NONE)
+                .inner_margin(egui::Margin::same(5))
+        } else {
+            style::workspace_frame(palette::CODE_BG())
+        };
         let response = panel
             .resizable(true)
             .default_size(panel_default_size)
             .min_size(panel_min_size)
             .max_size(panel_max_size)
-            .frame(style::workspace_frame(palette::CODE_BG()))
+            .frame(editor_frame)
+            .show_separator_line(false)
             .show_inside(root, |ui| {
                 if placement == QueryEditorPlacement::Bottom {
                     if mode_bar_height > 0.0 {
@@ -2270,6 +2341,7 @@ impl DbGuiApp {
                         .min_size(220.0)
                         .max_size((available_width - 220.0).max(220.0))
                         .show_inside(ui, |ui| self.split_sql_editor(ui, &font));
+                    style::workspace_resize_grip(ui, split_id, false);
                     let width = split.response.rect.width();
                     let dragged = ui
                         .ctx()
@@ -2721,6 +2793,45 @@ impl DbGuiApp {
         // tabs rendered it inside the resizable stack above, together with the result-mode bar.
         if placement == QueryEditorPlacement::Top {
             footer(self, root, QueryEditorPlacement::Top, actions);
+            // Panel::top leaves a two-point layout gap before CentralPanel. Close it so the
+            // SQL workspace bar and the result surface paint as one uninterrupted panel.
+            root.add_space(-(style::WORKSPACE_GUTTER_Y as f32));
+            if let Some(handle) = root.ctx().read_response(panel_id.with("__resize")) {
+                let edge = handle.rect.center().y;
+                // egui paints a hover/drag separator inside the editor even when its
+                // separator is disabled. Cover only that line with the editor fill;
+                // the next two points remain the actual dark resize gutter.
+                root.painter().rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(handle.rect.left(), edge - 4.0),
+                        egui::pos2(handle.rect.right(), edge - 2.0),
+                    ),
+                    0.0,
+                    palette::CODE_BG(),
+                );
+                root.painter().rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(handle.rect.left(), edge - 2.0),
+                        egui::pos2(handle.rect.right(), edge),
+                    ),
+                    0.0,
+                    style::workspace_gap(),
+                );
+                let dot_color = if handle.hovered() || handle.dragged() {
+                    palette::TEXT_WEAK()
+                } else {
+                    palette::TEXT_FAINT()
+                };
+                for offset in [-5.0, 0.0, 5.0] {
+                    root.painter().circle_filled(
+                        egui::pos2(handle.rect.center().x + offset, edge - 1.0),
+                        1.0,
+                        dot_color,
+                    );
+                }
+            }
+        } else {
+            style::workspace_resize_grip(root, panel_id, true);
         }
 
         let rendered_size = response.response.rect.height() - bottom_chrome;
@@ -2779,6 +2890,7 @@ impl DbGuiApp {
                 .min_size(min_size)
                 .max_size(max_size)
                 .frame(style::workspace_frame(palette::PANEL()))
+                .show_separator_line(false)
                 .show_inside(root, |ui| {
                     if include_mode_bar {
                         self.view_mode_bar(ui, QueryEditorPlacement::Top, true, actions);
@@ -2937,6 +3049,11 @@ impl DbGuiApp {
         panel_response.response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Panel, true, "Live log dock")
         });
+        style::workspace_resize_grip(
+            root,
+            egui::Id::new(("live_log", tab_id, include_mode_bar)),
+            true,
+        );
     }
 
     /// Paint the SQL editor's gutter — line numbers and fold chevrons — and apply a click on
@@ -4008,6 +4125,7 @@ impl DbGuiApp {
                     });
                 }
             });
+        style::workspace_resize_grip(root, egui::Id::new("details_panel"), false);
     }
 
     pub(super) fn connection_tabs(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -4242,8 +4360,14 @@ impl DbGuiApp {
             .frame(
                 style::workspace_frame(palette::PANEL()).outer_margin(egui::Margin {
                     // The right seam combines this card and the central card's gutters.
-                    // There is no workspace card on the rail side, so match that total here.
-                    left: style::WORKSPACE_GUTTER * 2,
+                    // When the connection rail is present it has no card margin of its own,
+                    // so this panel supplies the whole seam. Without the rail, the workspace
+                    // inset supplies the other half just like the other outside edges.
+                    left: if self.show_connection_tabs {
+                        style::WORKSPACE_GUTTER * 2
+                    } else {
+                        style::WORKSPACE_GUTTER
+                    },
                     right: style::WORKSPACE_GUTTER,
                     top: style::WORKSPACE_GUTTER_Y,
                     bottom: style::WORKSPACE_GUTTER_Y,
@@ -4299,6 +4423,7 @@ impl DbGuiApp {
                     SidebarTab::History => self.sidebar_history(ui, actions),
                 }
             });
+        style::workspace_resize_grip(root, egui::Id::new("left_panel"), false);
     }
 
     /// The Items tab: create-object menu, table filter, and the schema tree.
@@ -5101,14 +5226,18 @@ impl DbGuiApp {
         let tab_id = self.tabs[idx].id;
         let query_result_tabs = self.tabs[idx].kind == crate::components::QueryTabKind::Query;
         let editable_table = self.tabs[idx].kind == crate::components::QueryTabKind::Table;
-        if !query_result_tabs && self.structure_table(idx).is_none() {
+        let table_or_view = matches!(
+            self.tabs[idx].kind,
+            crate::components::QueryTabKind::Table | crate::components::QueryTabKind::View
+        );
+        if !query_result_tabs && !table_or_view {
             self.tabs[idx].view = TabView::Data;
             return;
         }
         let table_info = self.structure_table(idx).cloned();
         if editable_table && matches!(self.tabs[idx].view, TabView::Structure | TabView::Indexes) {
             let schema_view = self.tabs[idx].view;
-            if self.tabs[idx].schema_editor.is_none() {
+            if self.tabs[idx].schema_editor.is_none() && !self.tabs[idx].table_metadata_pending {
                 if let Some(info) = table_info.as_ref() {
                     if !info.columns.is_empty() {
                         let kind = self
@@ -5228,6 +5357,11 @@ impl DbGuiApp {
                                 actions.push(Action::ForTab {
                                     tab_id,
                                     action: Box::new(Action::OpenEditTable(info)),
+                                });
+                            } else {
+                                actions.push(Action::ForTab {
+                                    tab_id,
+                                    action: Box::new(Action::LoadTableMetadata),
                                 });
                             }
                         } else if let Some(crate::schema::ObjectEditor::Table(editor)) =
@@ -5352,26 +5486,67 @@ impl DbGuiApp {
 
     pub(super) fn central_panel(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
         let idx = self.active_query_tab;
+        let result_frame = if self.show_query_console
+            && self.tabs[idx].schema_editor.is_none()
+            && matches!(
+                self.tabs[idx].kind,
+                crate::components::QueryTabKind::Query
+                    | crate::components::QueryTabKind::Function
+                    | crate::components::QueryTabKind::Procedure
+                    | crate::components::QueryTabKind::Trigger
+            ) {
+            // The SQL workspace bar directly above is this result card's header.
+            style::workspace_frame(palette::PANEL())
+                // A normal frame would draw its top stroke across the join. Keep the
+                // content inset at five points (the old four plus its one-point stroke).
+                .stroke(egui::Stroke::NONE)
+                .inner_margin(egui::Margin::same(5))
+                .outer_margin(egui::Margin {
+                    left: style::WORKSPACE_GUTTER,
+                    right: style::WORKSPACE_GUTTER,
+                    top: 0,
+                    bottom: style::WORKSPACE_GUTTER_Y,
+                })
+                .corner_radius(egui::CornerRadius {
+                    nw: 0,
+                    ne: 0,
+                    sw: style::radius::LG,
+                    se: style::radius::LG,
+                })
+        } else {
+            style::workspace_frame(palette::PANEL())
+        };
         // A portable table editor temporarily replaces its Diagram canvas, then returns to it.
         if self.tabs[idx].schema_editor.is_some() {
             egui::CentralPanel::default()
-                .frame(style::workspace_frame(palette::PANEL()))
+                .frame(result_frame)
                 .show_inside(root, |ui| {
                     self.schema_editor_view(ui, actions);
                 });
             return;
         }
-        if self.tabs[idx].table_metadata_pending
-            && matches!(self.tabs[idx].view, TabView::Structure | TabView::Indexes)
+        let schema_mode = matches!(self.tabs[idx].view, TabView::Structure | TabView::Indexes);
+        let table_metadata_incomplete = self
+            .structure_table(idx)
+            .is_none_or(|table| table.columns.is_empty());
+        if schema_mode
+            && self.tabs[idx].schema_editor.is_none()
+            && (self.tabs[idx].table_metadata_pending || table_metadata_incomplete)
         {
+            let connection_metadata_pending = self.tabs[idx]
+                .conn_id
+                .as_ref()
+                .is_some_and(|conn_id| self.connection_jobs.contains(conn_id));
+            let message = if self.tabs[idx].table_metadata_pending || connection_metadata_pending {
+                "Loading table structure…"
+            } else {
+                "Table structure unavailable"
+            };
             egui::CentralPanel::default()
-                .frame(style::workspace_frame(palette::PANEL()))
+                .frame(result_frame)
                 .show_inside(root, |ui| {
                     ui.centered_and_justified(|ui| {
-                        ui.label(
-                            egui::RichText::new("Loading table structure…")
-                                .color(palette::TEXT_WEAK()),
-                        );
+                        ui.label(egui::RichText::new(message).color(palette::TEXT_WEAK()));
                     });
                 });
             return;
@@ -5391,12 +5566,11 @@ impl DbGuiApp {
             return;
         }
         // Structure mode replaces the whole grid with the table's introspected definition.
-        // `view_mode_bar` already forced the view back to Data when no table info exists,
-        // so the lookup here always succeeds in Structure mode.
+        // Missing or name-only metadata was handled by the loading/unavailable state above.
         if self.tabs[idx].view == TabView::Structure {
             if let Some(info) = self.structure_table(idx).cloned() {
                 egui::CentralPanel::default()
-                    .frame(style::workspace_frame(palette::PANEL()))
+                    .frame(result_frame)
                     .show_inside(root, |ui| {
                         structure_view(ui, &info);
                     });
@@ -5409,7 +5583,7 @@ impl DbGuiApp {
                     let query_error = self.tabs[idx].query_error.as_deref();
                     if query_error.is_none() && self.tabs[idx].result.is_none() {
                         egui::CentralPanel::default()
-                            .frame(style::workspace_frame(palette::PANEL()))
+                            .frame(result_frame)
                             .show_inside(root, crate::pet::show);
                         return;
                     }
@@ -5426,10 +5600,7 @@ impl DbGuiApp {
                         palette::TEXT_WEAK()
                     };
                     egui::CentralPanel::default()
-                        .frame(
-                            style::workspace_frame(palette::PANEL())
-                                .inner_margin(egui::Margin::same(12)),
-                        )
+                        .frame(result_frame.inner_margin(egui::Margin::same(12)))
                         .show_inside(root, |ui| {
                             ui.add(
                                 egui::Label::new(
@@ -5443,7 +5614,7 @@ impl DbGuiApp {
                 }
                 TabView::Chart => {
                     egui::CentralPanel::default()
-                        .frame(style::workspace_frame(palette::PANEL()))
+                        .frame(result_frame)
                         .show_inside(root, |ui| {
                             let tab = &mut self.tabs[idx];
                             if tab.result.is_none() && tab.query_error.is_none() {
@@ -5463,7 +5634,7 @@ impl DbGuiApp {
         }
         if self.tabs[idx].plan_result && self.tabs[idx].view == TabView::Data {
             egui::CentralPanel::default()
-                .frame(style::workspace_frame(palette::PANEL()))
+                .frame(result_frame)
                 .show_inside(root, |ui| {
                     if let Some(result) = self.tabs[idx].result.as_ref() {
                         plan_viewer(ui, result);
@@ -5503,7 +5674,7 @@ impl DbGuiApp {
         } = &mut self.tabs[idx];
         let sort = *sort;
         egui::CentralPanel::default()
-            .frame(style::workspace_frame(palette::PANEL()))
+            .frame(result_frame)
             .show_inside(root, |ui| {
                 if query_error.is_some() {
                     crate::pet::show(ui);
@@ -5700,6 +5871,13 @@ impl DbGuiApp {
                     }
                     Some(_) => {
                         components::empty_state(ui, icons::table(), "No columns", status_msg);
+                    }
+                    None if loading => {
+                        ui.centered_and_justified(|ui| {
+                            ui.label(
+                                egui::RichText::new("Loading data…").color(palette::TEXT_WEAK()),
+                            );
+                        });
                     }
                     None => match kind {
                         crate::components::QueryTabKind::Query => {

@@ -128,11 +128,12 @@ pub mod space {
 }
 
 /// The horizontal breathing room between independently-resizable workspace surfaces. Adjacent
-/// panels each contribute this margin, so `3` produces a restrained six-point seam.
-pub const WORKSPACE_GUTTER: i8 = 3;
-/// The vertical margin is doubled so the single-sided top/bottom edge matches the visible seam
-/// between adjacent panels (which receives a margin from both sides).
-pub const WORKSPACE_GUTTER_Y: i8 = 6;
+/// panels each contribute this margin, so `2` produces a compact four-point seam.
+pub const WORKSPACE_GUTTER: i8 = 2;
+/// Each card owns half of a seam on every edge. Adjacent cards therefore produce a four-point
+/// gutter without doubling the vertical gap; the workspace inset supplies the missing half at
+/// an outside edge where there is no neighbouring card.
+pub const WORKSPACE_GUTTER_Y: i8 = WORKSPACE_GUTTER;
 
 /// Dark seam between workspace cards. It is derived from the active base colour so light themes
 /// keep their contrast while charcoal themes get the deeper gutter used by the studio layout.
@@ -158,6 +159,28 @@ pub fn workspace_frame(fill: Color32) -> egui::Frame {
         // Full-bleed grids and dock headers paint rectangular child backgrounds. A four-point
         // inset keeps those fills inside the curved silhouette instead of covering its corners.
         .inner_margin(Margin::same(4))
+}
+
+/// Mark the existing draggable panel boundary without adding another interactive widget.
+/// `horizontal` means a top/bottom seam, so its three dots run left to right.
+pub fn workspace_resize_grip(ui: &egui::Ui, panel_id: egui::Id, horizontal: bool) {
+    let Some(handle) = ui.ctx().read_response(panel_id.with("__resize")) else {
+        return;
+    };
+    let center = handle.rect.center();
+    let color = if handle.hovered() || handle.dragged() {
+        palette::TEXT_WEAK()
+    } else {
+        palette::TEXT_FAINT()
+    };
+    for offset in [-5.0, 0.0, 5.0] {
+        let pos = if horizontal {
+            center + egui::vec2(offset, 0.0)
+        } else {
+            center + egui::vec2(0.0, offset)
+        };
+        ui.painter().circle_filled(pos, 1.0, color);
+    }
 }
 
 /// Font size tokens shared by custom-painted components.

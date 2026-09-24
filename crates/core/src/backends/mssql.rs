@@ -285,11 +285,22 @@ impl Database for MsSqlDb {
              WHERE s.name = N'{schema_filter}' AND t.name = N'{table_filter}' \
              ORDER BY fk.name, fkc.constraint_column_id"
         );
-        let (column_rows, index_rows, foreign_key_rows) = tokio::try_join!(
-            self.fetch(&columns_sql),
-            self.fetch(&indexes_sql),
-            self.fetch(&foreign_keys_sql),
-        )?;
+        // Keep focused structure loading on one pooled connection. Running these three
+        // catalog queries through `try_join!` made bb8 open up to three fresh TDS sessions
+        // when only the single warm idle connection existed. A TLS/login handshake is much
+        // more expensive than the metadata itself on a remote SQL Server, which made the
+        // Structure tab appear to hang. SQL Server returns each SELECT as a separate result
+        // set, so one batch gives us one checkout, one round trip, and no extra logins.
+        let mut conn = self.pool.get().await.map_err(map_pool_err)?;
+        let result_sets = conn
+            .simple_query(format!("{columns_sql}; {indexes_sql}; {foreign_keys_sql}"))
+            .await?
+            .into_results()
+            .await?;
+        let mut result_sets = result_sets.into_iter();
+        let column_rows = result_sets.next().unwrap_or_default();
+        let index_rows = result_sets.next().unwrap_or_default();
+        let foreign_key_rows = result_sets.next().unwrap_or_default();
         if column_rows.is_empty() {
             return Ok(None);
         }

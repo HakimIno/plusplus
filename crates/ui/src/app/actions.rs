@@ -3,27 +3,49 @@
 use super::*;
 
 impl DbGuiApp {
-    fn start_table_metadata_load(&mut self, table: &TableInfo) {
-        let tab_id = self.tab().id;
-        let Some(conn_id) = self.tab().conn_id.clone() else {
+    pub(super) fn start_table_metadata_load(
+        &mut self,
+        tab_index: usize,
+        schema: Option<String>,
+        table_name: String,
+    ) {
+        let Some(tab) = self.tabs.get(tab_index) else {
             return;
         };
-        if self.tab().table_metadata_pending {
+        let tab_id = tab.id;
+        let Some(conn_id) = tab.conn_id.clone() else {
+            return;
+        };
+        if tab.table_metadata_pending {
             return;
         }
-        let Some(db) = self
+        let Some(connection) = self
             .active_connections
             .iter()
             .find(|connection| connection.config_id == conn_id)
-            .map(|connection| connection.db.clone())
         else {
             return;
         };
-        self.tab_mut().schema_editor = None;
-        self.tab_mut().table_metadata_pending = true;
-        self.status_msg = format!("Loading structure for {}…", table.name);
-        let schema = table.schema.clone();
-        let table_name = table.name.clone();
+        // Older/restored tabs may only retain a bare table name. Prefer the uniquely
+        // matching schema already in the catalog instead of letting backends fall back to
+        // a default schema that may not contain the table.
+        let schema = schema.or_else(|| {
+            let mut matches = connection
+                .schema
+                .tables
+                .iter()
+                .filter(|table| table.name.eq_ignore_ascii_case(&table_name));
+            let first = matches.next()?;
+            matches
+                .next()
+                .is_none()
+                .then(|| first.schema.clone())
+                .flatten()
+        });
+        let db = connection.db.clone();
+        self.tabs[tab_index].schema_editor = None;
+        self.tabs[tab_index].table_metadata_pending = true;
+        self.status_msg = format!("Loading structure for {table_name}…");
         let tx = self.tx.clone();
         self.rt.spawn(async move {
             let requested_schema = schema.clone();
@@ -1123,12 +1145,43 @@ impl DbGuiApp {
                 }
                 self.schema_pending = None;
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
-                if table.columns.is_empty() || kind == DbKind::SqlServer {
-                    self.start_table_metadata_load(&table);
+                let connection_metadata_pending = self
+                    .tab()
+                    .conn_id
+                    .as_ref()
+                    .is_some_and(|conn_id| self.connection_jobs.contains(conn_id));
+                if table.columns.is_empty()
+                    || kind == DbKind::SqlServer
+                    || connection_metadata_pending
+                {
+                    self.start_table_metadata_load(self.active_query_tab, table.schema, table.name);
                 } else {
                     self.tab_mut().table_metadata_pending = false;
                     self.tab_mut().schema_editor =
                         Some(ObjectEditor::Table(SchemaEditor::edit_table(&table, kind)));
+                }
+            }
+            Action::LoadTableMetadata => {
+                let existing_source = self
+                    .tab()
+                    .edits
+                    .source
+                    .as_ref()
+                    .or(self.tab().edits.pending_source.as_ref())
+                    .cloned();
+                let source =
+                    existing_source.or_else(|| self.derive_edit_source(self.active_query_tab));
+                if let Some(source) = source {
+                    if self.tab().edits.source.is_none()
+                        && self.tab().edits.pending_source.is_none()
+                    {
+                        self.tab_mut().edits.pending_source = Some(source.clone());
+                    }
+                    self.start_table_metadata_load(
+                        self.active_query_tab,
+                        source.schema,
+                        source.table,
+                    );
                 }
             }
             Action::AddDataRow => {
@@ -1485,7 +1538,7 @@ impl DbGuiApp {
             }
             Action::ReloadTableStructure => {
                 if let Some(table) = self.structure_table(self.active_query_tab).cloned() {
-                    self.start_table_metadata_load(&table);
+                    self.start_table_metadata_load(self.active_query_tab, table.schema, table.name);
                 }
             }
             Action::CancelSchemaReload => self.schema_reload_pending = None,

@@ -103,6 +103,17 @@ impl DbGuiApp {
         kind: crate::components::QueryTabKind,
     ) {
         let conn_id = self.tab().conn_id.clone();
+        self.open_table_on_connection(conn_id, sql, source, pin, kind);
+    }
+
+    fn open_table_on_connection(
+        &mut self,
+        conn_id: Option<String>,
+        sql: String,
+        source: EditSource,
+        pin: bool,
+        kind: crate::components::QueryTabKind,
+    ) {
         let same = |s: &EditSource| s.table == source.table && s.schema == source.schema;
         // Already open (loaded or in-flight)? Activate it, pinning if asked.
         if let Some(idx) = self.tabs.iter().position(|t| {
@@ -130,7 +141,68 @@ impl DbGuiApp {
             return;
         }
 
-        self.open_in_preview_slot(sql, source, !pin, kind);
+        self.open_in_preview_slot_on_connection(conn_id, sql, source, !pin, kind);
+    }
+
+    pub(super) fn open_catalog_object(
+        &mut self,
+        conn_id: &str,
+        schema: Option<String>,
+        name: &str,
+        kind: crate::components::QueryTabKind,
+    ) {
+        if self.tabs.is_empty() {
+            self.new_tab();
+        }
+        let Some(connection) = self
+            .active_connections
+            .iter()
+            .find(|connection| connection.config_id == conn_id)
+        else {
+            self.status_msg = "Connect to the database before opening this object.".into();
+            return;
+        };
+        let db_kind = connection.db.kind();
+        let (qualified, pk_cols) = match kind {
+            crate::components::QueryTabKind::Table => {
+                let Some(table) = connection
+                    .schema
+                    .tables
+                    .iter()
+                    .find(|table| table.schema == schema && table.name == name)
+                else {
+                    return;
+                };
+                (
+                    table.qualified(db_kind),
+                    table
+                        .edit_key_candidates()
+                        .into_iter()
+                        .next()
+                        .map(|(_, columns)| columns)
+                        .unwrap_or_default(),
+                )
+            }
+            crate::components::QueryTabKind::View => {
+                let Some(view) = connection
+                    .schema
+                    .views
+                    .iter()
+                    .find(|view| view.schema == schema && view.name == name)
+                else {
+                    return;
+                };
+                (view.qualified(db_kind), Vec::new())
+            }
+            _ => return,
+        };
+        let sql = db_kind.preview_query(&qualified, 100);
+        let source = EditSource {
+            schema,
+            table: name.to_string(),
+            pk_cols,
+        };
+        self.open_table_on_connection(Some(conn_id.to_string()), sql, source, true, kind);
     }
     /// Load `sql` into a table tab bound to `source` and run it. Picks the reusable preview
     /// slot, else a blank scratch active tab, else a fresh tab (see [`Self::preview_target_slot`]),
@@ -147,6 +219,17 @@ impl DbGuiApp {
         // Preview tabs are global and may be reused across connections. Always bind the rebuilt
         // tab to the connection that initiated this open, never the preview slot's old owner.
         let conn_id = self.tab().conn_id.clone();
+        self.open_in_preview_slot_on_connection(conn_id, sql, source, preview, kind);
+    }
+
+    fn open_in_preview_slot_on_connection(
+        &mut self,
+        conn_id: Option<String>,
+        sql: String,
+        source: EditSource,
+        preview: bool,
+        kind: crate::components::QueryTabKind,
+    ) {
         let idx = self.preview_target_slot();
         let id = self.tabs[idx].id;
         let mut tab = QueryTab::new(id, source.table.clone());

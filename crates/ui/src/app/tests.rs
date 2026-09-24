@@ -213,6 +213,50 @@ impl dbcore::Database for DelayedMetadataDb {
     }
 }
 
+struct ReconnectMetadataDb;
+
+#[async_trait::async_trait]
+impl dbcore::Database for ReconnectMetadataDb {
+    fn kind(&self) -> dbcore::DbKind {
+        dbcore::DbKind::Sqlite
+    }
+
+    async fn introspect(&self) -> dbcore::Result<SchemaTree> {
+        Ok(fake_schema(1, 2))
+    }
+
+    async fn introspect_table(
+        &self,
+        _schema: Option<&str>,
+        _table: &str,
+    ) -> dbcore::Result<Option<TableInfo>> {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        Ok(fake_schema(1, 2).tables.into_iter().next())
+    }
+
+    async fn execute_capped(&self, _sql: &str, _max_rows: usize) -> dbcore::Result<QueryResult> {
+        Ok(QueryResult::default())
+    }
+
+    async fn execute_transaction(&self, stmts: &[String]) -> dbcore::Result<usize> {
+        Ok(stmts.len())
+    }
+
+    async fn export_query(
+        &self,
+        _sql: &str,
+        sink: &mut (dyn dbcore::RowSink + Send),
+    ) -> dbcore::Result<u64> {
+        sink.begin(&[ColumnMeta {
+            name: "field_0".into(),
+            type_name: "TEXT".into(),
+        }])?;
+        sink.write_row(&[Value::Text("loaded".into())])?;
+        sink.finish()?;
+        Ok(1)
+    }
+}
+
 fn fake_schema(tables: usize, cols: usize) -> SchemaTree {
     SchemaTree {
         database_name: "testdb".into(),
@@ -2009,6 +2053,22 @@ fn has_painted_text_near(
     shapes.iter().any(|shape| walk(&shape.shape, needle, point))
 }
 
+fn has_filled_rect_at(
+    shapes: &[egui::epaint::ClippedShape],
+    point: egui::Pos2,
+    fill: egui::Color32,
+) -> bool {
+    fn walk(shape: &egui::epaint::Shape, point: egui::Pos2, fill: egui::Color32) -> bool {
+        match shape {
+            egui::epaint::Shape::Rect(rect) => rect.rect.contains(point) && rect.fill == fill,
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().any(|shape| walk(shape, point, fill)),
+            _ => false,
+        }
+    }
+
+    shapes.iter().any(|shape| walk(&shape.shape, point, fill))
+}
+
 /// End-to-end drag-to-reorder: simulate a real pointer press → move → release over
 /// the tab strip and assert the tab order actually changes.
 #[test]
@@ -2126,7 +2186,21 @@ fn dragging_a_tab_to_the_workspace_opens_a_split_pane() {
             vec![egui::Event::PointerMoved(start + (drop - start) * t)],
         );
     }
-    run(&mut app, vec![egui::Event::PointerMoved(drop)]);
+    let dragged = run(&mut app, vec![egui::Event::PointerMoved(drop)]);
+    assert!(
+        has_painted_text_near(&dragged.shapes, "Query 2", drop),
+        "the dragged tab must follow the pointer into the split target"
+    );
+    let active_drop_fill = crate::style::palette::ACCENT().gamma_multiply(0.22);
+    assert!(
+        has_filled_rect_at(&dragged.shapes, drop, active_drop_fill),
+        "the split target must remain visible beneath the dragged tab"
+    );
+    let next_frame = run(&mut app, vec![egui::Event::PointerMoved(drop)]);
+    assert!(
+        has_filled_rect_at(&next_frame.shapes, drop, active_drop_fill),
+        "the split target must not flicker while the pointer stays still"
+    );
     run(
         &mut app,
         vec![egui::Event::PointerButton {
@@ -2874,6 +2948,80 @@ fn table_tab_keeps_data_controls_without_a_query_console() {
     }
 }
 
+#[test]
+fn table_tab_keeps_view_modes_while_schema_metadata_loads() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    app.show_live_log = false;
+    connect_fake(&mut app, SchemaTree::default());
+    app.connection_jobs.insert("c1".into());
+    app.tab_mut().kind = crate::components::QueryTabKind::Table;
+    app.tab_mut().view = TabView::Structure;
+    app.tab_mut().edits.source = Some(EditSource {
+        schema: None,
+        table: "table_0".into(),
+        pk_cols: Vec::new(),
+    });
+    app.tab_mut().set_result(fake_result(2, 3));
+
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+        });
+    harness.run_steps(4);
+
+    harness.get_by_label("Data");
+    harness.get_by_label("Structure");
+    harness.get_by_label("Indexes");
+    assert!(
+        harness.query_by_label("Loading table structure…").is_some(),
+        "Structure should show a loading state until reconnect metadata arrives"
+    );
+}
+
+#[test]
+fn data_view_shows_loading_message_before_its_first_result() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    app.show_live_log = false;
+    app.tab_mut().kind = crate::components::QueryTabKind::Table;
+    app.busy = Busy::Querying;
+    let tab_id = app.tab().id;
+    app.querying_tab_id = Some(tab_id);
+
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+        });
+    harness.run_steps(4);
+
+    assert!(harness.query_by_label("Loading data…").is_some());
+}
+
 /// Regression: an open object designer owns the whole tab — the SQL console and the
 /// Data/Message/Chart switch must not render around it. Existing tables edit their schema
 /// directly through the persistent Data/Structure/Indexes bar.
@@ -3175,6 +3323,106 @@ fn superseded_query_result_never_touches_ui_state() {
         app.tab().query_error.is_none(),
         "a stale failure must not surface on the tab"
     );
+}
+
+#[test]
+fn reconnect_reloads_the_active_table_tab() {
+    let mut app = DbGuiApp::construct();
+    let ctx = egui::Context::default();
+    let mut cfg = ConnectionConfig::new(DbKind::Sqlite);
+    cfg.id = "conn-1".into();
+    cfg.name = "Remote DB".into();
+    app.connections.push(cfg);
+    app.connection_jobs.insert("conn-1".into());
+    app.tab_mut().conn_id = Some("conn-1".into());
+    app.tab_mut().kind = crate::components::QueryTabKind::Table;
+    app.tab_mut().sql = "SELECT * FROM users".into();
+
+    app.tx
+        .send(AppMessage::Connected {
+            conn_id: "conn-1".into(),
+            name: "Remote DB".into(),
+            elapsed_ms: 1.0,
+            result: Ok(Arc::new(DummyDb)),
+        })
+        .unwrap();
+    app.poll_messages(&ctx);
+
+    assert_eq!(app.querying_tab_id, Some(app.tab().id));
+    assert_eq!(app.busy, Busy::Querying);
+}
+
+#[test]
+fn reconnect_restores_structure_and_indexes_for_an_open_table_tab() {
+    let mut app = DbGuiApp::construct();
+    let ctx = egui::Context::default();
+    let mut cfg = ConnectionConfig::new(DbKind::Sqlite);
+    cfg.id = "conn-1".into();
+    cfg.name = "Remote DB".into();
+    app.connections.push(cfg);
+    app.connection_jobs.insert("conn-1".into());
+    app.tab_mut().conn_id = Some("conn-1".into());
+    app.tab_mut().kind = crate::components::QueryTabKind::Table;
+    app.tab_mut().sql = "SELECT * FROM table_0".into();
+    app.tab_mut().view = TabView::Indexes;
+
+    app.tx
+        .send(AppMessage::Connected {
+            conn_id: "conn-1".into(),
+            name: "Remote DB".into(),
+            elapsed_ms: 1.0,
+            result: Ok(Arc::new(ReconnectMetadataDb)),
+        })
+        .unwrap();
+    app.poll_messages(&ctx);
+
+    assert!(app.tab().table_metadata_pending);
+    for _ in 0..20 {
+        app.rt
+            .block_on(tokio::time::sleep(std::time::Duration::from_millis(5)));
+        app.poll_messages(&ctx);
+        if app.tab().result.is_some() && app.tab().schema_editor.is_some() {
+            break;
+        }
+    }
+
+    assert!(
+        app.tab().result.is_some(),
+        "Data should reload after reconnect"
+    );
+    let editor = match app.tab().schema_editor.as_ref() {
+        Some(ObjectEditor::Table(editor)) => editor,
+        _ => panic!("fresh table metadata should restore the schema editor"),
+    };
+    assert_eq!(editor.active_tab, crate::schema::SchemaTab::Indexes);
+    assert_eq!(editor.columns.len(), 2);
+    assert_eq!(editor.indexes.len(), 1);
+}
+
+#[test]
+fn selecting_an_unloaded_table_tab_after_reconnect_runs_its_query() {
+    let mut app = DbGuiApp::construct();
+    app.active_connections.push(ActiveConnection {
+        config_id: "conn-1".into(),
+        name: "Remote DB".into(),
+        db: Arc::new(DummyDb),
+        databases: Vec::new(),
+        schema: fake_schema(1, 1),
+    });
+    app.tab_mut().conn_id = Some("conn-1".into());
+
+    let mut table_tab = QueryTab::new(app.next_tab_id, "users".into());
+    app.next_tab_id += 1;
+    table_tab.conn_id = Some("conn-1".into());
+    table_tab.kind = crate::components::QueryTabKind::Table;
+    table_tab.sql = "SELECT * FROM users".into();
+    let table_id = table_tab.id;
+    app.tabs.push(table_tab);
+
+    app.select_tab(1);
+
+    assert_eq!(app.querying_tab_id, Some(table_id));
+    assert_eq!(app.busy, Busy::Querying);
 }
 
 #[test]

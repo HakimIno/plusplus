@@ -67,6 +67,32 @@ impl DbGuiApp {
                                 None,
                                 0.0,
                             );
+                            self.reload_data_tab_if_needed(self.active_query_tab);
+                            // A table tab left on Structure/Indexes must recover independently
+                            // of the slower whole-schema refresh. This also prevents a cached
+                            // editor from becoming permanent while fresh metadata is in flight.
+                            let structure_tabs: Vec<_> = self
+                                .tabs
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, tab)| {
+                                    tab.conn_id.as_deref() == Some(arrived_id.as_str())
+                                        && tab.kind == crate::components::QueryTabKind::Table
+                                        && matches!(tab.view, TabView::Structure | TabView::Indexes)
+                                })
+                                .filter_map(|(tab_index, tab)| {
+                                    tab.edits
+                                        .source
+                                        .as_ref()
+                                        .or(tab.edits.pending_source.as_ref())
+                                        .map(|source| {
+                                            (tab_index, source.schema.clone(), source.table.clone())
+                                        })
+                                })
+                                .collect();
+                            for (tab_index, schema, table) in structure_tabs {
+                                self.start_table_metadata_load(tab_index, schema, table);
+                            }
                         }
                         Err(e) => {
                             self.connection_jobs.remove(&conn_id);
@@ -133,6 +159,30 @@ impl DbGuiApp {
                             // Queries can finish before full PK metadata arrives. Reconcile the
                             // edit source now so their grids become editable without a rerun.
                             self.refresh_edit_sources(&conn_id);
+                            let structure_tabs: Vec<_> = self
+                                .tabs
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, tab)| {
+                                    tab.conn_id.as_deref() == Some(conn_id.as_str())
+                                        && tab.kind == crate::components::QueryTabKind::Table
+                                        && matches!(tab.view, TabView::Structure | TabView::Indexes)
+                                        && tab.schema_editor.is_none()
+                                        && !tab.table_metadata_pending
+                                })
+                                .filter_map(|(tab_index, tab)| {
+                                    tab.edits
+                                        .source
+                                        .as_ref()
+                                        .or(tab.edits.pending_source.as_ref())
+                                        .map(|source| {
+                                            (tab_index, source.schema.clone(), source.table.clone())
+                                        })
+                                })
+                                .collect();
+                            for (tab_index, schema, table) in structure_tabs {
+                                self.start_table_metadata_load(tab_index, schema, table);
+                            }
                             self.status_msg = format!("Connected to {name} — {n} tables");
                             self.error = None;
                             // Diagram tabs of this connection track the fresh schema.
@@ -172,6 +222,25 @@ impl DbGuiApp {
                     let Some(tab_index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
                         continue;
                     };
+                    let retry_schema = schema
+                        .is_none()
+                        .then(|| {
+                            let connection = self
+                                .active_connections
+                                .iter()
+                                .find(|connection| connection.config_id == conn_id)?;
+                            let mut matches =
+                                connection.schema.tables.iter().filter(|table| {
+                                    table.name.eq_ignore_ascii_case(&requested_table)
+                                });
+                            let first = matches.next()?;
+                            matches
+                                .next()
+                                .is_none()
+                                .then(|| first.schema.clone())
+                                .flatten()
+                        })
+                        .flatten();
                     let request_still_matches = self.tabs[tab_index]
                         .edits
                         .source
@@ -179,10 +248,14 @@ impl DbGuiApp {
                         .or(self.tabs[tab_index].edits.pending_source.as_ref())
                         .is_some_and(|source| {
                             source.table.eq_ignore_ascii_case(&requested_table)
-                                && source.schema.as_deref().map(str::to_lowercase)
-                                    == schema.as_deref().map(str::to_lowercase)
+                                && source.schema.as_deref().is_none_or(|source_schema| {
+                                    schema.as_deref().is_some_and(|requested_schema| {
+                                        source_schema.eq_ignore_ascii_case(requested_schema)
+                                    })
+                                })
                         });
                     if !request_still_matches {
+                        self.tabs[tab_index].table_metadata_pending = false;
                         continue;
                     }
                     self.tabs[tab_index].table_metadata_pending = false;
@@ -210,14 +283,28 @@ impl DbGuiApp {
                                 TabView::Structure | TabView::Indexes
                             ) && self.tabs[tab_index].schema_editor.is_none()
                             {
-                                self.tabs[tab_index].schema_editor = Some(ObjectEditor::Table(
-                                    SchemaEditor::edit_table(&table, kind),
-                                ));
+                                let mut editor = SchemaEditor::edit_table(&table, kind);
+                                editor.active_tab = if self.tabs[tab_index].view == TabView::Indexes
+                                {
+                                    crate::schema::SchemaTab::Indexes
+                                } else {
+                                    crate::schema::SchemaTab::Columns
+                                };
+                                self.tabs[tab_index].schema_editor =
+                                    Some(ObjectEditor::Table(editor));
                             }
                             self.status_msg = format!("Loaded structure for {}", table.name);
                             self.error = None;
                         }
                         Ok(None) => {
+                            if let Some(retry_schema) = retry_schema {
+                                self.start_table_metadata_load(
+                                    tab_index,
+                                    Some(retry_schema),
+                                    requested_table,
+                                );
+                                continue;
+                            }
                             self.error = Some("Table metadata is no longer available".into());
                             self.status_msg = "Table structure unavailable".into();
                         }

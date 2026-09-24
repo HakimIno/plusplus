@@ -359,9 +359,9 @@ fn paint_tab_chip(
 /// [`connection_tab_item`] but laid out left-to-right for the tab strip above the editor.
 /// `preview` tabs render in italics (transient, like other editors' preview tabs).
 ///
-/// `drag_float_x` is set while this tab is being drag-reordered: the slot renders as an
-/// empty placeholder and the chip itself is painted on a foreground layer with its left
-/// edge at that x, following the pointer (same technique as egui's drag-and-drop demo).
+/// `drag_float_pos` is set while this tab is being dragged: the slot renders as an empty
+/// placeholder and the chip itself is painted on a foreground layer at that position,
+/// following the pointer (same technique as egui's drag-and-drop demo).
 pub(crate) fn query_tab_item(
     ui: &mut egui::Ui,
     title: &str,
@@ -369,7 +369,7 @@ pub(crate) fn query_tab_item(
     db_kind: Option<DbKind>,
     selected: bool,
     preview: bool,
-    drag_float_x: Option<f32>,
+    drag_float_pos: Option<egui::Pos2>,
 ) -> QueryTabResponse {
     let label: String = {
         let trimmed = title.trim();
@@ -384,7 +384,7 @@ pub(crate) fn query_tab_item(
         }
         s
     };
-    let dragging = drag_float_x.is_some();
+    let dragging = drag_float_pos.is_some();
 
     let font = egui::TextStyle::Body.resolve(ui.style());
     let close_w = 16.0;
@@ -461,7 +461,7 @@ pub(crate) fn query_tab_item(
     };
 
     if ui.is_rect_visible(rect) {
-        if let Some(float_x) = drag_float_x {
+        if let Some(float_pos) = drag_float_pos {
             // Empty-slot placeholder marking where the tab will land.
             ui.painter().rect(
                 rect,
@@ -475,8 +475,7 @@ pub(crate) fn query_tab_item(
             // (not `scope_builder`) so the floating chip never advances the tab strip's
             // layout cursor — that would corrupt the neighbouring chips' rects and break
             // the drag-to-reorder hit-testing.
-            let float_rect =
-                egui::Rect::from_min_size(egui::pos2(float_x, rect.top()), rect.size());
+            let float_rect = egui::Rect::from_min_size(float_pos, rect.size());
             egui::Area::new(resp.id.with("float"))
                 .order(egui::Order::Tooltip)
                 .fixed_pos(float_rect.min)

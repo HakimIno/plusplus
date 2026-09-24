@@ -3,6 +3,38 @@
 use super::*;
 
 impl DbGuiApp {
+    pub(super) fn reload_data_tab_if_needed(&mut self, idx: usize) {
+        let should_reload = self.tabs.get(idx).is_some_and(|tab| {
+            tab.result.is_none()
+                && !tab.result_evicted
+                && tab.stream.is_none()
+                && self.querying_tab_id != Some(tab.id)
+                && matches!(
+                    tab.kind,
+                    crate::components::QueryTabKind::Table | crate::components::QueryTabKind::View
+                )
+                && tab.conn_id.as_deref().is_some_and(|conn_id| {
+                    self.active_connections
+                        .iter()
+                        .any(|connection| connection.config_id == conn_id)
+                })
+        });
+        if should_reload {
+            if self.tabs[idx].edits.source.is_none()
+                && self.tabs[idx].edits.pending_source.is_none()
+            {
+                self.tabs[idx].edits.pending_source = self.derive_edit_source(idx);
+            }
+            let view = self.tabs[idx].view;
+            self.start_query_for(idx);
+            // Reconnects reload table data automatically, but must not pull a tab the user
+            // left on Structure/Indexes back to Data before its metadata recovery starts.
+            if matches!(view, TabView::Structure | TabView::Indexes) {
+                self.tabs[idx].view = view;
+            }
+        }
+    }
+
     pub(super) fn tab_is_in_split_group(&self, idx: usize) -> bool {
         self.tabs
             .get(idx)
@@ -115,6 +147,7 @@ impl DbGuiApp {
             self.split_focus = false;
         }
         self.touch_result(idx);
+        self.reload_data_tab_if_needed(idx);
         self.workspace_dirty = true;
     }
 
@@ -300,6 +333,7 @@ impl DbGuiApp {
         };
         self.active_query_tab = idx;
         self.touch_result(idx);
+        self.reload_data_tab_if_needed(idx);
         // Query failures are rendered inside their result surface, not duplicated globally.
         if self.tabs[idx].query_error.is_some() {
             self.status_msg = "Ready".to_string();

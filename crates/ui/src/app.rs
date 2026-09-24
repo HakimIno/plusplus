@@ -23,6 +23,7 @@ mod layout;
 mod memory;
 mod messages;
 mod navigate;
+mod open_anything;
 mod panels;
 mod query;
 mod tabs;
@@ -1728,6 +1729,9 @@ enum Action {
     OpenNewTable,
     /// Open the schema editor to modify an existing table.
     OpenEditTable(TableInfo),
+    /// Load focused metadata for the table behind the active tab. Unlike `OpenEditTable`,
+    /// this also works before the connection's schema overview has found the table.
+    LoadTableMetadata,
     /// Append a staged row from the Data view's bottom action bar.
     AddDataRow,
     /// Append a draft column from the Structure view's bottom action bar.
@@ -1812,9 +1816,9 @@ pub(crate) enum PageNav {
 struct TabDrag {
     /// Stable id of the tab being dragged (ids survive the index changing mid-drag).
     id: u64,
-    /// Pointer x-offset from the chip's left edge at grab time, so the floating chip
+    /// Pointer offset from the chip's top-left corner at grab time, so the floating chip
     /// keeps the grab point under the cursor instead of snapping its centre there.
-    grab_x: f32,
+    grab_offset: egui::Vec2,
     /// Tab that owned the workspace before the drag began.
     origin_active_id: u64,
 }
@@ -1901,6 +1905,8 @@ pub struct DbGuiApp {
     tab_drag: Option<TabDrag>,
     /// Live drag-to-reorder state for a saved connection (cleared on mouse release).
     connection_drag: Option<ConnectionDrag>,
+    /// Global object/action switcher opened with Cmd/Ctrl+P.
+    open_anything: Option<open_anything::OpenAnythingState>,
     /// Details panel: live column-name filter (the "Search for field…" box).
     details_filter: String,
     /// Details panel: the (row, col) cell with an inline date picker open, opened from
@@ -2194,6 +2200,7 @@ impl DbGuiApp {
             editor: None,
             tab_drag: None,
             connection_drag: None,
+            open_anything: None,
             details_filter: String::new(),
             details_date_pick: None,
             settings_open: false,

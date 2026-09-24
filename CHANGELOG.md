@@ -3,6 +3,13 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
+## 0.4.11 — 2026-09-24
+
+- Added Open Anything for quickly finding and opening connections, tables, and tabs.
+- Refined workspace panel spacing, rounded corners, resize grips, and the SQL workspace divider.
+- Improved SQL Server table-structure loading and restored metadata loading for table tabs.
+- Adjusted the Blue Studio editor background so it stands apart from surrounding panels.
+
 ## 0.4.4 — 2026-08-31
 
 - Added query-result charts with automatic numeric-series detection, configurable line/bar/scatter views, multi-series hover values, and themed SVG export.

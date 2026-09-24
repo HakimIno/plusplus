@@ -29,16 +29,14 @@ impl DbGuiApp {
             }
             return;
         }
-        let response = ui.interact(
-            workspace,
-            egui::Id::new("workspace_split_drop_target"),
-            egui::Sense::hover(),
-        );
-        let table_drag = response
-            .contains_pointer()
+        // Use geometry rather than a hover Response: the floating tab is a Tooltip-layer Area
+        // under the pointer and must not occlude the workspace drop target on alternating frames.
+        let pointer = ui.ctx().pointer_interact_pos();
+        let pointer_in_workspace = pointer.is_some_and(|pointer| workspace.contains(pointer));
+        let table_drag = pointer_in_workspace
             .then(|| egui::DragAndDrop::payload::<SchemaTableDrag>(ui.ctx()))
             .flatten();
-        let tab_drag = (self.split_tab.is_none() && response.contains_pointer())
+        let tab_drag = (self.split_tab.is_none() && pointer_in_workspace)
             .then_some(self.tab_drag)
             .flatten();
         if table_drag.is_none() && tab_drag.is_none() {
@@ -58,10 +56,7 @@ impl DbGuiApp {
         let target =
             egui::Rect::from_min_max(egui::pos2(target_left, workspace.top()), workspace.max)
                 .shrink(10.0);
-        let pointer_in_target = ui
-            .ctx()
-            .pointer_interact_pos()
-            .is_some_and(|pointer| target.contains(pointer));
+        let pointer_in_target = pointer.is_some_and(|pointer| target.contains(pointer));
         let painter = ui.ctx().layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
             egui::Id::new("workspace_split_drop_overlay"),
@@ -155,7 +150,20 @@ impl DbGuiApp {
             );
             let (divider, response) =
                 row.allocate_exact_size(egui::vec2(gap, height), egui::Sense::drag());
-            row.painter().rect_filled(divider, 1.0, palette::BORDER());
+            row.painter()
+                .rect_filled(divider, 1.0, style::workspace_gap());
+            let grip_color = if response.hovered() || response.dragged() {
+                palette::TEXT_WEAK()
+            } else {
+                palette::TEXT_FAINT()
+            };
+            for offset in [-5.0, 0.0, 5.0] {
+                row.painter().circle_filled(
+                    divider.center() + egui::vec2(0.0, offset),
+                    1.0,
+                    grip_color,
+                );
+            }
             if response.dragged() {
                 self.split_workspace_ratio = ((response
                     .interact_pointer_pos()
@@ -188,6 +196,9 @@ impl DbGuiApp {
     pub(super) fn draw(&mut self, ui_root: &mut egui::Ui, frame: Option<&eframe::Frame>) {
         let ctx = ui_root.ctx().clone();
         self.poll_messages(&ctx);
+        if !self.show_welcome {
+            self.open_anything_shortcut(&ctx);
+        }
 
         // First-run welcome page: replace the entire window until "Get Started" is clicked.
         if self.show_welcome {
@@ -207,6 +218,7 @@ impl DbGuiApp {
             self.query_tab_bar(ui_root, &mut actions);
             self.status_bar(ui_root);
             self.draw_settings_page(ui_root, &mut actions);
+            self.open_anything_dialog(&ctx);
             for action in actions {
                 self.apply_action(action);
             }
@@ -235,6 +247,7 @@ impl DbGuiApp {
             self.connection_dialog(&ctx, &mut actions);
             self.update_dialog(&ctx, &mut actions);
             self.whats_new_dialog(&ctx, &mut actions);
+            self.open_anything_dialog(&ctx);
 
             let structural = actions
                 .iter()
@@ -311,7 +324,8 @@ impl DbGuiApp {
             && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         if discard_schema {
             actions.push(Action::DiscardSchemaChanges);
-        } else if ctx.input(|i| i.key_pressed(egui::Key::Escape))
+        } else if self.open_anything.is_none()
+            && ctx.input(|i| i.key_pressed(egui::Key::Escape))
             && self.tab().edits.active.is_none()
             && self.tab().edits.has_pending()
             && !self.tab().filter.visible
@@ -532,7 +546,10 @@ impl DbGuiApp {
             self.tab_mut().find.open = true;
             self.tab_mut().find.focus_pending = true;
         }
-        if self.tab().filter.visible && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if self.open_anything.is_none()
+            && self.tab().filter.visible
+            && ctx.input(|i| i.key_pressed(egui::Key::Escape))
+        {
             self.tab_mut().filter.visible = false;
         }
 
@@ -553,18 +570,27 @@ impl DbGuiApp {
             egui::CornerRadius::ZERO,
             style::workspace_gap(),
         );
+        // Cards contribute two points to each side of an internal seam. Inset the entire
+        // dock layout by the same amount so an outside edge also totals four points instead of
+        // looking half as wide. Using a child Ui keeps this padding out of the global title,
+        // tab, and status chrome.
+        let mut workspace_root = ui_root.new_child(
+            egui::UiBuilder::new()
+                .id_salt("workspace_docks")
+                .max_rect(workspace_rect.shrink(style::WORKSPACE_GUTTER as f32)),
+        );
         if self.show_connection_tabs {
-            self.connection_tabs(ui_root, &mut actions);
+            self.connection_tabs(&mut workspace_root, &mut actions);
         }
         if self.show_schema_panel {
-            self.left_panel(ui_root, &mut actions);
+            self.left_panel(&mut workspace_root, &mut actions);
         }
         if self.show_details_panel {
-            self.right_panel(ui_root, &mut actions);
+            self.right_panel(&mut workspace_root, &mut actions);
         }
-        let workspace_drop_rect = ui_root.available_rect_before_wrap();
+        let workspace_drop_rect = workspace_root.available_rect_before_wrap();
         if self.split_tab.is_some() {
-            self.draw_split_workspace(ui_root, &mut actions);
+            self.draw_split_workspace(&mut workspace_root, &mut actions);
         } else {
             let editor_placement = query_editor_placement(self.tab().kind);
             // A Diagram tab is just the canvas: no SQL editor, no filter or result-mode bars.
@@ -590,26 +616,31 @@ impl DbGuiApp {
             // Data / Structure / Indexes on data-first tabs.
             let mode_bar_in_live_log = self.show_live_log && show_view_mode_bar;
             if console_visible {
-                self.query_console(ui_root, editor_placement, &mut actions);
+                self.query_console(&mut workspace_root, editor_placement, &mut actions);
             }
             // Live log is a workspace-level bottom dock, not part of the SQL editor. Keeping it
             // independent makes it stay put across Data / Structure / Indexes and places it below
             // query results instead of between the editor and its toolbar.
             if self.show_live_log && !diagram_tab {
-                self.live_log_panel(ui_root, self.tab().id, mode_bar_in_live_log, &mut actions);
+                self.live_log_panel(
+                    &mut workspace_root,
+                    self.tab().id,
+                    mode_bar_in_live_log,
+                    &mut actions,
+                );
             }
             if !diagram_tab && !designing {
-                self.batch_result_bar(ui_root);
+                self.batch_result_bar(&mut workspace_root);
                 // A top panel after left/right carves the strip directly above the grid.
-                self.filter_bar(ui_root);
+                self.filter_bar(&mut workspace_root);
             }
             // Without Live log the mode bar remains its own dock.
             if self.split_tab.is_none() && show_view_mode_bar && !mode_bar_in_live_log {
-                self.view_mode_bar(ui_root, editor_placement, false, &mut actions);
+                self.view_mode_bar(&mut workspace_root, editor_placement, false, &mut actions);
             }
-            self.central_panel(ui_root, &mut actions);
+            self.central_panel(&mut workspace_root, &mut actions);
         }
-        self.split_drop_overlay(ui_root, workspace_drop_rect, &mut actions);
+        self.split_drop_overlay(&mut workspace_root, workspace_drop_rect, &mut actions);
         self.connection_dialog(&ctx, &mut actions);
         self.schema_reload_dialog(&ctx, &mut actions);
         self.foreign_key_dialog(&ctx, &mut actions);
@@ -628,6 +659,7 @@ impl DbGuiApp {
         }
         self.update_dialog(&ctx, &mut actions);
         self.whats_new_dialog(&ctx, &mut actions);
+        self.open_anything_dialog(&ctx);
 
         let structural = actions.iter().any(|a| {
             matches!(
