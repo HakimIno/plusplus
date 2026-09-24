@@ -2961,13 +2961,13 @@ fn table_tab_keeps_view_modes_while_schema_metadata_loads() {
     connect_fake(&mut app, SchemaTree::default());
     app.connection_jobs.insert("c1".into());
     app.tab_mut().kind = crate::components::QueryTabKind::Table;
-    app.tab_mut().view = TabView::Structure;
     app.tab_mut().edits.source = Some(EditSource {
         schema: None,
         table: "table_0".into(),
         pk_cols: Vec::new(),
     });
     app.tab_mut().set_result(fake_result(2, 3));
+    app.tab_mut().view = TabView::Structure;
 
     let mut setup = false;
     let mut harness = egui_kittest::Harness::builder()
@@ -3378,8 +3378,7 @@ fn reconnect_restores_structure_and_indexes_for_an_open_table_tab() {
 
     assert!(app.tab().table_metadata_pending);
     for _ in 0..20 {
-        app.rt
-            .block_on(tokio::time::sleep(std::time::Duration::from_millis(5)));
+        std::thread::sleep(std::time::Duration::from_millis(5));
         app.poll_messages(&ctx);
         if app.tab().result.is_some() && app.tab().schema_editor.is_some() {
             break;

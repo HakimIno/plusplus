@@ -353,7 +353,7 @@ impl Database for PostgresDb {
         )))
         .fetch_all(&self.pool)
         .await?;
-        for (schema, table, constraint, column, ref_schema, ref_table, ref_column, del, upd) in
+        for (schema, table, constraint, ref_schema, ref_table, column, ref_column, del, upd) in
             fk_rows
         {
             if let Some(info) = tables.get_mut(&(schema, table)) {

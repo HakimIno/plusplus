@@ -51,6 +51,7 @@ sqlx = { version = "0.9", default-features = false, features = [
     "tls-rustls-ring-native-roots",
     "postgres",
     "mysql",
+    "mysql-rsa",
     "sqlite",
     "macros",
     "chrono",

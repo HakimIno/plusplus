@@ -932,7 +932,11 @@ impl QueryTab {
     /// Install a freshly returned result and rebuild the display order.
     fn set_result(&mut self, res: QueryResult) {
         self.result_revision = self.result_revision.wrapping_add(1);
-        self.view = TabView::Data;
+        if self.kind != crate::components::QueryTabKind::Table
+            || !matches!(self.view, TabView::Structure | TabView::Indexes)
+        {
+            self.view = TabView::Data;
+        }
         self.sort = None;
         self.selection.clear();
         // A fresh result may have a different column count; keep filter conditions but stop
