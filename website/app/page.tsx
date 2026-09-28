@@ -143,7 +143,7 @@ function LinuxPlatformIcon({ className }: { className?: string }) {
 
 const platforms = [
   { id: "macos", name: "macOS", format: "Universal DMG", detail: "Apple Silicon + Intel", icon: MacOSPlatformIcon },
-  { id: "windows", name: "Windows", format: "Portable ZIP", detail: "Windows x86_64", icon: WindowsPlatformIcon },
+  { id: "windows", name: "Windows", format: "Setup EXE / ZIP", detail: "Windows x86_64", icon: WindowsPlatformIcon },
   { id: "linux", name: "Linux", format: "AppImage", detail: "Linux x86_64", icon: LinuxPlatformIcon },
 ];
 

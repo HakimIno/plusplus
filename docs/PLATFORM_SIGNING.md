@@ -42,8 +42,8 @@ password-protected PFX. Configure:
 | `WINDOWS_CERTIFICATE_PASSWORD` | PFX password. |
 
 The workflow signs `plusplus.exe` with SHA-256 and a public timestamp before creating the
-portable ZIP. If the secrets are absent, the workflow skips Authenticode without pretending
-that the executable is platform-signed.
+portable ZIP and Windows installer, then signs the installer too. If the secrets are absent,
+the workflow skips Authenticode without pretending that either executable is platform-signed.
 
 ## Verification
 
@@ -56,6 +56,7 @@ spctl --assess --type execute --verbose=2 /Applications/plusplus.app
 
 # Windows PowerShell
 Get-AuthenticodeSignature .\plusplus.exe
+Get-AuthenticodeSignature .\plusplus-<version>-x86_64-windows-setup.exe
 ```
 
 Keep certificate files out of the repository. Rotate or revoke them through the relevant

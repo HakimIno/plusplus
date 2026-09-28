@@ -55,9 +55,10 @@ In the GitHub repo: **Settings → Secrets and variables → Actions → New rep
 | `MINISIGN_SECRET_KEY` | full contents of `plusplus.key`                    |
 | `MINISIGN_PASSWORD`   | the key's password (omit if you created one with `-W`) |
 
-The release workflow (`.github/workflows/release.yml`) signs each DMG and AppImage and
-uploads every `.minisig` automatically. It fails the release if `MINISIGN_SECRET_KEY` is
-missing, so a release can never ship an unsigned update.
+The release workflow (`.github/workflows/release.yml`) signs each DMG, AppImage, Windows
+installer, and Windows portable ZIP, then uploads every `.minisig` automatically. It fails
+the release if `MINISIGN_SECRET_KEY` is missing, so a release can never ship an unsigned
+package.
 
 ## Signing a DMG manually (local release)
 

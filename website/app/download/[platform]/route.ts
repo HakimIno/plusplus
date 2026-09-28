@@ -11,7 +11,7 @@ type GitHubRelease = {
 
 const assetMatchers: Record<string, (name: string) => boolean> = {
   macos: (name) => name.toLowerCase().endsWith(".dmg"),
-  windows: (name) => name.toLowerCase().endsWith(".zip"),
+  windows: (name) => name.toLowerCase().endsWith("-windows-setup.exe"),
   linux: (name) => name.toLowerCase().endsWith(".appimage"),
 };
 
@@ -43,7 +43,10 @@ export async function GET(
     }
 
     const release = (await response.json()) as GitHubRelease;
-    const asset = release.assets.find(({ name }) => matchesPlatform(name));
+    const asset = release.assets.find(({ name }) => matchesPlatform(name))
+      ?? (platform === "windows"
+        ? release.assets.find(({ name }) => name.toLowerCase().endsWith("-windows.zip"))
+        : undefined);
 
     if (!asset) {
       throw new Error(`No release asset found for ${platform}`);

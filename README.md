@@ -119,13 +119,17 @@ Get the latest package from [GitHub Releases](https://github.com/HakimIno/pluspl
 | Platform | Package | Architecture |
 | --- | --- | --- |
 | macOS | Universal `.dmg` | Apple Silicon and Intel |
-| Windows | Portable `.zip` | x86_64 |
+| Windows | Installer `.exe` or portable `.zip` | x86_64 |
 | Linux | `.AppImage` | x86_64 |
 
 Each release asset includes a detached Minisign signature. macOS notarization and Windows
 Authenticode signing are still in progress, so those operating systems may show a warning on
 first launch. See [release verification](docs/RELEASE_SIGNING.md) and
 [platform signing status](docs/PLATFORM_SIGNING.md) for details.
+
+On Windows, run the `-windows-setup.exe` asset for a guided per-user install with
+Start Menu shortcut and uninstaller. The portable `.zip` remains available if you
+prefer to extract and run `plusplus.exe` directly.
 
 ### Run from source
 

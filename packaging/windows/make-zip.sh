@@ -3,8 +3,8 @@
 #
 # Runs under Git Bash on a Windows runner (release.yml). Portable distribution:
 # unzip anywhere and run plusplus.exe — config lives in %APPDATA%\plusplus, so the
-# install directory stays read-only-safe. An installer (Inno Setup) can join later
-# without changing this asset's name, which the in-app updater will key on.
+# install directory stays read-only-safe. The Inno Setup installer is built
+# separately from the same signed executable.
 #
 # Usage (from repo root, after `cargo build --release -p plusplus-app`):
 #   packaging/windows/make-zip.sh
