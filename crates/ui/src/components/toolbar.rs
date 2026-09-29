@@ -583,8 +583,18 @@ pub(crate) fn beautify_button(
     }
 
     // The chevron stays active even with empty SQL so preferences remain reachable.
+    // Framed like the app's other popovers (the pager's Limit/Offset one): panel fill, a
+    // strong border, room inside, and a small gap below the button.
     egui::Popup::menu(&chev_resp)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .gap(6.0)
+        .frame(
+            egui::Frame::popup(ui.style())
+                .fill(palette::PANEL())
+                .stroke(egui::Stroke::new(1.0_f32, palette::BORDER_STRONG()))
+                .corner_radius(egui::CornerRadius::same(10))
+                .inner_margin(egui::Margin::same(10)),
+        )
         .show(|ui| {
             ui.set_min_width(170.0);
             ui.label(

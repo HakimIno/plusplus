@@ -46,10 +46,20 @@ pub(crate) fn dialect_for(kind: Option<DbKind>) -> Box<dyn Dialect> {
     }
 }
 
+/// Dialects tried when no connection says which one applies.
+const UNCONNECTED_DIALECTS: [DbKind; 5] = [
+    DbKind::SqlServer,
+    DbKind::Postgres,
+    DbKind::MySql,
+    DbKind::Sqlite,
+    DbKind::DuckDb,
+];
+
 /// Parse `sql` for `kind` and report the first syntax error, or `None` when it parses.
 ///
-/// `kind` is `None` when no connection is active — the generic dialect then accepts the
-/// broadest syntax, which is the right bias for a check whose only job is to flag typos.
+/// `kind` is `None` when no connection is active. The SQL could then be any dialect, and a
+/// red squiggle under correct code is worse than none, so an error is reported only when
+/// *no* dialect accepts the text — what's left is a genuine typo.
 pub fn check_syntax(kind: Option<DbKind>, sql: &str) -> Option<SyntaxError> {
     if sql.trim().is_empty() {
         return None;
@@ -60,7 +70,29 @@ pub fn check_syntax(kind: Option<DbKind>, sql: &str) -> Option<SyntaxError> {
     if matches!(kind, Some(DbKind::Cassandra | DbKind::ScyllaDb)) {
         return None;
     }
+    if kind.is_some() {
+        return check_kind(kind, sql);
+    }
+    let error = check_kind(None, sql)?;
+    if UNCONNECTED_DIALECTS
+        .iter()
+        .any(|&dialect| check_kind(Some(dialect), sql).is_none())
+    {
+        return None;
+    }
+    Some(error)
+}
 
+/// [`check_syntax`] against exactly one dialect (`None` = generic).
+fn check_kind(kind: Option<DbKind>, sql: &str) -> Option<SyntaxError> {
+    // SQL Server scripts separate batches with `GO` lines, which only client tools know.
+    let batches;
+    let sql = if kind == Some(DbKind::SqlServer) {
+        batches = go_lines_as_separators(sql);
+        batches.as_str()
+    } else {
+        sql
+    };
     let dialect = dialect_for(kind);
     let dialect = dialect.as_ref();
 
@@ -113,10 +145,56 @@ pub fn check_syntax(kind: Option<DbKind>, sql: &str) -> Option<SyntaxError> {
         Some(location) => token_range(sql, &tokens, location),
         None => last_token_range(sql, &tokens),
     }?;
+    match parser_blind_spot(kind, sql, &tokens, range.start) {
+        BlindSpot::None => {}
+        BlindSpot::Procedural => return None,
+        // Skip just that statement: blank it out (keeping every char position) and check
+        // what follows its `;`, so a typo further down is still found.
+        BlindSpot::Statement => {
+            let end = tokens
+                .iter()
+                .filter(|t| t.token == Token::SemiColon)
+                .map(|t| char_index(sql, t.span.start))
+                .find(|&at| at >= range.start)?;
+            let rest: String = sql
+                .chars()
+                .enumerate()
+                .map(|(i, c)| if i <= end && c != '\n' { ' ' } else { c })
+                .collect();
+            return check_kind(kind, &rest);
+        }
+    }
     Some(SyntaxError {
         range,
         message: humanize(&message),
     })
+}
+
+/// Turn each SQL Server `GO` batch-separator line (`GO`, or `GO 5` to repeat) into a `;`,
+/// padded with spaces to the same length so reported char ranges still index the original.
+fn go_lines_as_separators(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    for line in sql.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\n', '\r']);
+        let trimmed = body.trim();
+        let is_go = trimmed.len() >= 2
+            && trimmed[..2].eq_ignore_ascii_case("GO")
+            && trimmed[2..]
+                .trim_start()
+                .chars()
+                .all(|c| c.is_ascii_digit())
+            && (trimmed.len() == 2 || trimmed[2..].starts_with(char::is_whitespace));
+        if is_go {
+            let lead = body.len() - body.trim_start().len();
+            out.push_str(&body[..lead]);
+            out.push(';');
+            out.extend(std::iter::repeat_n(' ', body.chars().count() - lead - 1));
+            out.push_str(&line[body.len()..]);
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
 }
 
 /// Rewrite SQL Server's `ALTER TABLE t ADD a INT, b INT` into the equivalent shape
@@ -238,6 +316,96 @@ fn last_token_range(sql: &str, tokens: &[TokenWithSpan]) -> Option<Range<usize>>
     let start = char_index(sql, token.span.start);
     let end = char_index(sql, token.span.end);
     Some(non_empty(start..end, sql))
+}
+
+/// Statements sqlparser can't parse even though the database accepts them: procedural code
+/// (procedure / function / trigger bodies, T-SQL control flow, MySQL `DELIMITER` scripts,
+/// Postgres `DO` blocks), maintenance commands, and a few dialect clauses. An error inside
+/// one says nothing about the user's SQL, so it's not shown — staying quiet on valid code
+/// matters more than catching a typo inside a stored procedure.
+fn parser_blind_spot(
+    kind: Option<DbKind>,
+    sql: &str,
+    tokens: &[TokenWithSpan],
+    error_at: usize,
+) -> BlindSpot {
+    // Upper-cased words (and the separators that matter) up to the error, with positions.
+    let words: Vec<(usize, String)> = tokens
+        .iter()
+        .filter(|t| is_significant(t))
+        .map(|t| {
+            let text = match &t.token {
+                Token::Word(w) => w.value.to_ascii_uppercase(),
+                Token::SemiColon => ";".into(),
+                Token::LParen => "(".into(),
+                _ => String::new(),
+            };
+            (char_index(sql, t.span.start), text)
+        })
+        .take_while(|(at, _)| *at <= error_at)
+        .collect();
+    let word = |i: usize| words.get(i).map_or("", |(_, w)| w.as_str());
+
+    // Procedural code anywhere before the error: its body can hold statements of any
+    // shape, and `;` inside it doesn't end the outer statement.
+    for i in 0..words.len() {
+        let routine = |w: &str| matches!(w, "PROCEDURE" | "PROC" | "FUNCTION" | "TRIGGER");
+        let procedural = match word(i) {
+            "CREATE" => {
+                routine(word(i + 1))
+                    || (word(i + 1) == "OR"
+                        && matches!(word(i + 2), "REPLACE" | "ALTER")
+                        && routine(word(i + 3)))
+            }
+            "ALTER" => routine(word(i + 1)),
+            "BEGIN" => matches!(word(i + 1), "TRY" | "CATCH"),
+            "WHILE" | "DELIMITER" => true,
+            _ => false,
+        };
+        if procedural {
+            return BlindSpot::Procedural;
+        }
+    }
+
+    // The statement holding the error: from just after the last `;` before it.
+    let start = words
+        .iter()
+        .rposition(|(_, w)| w == ";")
+        .map_or(0, |i| i + 1);
+    let statement = &words[start.min(words.len())..];
+    let leading = statement.first().map_or("", |(_, w)| w.as_str());
+    if matches!(
+        leading,
+        "DO" | "VACUUM"
+            | "ANALYZE"
+            | "PRAGMA"
+            | "OPTIMIZE"
+            | "CHECKPOINT"
+            | "DBCC"
+            | "BACKUP"
+            | "RESTORE"
+            | "RECONFIGURE"
+    ) {
+        return BlindSpot::Statement;
+    }
+    if kind == Some(DbKind::SqlServer) {
+        let has = |a: &str, b: &str| statement.windows(2).any(|p| p[0].1 == a && p[1].1 == b);
+        // `ALTER COLUMN c <type>` and `OPTION (…)` query hints.
+        if has("ALTER", "COLUMN") || has("OPTION", "(") {
+            return BlindSpot::Statement;
+        }
+    }
+    BlindSpot::None
+}
+
+/// What [`parser_blind_spot`] found at a parse error.
+enum BlindSpot {
+    /// An ordinary error: report it.
+    None,
+    /// One statement the parser can't read: skip it and keep checking after its `;`.
+    Statement,
+    /// Procedural code whose body hides statement boundaries: stop checking.
+    Procedural,
 }
 
 fn is_significant(token: &TokenWithSpan) -> bool {
@@ -399,5 +567,87 @@ mod tests {
     fn works_without_a_connection() {
         assert!(check_syntax(None, "SELECT 1").is_none());
         assert!(check_syntax(None, "SELCT 1").is_some());
+    }
+
+    /// With no connection the SQL could be any dialect: SQL Server brackets, variables and
+    /// IF, MySQL backticks all pass; only text no dialect accepts is flagged.
+    #[test]
+    fn without_a_connection_any_dialect_that_parses_wins() {
+        for sql in [
+            "SELECT TOP 100 * FROM [dbo].[ac_ms_account_group1];",
+            "DECLARE @id INT = 5;\nSELECT * FROM t WHERE id = @id;",
+            "IF OBJECT_ID('t') IS NOT NULL DROP TABLE t;",
+            "SELECT `id` FROM `users`",
+        ] {
+            assert!(check_syntax(None, sql).is_none(), "{sql}");
+        }
+        let error = check_syntax(None, "SELECT * FORM t").expect("a typo in every dialect");
+        assert_eq!(marked("SELECT * FORM t", &error), "FORM");
+    }
+
+    /// Valid SQL sqlparser can't parse must not light up red, per dialect.
+    #[test]
+    fn valid_sql_outside_the_parser_is_not_flagged() {
+        use DbKind::*;
+        let cases: &[(DbKind, &str)] = &[
+            (Postgres, "DO $$ BEGIN RAISE NOTICE 'hi'; END $$;"),
+            (Postgres, "VACUUM ANALYZE t"),
+            (Postgres, "SELECT 1; VACUUM t"),
+            (
+                MySql,
+                "DELIMITER //\nCREATE PROCEDURE p() BEGIN SELECT 1; END //\nDELIMITER ;",
+            ),
+            (
+                SqlServer,
+                "CREATE PROCEDURE p @a INT AS BEGIN SELECT @a END",
+            ),
+            (
+                SqlServer,
+                "CREATE OR ALTER PROC p AS SET NOCOUNT ON; SELECT 1;",
+            ),
+            (
+                SqlServer,
+                "WITH c AS (SELECT 1 AS x) SELECT * FROM c OPTION (MAXRECURSION 0)",
+            ),
+            (
+                SqlServer,
+                "BEGIN TRY SELECT 1 END TRY BEGIN CATCH SELECT ERROR_MESSAGE() END CATCH",
+            ),
+            (SqlServer, "WHILE @i < 10 BEGIN SET @i = @i + 1 END"),
+            (
+                SqlServer,
+                "ALTER TABLE t ALTER COLUMN a NVARCHAR(50) NOT NULL",
+            ),
+            (Sqlite, "PRAGMA table_info(t)"),
+        ];
+        for (kind, sql) in cases {
+            assert!(check_syntax(Some(*kind), sql).is_none(), "{kind:?}: {sql}");
+        }
+    }
+
+    /// The blind spots are scoped: a typo in an ordinary statement before or after them is
+    /// still reported.
+    #[test]
+    fn typos_around_blind_spots_are_still_reported() {
+        let sql = "SELEC 1;\nVACUUM t";
+        let error = check_syntax(Some(DbKind::Postgres), sql).expect("typo before VACUUM");
+        assert_eq!(marked(sql, &error), "SELEC");
+        let sql = "VACUUM t;\nSELECT * FORM t";
+        assert!(check_syntax(Some(DbKind::Postgres), sql).is_some());
+        let sql = "ALTER TABLE t ALTER COLUMN a INT; SELECT * FORM t";
+        let error = check_syntax(Some(DbKind::SqlServer), sql).expect("typo after");
+        assert_eq!(marked(sql, &error), "FORM");
+    }
+
+    #[test]
+    fn sql_server_go_lines_separate_batches() {
+        let sql = "SELECT * FROM [dbo].[a]\nGO\n  go 3\nSELECT 1\nGO";
+        assert!(check_syntax(Some(DbKind::SqlServer), sql).is_none());
+        // A real error after a GO is still found, at its original position.
+        let sql = "SELECT 1\nGO\nSELEC 2";
+        let error = check_syntax(Some(DbKind::SqlServer), sql).expect("typo");
+        assert_eq!(marked(sql, &error), "SELEC");
+        // `GO` inside a statement is not a separator.
+        assert!(check_syntax(Some(DbKind::SqlServer), "SELECT go FROM t").is_none());
     }
 }

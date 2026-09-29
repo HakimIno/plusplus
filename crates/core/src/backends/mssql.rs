@@ -1082,7 +1082,9 @@ fn decode(cell: &ColumnData<'static>) -> Value {
             .map(|s| Value::Text(s.to_string()))
             .unwrap_or(Value::Null),
         ColumnData::Guid(v) => v.map(|g| Value::Text(g.to_string())).unwrap_or(Value::Null),
-        ColumnData::Numeric(v) => v.map(|n| Value::Text(n.to_string())).unwrap_or(Value::Null),
+        ColumnData::Numeric(v) => v
+            .map(|n| Value::Text(numeric_text(n.value(), n.scale())))
+            .unwrap_or(Value::Null),
         ColumnData::Xml(v) => v
             .as_ref()
             .map(|x| Value::Text(x.to_string()))
@@ -1101,6 +1103,23 @@ fn decode(cell: &ColumnData<'static>) -> Value {
     }
 }
 
+/// The text SQL Server itself shows for a DECIMAL/NUMERIC stored as `value` × 10^-`scale`.
+/// Written out by hand because tiberius' `Display` prints the fraction as a signed,
+/// unpadded integer: -327.10 comes out as `-327.-10`, -42056.07 as `-42056.-7`, and a
+/// scale-0 value gains a `.0`.
+fn numeric_text(value: i128, scale: u8) -> String {
+    let sign = if value < 0 { "-" } else { "" };
+    let digits = value.unsigned_abs().to_string();
+    let scale = scale as usize;
+    if scale == 0 {
+        return format!("{sign}{digits}");
+    }
+    // Pad so there is always at least one integer digit (0.05, not .05).
+    let padded = format!("{digits:0>width$}", width = scale + 1);
+    let (int, frac) = padded.split_at(padded.len() - scale);
+    format!("{sign}{int}.{frac}")
+}
+
 /// Decode a temporal cell into text via tiberius' chrono `FromSqlOwned` conversion.
 fn temporal<T>(cell: &ColumnData<'static>) -> Value
 where
@@ -1109,5 +1128,29 @@ where
     match T::from_sql_owned(cell.clone()) {
         Ok(Some(v)) => Value::Text(v.to_string()),
         _ => Value::Null,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::numeric_text;
+
+    /// Values from a real DECIMAL(18,2) result: negatives keep one sign, the fraction keeps
+    /// its leading zeros, and the text matches what SQL Server itself shows.
+    #[test]
+    fn decimals_render_like_sql_server() {
+        assert_eq!(numeric_text(-32710, 2), "-327.10");
+        assert_eq!(numeric_text(-4205607, 2), "-42056.07");
+        assert_eq!(numeric_text(-500000, 2), "-5000.00");
+        assert_eq!(numeric_text(58879, 2), "588.79");
+        assert_eq!(numeric_text(5, 2), "0.05");
+        assert_eq!(numeric_text(-5, 2), "-0.05");
+        assert_eq!(numeric_text(0, 2), "0.00");
+        assert_eq!(numeric_text(123, 0), "123");
+        assert_eq!(numeric_text(-123, 0), "-123");
+        assert_eq!(
+            numeric_text(i128::MIN + 1, 4),
+            "-17014118346046923173168730371588410.5727"
+        );
     }
 }

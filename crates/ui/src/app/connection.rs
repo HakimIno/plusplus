@@ -12,6 +12,42 @@ impl DbGuiApp {
         let id = cfg.id.clone();
         let name = cfg.name.clone();
         let live = self.active_connections.iter().any(|c| c.config_id == id);
+        if self.tab().conn_id.as_deref() != Some(id.as_str()) {
+            let kind = self.tab().kind;
+            if !matches!(
+                kind,
+                crate::components::QueryTabKind::Query | crate::components::QueryTabKind::Diagram
+            ) {
+                // A table / view / routine tab belongs to the database it was opened from:
+                // its SQL is written in that dialect and its rows edit that table. Pointing
+                // it at another connection would run the one against the wrong database, so
+                // the new connection gets a fresh query tab instead.
+                let tab_id = self.next_tab_id;
+                self.next_tab_id += 1;
+                self.tabs.push(QueryTab::new(tab_id, String::new()));
+                self.active_query_tab = self.tabs.len() - 1;
+            } else if self.tab().edits.has_pending() {
+                self.error = Some(
+                    "Save or discard this tab's staged edits before switching its connection."
+                        .into(),
+                );
+                return;
+            } else {
+                // The result on screen, its edit source and its paging came from the previous
+                // database; keeping them would let an edit or a load-more reach the new one.
+                let tab = self.tab_mut();
+                tab.result = None;
+                tab.clear_batch_results();
+                tab.row_order.clear();
+                tab.selection.clear();
+                tab.edits.clear();
+                tab.edits.source = None;
+                tab.edits.pending_source = None;
+                tab.page_exhausted = false;
+                tab.total_rows = None;
+                tab.server_filter_predicate = None;
+            }
+        }
         self.tab_mut().conn_id = Some(id.clone());
         // A portable diagram can be retargeted from the normal connection switcher. Keep
         // its refresh/apply routing in sync with the tab while leaving the design untouched.

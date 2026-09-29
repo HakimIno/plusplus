@@ -1784,9 +1784,9 @@ impl DbGuiApp {
 
         let nav_button = |ui: &mut egui::Ui, right: bool, enabled: bool, hint: &str| {
             let src = if right {
-                icons::arrow_right()
+                icons::chevron_right()
             } else {
-                icons::arrow_left()
+                icons::chevron_left()
             };
             components::soft_icon_button(ui, src, hint, enabled && idle).clicked()
         };
@@ -3312,7 +3312,7 @@ impl DbGuiApp {
             }
             if folded || gutter_hovered {
                 let icon = if folded {
-                    icons::arrow_right()
+                    icons::chevron_right()
                 } else {
                     icons::chevron_down()
                 };
@@ -4093,17 +4093,25 @@ impl DbGuiApp {
 
         let idx = self.active_query_tab;
         let now = ui.input(|i| i.time);
-        let stale = self.tabs[idx].sql != self.tabs[idx].editor_assist.syntax_checked;
+        // The dialect of the connection this tab runs on — not whichever connection happens
+        // to be selected elsewhere in the app.
+        let kind = self.tabs[idx]
+            .conn_id
+            .as_deref()
+            .and_then(|id| self.active_connections.iter().find(|c| c.config_id == id))
+            .map(|c| c.db.kind());
+        let stale = self.tabs[idx].sql != self.tabs[idx].editor_assist.syntax_checked
+            || kind != self.tabs[idx].editor_assist.syntax_checked_kind;
         if text_changed || (stale && self.tabs[idx].editor_assist.syntax_dirty_at.is_none()) {
             self.tabs[idx].editor_assist.syntax_dirty_at = Some(now);
         }
         if let Some(since) = self.tabs[idx].editor_assist.syntax_dirty_at {
             let waited = now - since;
             if waited >= DEBOUNCE {
-                let kind = self.active().map(|c| c.db.kind());
                 let sql = self.tabs[idx].sql.clone();
                 self.tabs[idx].editor_assist.syntax_error = dbcore::check_syntax(kind, &sql);
                 self.tabs[idx].editor_assist.syntax_checked = sql;
+                self.tabs[idx].editor_assist.syntax_checked_kind = kind;
                 self.tabs[idx].editor_assist.syntax_dirty_at = None;
             } else {
                 // Nothing else would repaint an idle editor, so ask for the frame that runs
@@ -4916,9 +4924,8 @@ impl DbGuiApp {
     fn sidebar_items(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Keep the two secondary actions visually subordinate to the filter. Their
-                // menus and enabled states stay exactly as before; only the resting chrome is
-                // removed so the whole toolbar fits on one 24-point row.
+                // Keep the create menu visually subordinate to the filter: only its resting
+                // chrome is removed, so the whole toolbar fits on one 24-point row.
                 ui.spacing_mut().button_padding = egui::vec2(4.0, 2.0);
                 let inactive_button = ui.visuals().widgets.inactive;
                 let inactive = &mut ui.visuals_mut().widgets.inactive;
@@ -4938,7 +4945,7 @@ impl DbGuiApp {
                         .fit_to_exact_size(egui::vec2(icons::SIZE, icons::SIZE))
                         .tint(ui.visuals().widgets.inactive.fg_stroke.color);
                     ui.menu_button(plus, |ui| {
-                        ui.set_min_width(150.0);
+                        ui.set_min_width(180.0);
                         if components::button(ui, icons::table(), "New Table…", true).clicked() {
                             actions.push(Action::OpenNewTable);
                             ui.close();
@@ -4957,19 +4964,34 @@ impl DbGuiApp {
                         }
                         if supports_routines {
                             ui.separator();
-                            if components::button(ui, icons::code(), "New Function…", true)
+                            if components::button(ui, icons::function(), "New Function…", true)
                                 .clicked()
                             {
                                 actions.push(Action::OpenNewRoutine(dbcore::RoutineKind::Function));
                                 ui.close();
                             }
-                            if components::button(ui, icons::code(), "New Procedure…", true)
+                            if components::button(ui, icons::function(), "New Procedure…", true)
                                 .clicked()
                             {
                                 actions
                                     .push(Action::OpenNewRoutine(dbcore::RoutineKind::Procedure));
                                 ui.close();
                             }
+                        }
+                        // The ER designer lives here rather than behind its own toolbar icon;
+                        // a single table's diagram is also on its right-click menu.
+                        ui.separator();
+                        if components::button(ui, icons::diagram(), "Open ER Designer", true)
+                            .clicked()
+                        {
+                            actions.push(Action::ShowDatabaseDiagram);
+                            ui.close();
+                        }
+                        if components::button(ui, icons::database(), "Import ER Design…", true)
+                            .clicked()
+                        {
+                            actions.push(Action::ImportErd);
+                            ui.close();
                         }
                     })
                     .response
@@ -4980,27 +5002,6 @@ impl DbGuiApp {
                         .response
                         .on_disabled_hover_text("Connect to a database first");
                 }
-                let diagram = egui::Image::new(icons::diagram())
-                    .fit_to_exact_size(egui::vec2(icons::SIZE, icons::SIZE))
-                    .tint(ui.visuals().widgets.inactive.fg_stroke.color);
-                ui.menu_button(diagram, |ui| {
-                    ui.set_min_width(210.0);
-                    if components::button(ui, icons::diagram(), "Open ER Designer", connected)
-                        .clicked()
-                    {
-                        actions.push(Action::ShowDatabaseDiagram);
-                        ui.close();
-                    }
-                    if components::button(ui, icons::database(), "Import ER Design…", connected)
-                        .clicked()
-                    {
-                        actions.push(Action::ImportErd);
-                        ui.close();
-                    }
-                })
-                .response
-                .on_hover_text("ER designer and portable designs");
-
                 // The filter remains a visible input well; only the icon actions are ghosted.
                 ui.visuals_mut().widgets.inactive = inactive_button;
                 components::icon_text_input(
@@ -5015,13 +5016,25 @@ impl DbGuiApp {
         ui.add_space(4.0);
 
         if self.active().is_some() {
+            // The tree fills the tab; the schema picker (when there's a choice) sits under it.
+            let schemas = self.sidebar_schemas();
+            let picker_h = if schemas.is_empty() {
+                0.0
+            } else {
+                style::CONTROL_H + 10.0
+            };
             egui::ScrollArea::vertical()
                 .id_salt("schema_scroll")
+                .auto_shrink([false, false])
+                .max_height((ui.available_height() - picker_h).max(0.0))
                 .show(ui, |ui| {
                     // Keep tree content within the panel — long names must not widen it.
                     ui.set_width(ui.available_width());
                     self.schema_tree(ui, actions);
                 });
+            if !schemas.is_empty() {
+                self.sidebar_schema_picker(ui, &schemas);
+            }
         } else {
             ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
                 let avail = ui.available_height();
@@ -5035,10 +5048,13 @@ impl DbGuiApp {
                             .size(14.0),
                     );
                 } else {
-                    ui.label(
-                        egui::RichText::new("Connect to a database to browse its schema.")
-                            .color(palette::TEXT_FAINT()),
-                    );
+                    ui.add(
+                        egui::Image::new(icons::plug_off())
+                            .fit_to_exact_size(egui::Vec2::splat(40.0))
+                            .tint(palette::TEXT_FAINT())
+                            .alt_text("Connect to a database to browse its schema."),
+                    )
+                    .on_hover_text("Connect to a database to browse its schema.");
                 }
             });
         }
@@ -5068,10 +5084,85 @@ impl DbGuiApp {
         self.history_list(ui, actions);
     }
 
+    /// Every schema the active connection's objects live in, sorted. Empty when there's no
+    /// choice to make (SQLite and MySQL report none; a single schema needs no picker).
+    pub(super) fn sidebar_schemas(&self) -> Vec<String> {
+        let Some(active) = self.active() else {
+            return Vec::new();
+        };
+        let tree = &active.schema;
+        let names: std::collections::BTreeSet<&str> = tree
+            .tables
+            .iter()
+            .map(|t| t.schema.as_deref())
+            .chain(tree.views.iter().map(|v| v.schema.as_deref()))
+            .chain(tree.routines.iter().map(|r| r.schema.as_deref()))
+            .flatten()
+            .collect();
+        if names.len() < 2 {
+            return Vec::new();
+        }
+        names.into_iter().map(str::to_string).collect()
+    }
+
+    /// The schema the sidebar is scoped to, if one is chosen and still exists.
+    pub(super) fn sidebar_schema_scope(&self) -> Option<&str> {
+        let active = self.active()?;
+        let chosen = self.sidebar_schema.get(&active.config_id)?.as_str();
+        let tree = &active.schema;
+        let exists = tree
+            .tables
+            .iter()
+            .any(|t| t.schema.as_deref() == Some(chosen))
+            || tree
+                .views
+                .iter()
+                .any(|v| v.schema.as_deref() == Some(chosen))
+            || tree
+                .routines
+                .iter()
+                .any(|r| r.schema.as_deref() == Some(chosen));
+        exists.then_some(chosen)
+    }
+
+    /// The schema picker under the Items tree: "All schemas" or one schema.
+    fn sidebar_schema_picker(&mut self, ui: &mut egui::Ui, schemas: &[String]) {
+        let Some(conn_id) = self.active().map(|a| a.config_id.clone()) else {
+            return;
+        };
+        let current = self.sidebar_schema_scope().map(str::to_string);
+        let mut choice = current.clone();
+        ui.add_space(6.0);
+        egui::ComboBox::from_id_salt(("sidebar_schema", conn_id.as_str()))
+            .width(ui.available_width())
+            .selected_text(current.as_deref().unwrap_or("All schemas"))
+            .icon(components::combo_chevron_icon)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut choice, None, "All schemas");
+                for schema in schemas {
+                    ui.selectable_value(&mut choice, Some(schema.clone()), schema);
+                }
+            })
+            .response
+            .on_hover_text("Show one schema's objects");
+        if choice != current {
+            match choice {
+                Some(schema) => {
+                    self.sidebar_schema.insert(conn_id, schema);
+                }
+                None => {
+                    self.sidebar_schema.remove(&conn_id);
+                }
+            }
+        }
+    }
+
     fn schema_tree(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let Some(active) = self.active() else {
             return;
         };
+        let scope = self.sidebar_schema_scope();
+        let in_scope = |schema: Option<&str>| scope.is_none_or(|s| schema == Some(s));
 
         ui.horizontal(|ui| {
             ui.add(
@@ -5092,8 +5183,10 @@ impl DbGuiApp {
 
         let conn_id = active.config_id.as_str();
         let filter = self.schema_filter.to_lowercase();
-        let visible =
-            |t: &dbcore::TableInfo| filter.is_empty() || t.name.to_lowercase().contains(&filter);
+        let visible = |t: &dbcore::TableInfo| {
+            in_scope(t.schema.as_deref())
+                && (filter.is_empty() || t.name.to_lowercase().contains(&filter))
+        };
 
         // One continuous list: pinned tables always sort to the top, while the saved custom
         // order controls positions within the pinned and unpinned groups.
@@ -5255,11 +5348,11 @@ impl DbGuiApp {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
 
-                    // Disclosure chevron follows the shared Hugeicons stroke language.
+                    // Disclosure chevron uses the shared Tabler icon set.
                     let (chev_rect, chev_resp) =
                         ui.allocate_exact_size(egui::vec2(12.0, TREE_ROW_H), egui::Sense::click());
                     let chevron = if state.openness(ui.ctx()) < 0.5 {
-                        icons::arrow_right()
+                        icons::chevron_right()
                     } else {
                         icons::chevron_down()
                     };
@@ -5277,7 +5370,7 @@ impl DbGuiApp {
                         toggle_open = true;
                     }
 
-                    // Accent table icon (neutral on the selected pill for contrast).
+                    // Shared table glyph, with the list's primary colour and selected contrast.
                     let icon_color = if selected {
                         palette::TEXT()
                     } else {
@@ -5421,6 +5514,8 @@ impl DbGuiApp {
         };
         let kind = active.db.kind();
         let filter = self.schema_filter.to_lowercase();
+        let scope = self.sidebar_schema_scope();
+        let in_scope = |schema: Option<&str>| scope.is_none_or(|s| schema == Some(s));
         let matches = |name: &str| filter.is_empty() || name.to_lowercase().contains(&filter);
 
         // ── Views: a folder of file-style rows, matching Saved Queries. ──
@@ -5428,7 +5523,7 @@ impl DbGuiApp {
             .schema
             .views
             .iter()
-            .filter(|v| matches(&v.name))
+            .filter(|v| in_scope(v.schema.as_deref()) && matches(&v.name))
             .collect();
         if !views.is_empty() {
             object_group(ui, "views_group", "Views", false, |ui| {
@@ -5445,7 +5540,7 @@ impl DbGuiApp {
                             let row = object_leaf_row(
                                 ui,
                                 tab_kind.icon(),
-                                tab_kind.color(),
+                                palette::TEXT_WEAK(),
                                 &label,
                                 "Click to preview rows · right-click for actions",
                             );
@@ -5493,7 +5588,7 @@ impl DbGuiApp {
                 .schema
                 .routines
                 .iter()
-                .filter(|r| r.kind == rk && matches(&r.name))
+                .filter(|r| r.kind == rk && in_scope(r.schema.as_deref()) && matches(&r.name))
                 .collect();
             if routines.is_empty() {
                 continue;
@@ -5519,7 +5614,7 @@ impl DbGuiApp {
                             let row = object_leaf_row(
                                 ui,
                                 tab_kind.icon(),
-                                tab_kind.color(),
+                                palette::TEXT_WEAK(),
                                 &r.name,
                                 &signature,
                             );
@@ -5554,7 +5649,7 @@ impl DbGuiApp {
             .schema
             .triggers
             .iter()
-            .filter(|t| matches(&t.name))
+            .filter(|t| in_scope(t.schema.as_deref()) && matches(&t.name))
             .collect();
         if !triggers.is_empty() {
             object_group(ui, "trig_group", "Triggers", false, |ui| {
@@ -5572,7 +5667,7 @@ impl DbGuiApp {
                             let row = object_leaf_row(
                                 ui,
                                 tab_kind.icon(),
-                                tab_kind.color(),
+                                palette::TEXT_WEAK(),
                                 &t.name,
                                 &t.display(),
                             );
@@ -5616,12 +5711,20 @@ impl DbGuiApp {
         let tab_id = self.tabs[idx].id;
         let mut choice = None;
         let mut close = None;
+        // The 29-point tabs stand on the bar's bottom separator, like the query tab strip:
+        // all the vertical margin goes on top, so the selected tab joins the grid below
+        // instead of floating against the bar's upper edge.
         egui::Panel::top(egui::Id::new(("batch_result_bar", self.tabs[idx].id)))
             .resizable(false)
             .exact_size(35.0)
             .frame(
                 egui::Frame::new()
-                    .inner_margin(egui::Margin::symmetric(6, 2))
+                    .inner_margin(egui::Margin {
+                        left: 6,
+                        right: 6,
+                        top: 6,
+                        bottom: 0,
+                    })
                     .fill(palette::PANEL()),
             )
             .show_separator_line(true)
@@ -6023,17 +6126,25 @@ impl DbGuiApp {
                 .conn_id
                 .as_ref()
                 .is_some_and(|conn_id| self.connection_jobs.contains(conn_id));
-            let message = if self.tabs[idx].table_metadata_pending || connection_metadata_pending {
-                "Loading table structure…"
-            } else {
-                "Table structure unavailable"
-            };
+            let loading = self.tabs[idx].table_metadata_pending || connection_metadata_pending;
             egui::CentralPanel::default()
                 .frame(result_frame)
                 .show_inside(root, |ui| {
-                    ui.centered_and_justified(|ui| {
-                        ui.label(egui::RichText::new(message).color(palette::TEXT_WEAK()));
-                    });
+                    if loading {
+                        ui.centered_and_justified(|ui| {
+                            ui.label(
+                                egui::RichText::new("Loading table structure…")
+                                    .color(palette::TEXT_WEAK()),
+                            );
+                        });
+                    } else {
+                        components::empty_state(
+                            ui,
+                            icons::mood_sad_dizzy(),
+                            "Table structure unavailable",
+                            "Its columns couldn't be read from the database.",
+                        );
+                    }
                 });
             return;
         }
@@ -6407,7 +6518,7 @@ impl DbGuiApp {
                         | crate::components::QueryTabKind::Procedure
                         | crate::components::QueryTabKind::Trigger => components::empty_state(
                             ui,
-                            icons::code(),
+                            kind.icon(),
                             "No output",
                             "This definition has not been run",
                         ),
@@ -7856,7 +7967,7 @@ impl DbGuiApp {
                     let (chev_rect, chev_resp) =
                         ui.allocate_exact_size(egui::vec2(12.0, TREE_ROW_H), egui::Sense::click());
                     let chevron = if state.openness(ui.ctx()) < 0.5 {
-                        icons::arrow_right()
+                        icons::chevron_right()
                     } else {
                         icons::chevron_down()
                     };
@@ -8122,7 +8233,7 @@ impl DbGuiApp {
                             .on_hover_text(&foreign_key.columns_raw);
                         });
                         ui.add_space(16.0);
-                        icons::show_weak(ui, icons::arrow_right(), 18.0);
+                        icons::show_weak(ui, icons::chevron_right(), 18.0);
                         ui.add_space(16.0);
                         ui.vertical(|ui| {
                             ui.label(
@@ -9158,7 +9269,7 @@ impl DbGuiApp {
                     ui.add(
                         egui::Image::new(icons::db_kind_icon(editor.config.kind))
                             .fit_to_exact_size(egui::Vec2::splat(28.0))
-                            .tint(icons::db_kind_icon_tint(editor.config.kind)),
+                            .tint(icons::db_kind_icon_tint()),
                     );
                     ui.vertical(|ui| {
                         ui.label(
@@ -9173,7 +9284,7 @@ impl DbGuiApp {
                         );
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if components::button(ui, icons::arrow_left(), "Change", true).clicked() {
+                        if components::button(ui, icons::chevron_left(), "Change", true).clicked() {
                             editor.selecting_provider = true;
                         }
                     });
@@ -9834,7 +9945,7 @@ fn embedded_table_editor_header(
                     ui.set_min_width(220.0);
                     for column in editor.columns.iter_mut().filter(|column| !column.drop) {
                         let name = column.name.clone();
-                        if ui.checkbox(&mut column.primary_key, &name).changed()
+                        if components::menu_checkbox(ui, &mut column.primary_key, &name).changed()
                             && column.primary_key
                         {
                             // SQL Server primary-key columns must be NOT NULL.
@@ -10051,7 +10162,7 @@ fn view_editor_view(
         }
         // Materialized views are Postgres-only.
         if editor.db_kind == dbcore::DbKind::Postgres {
-            ui.checkbox(&mut editor.materialized, "Materialized");
+            components::accent_checkbox(ui, true, &mut editor.materialized, Some("Materialized"));
         }
     });
     ui.add_space(6.0);
@@ -10169,7 +10280,9 @@ fn trigger_editor_view(
                         if ui.selectable_label(on, e.label()).clicked() {
                             editor.events = vec![e];
                         }
-                    } else if ui.checkbox(&mut on, e.label()).changed() {
+                    } else if components::accent_checkbox(ui, true, &mut on, Some(e.label()))
+                        .changed()
+                    {
                         editor.set_event(e, on);
                     }
                 }
@@ -10209,10 +10322,14 @@ fn trigger_editor_view(
 
             // Body — Postgres can execute an existing function instead of an inline body.
             if kind == DbKind::Postgres {
-                ui.checkbox(
-                    &mut editor.pg_existing_function,
-                    "Execute existing function",
-                );
+                ui.horizontal(|ui| {
+                    components::accent_checkbox(
+                        ui,
+                        true,
+                        &mut editor.pg_existing_function,
+                        Some("Execute existing function"),
+                    );
+                });
                 if editor.pg_existing_function {
                     ui.add_space(2.0);
                     ui.label(
@@ -10411,7 +10528,7 @@ fn favorite_entry_menu(
         ui.close();
     }
     ui.separator();
-    if components::button(ui, icons::code(), "Copy", true).clicked() {
+    if components::button(ui, icons::copy(), "Copy", true).clicked() {
         ui.ctx().copy_text(sql.to_string());
         ui.close();
     }
@@ -10456,7 +10573,7 @@ fn history_entry_menu(ui: &mut egui::Ui, idx: usize, sql: &str, actions: &mut Ve
         ui.close();
     }
     ui.separator();
-    if components::button(ui, icons::code(), "Copy", true).clicked() {
+    if components::button(ui, icons::copy(), "Copy", true).clicked() {
         ui.ctx().copy_text(sql.to_string());
         ui.close();
     }
@@ -10597,7 +10714,7 @@ fn table_actions_menu(
         });
         ui.close();
     }
-    if components::button(ui, icons::code(), "Copy name", true)
+    if components::button(ui, icons::copy(), "Copy name", true)
         .on_hover_text("Copy the table name to the clipboard")
         .clicked()
     {
@@ -10688,7 +10805,7 @@ fn object_group(
                 let (chev_rect, chev_resp) =
                     ui.allocate_exact_size(egui::vec2(12.0, TREE_ROW_H), egui::Sense::click());
                 let chevron = if state.openness(ui.ctx()) < 0.5 {
-                    icons::arrow_right()
+                    icons::chevron_right()
                 } else {
                     icons::chevron_down()
                 };
@@ -10705,7 +10822,7 @@ fn object_group(
                 let (icon_rect, _) =
                     ui.allocate_exact_size(egui::vec2(16.0, TREE_ROW_H), egui::Sense::hover());
                 egui::Image::new(icons::folder())
-                    .tint(palette::ACCENT())
+                    .tint(palette::TEXT_WEAK())
                     .paint_at(
                         ui,
                         egui::Rect::from_center_size(
@@ -12902,7 +13019,7 @@ fn schema_structure_grid(
                             egui::TextStyle::Body.resolve(ui.style()),
                             color,
                         );
-                        egui::Image::new(icons::arrow_right())
+                        egui::Image::new(icons::chevron_right())
                             .fit_to_exact_size(egui::vec2(13.0, 13.0))
                             .tint(color)
                             .paint_at(
@@ -13344,7 +13461,7 @@ fn schema_fk_tab(ui: &mut egui::Ui, fks: &mut Vec<crate::schema::FkDraft>) {
                         "col1, col2",
                         130.0,
                     );
-                    icons::show_weak(ui, icons::arrow_right(), 14.0);
+                    icons::show_weak(ui, icons::chevron_right(), 14.0);
                     components::text_input_enabled(
                         ui,
                         !fk.drop,

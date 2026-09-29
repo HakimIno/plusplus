@@ -2626,6 +2626,56 @@ fn closing_split_repairs_an_active_hidden_pane_index() {
     assert_eq!(app.tab().id, 0);
 }
 
+/// The syntax squiggle follows the tab's own connection: with none, SQL any dialect
+/// accepts (T-SQL variables here) is left alone; once the tab runs on SQLite — which has no
+/// DECLARE — the unchanged text is re-checked against that dialect and flagged.
+#[test]
+fn syntax_check_uses_the_tabs_connection_and_rechecks_when_it_changes() {
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    let tab = app.tab_mut();
+    tab.kind = crate::components::QueryTabKind::Query;
+    tab.conn_id = None;
+    tab.sql = "DECLARE @id INT = 5;\nSELECT @id;".into();
+    tab.mark_sql_changed();
+
+    let mut time = 0.0;
+    let mut frame = |app: &mut DbGuiApp| {
+        time += 0.5;
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 700.0),
+            )),
+            time: Some(time),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| app.draw(ui, None));
+    };
+    for _ in 0..3 {
+        frame(&mut app);
+    }
+    assert_eq!(
+        app.tab().editor_assist.syntax_checked,
+        app.tab().sql,
+        "the check ran"
+    );
+    assert!(app.tab().editor_assist.syntax_error.is_none());
+
+    app.tab_mut().conn_id = Some("edit-connection".into());
+    for _ in 0..3 {
+        frame(&mut app);
+    }
+    assert_eq!(
+        app.tab().editor_assist.syntax_checked_kind,
+        Some(DbKind::Sqlite)
+    );
+    assert!(app.tab().editor_assist.syntax_error.is_some());
+}
+
 #[test]
 fn split_panes_keep_independent_editor_assistance_state() {
     let mut app = DbGuiApp::construct();
@@ -3873,6 +3923,102 @@ fn memory_limited_stream_is_marked_truncated_and_cannot_auto_continue() {
     assert!(app.tab().page_exhausted);
 }
 
+/// A failed load-more must not retry by itself: the grid stays at its tail, so without
+/// this every idle frame re-issued the same failing query (a runaway loop in the log).
+#[test]
+fn failed_load_more_stops_auto_continue() {
+    let mut app = DbGuiApp::construct();
+    let tab_id = app.tab().id;
+    app.tab_mut().set_result(fake_result(2, 1));
+    app.query_seq = 4;
+    app.tx
+        .send(AppMessage::QueryStreamFinished {
+            tab_id,
+            conn_id: String::new(),
+            sql: "SELECT TOP 77 * FROM t WHERE ([id] > 23) ORDER BY [id];".into(),
+            elapsed_ms: 1.0,
+            rows_loaded: 0,
+            page: dbcore::PageWindow {
+                limit: Some(100),
+                offset: 2,
+            },
+            result_limit: 100,
+            append: true,
+            result: Err("Invalid object name 't'.".into()),
+            canceled: false,
+            budget_truncated: false,
+            row_truncated: false,
+            seq: 4,
+        })
+        .unwrap();
+    app.poll_messages(&egui::Context::default());
+    assert!(app.tab().page_exhausted, "no automatic retry");
+    assert!(app.tab().result.is_some(), "rows already shown stay");
+}
+
+/// `app_with_staged_edit` plus a second live connection to switch to.
+fn app_with_two_connections() -> (DbGuiApp, usize) {
+    let mut app = app_with_staged_edit();
+    let mut other = dbcore::ConnectionConfig::new(DbKind::Sqlite);
+    other.id = "other-connection".into();
+    app.connections.push(other);
+    app.active_connections.push(ActiveConnection {
+        config_id: "other-connection".into(),
+        name: "other".into(),
+        db: Arc::new(DummyDb),
+        databases: Vec::new(),
+        schema: fake_schema(1, 1),
+    });
+    let idx = app.connections.len() - 1;
+    (app, idx)
+}
+
+/// Choosing another connection never re-points a table tab: its SQL and edits belong to
+/// the database it was opened from. The new connection gets a fresh query tab.
+#[test]
+fn switching_connection_leaves_table_tabs_bound_to_their_database() {
+    let (mut app, other) = app_with_two_connections();
+    app.tab_mut().edits.clear();
+    app.tab_mut().kind = crate::components::QueryTabKind::Table;
+    app.tab_mut().sql = "SELECT * FROM \"customers\" LIMIT 100;".into();
+    let before = app.tabs.len();
+
+    app.bind_connection(other, false);
+
+    assert_eq!(app.tabs.len(), before + 1, "a new query tab");
+    assert_eq!(app.tab().conn_id.as_deref(), Some("other-connection"));
+    assert_eq!(app.tab().kind, crate::components::QueryTabKind::Query);
+    assert_eq!(app.tabs[0].conn_id.as_deref(), Some("edit-connection"));
+    assert_eq!(app.tabs[0].sql, "SELECT * FROM \"customers\" LIMIT 100;");
+}
+
+/// Staged edits must be saved or discarded before a query tab changes database — else the
+/// UPDATE would run against the new connection.
+#[test]
+fn switching_connection_refuses_a_tab_with_staged_edits() {
+    let (mut app, other) = app_with_two_connections();
+    assert!(app.tab().edits.has_pending());
+
+    app.bind_connection(other, false);
+
+    assert_eq!(app.tab().conn_id.as_deref(), Some("edit-connection"));
+    assert!(app.error.as_deref().unwrap_or("").contains("staged edits"));
+}
+
+/// A plain query tab follows the chosen connection, dropping the previous database's
+/// result and edit source.
+#[test]
+fn switching_connection_clears_a_query_tabs_old_result() {
+    let (mut app, other) = app_with_two_connections();
+    app.tab_mut().edits.clear();
+
+    app.bind_connection(other, false);
+
+    assert_eq!(app.tab().conn_id.as_deref(), Some("other-connection"));
+    assert!(app.tab().result.is_none());
+    assert!(app.tab().edits.source.is_none());
+}
+
 #[test]
 fn canceled_replacement_keeps_the_previous_result() {
     let mut app = DbGuiApp::construct();
@@ -4859,6 +5005,215 @@ fn find_widget_seeds_steps_replaces_and_closes() {
         vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
     );
     assert!(!app.tab().find.open);
+}
+
+fn two_schema_tree() -> SchemaTree {
+    let mut schema = fake_schema(3, 1);
+    schema.tables[0].schema = Some("dbo".into());
+    schema.tables[1].schema = Some("payroll".into());
+    schema.tables[2].schema = Some("dbo".into());
+    schema
+}
+
+/// The picker lists every schema (sorted, only when there's a choice), and a chosen
+/// schema that no longer exists quietly falls back to all schemas.
+#[test]
+fn sidebar_schema_picker_lists_schemas_and_scopes() {
+    let mut app = DbGuiApp::construct();
+    connect_fake(&mut app, fake_schema(2, 1));
+    assert!(app.sidebar_schemas().is_empty(), "no schemas, no picker");
+
+    let mut app = DbGuiApp::construct();
+    connect_fake(&mut app, two_schema_tree());
+    assert_eq!(app.sidebar_schemas(), ["dbo", "payroll"]);
+    assert_eq!(app.sidebar_schema_scope(), None, "all schemas by default");
+    let id = app.active().unwrap().config_id.clone();
+    app.sidebar_schema.insert(id.clone(), "payroll".into());
+    assert_eq!(app.sidebar_schema_scope(), Some("payroll"));
+    app.sidebar_schema.insert(id, "gone".into());
+    assert_eq!(app.sidebar_schema_scope(), None);
+}
+
+/// Screenshot generator (ignored): the sidebar scoped to one schema, picker at the bottom.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_sidebar_schema_picker() {
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    connect_fake(&mut app, two_schema_tree());
+    let id = app.active().unwrap().config_id.clone();
+    app.sidebar_schema.insert(id, "dbo".into());
+    render_and_snapshot_at(app, "sidebar_schema_picker", false, 2.0);
+}
+
+/// Screenshot generator (ignored): result tabs of a multi-statement run.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_batch_result_tabs() {
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    connect_fake(&mut app, fake_schema(2, 3));
+    app.tab_mut().sql = "SELECT 1; SELECT 2;".into();
+    app.tab_mut().set_batch_results(vec![
+        ("SELECT 1".into(), Ok(fake_result(2, 3))),
+        ("SELECT 2".into(), Ok(fake_result(3, 3))),
+    ]);
+    render_and_snapshot_at(app, "batch_result_tabs", false, 2.0);
+}
+
+/// Screenshot generator (ignored): the Beautify chevron's preferences popover, opened.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_beautify_popover() {
+    let rect = std::rc::Rc::new(std::cell::Cell::new(egui::Rect::NOTHING));
+    let seen = rect.clone();
+    let mut prefs = crate::format::BeautifyPrefs::default();
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(360.0, 220.0))
+        .with_pixels_per_point(2.0)
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            ui.painter()
+                .rect_filled(ui.ctx().content_rect(), 0.0, crate::style::palette::PANEL());
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.add_space(150.0);
+                let before = ui.cursor().min;
+                crate::components::beautify_button(ui, &mut prefs, true, "SQL Server");
+                seen.set(egui::Rect::from_min_max(before, ui.min_rect().max));
+            });
+        });
+    harness.run_steps(2);
+    let chevron = egui::pos2(rect.get().right() - 8.0, rect.get().center().y);
+    harness.hover_at(chevron);
+    harness.event(egui::Event::PointerButton {
+        pos: chevron,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::default(),
+    });
+    harness.event(egui::Event::PointerButton {
+        pos: chevron,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::default(),
+    });
+    harness.run_steps(6);
+    harness.snapshot("beautify_popover");
+}
+
+/// Screenshot generator (ignored): the Structure view when the table's metadata can't be
+/// loaded — the empty state with its icon, not a bare line of text.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_structure_unavailable() {
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    let tab = app.tab_mut();
+    tab.kind = crate::components::QueryTabKind::Table;
+    tab.view = TabView::Structure;
+    tab.edits.source = Some(EditSource {
+        schema: None,
+        table: "ac_ms_account_group1".into(),
+        pk_cols: Vec::new(),
+    });
+    render_and_snapshot_at(app, "structure_unavailable", false, 2.0);
+}
+
+/// Screenshot generator (ignored): grid alignment by column type — text left, integers and
+/// decimals (incl. SQL Server's text-carried DECIMAL) right, booleans centred, NULL following
+/// its column.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_grid_alignment() {
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    let meta = |name: &str, ty: &str| ColumnMeta {
+        name: name.into(),
+        type_name: ty.into(),
+    };
+    let text = |s: &str| Value::Text(s.into());
+    let rows = vec![
+        (
+            1,
+            "CT",
+            "-5000.00",
+            "-327.10",
+            false,
+            None,
+            "2026-09-01 10:15:00",
+        ),
+        (
+            2,
+            "CT",
+            "-45000.00",
+            "-2943.93",
+            false,
+            None,
+            "2026-09-01 10:16:30",
+        ),
+        (
+            3,
+            "IV",
+            "9000.00",
+            "588.79",
+            true,
+            Some("12.50"),
+            "2026-09-02 08:00:00",
+        ),
+        (
+            10,
+            "IV",
+            "9000.00",
+            "-42056.07",
+            true,
+            None,
+            "2026-09-03 17:45:12",
+        ),
+        (
+            125,
+            "RT",
+            "123456.78",
+            "0.05",
+            false,
+            Some("0.00"),
+            "2026-09-04 09:00:00",
+        ),
+    ];
+    app.tab_mut().set_result(QueryResult {
+        columns: vec![
+            meta("receipt_no", "NVARCHAR"),
+            meta("seq", "INT"),
+            meta("doc_type", "NVARCHAR"),
+            meta("received_amount", "DECIMAL"),
+            meta("received_vat_amount", "DECIMAL"),
+            meta("posted", "BIT"),
+            meta("tax_amount", "DECIMAL"),
+            meta("created_at", "DATETIME"),
+        ],
+        rows: rows
+            .into_iter()
+            .map(|(seq, doc, amount, vat, posted, tax, at)| {
+                vec![
+                    text("JV6007279"),
+                    Value::Int(seq),
+                    text(doc),
+                    text(amount),
+                    text(vat),
+                    Value::Bool(posted),
+                    tax.map_or(Value::Null, text),
+                    text(at),
+                ]
+            })
+            .collect(),
+        ..QueryResult::default()
+    });
+    render_and_snapshot_at(app, "grid_alignment", false, 2.0);
 }
 
 /// Screenshot generator (ignored): multi-cursor selections (Cmd/Ctrl+D) are painted under

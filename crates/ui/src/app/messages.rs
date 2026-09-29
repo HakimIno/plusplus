@@ -824,7 +824,10 @@ impl DbGuiApp {
                         }
                         Err(error) => {
                             tab.stream = None;
-                            tab.page_exhausted = false;
+                            // A failed continuation stops the automatic load-more: the grid is
+                            // still at its tail and would otherwise re-issue the same failing
+                            // query every idle frame. A reload (not an append) starts afresh.
+                            tab.page_exhausted = append;
                             // A continuation/replacement failure should not cover useful rows
                             // already on screen with an error page.
                             if tab.result.is_some() {

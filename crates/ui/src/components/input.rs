@@ -82,7 +82,6 @@ pub(crate) fn accent_checkbox(
     label: Option<&str>,
 ) -> egui::Response {
     const SIZE: f32 = 16.0;
-    const R: CornerRadius = CornerRadius::same(4);
 
     let sense = if enabled {
         egui::Sense::click()
@@ -109,48 +108,95 @@ pub(crate) fn accent_checkbox(
     }
 
     if ui.is_rect_visible(rect) {
-        let accent = palette::ACCENT();
-        let painter = ui.painter();
-        if *checked {
-            let fill = if enabled {
-                accent
-            } else {
-                accent.linear_multiply(0.4)
-            };
-            painter.rect_filled(rect, R, fill);
-            let p = rect.min;
-            let s = rect.size();
-            let stroke = Stroke::new(2.2_f32, Color32::WHITE);
-            painter.line_segment(
-                [
-                    Pos2::new(p.x + s.x * 0.19, p.y + s.y * 0.52),
-                    Pos2::new(p.x + s.x * 0.42, p.y + s.y * 0.76),
-                ],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(p.x + s.x * 0.42, p.y + s.y * 0.76),
-                    Pos2::new(p.x + s.x * 0.81, p.y + s.y * 0.25),
-                ],
-                stroke,
-            );
-        } else {
-            let (fill, border) = if resp.hovered() && enabled {
-                (
-                    accent.linear_multiply(0.10),
-                    Stroke::new(1.5_f32, accent.linear_multiply(0.65)),
-                )
-            } else {
-                (
-                    Color32::TRANSPARENT,
-                    Stroke::new(1.5_f32, palette::BORDER_STRONG()),
-                )
-            };
-            painter.rect(rect, R, fill, border, egui::StrokeKind::Inside);
-        }
+        paint_checkbox(ui.painter(), rect, *checked, enabled, resp.hovered());
     }
 
+    resp
+}
+
+/// Paint the app's checkbox square into `rect`: accent-filled with a white tick when
+/// checked, an outlined box (accent-tinted on hover) when not.
+fn paint_checkbox(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    checked: bool,
+    enabled: bool,
+    hovered: bool,
+) {
+    const R: CornerRadius = CornerRadius::same(4);
+    let accent = palette::ACCENT();
+    if checked {
+        let fill = if enabled {
+            accent
+        } else {
+            accent.linear_multiply(0.4)
+        };
+        painter.rect_filled(rect, R, fill);
+        let p = rect.min;
+        let s = rect.size();
+        let stroke = Stroke::new(2.2_f32, Color32::WHITE);
+        painter.line_segment(
+            [
+                Pos2::new(p.x + s.x * 0.19, p.y + s.y * 0.52),
+                Pos2::new(p.x + s.x * 0.42, p.y + s.y * 0.76),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                Pos2::new(p.x + s.x * 0.42, p.y + s.y * 0.76),
+                Pos2::new(p.x + s.x * 0.81, p.y + s.y * 0.25),
+            ],
+            stroke,
+        );
+    } else {
+        let (fill, border) = if hovered && enabled {
+            (
+                accent.linear_multiply(0.10),
+                Stroke::new(1.5_f32, accent.linear_multiply(0.65)),
+            )
+        } else {
+            (
+                Color32::TRANSPARENT,
+                Stroke::new(1.5_f32, palette::BORDER_STRONG()),
+            )
+        };
+        painter.rect(rect, R, fill, border, egui::StrokeKind::Inside);
+    }
+}
+
+/// A checkable row in a dropdown menu: the app's checkbox followed by the label at menu text
+/// size, the whole row clickable and hover-highlighted like the other menu items (egui's own
+/// `ui.checkbox` draws a different, round control).
+pub(crate) fn menu_checkbox(ui: &mut egui::Ui, checked: &mut bool, label: &str) -> egui::Response {
+    const BOX: f32 = 16.0;
+    const ROW_H: f32 = 28.0;
+    let (rect, mut resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), ROW_H),
+        egui::Sense::click(),
+    );
+    if resp.clicked() {
+        *checked = !*checked;
+        resp.mark_changed();
+    }
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if resp.hovered() {
+            painter.rect_filled(rect, CornerRadius::same(6), palette::SURFACE_HOVER());
+        }
+        let box_rect = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + 8.0 + BOX / 2.0, rect.center().y),
+            egui::vec2(BOX, BOX),
+        );
+        paint_checkbox(painter, box_rect, *checked, true, resp.hovered());
+        painter.text(
+            egui::pos2(box_rect.right() + 10.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::TextStyle::Body.resolve(ui.style()),
+            palette::TEXT(),
+        );
+    }
     resp
 }
 
@@ -366,7 +412,7 @@ pub(crate) fn segmented_sized(
 /// Large provider card used as the first step of the new-connection flow.
 pub(crate) fn db_kind_card(ui: &mut egui::Ui, kind: DbKind) -> egui::Response {
     const CARD_SIZE: Vec2 = Vec2::new(128.0, 84.0);
-    const LOGO_SIZE: f32 = 34.0;
+    const LOGO_SIZE: f32 = 40.0;
 
     let (rect, response) = ui.allocate_exact_size(CARD_SIZE, egui::Sense::click());
     response
@@ -402,7 +448,7 @@ pub(crate) fn db_kind_card(ui: &mut egui::Ui, kind: DbKind) -> egui::Response {
         let logo_rect = egui::Rect::from_center_size(logo_center, Vec2::splat(LOGO_SIZE));
         egui::Image::new(icons::db_kind_icon(kind))
             .fit_to_exact_size(logo_rect.size())
-            .tint(icons::db_kind_icon_tint(kind))
+            .tint(icons::db_kind_icon_tint())
             .paint_at(ui, logo_rect);
 
         ui.painter().text(
@@ -419,4 +465,47 @@ pub(crate) fn db_kind_card(ui: &mut egui::Ui, kind: DbKind) -> egui::Response {
     }
 
     response
+}
+
+#[cfg(test)]
+mod tests {
+    /// Screenshot generator (ignored): checkable menu rows (the structure editor's Primary
+    /// picker) next to an inline form checkbox, so both read as the same control.
+    #[test]
+    #[ignore = "screenshot generator; run manually with --ignored"]
+    fn snapshot_menu_checkbox() {
+        let mut checks = [true, true, false, false];
+        let mut materialized = true;
+        let mut setup = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 200.0))
+            .with_pixels_per_point(2.0)
+            .build_ui(move |ui| {
+                if !setup {
+                    crate::style::apply(ui.ctx());
+                    setup = true;
+                }
+                ui.painter().rect_filled(
+                    ui.ctx().content_rect(),
+                    0.0,
+                    crate::style::palette::BASE(),
+                );
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_width(240.0);
+                    for (checked, name) in checks.iter_mut().zip([
+                        "account_group_code",
+                        "account_group1_code",
+                        "account_group1_name",
+                        "record_id",
+                    ]) {
+                        super::menu_checkbox(ui, checked, name);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    super::accent_checkbox(ui, true, &mut materialized, Some("Materialized"));
+                });
+            });
+        harness.run_steps(4);
+        harness.snapshot("menu_checkbox");
+    }
 }

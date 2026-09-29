@@ -1292,13 +1292,13 @@ fn header_menu(
         },
     );
     ui.separator();
-    if header_menu_item(ui, crate::icons::column(), "Copy column name", true).clicked() {
+    if header_menu_item(ui, crate::icons::copy(), "Copy column name", true).clicked() {
         ui.ctx().copy_text(meta.name.clone());
         ui.close();
     }
     if header_menu_item(
         ui,
-        crate::icons::code(),
+        crate::icons::copy(),
         "Copy column type",
         !meta.type_name.is_empty(),
     )
@@ -1326,7 +1326,7 @@ fn header_menu(
         ui.close();
     }
     ui.separator();
-    if header_menu_item(ui, crate::icons::table(), "Fit this column", true).clicked() {
+    if header_menu_item(ui, crate::icons::fit(), "Fit this column", true).clicked() {
         update_column_view(ui, grid_id, |view| {
             view.fit_content_next_frame = Some(col);
         });
@@ -2106,12 +2106,13 @@ mod tests {
         };
 
         // Find cell (row 1, col 1) — its value is 1*3+1 = 4 — and click twice, drifting
-        // 20pt right between the clicks, well past egui's 6pt same-click tolerance but
-        // still inside the auto-fitted numeric cell, within the double-click delay (0.3s).
+        // 20pt between the clicks, well past egui's 6pt same-click tolerance but still
+        // inside the cell, within the double-click delay (0.3s). Numbers sit at the cell's
+        // right edge, so the drift goes left, into the cell.
         let out = run(vec![], 0.0, &mut edits, &mut begin);
         let text = find_text_pos(&out.shapes, "4").expect("cell text painted");
         let p1 = text + egui::vec2(2.0, 4.0);
-        let p2 = text + egui::vec2(22.0, 4.0);
+        let p2 = text + egui::vec2(-18.0, 4.0);
         let press = |pos, pressed| egui::Event::PointerButton {
             pos,
             button: egui::PointerButton::Primary,
@@ -2340,7 +2341,8 @@ mod tests {
 }
 
 /// Render a single cell with database-grid alignment: text starts left, numbers end right,
-/// and compact sentinel values are centered. NULLs are dimmed and numbers are monospaced. A
+/// booleans are centred, and NULL follows its column. NULLs are dimmed and numbers are
+/// monospaced. A
 /// `staged` value (an edit not yet saved) is drawn in the success colour so it stands out from
 /// stored data. Free-text values that contain emoji are drawn through [`emoji_cell`] so the
 /// emoji show in colour.
@@ -2374,20 +2376,36 @@ fn cell(
         let text = if underline { text.underline() } else { text };
         ui.add(egui::Label::new(text).selectable(false))
     };
-    let main_align = match (value, kind) {
-        (Value::Int(_) | Value::Float(_), _)
-        | (Value::Text(_), EditorKind::Int | EditorKind::Float | EditorKind::Decimal) => {
-            egui::Align::Max
-        }
-        (Value::Null | Value::Bool(_) | Value::Bytes(_), _) => egui::Align::Center,
-        (Value::Text(_), _) => egui::Align::Min,
+    // Alignment follows the column, as in TablePlus/DBeaver: numbers end right so their digits
+    // line up, booleans and binary placeholders sit centred, everything else starts left. A
+    // NULL takes its column's alignment so the column edge stays straight. (A horizontal
+    // layout's `main_align` is ignored by egui, so each case picks its own layout.)
+    let numeric = matches!(value, Value::Int(_) | Value::Float(_))
+        || matches!(
+            kind,
+            EditorKind::Int | EditorKind::Float | EditorKind::Decimal
+        );
+    let layout = if numeric {
+        egui::Layout::right_to_left(egui::Align::Center)
+    } else if matches!(value, Value::Bool(_) | Value::Bytes(_)) || kind == EditorKind::Bool {
+        egui::Layout::centered_and_justified(egui::Direction::LeftToRight)
+    } else {
+        egui::Layout::left_to_right(egui::Align::Center)
     };
     let content_rect = ui.max_rect().shrink2(egui::vec2(CELL_INSET_X, 0.0));
     ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(content_rect)
-            .layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(main_align)),
+        egui::UiBuilder::new().max_rect(content_rect).layout(layout),
         |ui| {
+            // Right-to-left places the first item rightmost, so the FK arrow goes in first
+            // to still land after the value.
+            if underline && numeric {
+                crate::icons::show_colored(
+                    ui,
+                    crate::icons::arrow_up_right(),
+                    11.0,
+                    palette::ACCENT(),
+                );
+            }
             let resp = match value {
                 Value::Null => label(ui, egui::RichText::new("NULL").italics()),
                 Value::Bool(v) => label(ui, egui::RichText::new(if *v { "true" } else { "false" })),
@@ -2422,7 +2440,7 @@ fn cell(
             };
             // A Shift-hovered, followable FK value: append a small arrow after the text so the
             // cell reads as a navigable link. Purely a marker — the whole cell is the click target.
-            if underline {
+            if underline && !numeric {
                 crate::icons::show_colored(
                     ui,
                     crate::icons::arrow_up_right(),

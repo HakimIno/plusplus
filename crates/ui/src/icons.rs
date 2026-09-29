@@ -1,7 +1,8 @@
-//! Hugeicons free Stroke Rounded icons (https://hugeicons.com/icons/stroke-rounded), embedded
-//! as white-stroked SVG so the loaded texture can be `.tint()`-ed to the current theme colour.
-//! The database-vendor logos in `assets/icondb/` are brand marks rather than interface icons,
-//! so they keep their own shapes and colours.
+//! Tabler Icons, embedded as white SVGs for tinting with the active theme.
+//! Shared by semantic meaning across the sidebar, tabs, menus, and autocomplete.
+//! Outline icons retain Tabler's 24-unit canvas and 2-unit rounded strokes.
+//! Sources and upstream names are recorded in assets/icons/tabler.json.
+//! Provider marks in assets/icondb/ are transparent monochrome shapes tinted by the theme.
 
 use dbcore::DbKind;
 use egui::{include_image, ImageSource};
@@ -16,109 +17,88 @@ macro_rules! icon_fns {
     ($($name:ident => $path:literal),* $(,)?) => {
         $(
             #[inline]
-            #[allow(dead_code)]
             pub fn $name() -> ImageSource<'static> {
                 include_image!($path)
             }
         )*
+
+        #[cfg(test)]
+        fn gallery_icons() -> Vec<(&'static str, ImageSource<'static>)> {
+            vec![$((stringify!($name), $name())),*]
+        }
     };
 }
 
 icon_fns! {
-    play       => "../assets/icons/play.svg",
-    connect    => "../assets/icons/connect.svg",
-    disconnect => "../assets/icons/disconnect.svg",
-    plus       => "../assets/icons/plus.svg",
-    minus      => "../assets/icons/minus.svg",
-    edit       => "../assets/icons/edit.svg",
-    trash      => "../assets/icons/trash.svg",
-    database   => "../assets/icons/database.svg",
-    table      => "../assets/icons/table.svg",
-    view       => "../assets/icons/view.svg",
-    conn_cloud => "../assets/icons/cloud.svg",
-    conn_storage => "../assets/icons/disk.svg",
-    conn_star  => "../assets/icons/star-emphasis.svg",
-    conn_treasure => "../assets/icons/box.svg",
-    code       => "../assets/icons/code.svg",
-    column     => "../assets/icons/column.svg",
-    autocomplete_keyword => "../assets/icons/autocomplete-keyword.svg",
-    autocomplete_table => "../assets/icons/autocomplete-table.svg",
-    autocomplete_column => "../assets/icons/autocomplete-column.svg",
-    diagram    => "../assets/icons/diagram.svg",
-    chart_line => "../assets/icons/chart-line.svg",
-    chart_bar => "../assets/icons/chart-bar.svg",
-    chart_scatter => "../assets/icons/chart-scatter.svg",
-    key        => "../assets/icons/key.svg",
-    keyboard_command => "../assets/icons/keyboard-command.svg",
-    keyboard_control => "../assets/icons/keyboard-control.svg",
-    keyboard_return => "../assets/icons/keyboard-return.svg",
-    keyboard_shift => "../assets/icons/keyboard-shift.svg",
-    index      => "../assets/icons/index.svg",
-    filter     => "../assets/icons/filter.svg",
-    folder     => "../assets/icons/folder.svg",
-    file       => "../assets/icons/file.svg",
-    fit        => "../assets/icons/fit.svg",
-    history    => "../assets/icons/history.svg",
-    relayout   => "../assets/icons/relayout.svg",
-    refresh    => "../assets/icons/refresh.svg",
-    more_vert  => "../assets/icons/more-vert.svg",
-    search     => "../assets/icons/search.svg",
-    warning    => "../assets/icons/warning.svg",
-    close      => "../assets/icons/close.svg",
-    save       => "../assets/icons/save.svg",
-    undo       => "../assets/icons/undo.svg",
-    redo       => "../assets/icons/redo.svg",
-    sort_ascending => "../assets/icons/sort-ascending.svg",
-    sort_descending => "../assets/icons/sort-descending.svg",
-    star       => "../assets/icons/star.svg",
-    star_filled => "../assets/icons/star-filled.svg",
-    settings   => "../assets/icons/settings.svg",
-    pager      => "../assets/icons/pager.svg",
-    arrow_up   => "../assets/icons/arrow-up.svg",
-    arrow_down => "../assets/icons/arrow-down.svg",
-    arrow_left => "../assets/icons/arrow-left.svg",
-    chevron_down => "../assets/icons/chevron-down.svg",
-    chevron_right => "../assets/icons/chevron-right.svg",
-    chevron_up => "../assets/icons/chevron-up.svg",
-    replace    => "../assets/icons/replace.svg",
-    replace_all => "../assets/icons/replace-all.svg",
-    arrow_right => "../assets/icons/arrow-right.svg",
-    arrow_up_right => "../assets/icons/arrow-up-right.svg",
-    layout_connections => "../assets/icons/layout-connections.svg",
-    layout_schema => "../assets/icons/layout-schema.svg",
-    layout_details => "../assets/icons/layout-details.svg",
-    layout_query => "../assets/icons/layout-query.svg",
-    split_editor => "../assets/icons/split-editor.svg",
-    layout_log => "../assets/icons/layout-log.svg",
-    db_postgres_dark => "../assets/icondb/skill-icons--postgresql-dark.svg",
-    db_postgres_light => "../assets/icondb/skill-icons--postgresql-light.svg",
-    db_mysql_dark => "../assets/icondb/skill-icons--mysql-dark.svg",
-    db_mysql_light => "../assets/icondb/skill-icons--mysql-light.svg",
-    db_mariadb => "../assets/icondb/simple-icons--mariadb.svg",
-    db_sqlserver => "../assets/icondb/devicon-plain--microsoftsqlserver-wordmark.svg",
-    db_sqlite => "../assets/icondb/skill-icons--sqlite.svg",
-    db_cassandra => "../assets/icondb/simple-icons--apachecassandra.svg",
-    db_scylladb => "../assets/icondb/simple-icons--scylladb.svg",
+    play       => "../assets/icons/outline/player-play.svg",
+    connect    => "../assets/icons/outline/plug-connected.svg",
+    plug_off   => "../assets/icons/outline/plug-off.svg",
+    mood_sad_dizzy => "../assets/icons/outline/mood-sad-dizzy.svg",
+    disconnect => "../assets/icons/outline/plug-connected-x.svg",
+    plus       => "../assets/icons/outline/plus.svg",
+    minus      => "../assets/icons/outline/minus.svg",
+    edit       => "../assets/icons/outline/pencil.svg",
+    trash      => "../assets/icons/outline/trash.svg",
+    database   => "../assets/icons/outline/database.svg",
+    table      => "../assets/icons/outline/table.svg",
+    view       => "../assets/icons/outline/eye.svg",
+    function   => "../assets/icons/outline/math-function.svg",
+    copy       => "../assets/icons/outline/copy.svg",
+    code       => "../assets/icons/outline/terminal-2.svg",
+    column     => "../assets/icons/outline/columns-3.svg",
+    diagram    => "../assets/icons/outline/sitemap.svg",
+    key        => "../assets/icons/outline/key.svg",
+    keyboard_command => "../assets/icons/outline/command.svg",
+    index      => "../assets/icons/outline/list-details.svg",
+    filter     => "../assets/icons/outline/filter.svg",
+    folder     => "../assets/icons/outline/folder.svg",
+    file       => "../assets/icons/outline/file.svg",
+    fit        => "../assets/icons/outline/arrows-maximize.svg",
+    history    => "../assets/icons/outline/history.svg",
+    relayout   => "../assets/icons/outline/layout-grid.svg",
+    refresh    => "../assets/icons/outline/refresh.svg",
+    more_vert  => "../assets/icons/outline/dots-vertical.svg",
+    search     => "../assets/icons/outline/search.svg",
+    warning    => "../assets/icons/outline/alert-triangle.svg",
+    close      => "../assets/icons/outline/x.svg",
+    save       => "../assets/icons/outline/device-floppy.svg",
+    undo       => "../assets/icons/outline/arrow-back-up.svg",
+    redo       => "../assets/icons/outline/arrow-forward-up.svg",
+    sort_ascending => "../assets/icons/outline/sort-ascending.svg",
+    sort_descending => "../assets/icons/outline/sort-descending.svg",
+    star       => "../assets/icons/outline/star.svg",
+    star_filled => "../assets/icons/filled/star.svg",
+    settings   => "../assets/icons/outline/settings.svg",
+    pager      => "../assets/icons/outline/adjustments-horizontal.svg",
+    arrow_up   => "../assets/icons/outline/arrow-up.svg",
+    arrow_down => "../assets/icons/outline/arrow-down.svg",
+    chevron_left => "../assets/icons/outline/chevron-left.svg",
+    chevron_down => "../assets/icons/outline/chevron-down.svg",
+    chevron_right => "../assets/icons/outline/chevron-right.svg",
+    chevron_up => "../assets/icons/outline/chevron-up.svg",
+    replace    => "../assets/icons/outline/replace.svg",
+    replace_all => "../assets/icons/outline/arrows-exchange.svg",
+    arrow_up_right => "../assets/icons/outline/arrow-up-right.svg",
+    layout_connections => "../assets/icons/outline/layout-sidebar.svg",
+    layout_schema => "../assets/icons/outline/layout-columns.svg",
+    layout_details => "../assets/icons/outline/layout-sidebar-right.svg",
+    layout_query => "../assets/icons/outline/layout-navbar.svg",
+    split_editor => "../assets/icons/outline/layout-board-split.svg",
+    layout_log => "../assets/icons/outline/layout-bottombar.svg",
+    db_postgres => "../assets/icondb/postgres.svg",
+    db_mysql => "../assets/icondb/mysql.svg",
+    db_mariadb => "../assets/icondb/mariadb.svg",
+    db_sqlserver => "../assets/icondb/sqlserver.svg",
+    db_sqlite => "../assets/icondb/sqlite.svg",
+    db_cassandra => "../assets/icondb/cassandra.svg",
+    db_scylladb => "../assets/icondb/scylladb.svg",
 }
 
-/// Embedded logo for a database backend; picks light/dark Postgres/MySQL variants from the theme.
+/// One transparent monochrome provider mark, shared by both themes.
 pub fn db_kind_icon(kind: DbKind) -> ImageSource<'static> {
-    let dark = crate::theme::current().is_dark;
     match kind {
-        DbKind::Postgres => {
-            if dark {
-                db_postgres_dark()
-            } else {
-                db_postgres_light()
-            }
-        }
-        DbKind::MySql => {
-            if dark {
-                db_mysql_dark()
-            } else {
-                db_mysql_light()
-            }
-        }
+        DbKind::Postgres => db_postgres(),
+        DbKind::MySql => db_mysql(),
         DbKind::MariaDb => db_mariadb(),
         DbKind::SqlServer => db_sqlserver(),
         DbKind::Sqlite => db_sqlite(),
@@ -128,14 +108,9 @@ pub fn db_kind_icon(kind: DbKind) -> ImageSource<'static> {
     }
 }
 
-/// Provider assets carry their final colours, so a white tint preserves them. The two
-/// `simple-icons` monochrome marks (Cassandra/ScyllaDB) are `currentColor` glyphs instead,
-/// so they take the theme's text colour like any other single-colour icon.
-pub fn db_kind_icon_tint(kind: DbKind) -> egui::Color32 {
-    match kind {
-        DbKind::DuckDb | DbKind::Cassandra | DbKind::ScyllaDb => crate::style::palette::TEXT(),
-        _ => egui::Color32::WHITE,
-    }
+/// White/light on dark themes and dark on light themes, like the surrounding text.
+pub fn db_kind_icon_tint() -> egui::Color32 {
+    crate::style::palette::TEXT()
 }
 
 /// Build a themed image widget for an icon at the given size.
@@ -173,4 +148,50 @@ pub fn show_colored(
     color: egui::Color32,
 ) -> egui::Response {
     ui.add(image(ui, src, size, color))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Manual visual review of every registered glyph at its actual UI size.
+    #[test]
+    #[ignore = "screenshot generator; run manually with --ignored"]
+    fn snapshot_icon_gallery() {
+        let mut results = egui_kittest::SnapshotResults::new();
+        for theme_key in ["midnight-conversational", "daylight"] {
+            let theme = crate::theme::ThemeRegistry::load().theme_of(theme_key);
+            let mut setup = false;
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(960.0, 560.0))
+                .with_pixels_per_point(2.0)
+                .build_ui(move |ui| {
+                    if !setup {
+                        egui_extras::install_image_loaders(ui.ctx());
+                        crate::theme::set_current(theme);
+                        crate::style::apply(ui.ctx());
+                        setup = true;
+                    }
+                    egui::Grid::new("icon_gallery")
+                        .num_columns(4)
+                        .min_col_width(225.0)
+                        .spacing(egui::vec2(12.0, 12.0))
+                        .show(ui, |ui| {
+                            for (index, (name, icon)) in gallery_icons().into_iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    show_native(ui, icon, SIZE);
+                                    ui.label(name);
+                                });
+                                if index % 4 == 3 {
+                                    ui.end_row();
+                                }
+                            }
+                        });
+                });
+            harness.run_steps(8);
+            harness.snapshot(format!("icons_{theme_key}"));
+            results.extend_harness(&mut harness);
+        }
+        results.unwrap();
+    }
 }

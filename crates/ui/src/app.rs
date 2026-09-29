@@ -701,6 +701,9 @@ struct EditorAssistState {
     ghost_key: Option<(u64, String, usize)>,
     syntax_error: Option<dbcore::SyntaxError>,
     syntax_checked: String,
+    /// The dialect `syntax_checked` was parsed with: the tab's own connection, `None` when
+    /// it has none. A connection change re-checks unchanged text.
+    syntax_checked_kind: Option<DbKind>,
     syntax_dirty_at: Option<f64>,
 }
 
@@ -1926,6 +1929,9 @@ pub struct DbGuiApp {
     settings_open: bool,
     settings_section: SettingsSection,
     schema_filter: String,
+    /// Schema the sidebar is scoped to, per connection config id (TablePlus-style picker at
+    /// the bottom of the Items tab). Absent = all schemas.
+    sidebar_schema: std::collections::HashMap<String, String>,
     /// Queries tab: live name/SQL filter over the saved-query list.
     favorites_filter: String,
     /// History tab: live SQL/connection/error filter over the grouped timeline.
@@ -2091,7 +2097,7 @@ impl DbGuiApp {
             app.start_update_check();
         }
 
-        // Theme + SVG icon loader (Hugeicons are embedded SVGs).
+        // Theme + SVG icon loader (Tabler icons are embedded SVGs).
         crate::style::apply(&cc.egui_ctx);
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
@@ -2222,6 +2228,7 @@ impl DbGuiApp {
             settings_open: false,
             settings_section: SettingsSection::default(),
             schema_filter: String::new(),
+            sidebar_schema: std::collections::HashMap::new(),
             favorites_filter: String::new(),
             suggest_pool: Vec::new(),
             status_msg: "Ready".to_string(),

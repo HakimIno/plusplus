@@ -1,19 +1,18 @@
 import Image from "next/image";
 import { Alert, Link, buttonVariants, cn } from "@heroui/react";
-import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  ComputerTerminal01Icon,
-  DatabaseIcon,
-  Download04Icon,
-  FileExportIcon,
-  GithubIcon,
-  GridTableIcon,
-  Key01Icon,
-  PaintBrush01Icon,
-  SecurityCheckIcon,
-  SecurityLockIcon,
-  Tick02Icon,
-} from "@hugeicons/core-free-icons";
+  IconTerminal2,
+  IconDatabase,
+  IconDownload,
+  IconFileExport,
+  IconBrandGithub,
+  IconTable,
+  IconKey,
+  IconBrush,
+  IconShieldCheck,
+  IconLock,
+  IconCheck,
+} from "@tabler/icons-react";
 
 const sourceUrl = "https://github.com/HakimIno/plusplus";
 
@@ -166,16 +165,16 @@ const pillars = [
 ];
 
 const features = [
-  { icon: DatabaseIcon, title: "Schema browser", text: "Tables, columns, keys, indexes, views, routines, and triggers stay within reach." },
-  { icon: ComputerTerminal01Icon, title: "SQL editor", text: "One focused editor and the same shortcuts across every connection and dialect." },
-  { icon: GridTableIcon, title: "Staged edits", text: "Cell edits, inserts, and deletions stay staged until you save or discard them." },
-  { icon: FileExportIcon, title: "Streaming export", text: "Export full tables to CSV or JSON without loading the whole dataset into memory." },
+  { icon: IconDatabase, title: "Schema browser", text: "Tables, columns, keys, indexes, views, routines, and triggers stay within reach." },
+  { icon: IconTerminal2, title: "SQL editor", text: "One focused editor and the same shortcuts across every connection and dialect." },
+  { icon: IconTable, title: "Staged edits", text: "Cell edits, inserts, and deletions stay staged until you save or discard them." },
+  { icon: IconFileExport, title: "Streaming export", text: "Export full tables to CSV or JSON without loading the whole dataset into memory." },
 ];
 
 const safeguards = [
-  { icon: SecurityCheckIcon, title: "Risk checks before execution", text: "Destructive SQL and UPDATE or DELETE without a WHERE clause are flagged before they run." },
-  { icon: SecurityLockIcon, title: "Read-only that blocks writes", text: "Read-only mode is enforced in the app and, where supported, in the database session." },
-  { icon: Key01Icon, title: "Credentials stay on device", text: "Passwords live in the OS keychain. Query history and optional audit logs remain local." },
+  { icon: IconShieldCheck, title: "Risk checks before execution", text: "Destructive SQL and UPDATE or DELETE without a WHERE clause are flagged before they run." },
+  { icon: IconLock, title: "Read-only that blocks writes", text: "Read-only mode is enforced in the app and, where supported, in the database session." },
+  { icon: IconKey, title: "Credentials stay on device", text: "Passwords live in the OS keychain. Query history and optional audit logs remain local." },
 ];
 
 const themes = [
@@ -261,7 +260,7 @@ export default async function Home({
               variant="ghost"
               className="hidden sm:inline-flex"
             >
-              <HugeiconsIcon icon={GithubIcon} size={15} aria-hidden="true" />
+              <IconBrandGithub size={15} aria-hidden="true" />
               GitHub
             </ButtonLink>
             <ButtonLink href="#download" size="sm">
@@ -287,7 +286,7 @@ export default async function Home({
             </p>
             <div className="hero-actions">
               <ButtonLink href="#download" size="lg">
-                <HugeiconsIcon icon={Download04Icon} size={16} aria-hidden="true" />
+                <IconDownload size={16} aria-hidden="true" />
                 Download plusplus
               </ButtonLink>
               <ButtonLink
@@ -297,14 +296,14 @@ export default async function Home({
                 rel="noreferrer"
                 variant="secondary"
               >
-                <HugeiconsIcon icon={GithubIcon} size={16} aria-hidden="true" />
+                <IconBrandGithub size={16} aria-hidden="true" />
                 View source
               </ButtonLink>
             </div>
             <div className="hero-badges">
               {["No account", "No Electron", "No telemetry"].map((item) => (
                 <span key={item} className="trust-badge">
-                  <HugeiconsIcon icon={Tick02Icon} size={12} aria-hidden="true" />
+                  <IconCheck size={12} aria-hidden="true" />
                   {item}
                 </span>
               ))}
@@ -371,7 +370,7 @@ export default async function Home({
             {features.map(({ icon: Icon, title, text }) => (
               <article key={title} className="feature-card">
                 <div className="feature-card__icon">
-                  <HugeiconsIcon icon={Icon} size={20} aria-hidden="true" />
+                  <Icon size={20} aria-hidden="true" />
                 </div>
                 <h3>{title}</h3>
                 <p>{text}</p>
@@ -437,7 +436,7 @@ export default async function Home({
               {safeguards.map(({ icon: Icon, title, text }) => (
                 <div key={title} className="safeguard-item">
                   <span className="safeguard-item__icon">
-                    <HugeiconsIcon icon={Icon} size={18} aria-hidden="true" />
+                    <Icon size={18} aria-hidden="true" />
                   </span>
                   <div>
                     <h3 className="text-base font-semibold">{title}</h3>
@@ -468,7 +467,7 @@ export default async function Home({
           <div className="split-section split-section--end section-intro">
             <div>
               <div className="mb-4 inline-flex items-center gap-2 section-eyebrow">
-                <HugeiconsIcon icon={PaintBrush01Icon} size={14} aria-hidden="true" />
+                <IconBrush size={14} aria-hidden="true" />
                 Themes
               </div>
               <h2 className="section-heading">
@@ -521,7 +520,7 @@ export default async function Home({
                   <span className="inline-flex size-16 shrink-0 overflow-hidden rounded-xl">
                     <PlatformIcon className="size-full" />
                   </span>
-                  <HugeiconsIcon icon={Download04Icon} size={18} aria-hidden="true" className="text-[var(--bd-muted)]" />
+                  <IconDownload size={18} aria-hidden="true" className="text-[var(--bd-muted)]" />
                 </div>
                 <h3>{name}</h3>
                 <p>{format} · {detail}</p>

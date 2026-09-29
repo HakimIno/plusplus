@@ -23,7 +23,7 @@ pub(crate) fn connection_tab_item(
     connected: bool,
     drag_float_y: Option<f32>,
 ) -> egui::Response {
-    const CONN_ICON_SIZE: f32 = 16.0;
+    const CONN_ICON_SIZE: f32 = 22.0;
 
     #[allow(clippy::too_many_arguments)]
     fn paint_connection_chip(
@@ -53,21 +53,21 @@ pub(crate) fn connection_tab_item(
         }
         let content_rect = rect.shrink2(egui::vec2(3.0, 4.0));
         let icon_rect = egui::Rect::from_center_size(
-            egui::pos2(content_rect.center().x, content_rect.top() + 8.0),
+            egui::pos2(content_rect.center().x, content_rect.top() + 11.0),
             egui::vec2(CONN_ICON_SIZE, CONN_ICON_SIZE),
         );
         egui::Image::new(icons::db_kind_icon(kind))
             .fit_to_exact_size(icon_rect.size())
-            .tint(icons::db_kind_icon_tint(kind))
+            .tint(icons::db_kind_icon_tint())
             .paint_at(ui, icon_rect);
         let label_pos = egui::pos2(
             content_rect.center().x - label.size().x * 0.5,
-            content_rect.top() + 18.0,
+            content_rect.top() + 25.0,
         );
         painter.galley(label_pos, label.clone(), text_color);
     }
 
-    let size = egui::vec2(40.0, 36.0);
+    let size = egui::vec2(40.0, 44.0);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
     let dragging = drag_float_y.is_some();
 
@@ -163,22 +163,12 @@ pub(crate) enum QueryTabKind {
 }
 
 impl QueryTabKind {
-    pub(crate) fn color(self) -> egui::Color32 {
-        match self {
-            Self::Query => palette::WARNING(),
-            Self::Table | Self::Diagram => palette::ACCENT(),
-            Self::View => palette::SUCCESS(),
-            Self::Function => crate::style::mix(palette::ACCENT(), palette::DANGER(), 0.45),
-            Self::Procedure => palette::WARNING(),
-            Self::Trigger => palette::DANGER(),
-        }
-    }
-
     pub(crate) fn icon(self) -> egui::ImageSource<'static> {
         match self {
             Self::Table => icons::table(),
             Self::View => icons::view(),
-            Self::Function | Self::Procedure | Self::Query => icons::code(),
+            Self::Function | Self::Procedure => icons::function(),
+            Self::Query => icons::code(),
             Self::Trigger => icons::play(),
             Self::Diagram => icons::diagram(),
         }
@@ -187,11 +177,6 @@ impl QueryTabKind {
 
 const TAB_ICON_SIZE: f32 = 13.0;
 const TAB_ICON_GAP: f32 = 6.0;
-
-fn tab_icon_color(kind: QueryTabKind, select_t: f32) -> egui::Color32 {
-    let color = kind.color();
-    crate::style::mix(color.linear_multiply(0.78), color, select_t)
-}
 
 fn translucent(color: egui::Color32, alpha: u8) -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
@@ -313,7 +298,7 @@ fn paint_tab_chip(
         paint_tab_waves(painter, rect, palette::ACCENT(), select_t * 12.0, select_t);
     }
 
-    let icon_color = tab_icon_color(kind, select_t);
+    let icon_color = palette::ACCENT();
     let badge_rect = egui::Rect::from_center_size(
         egui::pos2(rect.left() + pad + 7.0, rect.center().y),
         egui::vec2(16.0, 16.0),
@@ -331,9 +316,10 @@ fn paint_tab_chip(
         egui::vec2(TAB_ICON_SIZE, TAB_ICON_SIZE),
     );
     if let Some(db_kind) = db_kind {
+        let icon_rect = egui::Rect::from_center_size(badge_rect.center(), egui::Vec2::splat(16.0));
         egui::Image::new(icons::db_kind_icon(db_kind))
             .fit_to_exact_size(icon_rect.size())
-            .tint(icons::db_kind_icon_tint(db_kind))
+            .tint(icons::db_kind_icon_tint())
             .paint_at(ui, icon_rect);
     } else {
         egui::Image::new(kind.icon())
@@ -599,7 +585,7 @@ pub(crate) fn result_tab_item(
         let icon_color = if failed {
             palette::DANGER()
         } else {
-            crate::style::mix(palette::TEXT_FAINT(), palette::ACCENT(), select_t)
+            palette::ACCENT()
         };
         let icon_rect = egui::Rect::from_center_size(
             egui::pos2(rect.left() + pad + 7.0, rect.center().y),

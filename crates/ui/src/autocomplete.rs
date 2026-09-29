@@ -30,6 +30,7 @@ fn opens_quoted_ident(kind: Option<DbKind>, c: char) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SuggestionKind {
     Keyword,
+    Function,
     Table,
     Column,
 }
@@ -316,7 +317,7 @@ pub fn complete(
                     .map(|function| Suggestion {
                         insert: (*function).to_string(),
                         detail: "function".to_string(),
-                        kind: SuggestionKind::Keyword,
+                        kind: SuggestionKind::Function,
                     }),
             );
             if lead {
@@ -472,16 +473,13 @@ fn maybe_quote(name: &str, kind: Option<DbKind>) -> String {
 
 // --- popup widget -------------------------------------------------------------------
 
-/// Keep every suggestion icon in the active theme's accent family. The icon shape already
-/// communicates its kind; colour is reserved for interaction state so the set stays cohesive.
+/// Neutral outlines keep the icon rail quiet; the matched text owns the accent colour.
 fn icon_color(selected: bool, hovered: bool) -> egui::Color32 {
     let t = crate::theme::current();
-    if selected {
-        t.accent_hover
-    } else if hovered {
-        t.accent
+    if selected || hovered {
+        t.text
     } else {
-        crate::style::mix(t.accent, t.text_weak, if t.is_dark { 0.35 } else { 0.20 })
+        t.text_weak
     }
 }
 
@@ -605,13 +603,14 @@ pub fn show_popup(
                                 }
 
                                 let icon = match item.kind {
-                                    SuggestionKind::Keyword => crate::icons::autocomplete_keyword(),
-                                    SuggestionKind::Table => crate::icons::autocomplete_table(),
-                                    SuggestionKind::Column => crate::icons::autocomplete_column(),
+                                    SuggestionKind::Keyword => crate::icons::code(),
+                                    SuggestionKind::Function => crate::icons::function(),
+                                    SuggestionKind::Table => crate::icons::table(),
+                                    SuggestionKind::Column => crate::icons::column(),
                                 };
-                                const ICON_SIZE: f32 = 13.0;
+                                const ICON_SIZE: f32 = 16.0;
                                 let icon_rect = egui::Rect::from_center_size(
-                                    egui::pos2(rect.left() + 9.0, rect.center().y),
+                                    egui::pos2(rect.left() + 11.0, rect.center().y),
                                     egui::Vec2::splat(ICON_SIZE),
                                 );
                                 egui::Image::new(icon)
@@ -635,7 +634,7 @@ pub fn show_popup(
                                     egui::pos2(detail_rect.left() - 10.0, rect.bottom()),
                                 );
                                 let label_painter = ui.painter().with_clip_rect(label_clip);
-                                let mut label_pos = egui::pos2(rect.left() + 20.0, rect.center().y);
+                                let mut label_pos = egui::pos2(rect.left() + 25.0, rect.center().y);
                                 let matched = matched_len(&item.insert, &state.prefix);
                                 if matched > 0 {
                                     let painted = label_painter.text(
@@ -1072,7 +1071,7 @@ mod tests {
         assert!(c2.items.iter().any(|i| i.insert == "\"ลูกค้า\""));
     }
 
-    /// Render the popup with a mix of all three kinds under `theme_key`, so the icon rail's
+    /// Render the popup with a mix of all four kinds under `theme_key`, so the icon rail's
     /// colour and glyph legibility can be judged at the size it actually ships at.
     fn render_popup_snapshot(theme_key: &str, name: &str) {
         let item = |insert: &str, detail: &str, kind: SuggestionKind| Suggestion {
@@ -1089,7 +1088,7 @@ mod tests {
                 item("user_id", "orders · integer", SuggestionKind::Column),
                 item("created_at", "orders · timestamptz", SuggestionKind::Column),
                 item("SELECT", "keyword", SuggestionKind::Keyword),
-                item("ORDER BY", "keyword", SuggestionKind::Keyword),
+                item("SUM", "function", SuggestionKind::Function),
             ],
             replace_start: 0,
             // Mixed on purpose: `or…` matches some rows and not others, so the snapshot
