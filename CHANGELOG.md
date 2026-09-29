@@ -3,6 +3,16 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
+## 0.4.12 — 2026-09-29
+
+- Grid editing: type to edit the cursor cell, Set NULL / Set Empty / Duplicate Row (Cmd/Ctrl+D), multi-row edits across a selection, paste over existing cells, and an expanded multi-line editor (Shift+Enter).
+- Opening a cell and leaving it no longer rewrites it; empty text stays `''` instead of silently becoming NULL.
+- Column constraints are checked while typing (NOT NULL, declared length), and required columns on new rows are reported before saving.
+- Optional "Review changes before saving" setting; production connections and CQL always review.
+- SQL Server: non-ASCII text is written as `N'…'`, so Thai text is no longer stored as `?`.
+- New floating find/replace widget in the SQL editor with match case, whole word, regex, highlighted matches, and replace-all.
+- Refreshed the app icon.
+
 ## 0.4.11 — 2026-09-24
 
 - Added Open Anything for quickly finding and opening connections, tables, and tabs.
