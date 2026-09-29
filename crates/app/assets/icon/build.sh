@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Regenerate every platform icon artifact from the single source of truth, icon.svg.
 #
-# Requires: rsvg-convert (brew install librsvg), python3 + Pillow, and (macOS) iconutil.
+# Requires: rsvg-convert (brew install librsvg), python3 + Pillow.
+# Uses iconutil on macOS when available, with Pillow as a fallback.
 # Outputs:
 #   icon.icns            — macOS app bundle icon
 #   icon.ico             — Windows app/exe icon (16..256 packed)
 #   png/icon-<size>.png  — Linux/hicolor + window icon source
+#   website/public/app-icon.png — website brand icon
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -31,12 +33,16 @@ cp png/icon-256.png   "$ICONSET/icon_256x256.png"
 cp png/icon-512.png   "$ICONSET/icon_256x256@2x.png"
 cp png/icon-512.png   "$ICONSET/icon_512x512.png"
 cp png/icon-1024.png  "$ICONSET/icon_512x512@2x.png"
-if command -v iconutil >/dev/null 2>&1; then
-  iconutil -c icns "$ICONSET" -o icon.icns
-  rm -rf "$ICONSET"
+if command -v iconutil >/dev/null 2>&1 && iconutil -c icns "$ICONSET" -o icon.icns; then
+  echo "  wrote icon.icns with iconutil"
 else
-  echo "  (iconutil not found — skipping .icns; run on macOS to produce it)"
+  python3 - <<'PY'
+from PIL import Image
+Image.open("png/icon-1024.png").save("icon.icns", format="ICNS")
+print("  wrote icon.icns with Pillow")
+PY
 fi
+rm -rf "$ICONSET"
 
 echo "→ building icon.ico (Windows)"
 python3 - <<'PY'
@@ -48,5 +54,8 @@ base.save("icon.ico", format="ICO", sizes=[(s, s) for s in sizes])
 got = sorted(Image.open("icon.ico").info["sizes"])
 print("  wrote icon.ico:", ", ".join(f"{w}px" for w, _ in got))
 PY
+
+echo "→ syncing website icon"
+cp png/icon-512.png ../../../../website/public/app-icon.png
 
 echo "✓ done"
