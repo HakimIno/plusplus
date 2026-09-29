@@ -3,6 +3,16 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
+## 0.4.13 — 2026-09-29
+
+- Choosing another connection no longer points an open table tab at it — its SQL could run against the wrong database; a new query tab opens instead. Tabs with unsaved edits can't switch connection.
+- A failed "load more rows" no longer retries in a loop.
+- SQL Server DECIMAL/NUMERIC values display correctly (e.g. `-327.10`, not `-327.-10`).
+- The syntax check follows each tab's own database and stops flagging valid SQL Server, Postgres, MySQL and SQLite syntax (`[dbo].[t]`, `GO`, procedures, `PRAGMA`, …).
+- Grid values align by type: numbers right, booleans centred.
+- Schema picker at the bottom of the sidebar for databases with several schemas.
+- Consistent checkboxes, result tabs and Beautify popover; interface icons moved to Tabler.
+
 ## 0.4.12 — 2026-09-29
 
 - Grid editing: type to edit the cursor cell, Set NULL / Set Empty / Duplicate Row (Cmd/Ctrl+D), multi-row edits across a selection, paste over existing cells, and an expanded multi-line editor (Shift+Enter).
