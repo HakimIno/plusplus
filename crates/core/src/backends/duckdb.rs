@@ -210,6 +210,7 @@ impl DuckDb {
                     check: None,
                     comment: None,
                     generated,
+                    max_length: None,
                 });
         }
         for table in &mut tables {

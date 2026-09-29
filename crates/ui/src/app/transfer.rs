@@ -50,9 +50,11 @@ impl DbGuiApp {
         }
     }
     /// Paste clipboard `text` (TSV: one row per line, tab-separated fields) into the active
-    /// table as new staged insert rows — the counterpart to "Copy". Fields map to columns by
-    /// position; each is typed by its column's editor kind (empty → NULL). Nothing touches the
-    /// database until the user reviews and Saves. Only works on an editable (PK-bearing) table.
+    /// table. Whole rows (every line has one field per column, as Copy writes them) become new
+    /// staged insert rows; anything narrower overwrites cells from the cell cursor instead
+    /// (see [`Self::paste_into_cells`]). Fields are typed by their column's editor kind
+    /// (empty → NULL). Nothing touches the database until the user reviews and Saves. Only
+    /// works on an editable (PK-bearing) table.
     pub(super) fn paste_rows(&mut self, text: &str) {
         let idx = self.active_query_tab;
         if !self.tabs[idx].edits.editable() {
@@ -71,6 +73,13 @@ impl DbGuiApp {
             .collect();
         if parsed.is_empty() {
             return;
+        }
+        let whole_rows = ncols > 1 && parsed.iter().all(|fields| fields.len() == ncols);
+        if !whole_rows {
+            if let Some(cursor) = self.tabs[idx].selection.cursor() {
+                self.paste_into_cells(idx, cursor, &parsed);
+                return;
+            }
         }
         let added = parsed.len();
         // One undo group so the whole paste takes a single Cmd/Ctrl+Z.
@@ -92,6 +101,76 @@ impl DbGuiApp {
         sel.select_one(total - added);
         sel.range_to(total - 1);
         self.status_msg = format!("Pasted {added} row(s) — review, then Save to insert.");
+        self.error = None;
+        self.workspace_dirty = true;
+    }
+    /// Overwrite cells with a pasted TSV block, spreadsheet-style: the block's top-left lands
+    /// on the cell `cursor` and spreads right/down, clipped to the grid. A single value over a
+    /// multi-row selection containing the cursor fills the cursor's column on every selected
+    /// row instead. Deleted rows and binary cells are skipped, as are values invalid for their
+    /// column (counted in the status line). One undo step.
+    fn paste_into_cells(&mut self, idx: usize, cursor: (usize, usize), parsed: &[Vec<&str>]) {
+        let (disp0, col0) = cursor;
+        let tab = &mut self.tabs[idx];
+        let Some(result) = tab.result.as_ref() else {
+            return;
+        };
+        let (len, ncols) = (
+            tab.row_order.len() + tab.edits.new_rows,
+            result.column_count(),
+        );
+        let single = parsed.len() == 1 && parsed[0].len() == 1;
+        let cells: Vec<(usize, usize, &str)> =
+            if single && tab.selection.len() > 1 && tab.selection.contains(disp0) {
+                tab.selection
+                    .iter()
+                    .map(|disp| (disp, col0, parsed[0][0]))
+                    .collect()
+            } else {
+                parsed
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(i, fields)| {
+                        fields
+                            .iter()
+                            .enumerate()
+                            .map(move |(j, field)| (disp0 + i, col0 + j, *field))
+                    })
+                    .collect()
+            };
+        let (mut applied, mut invalid, mut outside) = (0, 0, 0);
+        tab.edits.begin_undo_group();
+        for (disp, col, field) in cells {
+            let raw = (col < ncols && disp < len)
+                .then(|| crate::edit::disp_to_raw(&tab.row_order, tab.edits.new_rows, disp))
+                .flatten();
+            let Some(raw) = raw else {
+                outside += 1;
+                continue;
+            };
+            let Some(original) = crate::edit::original_value(result, raw, col) else {
+                continue;
+            };
+            if tab.edits.row_state(raw) == crate::edit::RowState::Deleted
+                || matches!(original, dbcore::Value::Bytes(_))
+            {
+                continue;
+            }
+            if tab.edits.paste_text(raw, col, field, &original) {
+                applied += 1;
+            } else {
+                invalid += 1;
+            }
+        }
+        tab.edits.end_undo_group();
+        let mut msg = format!("Pasted into {applied} cell(s)");
+        if invalid > 0 {
+            msg.push_str(&format!(", {invalid} skipped (invalid for the column)"));
+        }
+        if outside > 0 {
+            msg.push_str(&format!(", {outside} outside the grid"));
+        }
+        self.status_msg = format!("{msg} — review, then Save.");
         self.error = None;
         self.workspace_dirty = true;
     }

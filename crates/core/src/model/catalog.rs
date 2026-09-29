@@ -20,6 +20,26 @@ pub struct ColumnInfo {
     /// The database generates this value when the column is omitted from INSERT
     /// (identity, auto-increment, computed default, or equivalent).
     pub generated: bool,
+    /// Declared maximum length of a character column, where the backend reports it apart
+    /// from `data_type` (Postgres). See [`ColumnInfo::char_limit`].
+    pub max_length: Option<u32>,
+}
+
+impl ColumnInfo {
+    /// The most characters a string column accepts: [`Self::max_length`] when introspected,
+    /// else the `(n)` of a `char`/`varchar`-style `data_type` (MySQL, SQL Server). `None`
+    /// for unbounded (`max`, `text`) and non-character types.
+    pub fn char_limit(&self) -> Option<u32> {
+        if self.max_length.is_some() {
+            return self.max_length;
+        }
+        let t = self.data_type.to_ascii_lowercase();
+        let (base, rest) = t.split_once('(')?;
+        if !base.trim_end().ends_with("char") {
+            return None;
+        }
+        rest.split(')').next()?.trim().parse().ok()
+    }
 }
 
 /// An index on a table.

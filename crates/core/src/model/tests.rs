@@ -664,6 +664,7 @@ fn table_edit_key_candidates_prefer_primary_key_then_unique_indexes() {
                 check: None,
                 comment: None,
                 generated: false,
+                max_length: None,
             },
             ColumnInfo {
                 name: "email".into(),
@@ -674,6 +675,7 @@ fn table_edit_key_candidates_prefer_primary_key_then_unique_indexes() {
                 check: None,
                 comment: None,
                 generated: false,
+                max_length: None,
             },
         ],
         indexes: vec![
@@ -970,6 +972,61 @@ fn build_delete_targets_by_key() {
     );
     // No keys ⇒ refuse (never emit an unfiltered DELETE).
     assert_eq!(build_delete_sql(DbKind::Postgres, None, "t", &[]), None);
+}
+
+/// SQL Server stores a plain '…' literal in the database code page, so non-ASCII text
+/// (Thai under a Latin collation) would turn into `?`. It gets the N prefix; ASCII keeps
+/// the plain literal so varchar key lookups stay index-friendly.
+#[test]
+fn sql_server_prefixes_unicode_text_literals() {
+    let thai = Value::Text("สวัสดี".into());
+    let ascii = Value::Text("O'Brien".into());
+    let key = Value::Text("k1".into());
+    let sql = build_update_sql(
+        DbKind::SqlServer,
+        None,
+        "t",
+        &[("a", &thai), ("b", &ascii)],
+        &[("id", &key)],
+    )
+    .unwrap();
+    assert!(sql.contains("N'สวัสดี'"), "{sql}");
+    assert!(
+        sql.contains("'O''Brien'") && !sql.contains("N'O''Brien'"),
+        "{sql}"
+    );
+    assert!(sql.contains("= 'k1'"), "{sql}");
+    // Other dialects never use the prefix.
+    let pg = build_update_sql(
+        DbKind::Postgres,
+        None,
+        "t",
+        &[("a", &thai)],
+        &[("id", &key)],
+    )
+    .unwrap();
+    assert!(pg.contains("'สวัสดี'") && !pg.contains("N'"), "{pg}");
+}
+
+#[test]
+fn char_limit_reads_introspected_or_declared_length() {
+    let col = |data_type: &str, max_length| ColumnInfo {
+        name: "c".into(),
+        data_type: data_type.into(),
+        nullable: true,
+        primary_key: false,
+        default: None,
+        check: None,
+        comment: None,
+        generated: false,
+        max_length,
+    };
+    assert_eq!(col("character varying", Some(40)).char_limit(), Some(40));
+    assert_eq!(col("varchar(50)", None).char_limit(), Some(50));
+    assert_eq!(col("NVARCHAR(12)", None).char_limit(), Some(12));
+    assert_eq!(col("nvarchar(max)", None).char_limit(), None);
+    assert_eq!(col("decimal(10,2)", None).char_limit(), None);
+    assert_eq!(col("text", None).char_limit(), None);
 }
 
 #[test]

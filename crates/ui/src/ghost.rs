@@ -433,6 +433,7 @@ mod tests {
             check: None,
             comment: None,
             generated: false,
+            max_length: None,
         }
     }
 

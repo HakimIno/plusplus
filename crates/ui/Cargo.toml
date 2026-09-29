@@ -47,3 +47,6 @@ swash = "0.2"
 memmap2 = "0.9"
 # Splits cell text into grapheme clusters so emoji sequences (ZWJ, skin tones) stay intact.
 unicode-segmentation = "1"
+# Regular-expression mode of the SQL editor's find/replace widget (already in the tree via
+# other crates).
+regex = "1"

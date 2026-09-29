@@ -706,6 +706,7 @@ mod tests {
             check: None,
             comment: None,
             generated: false,
+            max_length: None,
         };
         SchemaTree {
             database_name: "test".to_string(),
@@ -1011,6 +1012,7 @@ mod tests {
                     check: None,
                     comment: None,
                     generated: false,
+                    max_length: None,
                 }],
                 indexes: vec![],
                 foreign_keys: vec![],
@@ -1041,6 +1043,7 @@ mod tests {
                         check: None,
                         comment: None,
                         generated: false,
+                        max_length: None,
                     },
                     ColumnInfo {
                         name: "อีเมล".to_string(),
@@ -1051,6 +1054,7 @@ mod tests {
                         check: None,
                         comment: None,
                         generated: false,
+                        max_length: None,
                     },
                 ],
                 indexes: vec![],

@@ -330,6 +330,7 @@ impl SqliteDb {
                     check: None,
                     comment: None,
                     // SQLite generates ROWIDs for INTEGER PRIMARY KEY columns when omitted.
+                    max_length: None,
                     generated: primary_key && data_type.eq_ignore_ascii_case("INTEGER")
                         || default.as_deref().is_some_and(|value| {
                             let value = value.to_ascii_lowercase();

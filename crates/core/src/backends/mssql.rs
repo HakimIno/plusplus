@@ -325,6 +325,7 @@ impl Database for MsSqlDb {
                         (!value.is_empty()).then_some(value)
                     },
                     generated: identity || default.to_ascii_lowercase().contains("next value for"),
+                    max_length: None,
                 }
             })
             .collect();
@@ -483,6 +484,7 @@ impl Database for MsSqlDb {
                 check: None,
                 comment: None,
                 generated,
+                max_length: None,
             };
             if let Some(info) = tables.get_mut(&(schema.clone(), table.clone())) {
                 info.columns.push(col);

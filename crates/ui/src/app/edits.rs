@@ -17,6 +17,40 @@ impl PendingEdits {
     }
 }
 
+/// Per-result-column constraints from the table's introspected schema. Declared lengths are
+/// only enforced where the database enforces them (SQLite and DuckDB accept any length).
+fn column_rules(
+    kind: DbKind,
+    table: &dbcore::TableInfo,
+    columns: &[dbcore::ColumnMeta],
+) -> Vec<crate::edit::ColumnRule> {
+    let enforces_length = matches!(
+        kind,
+        DbKind::Postgres | DbKind::MySql | DbKind::MariaDb | DbKind::SqlServer
+    );
+    columns
+        .iter()
+        .map(|meta| {
+            let Some(info) = table
+                .columns
+                .iter()
+                .find(|c| c.name.eq_ignore_ascii_case(&meta.name))
+            else {
+                return crate::edit::ColumnRule::default();
+            };
+            crate::edit::ColumnRule {
+                not_null: !info.nullable,
+                required: !info.nullable && info.default.is_none() && !info.generated,
+                max_chars: if enforces_length {
+                    info.char_limit()
+                } else {
+                    None
+                },
+            }
+        })
+        .collect()
+}
+
 fn edit_key_columns(table: &dbcore::TableInfo) -> Vec<String> {
     table
         .edit_key_candidates()
@@ -175,6 +209,35 @@ impl DbGuiApp {
                 }
         })
     }
+    /// Install column constraints on the visible tabs' edits once their table metadata is
+    /// known. Cheap per frame: a tab is skipped once synced for its current result.
+    pub(super) fn sync_edit_rules(&mut self) {
+        let visible = [Some(self.active_query_tab), self.split_tab];
+        for idx in visible.into_iter().flatten() {
+            let Some(tab) = self.tabs.get(idx) else {
+                continue;
+            };
+            if tab.edits.rules_synced || !tab.edits.editable() {
+                continue;
+            }
+            let (Some(result), Some(table)) = (tab.result.as_ref(), self.structure_table(idx))
+            else {
+                continue;
+            };
+            let Some(kind) = tab
+                .conn_id
+                .as_deref()
+                .and_then(|id| self.active_connections.iter().find(|c| c.config_id == id))
+                .map(|c| c.db.kind())
+            else {
+                continue;
+            };
+            let rules = column_rules(kind, table, &result.columns);
+            let edits = &mut self.tabs[idx].edits;
+            edits.set_rules(rules);
+            edits.rules_synced = true;
+        }
+    }
     /// Validate staged edits and build the SQL statements, storing them in
     /// `commit_pending` to show the preview dialog. Nothing is executed yet.
     pub(super) fn commit_edits(&mut self) {
@@ -308,6 +371,96 @@ impl DbGuiApp {
             self.status_msg = "Nothing to redo".to_string();
         }
     }
+    /// Raw row ids of the active tab's selection, in display order.
+    fn selected_raw_rows(&self) -> Vec<usize> {
+        let tab = self.tab();
+        tab.selection
+            .iter()
+            .filter_map(|disp| crate::edit::disp_to_raw(&tab.row_order, tab.edits.new_rows, disp))
+            .collect()
+    }
+    /// Stage NULL / `''` into `col` on every selected row, as one undo step.
+    pub(super) fn set_selected_cells(&mut self, col: usize, to: crate::edit::SetTo) {
+        if !self.tab().edits.editable() {
+            return;
+        }
+        let rows = self.selected_raw_rows();
+        let tab = self.tab_mut();
+        let Some(result) = tab.result.as_ref() else {
+            return;
+        };
+        let targets: Vec<(usize, dbcore::Value)> = rows
+            .into_iter()
+            .filter_map(|raw| crate::edit::original_value(result, raw, col).map(|v| (raw, v)))
+            .collect();
+        let rejected = tab.edits.set_cells(&targets, col, to);
+        self.error = None;
+        if rejected > 0 {
+            self.status_msg = format!("{rejected} row(s) skipped — the column is NOT NULL");
+        }
+        self.workspace_dirty = true;
+    }
+    /// Copy every selected (non-deleted) row into a new staged insert row, TablePlus-style.
+    /// Key columns are left empty so the copies don't collide with their sources — an
+    /// auto-increment key fills itself in, any other key must be typed before saving.
+    pub(super) fn duplicate_rows(&mut self) {
+        if !self.tab().edits.editable() {
+            self.status_msg =
+                "Duplicate needs an editable table (open one with a primary key).".into();
+            return;
+        }
+        let rows = self.selected_raw_rows();
+        let tab = self.tab_mut();
+        tab.flush_active_edit();
+        let Some(result) = tab.result.as_ref() else {
+            return;
+        };
+        let pk_cols = tab
+            .edits
+            .source
+            .as_ref()
+            .map(|s| s.pk_cols.clone())
+            .unwrap_or_default();
+        // Snapshot the current values (staged edits win) before adding rows renumbers nothing
+        // we read — new ids are appended past every existing one.
+        let copies: Vec<Vec<(usize, dbcore::Value)>> = rows
+            .into_iter()
+            .filter(|raw| tab.edits.row_state(*raw) != crate::edit::RowState::Deleted)
+            .map(|raw| {
+                (0..result.column_count())
+                    .filter(|&c| !pk_cols.contains(&result.columns[c].name))
+                    .filter_map(|c| {
+                        let value = tab
+                            .edits
+                            .staged(raw, c)
+                            .cloned()
+                            .or_else(|| crate::edit::original_value(result, raw, c))?;
+                        (!value.is_null()).then_some((c, value))
+                    })
+                    .collect()
+            })
+            .collect();
+        if copies.is_empty() {
+            return;
+        }
+        let added = copies.len();
+        tab.edits.begin_undo_group();
+        for cells in copies {
+            let id = tab.edits.add_new_row();
+            for (c, value) in cells {
+                tab.edits.stage(id, c, value, &dbcore::Value::Null);
+            }
+        }
+        tab.edits.end_undo_group();
+        // Select the copies (they sit just past the stored rows) and bring them into view.
+        let total = tab.row_order.len() + tab.edits.new_rows;
+        tab.selection.select_one(total - added);
+        tab.selection.range_to(total - 1);
+        tab.pending_scroll = Some(total - 1);
+        self.status_msg = format!("Duplicated {added} row(s) — review, then Save to insert.");
+        self.error = None;
+        self.workspace_dirty = true;
+    }
     /// Flush the UI editor, then delegate validation and SQL planning to the shared core.
     pub(super) fn build_commit_statements(&mut self) -> Option<Vec<String>> {
         let idx = self.active_query_tab;
@@ -317,6 +470,18 @@ impl DbGuiApp {
             return None;
         }
         if !self.tabs[idx].edits.has_pending() {
+            return None;
+        }
+        // A new row missing a NOT NULL value with no default would fail the whole
+        // transaction at the database; name the cell instead.
+        if let Some((slot, col)) = self.tabs[idx].edits.missing_required() {
+            let column = self.tabs[idx]
+                .result
+                .as_ref()
+                .and_then(|r| r.columns.get(col))
+                .map_or("?", |c| c.name.as_str());
+            self.error = Some(format!("New row {}: \"{column}\" is required.", slot + 1));
+            self.status_msg = "Missing required value — not saved".into();
             return None;
         }
         let kind = self.active()?.db.kind();

@@ -28,7 +28,15 @@ pub(crate) fn value_to_literal(value: &Value, kind: DbKind) -> Option<String> {
                 DbKind::MySql | DbKind::MariaDb => escaped.replace('\\', "\\\\"),
                 _ => escaped,
             };
-            format!("'{escaped}'")
+            // A plain SQL Server literal is varchar in the database's code page, so text
+            // outside it (e.g. Thai under a Latin collation) would be stored as `?`. The
+            // N prefix keeps it Unicode. ASCII stays unprefixed: an nvarchar literal compared
+            // with a varchar key column forces a conversion that defeats its index.
+            if kind == DbKind::SqlServer && !s.is_ascii() {
+                format!("N'{escaped}'")
+            } else {
+                format!("'{escaped}'")
+            }
         }
         Value::Bytes(bytes) => return binary_literal(bytes, kind),
     })

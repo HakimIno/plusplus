@@ -196,6 +196,7 @@ impl DbGuiApp {
     pub(super) fn draw(&mut self, ui_root: &mut egui::Ui, frame: Option<&eframe::Frame>) {
         let ctx = ui_root.ctx().clone();
         self.poll_messages(&ctx);
+        self.sync_edit_rules();
         if !self.show_welcome {
             self.open_anything_shortcut(&ctx);
         }
@@ -325,6 +326,8 @@ impl DbGuiApp {
         if discard_schema {
             actions.push(Action::DiscardSchemaChanges);
         } else if self.open_anything.is_none()
+            // Esc in a text field (SQL editor, find widget) is that field's, never a discard.
+            && !typing_now
             && ctx.input(|i| i.key_pressed(egui::Key::Escape))
             && self.tab().edits.active.is_none()
             && self.tab().edits.has_pending()
@@ -456,13 +459,90 @@ impl DbGuiApp {
                         let deleted = tab.edits.row_state(raw) == crate::edit::RowState::Deleted;
                         let bytes = crate::edit::original_value(result, raw, col)
                             .is_some_and(|v| matches!(v, dbcore::Value::Bytes(_)));
+                        // Inside a multi-row selection the edit applies to every selected row.
+                        let fan_out = crate::edit::selection_fan_out(
+                            &tab.selection,
+                            &tab.row_order,
+                            tab.edits.new_rows,
+                            result,
+                            disp,
+                            col,
+                        );
                         if !deleted && !bytes {
                             if tab.edits.col_kind(col) == crate::edit::EditorKind::Bool {
                                 if let Some(orig) = crate::edit::original_value(result, raw, col) {
+                                    // Every selected row takes the cursor cell's flipped value.
+                                    tab.edits.begin_undo_group();
                                     tab.edits.toggle_bool(raw, col, &orig);
+                                    let flipped =
+                                        tab.edits.staged(raw, col).cloned().unwrap_or(orig);
+                                    for (row, orig) in &fan_out {
+                                        if tab.edits.row_state(*row)
+                                            != crate::edit::RowState::Deleted
+                                        {
+                                            tab.edits.stage(*row, col, flipped.clone(), orig);
+                                        }
+                                    }
+                                    tab.edits.end_undo_group();
                                 }
                             } else {
                                 crate::edit::begin_cell_edit(&mut tab.edits, result, raw, col);
+                                tab.edits.set_fan_out(fan_out);
+                            }
+                        }
+                    }
+                }
+            }
+            // Type-to-edit: printable text on the cursor cell opens its editor with the typed
+            // text *replacing* the value, spreadsheet-style. The Text events are removed so
+            // the editor, which takes focus this same frame, doesn't insert them twice.
+            let typed = ctx.input(|i| {
+                if i.modifiers.command || i.modifiers.ctrl || i.modifiers.mac_cmd {
+                    return None;
+                }
+                let text: String = i
+                    .events
+                    .iter()
+                    .filter_map(|e| match e {
+                        egui::Event::Text(t) => Some(t.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                (!text.is_empty() && !text.chars().any(char::is_control)).then_some(text)
+            });
+            if let Some(text) = typed.filter(|_| {
+                self.tab().edits.editable()
+                    && self.tab().edits.active.is_none()
+                    && self.open_anything.is_none()
+                    && self.commit_pending.is_none()
+            }) {
+                let tab = self.tab_mut();
+                if let (Some((disp, col)), Some(result)) =
+                    (tab.selection.cursor(), tab.result.as_ref())
+                {
+                    if let Some(raw) =
+                        crate::edit::disp_to_raw(&tab.row_order, tab.edits.new_rows, disp)
+                    {
+                        let deleted = tab.edits.row_state(raw) == crate::edit::RowState::Deleted;
+                        let bytes = crate::edit::original_value(result, raw, col)
+                            .is_some_and(|v| matches!(v, dbcore::Value::Bytes(_)));
+                        let bool_col = tab.edits.col_kind(col) == crate::edit::EditorKind::Bool;
+                        if !deleted && !bytes && !bool_col {
+                            let fan_out = crate::edit::selection_fan_out(
+                                &tab.selection,
+                                &tab.row_order,
+                                tab.edits.new_rows,
+                                result,
+                                disp,
+                                col,
+                            );
+                            crate::edit::begin_cell_edit(&mut tab.edits, result, raw, col);
+                            tab.edits.set_fan_out(fan_out);
+                            if let Some(active) = tab.edits.active.as_mut() {
+                                active.buf = text;
+                                ctx.input_mut(|i| {
+                                    i.events.retain(|e| !matches!(e, egui::Event::Text(_)))
+                                });
                             }
                         }
                     }
@@ -502,6 +582,16 @@ impl DbGuiApp {
                 actions.push(Action::PasteRows(text));
             }
         }
+        // Cmd/Ctrl+D duplicates the selected rows as new insert rows. Consumed here, before
+        // the SQL editor renders, so an unfocused editor doesn't read it as "add next cursor".
+        if !typing
+            && self.tab().edits.editable()
+            && self.tab().view == TabView::Data
+            && !self.tab().selection.is_empty()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::D))
+        {
+            actions.push(Action::DuplicateRows);
+        }
         // Cmd/Ctrl+I beautifies the active tab's SQL (TablePlus-style).
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::I)) {
             actions.push(Action::BeautifySql);
@@ -533,8 +623,7 @@ impl DbGuiApp {
         // keeps the existing result-filter shortcut.
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
             if typing && self.tab().kind == crate::components::QueryTabKind::Query {
-                self.tab_mut().find.open = true;
-                self.tab_mut().find.focus_pending = true;
+                self.open_find(&ctx, false);
             } else if self.tab().result.is_some() {
                 actions.push(Action::ToggleFilter(self.tab().id));
             }
@@ -543,8 +632,7 @@ impl DbGuiApp {
             && self.tab().kind == crate::components::QueryTabKind::Query
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::H))
         {
-            self.tab_mut().find.open = true;
-            self.tab_mut().find.focus_pending = true;
+            self.open_find(&ctx, true);
         }
         if self.open_anything.is_none()
             && self.tab().filter.visible

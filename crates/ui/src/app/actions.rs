@@ -1067,6 +1067,8 @@ impl DbGuiApp {
             Action::LoadMoreRows => self.load_more_rows(),
             Action::CopyRows(format) => self.copy_selection(format),
             Action::PasteRows(text) => self.paste_rows(&text),
+            Action::SetCells { col, to } => self.set_selected_cells(col, to),
+            Action::DuplicateRows => self.duplicate_rows(),
             Action::ExportTable { table, format } => self.export_table(&table, format),
             Action::ImportIntoTable(table) => self.open_import(&table),
             Action::SetImportMapping { target, source } => {
@@ -1099,7 +1101,19 @@ impl DbGuiApp {
                     return;
                 }
                 self.commit_edits();
-                self.start_pending_edits_guard(self.active_query_tab);
+                if self.start_pending_edits_guard(self.active_query_tab) {
+                    return;
+                }
+                // With review turned off, save the plan straight away. CQL batches aren't
+                // atomic, so they keep the preview (and its warning) regardless.
+                let skip_review = !self.review_edits_before_save
+                    && self
+                        .commit_pending
+                        .as_ref()
+                        .is_some_and(|plan| !plan.is_sequential());
+                if skip_review {
+                    self.confirm_edits();
+                }
             }
             Action::Undo => self.undo_edits(),
             Action::Redo => self.redo_edits(),

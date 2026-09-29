@@ -52,6 +52,96 @@ fn edit_preview_commits_to_original_tab_after_selection_changes() {
     assert!(app.commit_pending.is_none());
 }
 
+/// Column constraints come from the table's schema once it's known, and a new row missing
+/// a required value is stopped before any SQL is planned — naming the cell.
+#[test]
+fn save_stops_on_a_missing_required_value() {
+    let mut app = app_with_staged_edit();
+    app.active_connections[0].schema.tables = vec![TableInfo {
+        schema: None,
+        name: "items".into(),
+        columns: vec![
+            col("id", "INTEGER", false, true),
+            col("name", "TEXT", false, false),
+        ],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+    }];
+    app.tab_mut().set_result(QueryResult {
+        columns: vec![
+            ColumnMeta {
+                name: "id".into(),
+                type_name: "INTEGER".into(),
+            },
+            ColumnMeta {
+                name: "name".into(),
+                type_name: "TEXT".into(),
+            },
+        ],
+        rows: vec![vec![Value::Int(1), Value::Text("a".into())]],
+        ..QueryResult::default()
+    });
+    app.sync_edit_rules();
+    let rule = app.tab().edits.rule(1).cloned().expect("rules synced");
+    assert!(rule.not_null && rule.required);
+
+    let new = app.tab_mut().edits.add_new_row();
+    // The fixture already stages the stored row's id 1 → 2, so the new row takes 3.
+    app.tab_mut()
+        .edits
+        .stage(new, 0, Value::Int(3), &Value::Null);
+    app.apply_action(Action::PreviewEdits);
+    assert!(app.commit_pending.is_none(), "nothing planned");
+    assert!(
+        app.error
+            .as_deref()
+            .unwrap_or("")
+            .contains("\"name\" is required"),
+        "{:?}",
+        app.error
+    );
+
+    app.tab_mut()
+        .edits
+        .stage(new, 1, Value::Text("b".into()), &Value::Null);
+    app.error = None;
+    app.apply_action(Action::PreviewEdits);
+    assert!(
+        app.commit_pending.is_some(),
+        "saves once filled: {:?} {}",
+        app.error,
+        app.status_msg
+    );
+}
+
+#[test]
+fn save_keeps_the_preview_by_default() {
+    let mut app = app_with_staged_edit();
+    app.apply_action(Action::PreviewEdits);
+    assert!(app.commit_pending.is_some(), "preview shown");
+    assert_eq!(app.busy, Busy::Idle, "nothing written yet");
+}
+
+#[test]
+fn save_skips_the_preview_when_review_is_off() {
+    let mut app = app_with_staged_edit();
+    app.review_edits_before_save = false;
+    app.apply_action(Action::PreviewEdits);
+    assert!(app.commit_pending.is_none(), "no preview left open");
+    assert_eq!(app.busy, Busy::Querying, "saved straight away");
+}
+
+/// Production Guardian still confirms even with review turned off.
+#[test]
+fn save_without_review_still_guards_production() {
+    let mut app = app_with_staged_edit();
+    app.connections[0].production = true;
+    app.review_edits_before_save = false;
+    app.apply_action(Action::PreviewEdits);
+    assert!(app.danger_pending.is_some(), "Guardian dialog opened");
+    assert_eq!(app.busy, Busy::Idle, "nothing written before confirmation");
+}
+
 #[test]
 fn edit_preview_rejects_reloaded_result_even_with_identical_sql() {
     let mut app = app_with_staged_edit();
@@ -277,6 +367,7 @@ fn fake_schema(tables: usize, cols: usize) -> SchemaTree {
                         check: None,
                         comment: None,
                         generated: false,
+                        max_length: None,
                     })
                     .collect(),
                 indexes: vec![IndexInfo {
@@ -1032,6 +1123,7 @@ fn col(name: &str, ty: &str, nullable: bool, pk: bool) -> ColumnInfo {
         check: None,
         comment: None,
         generated: false,
+        max_length: None,
     }
 }
 
@@ -4653,7 +4745,12 @@ fn demo_app_with_objects() -> (DbGuiApp, std::path::PathBuf) {
 /// Render `app` headlessly and write a PNG snapshot named `name`. Optionally expands the
 /// sidebar object groups first. The UI animates a button glint (continuous repaint), so we
 /// step a fixed number of frames rather than running to quiescence.
-fn render_and_snapshot(mut app: DbGuiApp, name: &str, expand_groups: bool) {
+fn render_and_snapshot(app: DbGuiApp, name: &str, expand_groups: bool) {
+    render_and_snapshot_at(app, name, expand_groups, 1.0);
+}
+
+/// [`render_and_snapshot`] at a given pixel density (2.0 to judge icons as on Retina).
+fn render_and_snapshot_at(mut app: DbGuiApp, name: &str, expand_groups: bool, ppp: f32) {
     use egui_kittest::kittest::Queryable;
     // `construct` loads the developer's real saved connections, which the rail then paints
     // into the PNG: machine-dependent pixels, and their names committed to git. Snapshots
@@ -4662,6 +4759,7 @@ fn render_and_snapshot(mut app: DbGuiApp, name: &str, expand_groups: bool) {
     let mut setup = false;
     let mut harness = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1180.0, 760.0))
+        .with_pixels_per_point(ppp)
         .build_ui(move |ui| {
             if !setup {
                 egui_extras::install_image_loaders(ui.ctx());
@@ -4681,6 +4779,127 @@ fn render_and_snapshot(mut app: DbGuiApp, name: &str, expand_groups: bool) {
     }
     harness.run_steps(6);
     harness.snapshot(name);
+}
+
+/// The floating find widget end to end: Cmd/Ctrl+F seeds the query from a one-line editor
+/// selection, typing jumps to the first match from the caret, Enter steps to the next one
+/// (selecting it in the editor without leaving the widget), Enter in the replace field
+/// replaces the current match, and Escape closes the widget.
+#[test]
+fn find_widget_seeds_steps_replaces_and_closes() {
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    let tab = app.tab_mut();
+    tab.kind = crate::components::QueryTabKind::Query;
+    tab.sql = "SELECT a FROM t; SELECT a, b FROM t WHERE a = 1".into();
+    tab.mark_sql_changed();
+    tab.primary_cursor = 14..15; // the first `t`
+    run_frame(&ctx, &mut app, vec![]);
+
+    let editor = egui::Id::new(("sql_editor", app.tab().id, "primary"));
+    ctx.memory_mut(|m| m.request_focus(editor));
+    app.open_find(&ctx, false);
+    assert!(app.tab().find.open && !app.tab().find.replace_open);
+    assert_eq!(app.tab().find.query, "t", "seeded from the selection");
+    for _ in 0..3 {
+        run_frame(&ctx, &mut app, vec![]);
+    }
+    let find_id = editor.with("find_query");
+    assert!(
+        ctx.memory(|m| m.has_focus(find_id)),
+        "query field focused despite the popover's sizing pass"
+    );
+
+    // The seeded query is selected, so typing replaces it.
+    run_frame(&ctx, &mut app, vec![egui::Event::Text("a".into())]);
+    assert_eq!(app.tab().find.query, "a");
+    assert_eq!(app.tab().find.found().len(), 3);
+    assert_eq!(
+        app.tab().primary_cursor,
+        24..25,
+        "first match after the caret"
+    );
+
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+    );
+    assert_eq!(app.tab().find.current, 2);
+    assert_eq!(app.tab().primary_cursor, 42..43);
+    assert!(
+        ctx.memory(|m| m.has_focus(find_id)),
+        "focus stays in the widget"
+    );
+
+    // Replace the current match from the replace row.
+    app.tab_mut().find.replace_open = true;
+    app.tab_mut().find.replacement = "x".into();
+    run_frame(&ctx, &mut app, vec![]);
+    let replace_id = editor.with("find_replace");
+    ctx.memory_mut(|m| m.request_focus(replace_id));
+    run_frame(&ctx, &mut app, vec![]);
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+    );
+    assert_eq!(
+        app.tab().sql,
+        "SELECT a FROM t; SELECT a, b FROM t WHERE x = 1"
+    );
+    assert_eq!(app.tab().find.found().len(), 2);
+
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
+    );
+    assert!(!app.tab().find.open);
+}
+
+/// Screenshot generator (ignored): multi-cursor selections (Cmd/Ctrl+D) are painted under
+/// the text like the primary selection, so every selected word stays readable.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_multi_cursor_selection() {
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    let tab = app.tab_mut();
+    tab.kind = crate::components::QueryTabKind::Query;
+    tab.sql = "SELECT * FROM [dbo].[ac_ms_account_group1];\n\
+               SELECT * FROM [dbo].[ac_ms_account_group1];\n\
+               SELECT * FROM [dbo].[ac_ms_account_group1];"
+        .into();
+    tab.mark_sql_changed();
+    tab.extra_cursors = vec![65..85, 109..129];
+    tab.primary_cursor = 21..41;
+    render_and_snapshot_at(app, "multi_cursor_selection", false, 2.0);
+}
+
+/// Screenshot generator (ignored): the SQL editor's floating find/replace widget with the
+/// replace row open, matches highlighted and the current one outlined.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_find_widget() {
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    let tab = app.tab_mut();
+    tab.kind = crate::components::QueryTabKind::Query;
+    tab.sql = "SELECT\n  TOP 100 *\nFROM\n  [dbo].[ac_ms_account_group1];\n\n\
+               SELECT g.id, g.name\nFROM ac_ms_account_group1 AS g\n\
+               WHERE g.parent_id IN (SELECT id FROM ac_ms_account_group1);"
+        .into();
+    tab.mark_sql_changed();
+    tab.find.open = true;
+    tab.find.replace_open = true;
+    tab.find.query = "ac_ms_account_group1".into();
+    tab.find.replacement = "ac_ms_account_group2".into();
+    tab.find.current = 1;
+    render_and_snapshot_at(app, "find_widget", false, 2.0);
 }
 
 /// Screenshot generator (ignored): the import dialog with a realistic mapping — one column
@@ -5621,6 +5840,263 @@ fn enter_opens_editor_at_cursor() {
     assert!(!app.tab().edits.has_pending(), "nothing staged yet");
 }
 
+/// Typing on the cursor cell opens its editor with the typed text replacing the value —
+/// exactly once (the same Text event must not also reach the freshly focused editor).
+#[test]
+fn typing_on_cursor_cell_starts_editing() {
+    let (ctx, mut app) = grid_nav_app(5, 3);
+    app.tab_mut().selection.select_one(1);
+    app.tab_mut().selection.set_cursor(1, 1);
+
+    run_frame(&ctx, &mut app, vec![egui::Event::Text("Z".into())]);
+    assert!(app.tab().edits.is_active(1, 1), "typing opens the editor");
+    run_frame(&ctx, &mut app, vec![]);
+    assert_eq!(app.tab().edits.active.as_ref().unwrap().buf, "Z");
+
+    run_frame(&ctx, &mut app, vec![egui::Event::Text("q".into())]);
+    assert_eq!(
+        app.tab().edits.active.as_ref().unwrap().buf,
+        "Zq",
+        "further typing appends at the caret"
+    );
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+    );
+    assert_eq!(
+        app.tab().edits.staged(1, 1),
+        Some(&Value::Text("Zq".into()))
+    );
+}
+
+/// Cmd/Ctrl+D copies the selected rows into new insert rows, leaving the key empty.
+#[test]
+fn cmd_d_duplicates_selected_rows_without_the_key() {
+    let (ctx, mut app) = grid_nav_app(5, 3);
+    app.tab_mut().selection.select_one(0);
+    app.tab_mut().selection.range_to(1);
+    // A staged edit on the source is what gets copied, not the stored value.
+    app.tab_mut()
+        .edits
+        .stage(1, 2, Value::Text("edited".into()), &Value::Int(5));
+
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::D, egui::Modifiers::COMMAND)],
+    );
+
+    let base = crate::edit::NEW_ROW_BASE;
+    let edits = &app.tab().edits;
+    assert_eq!(edits.new_rows, 2);
+    assert_eq!(edits.staged(base, 0), None, "primary key left empty");
+    assert_eq!(edits.staged(base, 1), Some(&Value::Int(1)));
+    assert_eq!(
+        edits.staged(base + 1, 2),
+        Some(&Value::Text("edited".into()))
+    );
+    let selected: Vec<usize> = app.tab().selection.iter().collect();
+    assert_eq!(selected, [5, 6], "the copies are selected");
+}
+
+/// "Set NULL" from the cell menu applies to that column on every selected row.
+#[test]
+fn set_cells_action_targets_the_selection() {
+    let (_ctx, mut app) = grid_nav_app(5, 3);
+    app.tab_mut().selection.select_one(0);
+    app.tab_mut().selection.toggle(2);
+
+    app.apply_action(Action::SetCells {
+        col: 1,
+        to: crate::edit::SetTo::Null,
+    });
+
+    let edits = &app.tab().edits;
+    assert_eq!(edits.staged(0, 1), Some(&Value::Null));
+    assert_eq!(edits.staged(1, 1), None);
+    assert_eq!(edits.staged(2, 1), Some(&Value::Null));
+    assert_eq!(edits.staged(0, 0), None, "other columns untouched");
+}
+
+/// Typing over a multi-row selection edits that column on every selected row (TablePlus
+/// multi-row edit), and a single Cmd/Ctrl+Z takes the whole edit back.
+#[test]
+fn typing_over_multi_row_selection_edits_every_row() {
+    let (ctx, mut app) = grid_nav_app(5, 3);
+    app.tab_mut().selection.select_one(0);
+    app.tab_mut().selection.range_to(2);
+    app.tab_mut().selection.set_cursor(0, 1);
+
+    run_frame(&ctx, &mut app, vec![egui::Event::Text("Q".into())]);
+    assert_eq!(
+        app.tab().edits.active.as_ref().map(|a| a.fan_out_len()),
+        Some(2)
+    );
+    run_frame(&ctx, &mut app, vec![]);
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+    );
+    for row in 0..3 {
+        assert_eq!(
+            app.tab().edits.staged(row, 1),
+            Some(&Value::Text("Q".into())),
+            "row {row}"
+        );
+    }
+    assert_eq!(
+        app.tab().edits.staged(3, 1),
+        None,
+        "unselected row untouched"
+    );
+
+    app.apply_action(Action::Undo);
+    assert!(!app.tab().edits.has_pending(), "one undo reverts all rows");
+}
+
+/// Pasting narrower-than-a-row text overwrites cells from the cursor, clipped to the grid.
+#[test]
+fn paste_overwrites_cells_from_the_cursor() {
+    let (_ctx, mut app) = grid_nav_app(5, 3);
+    app.tab_mut().selection.select_one(3);
+    app.tab_mut().selection.set_cursor(3, 1);
+
+    app.apply_action(Action::PasteRows("a\tb\tc\nd\te".into()));
+
+    let edits = &app.tab().edits;
+    assert_eq!(edits.new_rows, 0, "no insert rows");
+    let text = |s: &str| Some(Value::Text(s.into()));
+    assert_eq!(edits.staged(3, 1).cloned(), text("a"));
+    assert_eq!(edits.staged(3, 2).cloned(), text("b"));
+    assert_eq!(edits.staged(4, 1).cloned(), text("d"));
+    assert_eq!(edits.staged(4, 2).cloned(), text("e"));
+    assert!(
+        app.status_msg.contains("1 outside the grid"),
+        "{}",
+        app.status_msg
+    );
+}
+
+/// One pasted value over a multi-row selection fills the cursor column on every row.
+#[test]
+fn paste_single_value_fills_the_selection() {
+    let (_ctx, mut app) = grid_nav_app(5, 3);
+    app.tab_mut().selection.select_one(0);
+    app.tab_mut().selection.range_to(2);
+    app.tab_mut().selection.set_cursor(1, 2);
+
+    app.apply_action(Action::PasteRows("z".into()));
+
+    for row in 0..3 {
+        assert_eq!(
+            app.tab().edits.staged(row, 2),
+            Some(&Value::Text("z".into()))
+        );
+    }
+    assert_eq!(app.tab().edits.staged(3, 2), None);
+}
+
+/// Whole rows (one field per column, as Copy writes them) still paste as insert rows even
+/// with a cell cursor in the grid.
+#[test]
+fn paste_whole_rows_still_inserts() {
+    let (_ctx, mut app) = grid_nav_app(5, 3);
+    app.tab_mut().selection.select_one(0);
+    app.tab_mut().selection.set_cursor(0, 1);
+
+    app.apply_action(Action::PasteRows("9\tx\ty".into()));
+
+    assert_eq!(app.tab().edits.new_rows, 1);
+    assert!(!app.tab().edits.row_dirty(0));
+}
+
+/// Shift+Enter breaks the line and expands the editor; Up/Down then move within the text
+/// (no row advance) and Enter commits the multi-line value.
+#[test]
+fn shift_enter_inserts_a_line_break_and_expands() {
+    let (ctx, mut app) = grid_nav_app(5, 3);
+    app.tab_mut().selection.select_one(1);
+    app.tab_mut().selection.set_cursor(1, 1);
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+    );
+    run_frame(&ctx, &mut app, vec![]);
+
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::Enter, egui::Modifiers::SHIFT)],
+    );
+    run_frame(&ctx, &mut app, vec![egui::Event::Text("x".into())]);
+    {
+        let active = app.tab().edits.active.as_ref().expect("still editing");
+        assert!(active.is_expanded());
+        assert_eq!(active.buf, "4\nx");
+    }
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::ArrowUp, egui::Modifiers::NONE)],
+    );
+    assert!(
+        app.tab().edits.is_active(1, 1),
+        "Up moves the caret, not the row"
+    );
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+    );
+    assert_eq!(
+        app.tab().edits.staged(1, 1),
+        Some(&Value::Text("4\nx".into()))
+    );
+}
+
+/// A value too wide for its cell opens straight into the expanded editor.
+#[test]
+fn long_values_open_expanded() {
+    let (ctx, mut app) = grid_nav_app(5, 3);
+    app.tab_mut().result.as_mut().unwrap().rows[1][1] = Value::Text("word ".repeat(80));
+    app.tab_mut().selection.select_one(1);
+    app.tab_mut().selection.set_cursor(1, 1);
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+    );
+    run_frame(&ctx, &mut app, vec![]);
+    assert!(app.tab().edits.active.as_ref().unwrap().is_expanded());
+    // The popover holds focus through its first (sizing) frame: typing lands, Enter saves.
+    run_frame(&ctx, &mut app, vec![egui::Event::Text("!".into())]);
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+    );
+    let expected = format!("{}!", "word ".repeat(80));
+    assert_eq!(app.tab().edits.staged(1, 1), Some(&Value::Text(expected)));
+
+    // Short values keep the one-line cell editor.
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
+    );
+    app.tab_mut().selection.set_cursor(2, 1);
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+    );
+    run_frame(&ctx, &mut app, vec![]);
+    assert!(!app.tab().edits.active.as_ref().unwrap().is_expanded());
+}
+
 /// Tab commits the open editor and moves it one cell right, spreadsheet-style.
 #[test]
 fn tab_commits_and_advances() {
@@ -6186,6 +6662,7 @@ fn snapshot_erd_views() {
         check: None,
         comment: None,
         generated: false,
+        max_length: None,
     };
     let fk = |cols: &[&str], ref_table: &str| dbcore::ForeignKeyInfo {
         name: format!("fk_{ref_table}"),
@@ -6864,6 +7341,7 @@ fn erd_refresh_keeps_positions_and_disconnect_keeps_snapshot() {
                 check: None,
                 comment: None,
                 generated: false,
+                max_length: None,
             }],
             indexes: Vec::new(),
             foreign_keys: Vec::new(),

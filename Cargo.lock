@@ -4664,6 +4664,7 @@ dependencies = [
  "memmap2",
  "minisign-verify",
  "plusplus-core",
+ "regex",
  "reqwest",
  "rfd",
  "serde",

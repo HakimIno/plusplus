@@ -356,6 +356,11 @@ pub struct GridResponse {
     pub view_value: Option<(String, String, Value)>,
     /// A binary cell asked to stage a file replacement (raw result-row index, column).
     pub replace_blob: Option<(usize, usize)>,
+    /// "Set NULL" / "Set Empty" from a cell's context menu: the right-clicked *display* row,
+    /// the column, and the value. Like `copy`, the app applies it to the whole selection.
+    pub set_cells: Option<(usize, usize, crate::edit::SetTo)>,
+    /// "Duplicate Row" from a cell's context menu: the right-clicked *display* row.
+    pub duplicate: Option<usize>,
     /// A cell was double-clicked → start editing it (*display* row index, column index).
     pub begin_edit: Option<(usize, usize)>,
     /// A boolean cell was double-clicked → flip it (*display* row index, column index).
@@ -634,6 +639,13 @@ fn build_grid(
     let pointer_pos = ui.input(|i| i.pointer.hover_pos());
     let cursor = selection.cursor();
     let active_cell = edits.active.as_ref().map(|a| (a.row, a.col, a.origin));
+    // A grid editor opened inside a multi-row selection writes this column on every selected
+    // row; those cells get a faint accent wash so the reach of the edit is visible.
+    let fan_out_col = edits
+        .active
+        .as_ref()
+        .filter(|a| a.origin == crate::edit::EditOrigin::Grid && a.fan_out_len() > 0)
+        .map(|a| a.col);
     // Captured once per frame: a click is reported in the same frame, so these reflect the
     // modifiers held as the row was clicked (plain vs. Cmd/Ctrl toggle vs. Shift range).
     let modifiers = ui.input(|i| i.modifiers);
@@ -831,6 +843,13 @@ fn build_grid(
                         let active_from_grid = active_cell.is_some_and(|(row, col, origin)| {
                             row == r && col == c && origin == crate::edit::EditOrigin::Grid
                         });
+                        if fan_out_col == Some(c) && !active_from_grid && selection.contains(disp) {
+                            ui.painter().rect_filled(
+                                ui.max_rect().expand2(0.5 * ui.spacing().item_spacing),
+                                egui::CornerRadius::ZERO,
+                                palette::ACCENT().gamma_multiply(0.16),
+                            );
+                        }
                         if active_from_grid {
                             // The cell under edit fills the whole cell; the editor is
                             // type-aware and validates numbers/dates before they can commit.
@@ -847,7 +866,7 @@ fn build_grid(
                                     .max_rect()
                                     .expand2(0.5 * ui.spacing().item_spacing)
                                     .intersect(grid_clip);
-                                let valid = active.kind.is_valid(&active.buf);
+                                let valid = active.check().is_ok();
                                 let mut outcome = EditOutcome::Continue;
                                 ui.scope_builder(
                                     egui::UiBuilder::new()
@@ -881,15 +900,28 @@ fn build_grid(
                             let staged = edits.staged(r, c);
                             let value = staged.unwrap_or(stored);
                             let link = fk_ref.is_some() && !value.is_null();
-                            cell(
-                                ui,
-                                value,
-                                edits.col_kind(c),
-                                staged.is_some(),
-                                link,
-                                shift_hover,
-                                emoji,
-                            );
+                            // An empty required cell on a new row says so up front — saving
+                            // would stop on it.
+                            let required_empty = matches!(kind, RowKind::New(_))
+                                && value.is_null()
+                                && edits.rule(c).is_some_and(|rule| rule.required);
+                            if required_empty {
+                                ui.label(
+                                    egui::RichText::new("required")
+                                        .italics()
+                                        .color(palette::DANGER().gamma_multiply(0.8)),
+                                );
+                            } else {
+                                cell(
+                                    ui,
+                                    value,
+                                    edits.col_kind(c),
+                                    staged.is_some(),
+                                    link,
+                                    shift_hover,
+                                    emoji,
+                                );
+                            }
                         }
                     });
                     // Entering cell-edit (binary cells aren't editable; deleted rows are on
@@ -984,6 +1016,25 @@ fn build_grid(
                                     result.columns[c].type_name.clone(),
                                     shown.clone(),
                                 ));
+                                ui.close();
+                            }
+                            ui.separator();
+                        }
+                        if editable && state != crate::edit::RowState::Deleted {
+                            // NOT NULL rejects NULL on stored rows (a new row just leaves
+                            // the column out), so don't offer it there.
+                            let null_allowed = matches!(kind, RowKind::New(_))
+                                || !edits.rule(c).is_some_and(|rule| rule.not_null);
+                            if null_allowed && ui.button("Set NULL").clicked() {
+                                out.set_cells = Some((disp, c, crate::edit::SetTo::Null));
+                                ui.close();
+                            }
+                            if edits.col_is_string(c) && ui.button("Set Empty").clicked() {
+                                out.set_cells = Some((disp, c, crate::edit::SetTo::Empty));
+                                ui.close();
+                            }
+                            if ui.button("Duplicate Row").clicked() {
+                                out.duplicate = Some(disp);
                                 ui.close();
                             }
                             ui.separator();

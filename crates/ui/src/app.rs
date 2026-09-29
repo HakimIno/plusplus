@@ -1683,6 +1683,13 @@ enum Action {
     },
     /// Paste clipboard text (TSV) into the active editable table as new (staged) insert rows.
     PasteRows(String),
+    /// Stage NULL / `''` into `col` across the selected rows (cell context menu).
+    SetCells {
+        col: usize,
+        to: crate::edit::SetTo,
+    },
+    /// Duplicate the selected rows as new staged insert rows (Cmd/Ctrl+D or the cell menu).
+    DuplicateRows,
     /// Export an entire table (every row, streamed server-side) to a file in the chosen
     /// format, after picking a path from a save dialog. Triggered from the sidebar.
     ExportTable {
@@ -1959,6 +1966,10 @@ pub struct DbGuiApp {
     history_enabled: bool,
     /// Record connections and statements to the append-only audit trail (settings toggle).
     audit_enabled: bool,
+    /// Show the SQL preview before saving staged row edits (settings toggle). When off,
+    /// Cmd/Ctrl+S saves straight away — except on production connections, whose Guardian
+    /// confirmation always runs, and CQL, whose non-atomic batches always get reviewed.
+    review_edits_before_save: bool,
     /// Check GitHub for a newer release at launch (settings toggle) — the app's only
     /// network call apart from the databases the user connects to.
     update_check_enabled: bool,
@@ -2158,6 +2169,7 @@ impl DbGuiApp {
         }
         let history_enabled = settings.history_enabled.unwrap_or(true);
         let audit_enabled = settings.audit_enabled.unwrap_or(true);
+        let review_edits_before_save = settings.review_edits_before_save.unwrap_or(true);
         let update_check_enabled = settings.update_check_enabled.unwrap_or(true);
         let schema_table_order = settings.schema_table_order.clone();
         let result_memory_budget_mb = settings
@@ -2246,6 +2258,7 @@ impl DbGuiApp {
             import_pending: None,
             history_enabled,
             audit_enabled,
+            review_edits_before_save,
             update_check_enabled,
             sidebar_tab: SidebarTab::default(),
             history_cache: Vec::new(),

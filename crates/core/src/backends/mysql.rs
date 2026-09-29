@@ -290,6 +290,7 @@ impl Database for MySqlDb {
                 default,
                 check: None,
                 comment: (!comment.is_empty()).then_some(comment),
+                max_length: None,
                 generated: extra.to_ascii_lowercase().contains("auto_increment")
                     || extra.to_ascii_lowercase().contains("generated"),
             };

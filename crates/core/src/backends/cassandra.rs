@@ -475,6 +475,7 @@ impl Database for CassandraDb {
                     check: None,
                     comment: None,
                     generated: false,
+                    max_length: None,
                 },
             ));
         }

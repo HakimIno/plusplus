@@ -176,6 +176,7 @@ fn schema_from_design(design: &dbcore::ErDesign) -> SchemaTree {
                         check: None,
                         comment: None,
                         generated: false,
+                        max_length: None,
                     })
                     .collect(),
                 indexes: table
@@ -621,6 +622,7 @@ mod tests {
             check: None,
             comment: None,
             generated: false,
+            max_length: None,
         }
     }
 

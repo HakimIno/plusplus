@@ -540,6 +540,7 @@ impl SchemaEditor {
                     check: None,
                     comment: None,
                     generated: false,
+                    max_length: None,
                 });
                 draft.default = column.default.clone().unwrap_or_default();
                 draft
@@ -1495,6 +1496,7 @@ mod object_editor_tests {
                 check: None,
                 comment: None,
                 generated: false,
+                max_length: None,
             }],
             indexes: vec![IndexInfo {
                 name: "idx_items_sku".into(),
@@ -1526,6 +1528,7 @@ mod object_editor_tests {
                 check: None,
                 comment: None,
                 generated: false,
+                max_length: None,
             }],
             indexes: vec![IndexInfo {
                 name: "idx_items_sku".into(),
@@ -1556,6 +1559,7 @@ mod object_editor_tests {
                 check: Some("[qty] > 0".into()),
                 comment: Some("Old description".into()),
                 generated: false,
+                max_length: None,
             }],
             indexes: Vec::new(),
             foreign_keys: Vec::new(),
@@ -1592,6 +1596,7 @@ mod object_editor_tests {
                     check: None,
                     comment: None,
                     generated: false,
+                    max_length: None,
                 },
                 ColumnInfo {
                     name: "sku".into(),
@@ -1602,6 +1607,7 @@ mod object_editor_tests {
                     check: None,
                     comment: None,
                     generated: false,
+                    max_length: None,
                 },
             ],
             indexes: Vec::new(),

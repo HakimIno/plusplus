@@ -50,6 +50,61 @@ pub struct ActiveEdit {
     pub buf: String,
     /// Which view opened this editor (that view renders it; the other shows a label).
     pub origin: EditOrigin,
+    /// The buffer as it was seeded. Committing an untouched editor is a no-op, so opening a
+    /// cell and leaving it can never rewrite its value (e.g. `''` into `NULL`).
+    seed: String,
+    /// The seed value was NULL — shown as a "NULL" hint in text editors, since `''` and
+    /// NULL otherwise both seed an empty buffer.
+    seed_null: bool,
+    /// First frame of this editor: [`render_editor`] parks the caret at the end of the
+    /// buffer (type-to-edit replaces the value, and a stale caret from an earlier edit of
+    /// the same cell must not land mid-text).
+    fresh: bool,
+    /// Other rows this edit also applies to (raw row, value to type against) — the rest
+    /// of a multi-row selection the editor was opened in. See [`selection_fan_out`].
+    fan_out: Vec<(usize, Value)>,
+    /// Text is edited in a multi-line popover over the cell instead of the one-line field:
+    /// the value has line breaks, is too long for the cell, or Shift+Enter added a break.
+    expanded: bool,
+    /// The column holds strings (see [`is_string_type`]): an emptied buffer means `''`.
+    string_col: bool,
+    /// The column's constraints, checked on every keystroke (see [`Self::check`]).
+    rule: ColumnRule,
+}
+
+impl ActiveEdit {
+    /// Type the buffer for its column: string columns keep it byte-for-byte (empty stays
+    /// `''`, NULL is set explicitly from the context menu); other kinds read empty as NULL.
+    fn parse(&self) -> Value {
+        if self.kind == EditorKind::Text && self.string_col {
+            Value::Text(self.buf.clone())
+        } else {
+            self.kind.parse(&self.buf)
+        }
+    }
+
+    /// The typed value, or why it can't be written: not valid for the type, NULL in a NOT
+    /// NULL column, or longer than the column allows.
+    pub fn check(&self) -> Result<Value, String> {
+        if !self.kind.is_valid(&self.buf) {
+            return Err(format!("Not {}", self.kind.expected()));
+        }
+        let value = self.parse();
+        match self.rule.violation(&value, is_new_row(self.row)) {
+            Some(problem) => Err(problem),
+            None => Ok(value),
+        }
+    }
+
+    /// How many *other* rows a commit also writes (0 for a plain single-cell edit).
+    pub fn fan_out_len(&self) -> usize {
+        self.fan_out.len()
+    }
+
+    #[cfg(test)]
+    pub fn is_expanded(&self) -> bool {
+        self.expanded
+    }
 }
 
 /// Where the cell cursor should move after a commit.
@@ -70,6 +125,54 @@ pub enum EditOutcome {
     Commit { advance: Option<CursorDir> },
     /// Abandon the edit.
     Cancel,
+}
+
+/// What the editor enforces for one column, from the table's introspected schema. The
+/// default (no metadata yet) enforces nothing beyond the column's type.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ColumnRule {
+    /// `NOT NULL`: a stored row can't be set to NULL.
+    pub not_null: bool,
+    /// An `INSERT` must supply it: NOT NULL with no default and not database-generated.
+    pub required: bool,
+    /// Longest string the column accepts, in characters (only where the database enforces
+    /// declared lengths).
+    pub max_chars: Option<u32>,
+}
+
+impl ColumnRule {
+    /// Why `value` can't be written to this column, if it can't. On a new row NULL just
+    /// leaves the column out of the `INSERT` — a missing required value is caught at save.
+    pub fn violation(&self, value: &Value, new_row: bool) -> Option<String> {
+        if value.is_null() && self.not_null && !new_row {
+            return Some("Can't be NULL".into());
+        }
+        if let (Some(max), Value::Text(text)) = (self.max_chars, value) {
+            let n = text.chars().count();
+            if n > max as usize {
+                return Some(format!("Too long: {n} / {max} characters"));
+            }
+        }
+        None
+    }
+}
+
+/// An explicit value set from the cell context menu (no text editor involved).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SetTo {
+    Null,
+    /// The empty string — only offered on string-typed columns.
+    Empty,
+}
+
+/// Whether a column type stores character strings, where `''` is a real value distinct from
+/// NULL. Other types that edit as free text (UUID, JSON, INTERVAL, enums…) reject `''`, so
+/// an emptied editor on them still means NULL.
+pub fn is_string_type(type_name: &str) -> bool {
+    let t = type_name.to_ascii_uppercase();
+    ["CHAR", "TEXT", "CLOB", "STRING", "ASCII"]
+        .iter()
+        .any(|k| t.contains(k))
 }
 
 /// How a row should be painted / treated, derived from the pending edits on it.
@@ -168,6 +271,13 @@ pub struct Edits {
     pub pending_source: Option<EditSource>,
     /// Per-column editor kind, indexed like `result.columns`.
     col_kinds: Vec<EditorKind>,
+    /// Per-column [`is_string_type`], indexed like `result.columns`.
+    col_strings: Vec<bool>,
+    /// Per-column constraints, indexed like `result.columns`. Empty until the table's
+    /// metadata is known (see [`Self::set_rules`]).
+    rules: Vec<ColumnRule>,
+    /// `rules` were built for the current result; cleared by [`Self::set_columns`].
+    pub rules_synced: bool,
     /// Staged changes: row index → column index → new value. Row indices below
     /// [`NEW_ROW_BASE`] are stored rows (a diff against the original); indices at/above it
     /// are new rows (the full set of entered cells).
@@ -310,10 +420,83 @@ impl Edits {
             .iter()
             .map(|c| EditorKind::classify(&c.type_name))
             .collect();
+        self.col_strings = columns
+            .iter()
+            .map(|c| is_string_type(&c.type_name))
+            .collect();
+        self.rules.clear();
+        self.rules_synced = false;
+    }
+
+    /// Install the per-column constraints (indexed like `result.columns`), refreshing the
+    /// open editor's copy. A no-op when unchanged, so it's cheap to call every frame.
+    pub fn set_rules(&mut self, rules: Vec<ColumnRule>) {
+        if rules == self.rules {
+            return;
+        }
+        self.rules = rules;
+        if let Some(active) = self.active.as_mut() {
+            active.rule = self.rules.get(active.col).cloned().unwrap_or_default();
+        }
+    }
+
+    pub fn rule(&self, col: usize) -> Option<&ColumnRule> {
+        self.rules.get(col)
+    }
+
+    /// The first new row missing a required value, as `(new-row slot, column)`: the save
+    /// would fail on it, so the app reports it instead of sending the INSERT.
+    pub fn missing_required(&self) -> Option<(usize, usize)> {
+        (0..self.new_rows).find_map(|slot| {
+            let row = NEW_ROW_BASE + slot;
+            self.rules.iter().enumerate().find_map(|(col, rule)| {
+                let filled = self.staged(row, col).is_some_and(|v| !v.is_null());
+                (rule.required && !filled).then_some((slot, col))
+            })
+        })
     }
 
     pub fn col_kind(&self, col: usize) -> EditorKind {
         self.col_kinds.get(col).copied().unwrap_or_default()
+    }
+
+    /// Whether `col` holds strings, so `''` is a value of its own (see [`is_string_type`]).
+    pub fn col_is_string(&self, col: usize) -> bool {
+        self.col_strings.get(col).copied().unwrap_or(false)
+    }
+
+    /// Stage one explicit value into `col` across several rows as a single undo step.
+    /// `targets` pairs each raw row with the value it is typed against (see
+    /// [`original_value`]); rows marked for deletion are skipped. An open editor on an
+    /// affected cell is closed so it can't commit over the new value. Rows the column's
+    /// constraints reject (NULL into NOT NULL) are skipped; returns how many.
+    pub fn set_cells(&mut self, targets: &[(usize, Value)], col: usize, to: SetTo) -> usize {
+        let value = match to {
+            SetTo::Null => Value::Null,
+            SetTo::Empty => Value::Text(String::new()),
+        };
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|a| a.col == col && targets.iter().any(|(r, _)| *r == a.row))
+        {
+            self.active = None;
+        }
+        let rule = self.rules.get(col).cloned().unwrap_or_default();
+        let mut rejected = 0;
+        self.begin_undo_group();
+        for (row, original) in targets {
+            if self.deleted.contains(row) {
+                continue;
+            }
+            if rule.violation(&value, is_new_row(*row)).is_some() {
+                rejected += 1;
+                continue;
+            }
+            self.stage(*row, col, value.clone(), original);
+        }
+        self.end_undo_group();
+        rejected
     }
 
     /// The staged value for a cell, if it has an uncommitted edit.
@@ -372,6 +555,33 @@ impl Edits {
         self.stage(row, col, value, &Value::Null);
     }
 
+    /// Stage pasted `text` over `(row, col)`, typed by the column kind (an empty field is
+    /// NULL, matching how Copy writes NULL to TSV). Returns `false` — staging nothing — when
+    /// the text isn't valid for the column's type or constraints.
+    pub fn paste_text(&mut self, row: usize, col: usize, text: &str, original: &Value) -> bool {
+        let kind = self.col_kind(col);
+        if !kind.is_valid(text) {
+            return false;
+        }
+        let value = kind.parse(text);
+        let violates = self
+            .rules
+            .get(col)
+            .is_some_and(|rule| rule.violation(&value, is_new_row(row)).is_some());
+        if violates {
+            return false;
+        }
+        self.stage(row, col, value, original);
+        true
+    }
+
+    /// Make the open editor also apply to `targets` on commit (see [`selection_fan_out`]).
+    pub fn set_fan_out(&mut self, targets: Vec<(usize, Value)>) {
+        if let Some(active) = self.active.as_mut() {
+            active.fan_out = targets;
+        }
+    }
+
     /// Flip a boolean cell and stage the result immediately (no text editor needed).
     pub fn toggle_bool(&mut self, row: usize, col: usize, original: &Value) {
         let current = self
@@ -388,12 +598,20 @@ impl Edits {
             Value::Null => String::new(),
             other => other.display(),
         };
+        let rule = self.rules.get(col).cloned().unwrap_or_default();
         self.active = Some(ActiveEdit {
             row,
             col,
             kind: self.col_kind(col),
+            seed: buf.clone(),
             buf,
             origin,
+            seed_null: current.is_null(),
+            fresh: true,
+            fan_out: Vec::new(),
+            expanded: false,
+            string_col: self.col_is_string(col),
+            rule,
         });
     }
 
@@ -412,12 +630,29 @@ impl Edits {
         let Some(active) = self.active.as_ref() else {
             return true;
         };
-        if !active.kind.is_valid(&active.buf) {
-            return false;
+        // Untouched: close without staging. Re-parsing the seed isn't lossless (`''` and
+        // NULL seed the same empty buffer), so it must not be written back.
+        if active.buf == active.seed {
+            self.active = None;
+            return true;
         }
+        let Ok(new) = active.check() else {
+            return false;
+        };
         let active = self.active.take().expect("active checked above");
-        let new = active.kind.parse(&active.buf);
+        // One undo step covers the edited cell and every fanned-out row (skipping any the
+        // column's constraints reject — e.g. NULL is fine on a new row, not a stored one).
+        self.begin_undo_group();
+        for (row, orig) in &active.fan_out {
+            if !self.deleted.contains(row)
+                && !matches!(orig, Value::Bytes(_))
+                && active.rule.violation(&new, is_new_row(*row)).is_none()
+            {
+                self.stage(*row, active.col, new.clone(), orig);
+            }
+        }
         self.stage(active.row, active.col, new, original);
+        self.end_undo_group();
         true
     }
 
@@ -584,6 +819,31 @@ impl Edits {
 /// Horizontal inset for value text in the Details panel (display paint + editor must match).
 pub const DETAILS_VALUE_PAD_X: f32 = 8.0;
 
+/// Minimum width of the expanded (multi-line) editor popover.
+const EXPANDED_EDITOR_W: f32 = 360.0;
+/// Height past which the expanded editor scrolls instead of growing.
+const EXPANDED_EDITOR_MAX_H: f32 = 280.0;
+
+/// Replace the editor's selection (or insert at its caret) with `text`, leaving the caret
+/// after the insertion. With no stored caret, inserts at the end.
+fn insert_at_caret(ctx: &egui::Context, id: egui::Id, buf: &mut String, text: &str) {
+    let mut state = egui::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+    let n = buf.chars().count();
+    let range = state
+        .cursor
+        .char_range()
+        .map_or(n..n, |r| r.as_sorted_char_range());
+    let (start, end) = (range.start.min(n), range.end.min(n));
+    let byte = |c: usize| buf.char_indices().nth(c).map_or(buf.len(), |(b, _)| b);
+    let (bs, be) = (byte(start), byte(end));
+    buf.replace_range(bs..be, text);
+    let caret = egui::text::CCursor::new(start + text.chars().count());
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::one(caret)));
+    state.store(ctx, id);
+}
+
 /// Render the active text editor (numbers, dates, free text) and report what to do next.
 /// Invalid input (per the column kind) is shown in the danger colour and can't be committed
 /// by pressing Enter; clicking away from invalid input discards the edit. `fill`, when set,
@@ -595,7 +855,23 @@ pub fn render_editor(
     active: &mut ActiveEdit,
     fill: Option<egui::Vec2>,
 ) -> EditOutcome {
-    let valid = active.kind.is_valid(&active.buf);
+    let editor_id = egui::Id::new(("cell_editor", active.row, active.col, active.origin));
+    let was_expanded = active.expanded;
+    // Text that can't be edited comfortably on one line opens expanded: it already has line
+    // breaks, or (checked once, as the editor opens) it's wider than the cell.
+    if active.kind == EditorKind::Text && !active.expanded {
+        active.expanded = active.buf.contains('\n')
+            || (active.fresh
+                && fill.is_some_and(|size| {
+                    let font = egui::TextStyle::Body.resolve(ui.style());
+                    let width = ui
+                        .painter()
+                        .layout_no_wrap(active.buf.clone(), font, egui::Color32::PLACEHOLDER)
+                        .size()
+                        .x;
+                    width + 12.0 > size.x
+                }));
+    }
     // Tab / Shift+Tab: commit and advance to the neighbouring cell, spreadsheet-style.
     // In a grid editor, Up/Down do the same vertically while keeping the current column;
     // Left/Right remain available for moving the caret within the single-line value.
@@ -607,10 +883,12 @@ pub fn render_editor(
         } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
             Some(CursorDir::Right)
         } else if active.origin == EditOrigin::Grid
+            && !active.expanded
             && i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
         {
             Some(CursorDir::Up)
         } else if active.origin == EditOrigin::Grid
+            && !active.expanded
             && i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
         {
             Some(CursorDir::Down)
@@ -618,14 +896,187 @@ pub fn render_editor(
             None
         }
     });
-    if advance.is_some() && valid {
+    if advance.is_some() && active.check().is_ok() {
         return EditOutcome::Commit { advance };
     }
+    // Shift+Enter inserts a line break into text and switches to the expanded editor
+    // (Enter alone still commits, in both modes).
+    if active.kind == EditorKind::Text
+        && ui.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Enter))
+    {
+        insert_at_caret(ui.ctx(), editor_id, &mut active.buf, "\n");
+        active.expanded = true;
+    }
+    let hint = if active.kind == EditorKind::Text && active.seed_null {
+        "NULL"
+    } else {
+        active.kind.hint()
+    };
+    let problem = active.check().err();
+    let valid = problem.is_none();
+    let resp = if active.expanded {
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            return EditOutcome::Cancel;
+        }
+        // Enter commits valid input; on invalid input it stays put, as in the one-line field.
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) && valid {
+            return EditOutcome::Commit { advance: None };
+        }
+        render_expanded(ui, active, editor_id, hint, problem.as_deref())
+    } else {
+        if let Some(problem) = problem.as_deref() {
+            render_problem(ui, editor_id, problem);
+        }
+        render_single_line(ui, active, editor_id, hint, valid, fill)
+    };
+    // An open editor owns keyboard focus: re-request it any frame it doesn't have it.
+    // A one-shot request can be swallowed by a discarded egui pass, and egui silently
+    // drops focus when the cell scrolls out of the virtualized grid (the widget isn't
+    // rendered, so no lost_focus is ever reported) — either would leave a visible editor
+    // that ignores typing. A *deliberate* focus move (clicking elsewhere) is observed as
+    // lost_focus below and closes the editor, so this never fights another widget.
+    if !resp.has_focus() && !resp.lost_focus() {
+        resp.request_focus();
+    }
+    if std::mem::take(&mut active.fresh) {
+        if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), resp.id) {
+            let end = egui::text::CCursor::new(active.buf.chars().count());
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(end)));
+            state.store(ui.ctx(), resp.id);
+        }
+    }
+    // A new popover's first frame is an invisible sizing pass, where the field can't hold
+    // focus — the drop it reports is not the user leaving. Take focus back and carry on.
+    if active.expanded && !was_expanded {
+        resp.request_focus();
+        return EditOutcome::Continue;
+    }
+
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        return EditOutcome::Cancel;
+    }
+    if resp.lost_focus() {
+        if valid {
+            return EditOutcome::Commit { advance: None };
+        }
+        // Enter on invalid input keeps the editor open so it can be fixed (the focus
+        // re-request above grabs it back next frame); losing focus by clicking elsewhere
+        // discards it.
+        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            return EditOutcome::Continue;
+        }
+        return EditOutcome::Cancel;
+    }
+    EditOutcome::Continue
+}
+
+/// The multi-line text editor, as a popover anchored at the cell's top-left (a grid cell is
+/// one row tall, so it can't host the text itself). At least [`EXPANDED_EDITOR_W`] wide,
+/// kept on screen, and scrolling past [`EXPANDED_EDITOR_MAX_H`].
+fn render_expanded(
+    ui: &mut egui::Ui,
+    active: &mut ActiveEdit,
+    editor_id: egui::Id,
+    hint: &str,
+    problem: Option<&str>,
+) -> egui::Response {
+    let valid = problem.is_none();
+    let anchor = ui.max_rect();
+    let screen = ui.ctx().content_rect();
+    let width = anchor
+        .width()
+        .max(EXPANDED_EDITOR_W)
+        .min(screen.width() - 16.0);
+    let x = anchor
+        .left()
+        .min(screen.right() - width - 8.0)
+        .max(screen.left() + 8.0);
+    let border = if valid {
+        palette::ACCENT()
+    } else {
+        palette::DANGER()
+    };
+    egui::Area::new(editor_id.with("expanded"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::pos2(x, anchor.top()))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(palette::CODE_BG())
+                .stroke(egui::Stroke::new(1.0_f32, border))
+                .inner_margin(egui::Margin::same(6))
+                .show(ui, |ui| {
+                    let resp = egui::ScrollArea::vertical()
+                        .max_height(EXPANDED_EDITOR_MAX_H)
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut active.buf)
+                                    .id(editor_id)
+                                    .hint_text(hint)
+                                    .frame(egui::Frame::NONE)
+                                    // Enter commits and Shift+Enter breaks the line — both
+                                    // handled by the caller — so the field inserts neither.
+                                    .return_key(None)
+                                    .lock_focus(true)
+                                    .desired_rows(3)
+                                    .desired_width(width - 12.0),
+                            )
+                        })
+                        .inner;
+                    let note = match problem {
+                        Some(problem) => egui::RichText::new(problem).color(palette::DANGER()),
+                        None => {
+                            egui::RichText::new("Enter save · Shift+Enter new line · Esc cancel")
+                                .color(palette::TEXT_FAINT())
+                        }
+                    };
+                    ui.label(note.size(11.0));
+                    resp
+                })
+                .inner
+        })
+        .inner
+}
+
+/// Why the one-line editor's input can't be saved, in a small note under the cell. Not
+/// interactable, so it never takes a click (or focus) from the field or the grid.
+fn render_problem(ui: &egui::Ui, editor_id: egui::Id, problem: &str) {
+    let anchor = ui.max_rect();
+    egui::Area::new(editor_id.with("problem"))
+        .order(egui::Order::Tooltip)
+        .interactable(false)
+        .fixed_pos(anchor.left_bottom() + egui::vec2(0.0, 2.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(palette::SURFACE())
+                .stroke(egui::Stroke::new(1.0_f32, palette::DANGER()))
+                .corner_radius(egui::CornerRadius::same(4))
+                .inner_margin(egui::Margin::symmetric(6, 3))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(problem)
+                            .size(11.5)
+                            .color(palette::DANGER()),
+                    );
+                });
+        });
+}
+
+/// The one-line editor that fills the grid cell or Details value box.
+fn render_single_line(
+    ui: &mut egui::Ui,
+    active: &mut ActiveEdit,
+    editor_id: egui::Id,
+    hint: &str,
+    valid: bool,
+    fill: Option<egui::Vec2>,
+) -> egui::Response {
     let embedded = fill.is_some();
     let is_details = active.origin == EditOrigin::Details;
     let mut field = egui::TextEdit::singleline(&mut active.buf)
-        .hint_text(active.kind.hint())
-        .id_salt((active.row, active.col, active.origin))
+        .hint_text(hint)
+        .id(editor_id)
         // Keep Tab out of egui's focus traversal (which latches it at frame start, before
         // the consume_key above could run): the editor's event filter absorbs it, and the
         // consume_key prevents a literal '\t' from reaching the field.
@@ -676,7 +1127,7 @@ pub fn render_editor(
             field = field.margin(egui::Margin::symmetric(6, 3));
         }
     }
-    let resp = match fill {
+    match fill {
         // Details keeps its centred fixed-size placement. The grid cell instead lets the field
         // stretch to the full cell width (infinite desired width → clamps to the cell) with its
         // height already grown to the cell via the frame padding above, so the border sits flush
@@ -684,33 +1135,7 @@ pub fn render_editor(
         Some(size) if is_details => ui.add_sized(size, field),
         Some(_) => ui.add(field.desired_width(f32::INFINITY)),
         None => ui.add(field.desired_width(f32::INFINITY)),
-    };
-    // An open editor owns keyboard focus: re-request it any frame it doesn't have it.
-    // A one-shot request can be swallowed by a discarded egui pass, and egui silently
-    // drops focus when the cell scrolls out of the virtualized grid (the widget isn't
-    // rendered, so no lost_focus is ever reported) — either would leave a visible editor
-    // that ignores typing. A *deliberate* focus move (clicking elsewhere) is observed as
-    // lost_focus below and closes the editor, so this never fights another widget.
-    if !resp.has_focus() && !resp.lost_focus() {
-        resp.request_focus();
     }
-
-    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-        return EditOutcome::Cancel;
-    }
-    if resp.lost_focus() {
-        if valid {
-            return EditOutcome::Commit { advance: None };
-        }
-        // Enter on invalid input keeps the editor open so it can be fixed (the focus
-        // re-request above grabs it back next frame); losing focus by clicking elsewhere
-        // discards it.
-        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            return EditOutcome::Continue;
-        }
-        return EditOutcome::Cancel;
-    }
-    EditOutcome::Continue
 }
 
 /// Map a *display* row index to the raw row id it addresses: an index into `order` for
@@ -733,6 +1158,28 @@ pub fn original_value(result: &dbcore::QueryResult, raw: usize, col: usize) -> O
     } else {
         result.rows.get(raw).and_then(|row| row.get(col)).cloned()
     }
+}
+
+/// The rows an edit at display row `disp` should also write, TablePlus-style: when `disp`
+/// is part of a multi-row selection, every *other* selected row paired with the value its
+/// `col` cell is typed against. Empty for a single-row selection or a cell outside it.
+pub fn selection_fan_out(
+    selection: &crate::grid::Selection,
+    order: &[usize],
+    new_rows: usize,
+    result: &dbcore::QueryResult,
+    disp: usize,
+    col: usize,
+) -> Vec<(usize, Value)> {
+    if selection.len() < 2 || !selection.contains(disp) {
+        return Vec::new();
+    }
+    selection
+        .iter()
+        .filter(|&d| d != disp)
+        .filter_map(|d| disp_to_raw(order, new_rows, d))
+        .filter_map(|raw| original_value(result, raw, col).map(|v| (raw, v)))
+        .collect()
 }
 
 /// Commit the open editor into the staged set, typing the value against the stored cell;
@@ -853,6 +1300,255 @@ mod tests {
         // The final write-guard rejects a value of the wrong shape for the column.
         assert!(!EditorKind::Int.accepts(&Value::Text("31".into())));
         assert!(EditorKind::Int.accepts(&Value::Int(31)));
+    }
+
+    fn cols(types: &[&str]) -> Vec<dbcore::ColumnMeta> {
+        types
+            .iter()
+            .enumerate()
+            .map(|(i, t)| dbcore::ColumnMeta {
+                name: format!("c{i}"),
+                type_name: (*t).into(),
+            })
+            .collect()
+    }
+
+    /// Opening a cell and leaving it untouched must never rewrite it: `''` and NULL both seed
+    /// an empty buffer, so re-parsing would silently turn one into the other.
+    #[test]
+    fn untouched_editor_stages_nothing() {
+        let mut e = Edits::default();
+        e.set_columns(&cols(&["varchar(20)", "INT"]));
+        for original in [Value::Text(String::new()), Value::Null] {
+            e.begin(0, 0, &original, EditOrigin::Grid);
+            assert!(e.commit_active(&original));
+            assert!(e.active.is_none());
+            assert!(!e.has_pending(), "{original:?} must stay as-is");
+        }
+    }
+
+    /// String columns keep what was typed — clearing gives `''`, spaces survive. Other kinds
+    /// still read an emptied editor as NULL.
+    #[test]
+    fn string_columns_distinguish_empty_from_null() {
+        let mut e = Edits::default();
+        e.set_columns(&cols(&["TEXT", "INT", "uuid"]));
+        let hello = Value::Text("hello".into());
+
+        e.begin(0, 0, &hello, EditOrigin::Grid);
+        e.active.as_mut().unwrap().buf.clear();
+        assert!(e.commit_active(&hello));
+        assert_eq!(e.staged(0, 0), Some(&Value::Text(String::new())));
+
+        e.begin(1, 0, &hello, EditOrigin::Grid);
+        e.active.as_mut().unwrap().buf = "  ".into();
+        assert!(e.commit_active(&hello));
+        assert_eq!(e.staged(1, 0), Some(&Value::Text("  ".into())));
+
+        e.begin(0, 1, &Value::Int(3), EditOrigin::Grid);
+        e.active.as_mut().unwrap().buf.clear();
+        assert!(e.commit_active(&Value::Int(3)));
+        assert_eq!(e.staged(0, 1), Some(&Value::Null));
+
+        // UUID edits as free text but has no empty value: emptied still means NULL.
+        let id = Value::Text("0b6e…".into());
+        e.begin(0, 2, &id, EditOrigin::Grid);
+        e.active.as_mut().unwrap().buf.clear();
+        assert!(e.commit_active(&id));
+        assert_eq!(e.staged(0, 2), Some(&Value::Null));
+    }
+
+    #[test]
+    fn set_cells_is_one_undo_step_and_skips_deleted_rows() {
+        let mut e = Edits::default();
+        e.set_columns(&cols(&["TEXT"]));
+        e.toggle_delete(1);
+        let a = Value::Text("a".into());
+        e.begin(0, 0, &a, EditOrigin::Grid);
+        let targets = [(0, a.clone()), (1, a.clone()), (2, Value::Null)];
+        e.set_cells(&targets, 0, SetTo::Null);
+
+        assert!(e.active.is_none(), "an editor on a target cell is closed");
+        assert_eq!(e.staged(0, 0), Some(&Value::Null));
+        assert_eq!(e.staged(1, 0), None, "deleted row untouched");
+        assert_eq!(e.staged(2, 0), None, "already NULL → no change");
+
+        e.set_cells(&targets, 0, SetTo::Empty);
+        assert_eq!(e.staged(2, 0), Some(&Value::Text(String::new())));
+        assert!(e.undo());
+        assert_eq!(e.staged(0, 0), Some(&Value::Null), "one undo per action");
+        assert_eq!(e.staged(2, 0), None);
+    }
+
+    /// An editor opened over a multi-row selection writes every selected row on commit, as
+    /// one undo step — but only if something was actually typed.
+    #[test]
+    fn fan_out_commit_writes_every_target_as_one_step() {
+        let mut e = Edits::default();
+        e.set_columns(&cols(&["TEXT"]));
+        e.toggle_delete(3);
+        let targets = vec![
+            (1, Value::Text("b".into())),
+            (3, Value::Text("d".into())),
+            (4, Value::Bytes(vec![1])),
+        ];
+        let a = Value::Text("a".into());
+
+        e.begin(0, 0, &a, EditOrigin::Grid);
+        e.set_fan_out(targets.clone());
+        assert!(e.commit_active(&a), "untouched");
+        assert!(
+            !e.row_dirty(0) && !e.row_dirty(1),
+            "untouched fans out nothing"
+        );
+
+        e.begin(0, 0, &a, EditOrigin::Grid);
+        e.set_fan_out(targets);
+        assert_eq!(e.active.as_ref().unwrap().fan_out_len(), 3);
+        e.active.as_mut().unwrap().buf = "z".into();
+        assert!(e.commit_active(&a));
+        let z = Some(Value::Text("z".into()));
+        assert_eq!(e.staged(0, 0).cloned(), z);
+        assert_eq!(e.staged(1, 0).cloned(), z);
+        assert_eq!(e.staged(3, 0), None, "deleted row skipped");
+        assert_eq!(e.staged(4, 0), None, "binary cell skipped");
+
+        assert!(e.undo());
+        assert!(!e.row_dirty(0) && !e.row_dirty(1), "one undo reverts all");
+    }
+
+    #[test]
+    fn paste_text_rejects_invalid_values() {
+        let mut e = Edits::default();
+        e.set_columns(&cols(&["INT"]));
+        assert!(!e.paste_text(0, 0, "abc", &Value::Int(1)));
+        assert!(!e.has_pending());
+        assert!(e.paste_text(0, 0, "7", &Value::Int(1)));
+        assert_eq!(e.staged(0, 0), Some(&Value::Int(7)));
+        assert!(
+            e.paste_text(0, 0, "", &Value::Int(1)),
+            "empty field is NULL"
+        );
+        assert_eq!(e.staged(0, 0), Some(&Value::Null));
+    }
+
+    /// Screenshot generator (ignored): the expanded multi-line editor popover over a grid
+    /// cell, so its frame, wrap and key hint can be judged at the size it ships at.
+    #[test]
+    #[ignore = "screenshot generator; run manually with --ignored"]
+    fn snapshot_expanded_editor() {
+        let mut e = Edits::default();
+        e.set_columns(&cols(&["TEXT"]));
+        let value = Value::Text(
+            "Shipping note:\nLeave at the side door, ring twice.\n{\"gift\": true, \"wrap\": \"blue\"}".into(),
+        );
+        e.begin(0, 0, &value, EditOrigin::Grid);
+        let mut active = e.active.take();
+        let mut setup = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(460.0, 220.0))
+            .with_pixels_per_point(2.0)
+            .build_ui(move |ui| {
+                if !setup {
+                    crate::style::apply(ui.ctx());
+                    setup = true;
+                }
+                ui.painter()
+                    .rect_filled(ui.ctx().content_rect(), 0.0, palette::BASE());
+                let cell =
+                    egui::Rect::from_min_size(egui::pos2(40.0, 30.0), egui::vec2(150.0, 26.0));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(cell), |ui| {
+                    if let Some(active) = active.as_mut() {
+                        render_editor(ui, active, Some(cell.size()));
+                    }
+                });
+            });
+        harness.run_steps(8);
+        harness.snapshot("expanded_cell_editor");
+    }
+
+    fn rule(not_null: bool, required: bool, max_chars: Option<u32>) -> ColumnRule {
+        ColumnRule {
+            not_null,
+            required,
+            max_chars,
+        }
+    }
+
+    /// NOT NULL stops a stored row being emptied to NULL (with the reason), while a new row
+    /// may leave the column out — required-ness is checked at save instead.
+    #[test]
+    fn not_null_blocks_null_on_stored_rows_only() {
+        let mut e = Edits::default();
+        e.set_columns(&cols(&["INT"]));
+        e.set_rules(vec![rule(true, false, None)]);
+
+        e.begin(0, 0, &Value::Int(3), EditOrigin::Grid);
+        e.active.as_mut().unwrap().buf.clear();
+        assert_eq!(
+            e.active.as_ref().unwrap().check(),
+            Err("Can't be NULL".into())
+        );
+        assert!(!e.commit_active(&Value::Int(3)), "stays open");
+        assert!(!e.has_pending());
+
+        let new = e.add_new_row();
+        e.begin(new, 0, &Value::Null, EditOrigin::Grid);
+        e.active.as_mut().unwrap().buf = "5".into();
+        e.active.as_mut().unwrap().buf.clear();
+        assert!(e.active.as_ref().unwrap().check().is_ok());
+    }
+
+    #[test]
+    fn declared_length_is_enforced_while_typing() {
+        let mut e = Edits::default();
+        e.set_columns(&cols(&["varchar(5)"]));
+        e.set_rules(vec![rule(false, false, Some(5))]);
+        let orig = Value::Text("abc".into());
+        e.begin(0, 0, &orig, EditOrigin::Grid);
+        // Characters, not bytes: five Thai characters fit.
+        e.active.as_mut().unwrap().buf = "สวัสด".into();
+        assert!(e.active.as_ref().unwrap().check().is_ok());
+        e.active.as_mut().unwrap().buf = "abcdef".into();
+        assert_eq!(
+            e.active.as_ref().unwrap().check(),
+            Err("Too long: 6 / 5 characters".into())
+        );
+        assert!(!e.commit_active(&orig));
+        // Paste and Set Empty/NULL obey the same rules.
+        assert!(!e.paste_text(0, 0, "abcdef", &orig));
+        assert!(e.paste_text(0, 0, "abcde", &orig));
+    }
+
+    #[test]
+    fn set_cells_skips_rows_the_rule_rejects() {
+        let mut e = Edits::default();
+        e.set_columns(&cols(&["TEXT"]));
+        e.set_rules(vec![rule(true, false, None)]);
+        let new = e.add_new_row();
+        let a = Value::Text("a".into());
+        let skipped = e.set_cells(&[(0, a.clone()), (new, Value::Null)], 0, SetTo::Empty);
+        assert_eq!(skipped, 0, "'' is fine in NOT NULL");
+        let skipped = e.set_cells(&[(0, a), (1, Value::Text("b".into()))], 0, SetTo::Null);
+        assert_eq!(skipped, 2);
+        assert_eq!(e.staged(1, 0), None);
+    }
+
+    #[test]
+    fn missing_required_names_the_first_empty_cell() {
+        let mut e = Edits::default();
+        e.set_columns(&cols(&["INT", "TEXT", "TEXT"]));
+        e.set_rules(vec![
+            rule(true, false, None), // NOT NULL with a default: may be omitted
+            rule(true, true, None),
+            rule(false, false, None),
+        ]);
+        let first = e.add_new_row();
+        let second = e.add_new_row();
+        e.stage(first, 1, Value::Text("x".into()), &Value::Null);
+        assert_eq!(e.missing_required(), Some((1, 1)), "second row, column 1");
+        e.stage(second, 1, Value::Text("y".into()), &Value::Null);
+        assert_eq!(e.missing_required(), None);
     }
 
     #[test]

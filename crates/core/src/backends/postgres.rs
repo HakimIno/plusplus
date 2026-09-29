@@ -216,9 +216,11 @@ impl Database for PostgresDb {
         }
 
         // Columns (ordered by ordinal position).
-        let col_rows: Vec<(String, String, String, String, String, Option<String>, String, Option<String>)> = sqlx::query_as(AssertSqlSafe(format!(
+        #[allow(clippy::type_complexity)]
+        let col_rows: Vec<(String, String, String, String, String, Option<String>, String, Option<String>, Option<i32>)> = sqlx::query_as(AssertSqlSafe(format!(
             "SELECT c.table_schema, c.table_name, c.column_name, c.data_type, c.is_nullable, c.column_default, c.is_generated, \
-                    pg_catalog.col_description(pg_catalog.to_regclass(format('%I.%I', c.table_schema, c.table_name))::oid, c.ordinal_position) \
+                    pg_catalog.col_description(pg_catalog.to_regclass(format('%I.%I', c.table_schema, c.table_name))::oid, c.ordinal_position), \
+                    c.character_maximum_length::int4 \
              FROM information_schema.columns c \
              WHERE c.table_schema NOT IN {SYSTEM_SCHEMAS} \
              ORDER BY c.table_schema, c.table_name, c.ordinal_position"
@@ -268,8 +270,17 @@ impl Database for PostgresDb {
                 .push(clause);
         }
 
-        for (schema, table, column, data_type, is_nullable, default, is_generated, comment) in
-            col_rows
+        for (
+            schema,
+            table,
+            column,
+            data_type,
+            is_nullable,
+            default,
+            is_generated,
+            comment,
+            max_length,
+        ) in col_rows
         {
             let key = (schema.clone(), table.clone(), column.clone());
             let generated = is_generated != "NEVER"
@@ -285,6 +296,7 @@ impl Database for PostgresDb {
                 check: checks.get(&key).map(|items| items.join(" AND ")),
                 comment,
                 generated,
+                max_length: max_length.and_then(|n| u32::try_from(n).ok()),
             };
             if let Some(info) = tables.get_mut(&(schema.clone(), table.clone())) {
                 info.columns.push(col);

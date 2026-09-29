@@ -132,6 +132,10 @@ pub struct Settings {
     /// in MiB. `None` uses the application default.
     #[serde(default)]
     pub result_memory_budget_mb: Option<u32>,
+    /// Show the generated SQL for review before Cmd/Ctrl+S saves staged row edits. `None` =
+    /// the default (on). Production connections always confirm regardless.
+    #[serde(default)]
+    pub review_edits_before_save: Option<bool>,
     /// The last version of the app the user has seen the "What's New" dialog for.
     #[serde(default)]
     pub last_seen_version: Option<String>,
