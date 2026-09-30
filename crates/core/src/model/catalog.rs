@@ -40,6 +40,77 @@ impl ColumnInfo {
         }
         rest.split(')').next()?.trim().parse().ok()
     }
+
+    /// The allowed labels of an `enum('a','b')` column (MySQL's `COLUMN_TYPE`; Postgres
+    /// introspection renders enum types the same way), in declaration order. `None` for any
+    /// other type — including `set(...)`, which holds a comma-joined subset, not one label.
+    pub fn enum_values(&self) -> Option<Vec<String>> {
+        let t = self.data_type.trim();
+        let head = t.get(..5)?;
+        if !head.eq_ignore_ascii_case("enum(") || !t.ends_with(')') {
+            return None;
+        }
+        let mut chars = t[5..t.len() - 1].chars().peekable();
+        let mut values = Vec::new();
+        loop {
+            if chars.next()? != '\'' {
+                return None;
+            }
+            let mut label = String::new();
+            loop {
+                match chars.next()? {
+                    '\'' if chars.peek() == Some(&'\'') => {
+                        chars.next();
+                        label.push('\'');
+                    }
+                    '\'' => break,
+                    c => label.push(c),
+                }
+            }
+            values.push(label);
+            match chars.next() {
+                None => return Some(values),
+                Some(',') => {}
+                Some(_) => return None,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod enum_tests {
+    use super::*;
+
+    fn col(data_type: &str) -> ColumnInfo {
+        ColumnInfo {
+            name: "c".into(),
+            data_type: data_type.into(),
+            nullable: true,
+            primary_key: false,
+            default: None,
+            check: None,
+            comment: None,
+            generated: false,
+            max_length: None,
+        }
+    }
+
+    #[test]
+    fn parses_enum_labels() {
+        assert_eq!(
+            col("enum('active','it''s, odd','')").enum_values(),
+            Some(vec!["active".into(), "it's, odd".into(), "".into()])
+        );
+        assert_eq!(col("ENUM('a')").enum_values(), Some(vec!["a".into()]));
+    }
+
+    #[test]
+    fn rejects_non_enums() {
+        assert_eq!(col("set('a','b')").enum_values(), None);
+        assert_eq!(col("varchar(20)").enum_values(), None);
+        assert_eq!(col("enum('a'").enum_values(), None);
+        assert_eq!(col("enum(a)").enum_values(), None);
+    }
 }
 
 /// An index on a table.

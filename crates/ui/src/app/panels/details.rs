@@ -75,16 +75,11 @@ fn details_field(
             // Header: column name on the left, with a quiet colour-coded type label pinned to
             // the right edge. Details deliberately avoids badge chrome so values stay dominant.
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(&col.name)
-                        .strong()
-                        .color(palette::TEXT()),
-                );
+                ui.label(egui::RichText::new(&col.name).color(palette::TEXT_WEAK()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
-                        egui::RichText::new(col.type_name.to_uppercase())
-                            .size(10.0)
-                            .strong()
+                        egui::RichText::new(col.type_name.to_lowercase())
+                            .size(11.0)
                             .color(kind_color(kind)),
                     );
                 });
@@ -313,6 +308,17 @@ fn details_value_box(
     let chev_rect =
         egui::Rect::from_min_max(egui::pos2(rect.right() - chev_w, rect.top()), rect.max);
     let chev_resp = ui.interact(chev_rect, resp.id.with("actions"), egui::Sense::click());
+    // Structured values (JSON) get a one-click "View" button beside the chevron, opening the
+    // formatted, syntax-coloured viewer — the one-line box can't show them readably.
+    let viewer_kind = crate::value_viewer::ValueViewer::kind(&col.type_name, shown);
+    let view_rect = egui::Rect::from_min_max(
+        egui::pos2(chev_rect.left() - chev_w, rect.top()),
+        egui::pos2(chev_rect.left(), rect.bottom()),
+    );
+    let view_resp = (viewer_kind == Some(crate::value_viewer::ViewerKind::Json)).then(|| {
+        ui.interact(view_rect, resp.id.with("view"), egui::Sense::click())
+            .on_hover_text("View formatted JSON")
+    });
 
     if ui.is_rect_visible(rect) {
         let hovered = resp.hovered() || chev_resp.hovered();
@@ -357,8 +363,27 @@ fn details_value_box(
             },
         );
         let galley = ui.fonts_mut(|f| f.layout_job(job));
+        let text_right = if view_resp.is_some() {
+            view_rect.left()
+        } else {
+            chev_rect.left()
+        };
         let text_clip =
-            egui::Rect::from_min_max(rect.min, egui::pos2(chev_rect.left() - 2.0, rect.bottom()));
+            egui::Rect::from_min_max(rect.min, egui::pos2(text_right - 2.0, rect.bottom()));
+        if let Some(view_resp) = &view_resp {
+            let tint = if view_resp.hovered() {
+                palette::TEXT()
+            } else {
+                palette::TEXT_WEAK()
+            };
+            egui::Image::new(crate::icons::view())
+                .fit_to_exact_size(egui::Vec2::splat(14.0))
+                .tint(tint)
+                .paint_at(
+                    ui,
+                    egui::Rect::from_center_size(view_rect.center(), egui::Vec2::splat(14.0)),
+                );
+        }
         ui.painter().with_clip_rect(text_clip).galley(
             egui::pos2(
                 rect.left() + crate::edit::DETAILS_VALUE_PAD_X,
@@ -387,16 +412,47 @@ fn details_value_box(
         );
     }
 
+    if view_resp.is_some_and(|r| r.clicked()) {
+        if let Some(viewer) =
+            crate::value_viewer::ValueViewer::new(&col.name, &col.type_name, shown)
+        {
+            actions.push(Action::OpenValueViewer(viewer));
+        }
+    }
+
     // Click-to-edit, like a real input. Booleans toggle instead of opening an editor.
     if can_edit {
         let resp = resp.on_hover_cursor(egui::CursorIcon::Text);
-        if resp.clicked() {
-            if kind == K::Bool {
-                edits.toggle_bool(row_idx, c, value);
-            } else {
-                // Prefill from the staged value (if any) so editing continues from it.
-                edits.begin(row_idx, c, shown, crate::edit::EditOrigin::Details);
-            }
+        if kind == K::Bool {
+            // A boolean is picked from a short list (TRUE / FALSE / NULL), not typed.
+            let current = (!shown.is_null()).then(|| crate::edit::as_bool(shown));
+            let null_ok = edits.rule(c).is_none_or(|rule| !rule.not_null);
+            egui::Popup::menu(&resp).show(|ui| {
+                ui.set_min_width(rect.width().max(110.0));
+                for (label, choice) in [("TRUE", true), ("FALSE", false)] {
+                    if ui
+                        .add(egui::Button::selectable(current == Some(choice), label))
+                        .clicked()
+                    {
+                        edits.stage(row_idx, c, dbcore::Value::Bool(choice), value);
+                        ui.close();
+                    }
+                }
+                if null_ok {
+                    ui.separator();
+                    if ui
+                        .add(egui::Button::selectable(current.is_none(), "NULL"))
+                        .clicked()
+                    {
+                        edits.stage(row_idx, c, dbcore::Value::Null, value);
+                        ui.close();
+                    }
+                }
+            });
+        } else if resp.clicked() {
+            // Prefill from the staged value (if any) so editing continues from it. An ENUM
+            // column opens its list of allowed values here instead of a text field.
+            edits.begin(row_idx, c, shown, crate::edit::EditOrigin::Details);
         }
     } else if resp.double_clicked()
         && crate::value_viewer::ValueViewer::kind(&col.type_name, shown).is_some()
@@ -522,6 +578,8 @@ impl DbGuiApp {
         let details_filter = &mut self.details_filter;
         let details_date_pick = &mut self.details_date_pick;
         let details_image_preview = &mut self.details_image_preview;
+        let show_details_panel = &mut self.show_details_panel;
+        let workspace_dirty = &mut self.workspace_dirty;
 
         egui::Panel::right("details_panel")
             .resizable(true)
@@ -530,7 +588,19 @@ impl DbGuiApp {
             .show_separator_line(false)
             .show_inside(root, |ui| {
                 ui.add_space(6.0);
-                components::section_header(ui, "Details");
+                ui.horizontal(|ui| {
+                    components::section_title(ui, "Details");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if components::Btn::ghost_icon(icons::close())
+                            .tooltip("Close Details panel")
+                            .show(ui)
+                            .clicked()
+                        {
+                            *show_details_panel = false;
+                            *workspace_dirty = true;
+                        }
+                    });
+                });
                 // Live field filter, TablePlus-style: typing narrows the stacked fields
                 // below by column name. Icon sits inside the field via `icon_text_input`.
                 components::icon_text_input(

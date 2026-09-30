@@ -101,7 +101,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Tiny, single-purpose, no_std-friendly — pairs with the `minisign` CLI used to sign releases.
 minisign-verify = "0.2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 # RFC 4180 CSV *parser* for data import. Export hand-rolls its writer (trivial), but parsing
 # is where the edge cases live — quoted fields, embedded newlines, CRLF, BOM — so use the
 # well-tested crate rather than a second hand-rolled implementation.

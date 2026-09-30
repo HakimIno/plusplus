@@ -985,11 +985,8 @@ fn build_grid(
                         && state != crate::edit::RowState::Deleted
                         && !matches!(stored, Value::Bytes(_))
                     {
-                        if edits.col_kind(c) == EditorKind::Bool {
-                            out.toggle = Some((disp, c));
-                        } else {
-                            out.begin_edit = Some((disp, c));
-                        }
+                        // Booleans open a TRUE / FALSE / NULL list like any other editor.
+                        out.begin_edit = Some((disp, c));
                     }
 
                     // Shift+click a Shift-hovered (underlined) FK cell → follow the key, and skip
@@ -1224,6 +1221,13 @@ fn header_cell(
         egui::Id::new(("result_header_context", grid_id, i)),
         egui::Sense::click(),
     );
+    // Double-clicking a header fits the column to its content — same as "Fit this column".
+    if header_response.double_clicked() {
+        update_column_view(ui, grid_id, |view| {
+            view.fit_content_next_frame = Some(i);
+        });
+        ui.ctx().request_repaint();
+    }
     header_response.context_menu(|ui| {
         header_menu(
             ui,

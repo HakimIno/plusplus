@@ -43,6 +43,22 @@ pub(crate) fn section_header(ui: &mut egui::Ui, text: &str) {
     ui.add_space(3.0);
 }
 
+/// A panel title in sentence case ("Details"), for panels where the tracked-out caps of
+/// [`section_header`] read as shouting.
+pub(crate) fn section_title(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(2.0);
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(text)
+                .size(13.0)
+                .strong()
+                .color(palette::TEXT_WEAK()),
+        )
+        .selectable(false),
+    );
+    ui.add_space(3.0);
+}
+
 pub(crate) fn paint_table_header_cell(ui: &mut egui::Ui) {
     let rect = ui.available_rect_before_wrap();
     if !ui.is_rect_visible(rect) {

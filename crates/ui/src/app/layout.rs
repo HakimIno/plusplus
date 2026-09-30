@@ -542,7 +542,10 @@ impl DbGuiApp {
                             crate::edit::begin_cell_edit(&mut tab.edits, result, raw, col);
                             tab.edits.set_fan_out(fan_out);
                             if let Some(active) = tab.edits.active.as_mut() {
-                                active.buf = text;
+                                // An enum is picked from its list; typed text can't seed it.
+                                if !active.is_enum() {
+                                    active.buf = text;
+                                }
                                 ctx.input_mut(|i| {
                                     i.events.retain(|e| !matches!(e, egui::Event::Text(_)))
                                 });

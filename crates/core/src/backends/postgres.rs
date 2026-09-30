@@ -218,7 +218,14 @@ impl Database for PostgresDb {
         // Columns (ordered by ordinal position).
         #[allow(clippy::type_complexity)]
         let col_rows: Vec<(String, String, String, String, String, Option<String>, String, Option<String>, Option<i32>)> = sqlx::query_as(AssertSqlSafe(format!(
-            "SELECT c.table_schema, c.table_name, c.column_name, c.data_type, c.is_nullable, c.column_default, c.is_generated, \
+            "SELECT c.table_schema, c.table_name, c.column_name, \
+                    COALESCE((SELECT 'enum(' || string_agg('''' || replace(e.enumlabel, '''', '''''') || '''', ',' ORDER BY e.enumsortorder) || ')' \
+                              FROM pg_catalog.pg_enum e \
+                              JOIN pg_catalog.pg_type t ON t.oid = e.enumtypid \
+                              JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
+                              WHERE c.data_type = 'USER-DEFINED' AND n.nspname = c.udt_schema AND t.typname = c.udt_name), \
+                             c.data_type), \
+                    c.is_nullable, c.column_default, c.is_generated, \
                     pg_catalog.col_description(pg_catalog.to_regclass(format('%I.%I', c.table_schema, c.table_name))::oid, c.ordinal_position), \
                     c.character_maximum_length::int4 \
              FROM information_schema.columns c \

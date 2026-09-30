@@ -68,6 +68,8 @@ pub struct ActiveEdit {
     expanded: bool,
     /// The column holds strings (see [`is_string_type`]): an emptied buffer means `''`.
     string_col: bool,
+    /// A JSON/JSONB column: shown indented and coloured, and must stay valid JSON.
+    json: bool,
     /// The column's constraints, checked on every keystroke (see [`Self::check`]).
     rule: ColumnRule,
 }
@@ -76,7 +78,9 @@ impl ActiveEdit {
     /// Type the buffer for its column: string columns keep it byte-for-byte (empty stays
     /// `''`, NULL is set explicitly from the context menu); other kinds read empty as NULL.
     fn parse(&self) -> Value {
-        if self.kind == EditorKind::Text && self.string_col {
+        if !self.rule.enum_values.is_empty() && self.buf.is_empty() {
+            Value::Null
+        } else if self.kind == EditorKind::Text && self.string_col {
             Value::Text(self.buf.clone())
         } else {
             self.kind.parse(&self.buf)
@@ -89,11 +93,21 @@ impl ActiveEdit {
         if !self.kind.is_valid(&self.buf) {
             return Err(format!("Not {}", self.kind.expected()));
         }
+        if self.json && !self.buf.trim().is_empty() {
+            if let Err(e) = serde_json::from_str::<serde_json::Value>(&self.buf) {
+                return Err(format!("Not valid JSON: {e}"));
+            }
+        }
         let value = self.parse();
         match self.rule.violation(&value, is_new_row(self.row)) {
             Some(problem) => Err(problem),
             None => Ok(value),
         }
+    }
+
+    /// The column is an `ENUM`: edited by picking a label, never by typing.
+    pub fn is_enum(&self) -> bool {
+        !self.rule.enum_values.is_empty()
     }
 
     /// How many *other* rows a commit also writes (0 for a plain single-cell edit).
@@ -138,6 +152,9 @@ pub struct ColumnRule {
     /// Longest string the column accepts, in characters (only where the database enforces
     /// declared lengths).
     pub max_chars: Option<u32>,
+    /// The only values an `ENUM` column accepts, in declaration order. Non-empty switches
+    /// the grid editor from a text field to a picker.
+    pub enum_values: Vec<String>,
 }
 
 impl ColumnRule {
@@ -146,6 +163,11 @@ impl ColumnRule {
     pub fn violation(&self, value: &Value, new_row: bool) -> Option<String> {
         if value.is_null() && self.not_null && !new_row {
             return Some("Can't be NULL".into());
+        }
+        if let Value::Text(text) = value {
+            if !self.enum_values.is_empty() && !self.enum_values.contains(text) {
+                return Some("Not one of the allowed values".into());
+            }
         }
         if let (Some(max), Value::Text(text)) = (self.max_chars, value) {
             let n = text.chars().count();
@@ -273,6 +295,8 @@ pub struct Edits {
     col_kinds: Vec<EditorKind>,
     /// Per-column [`is_string_type`], indexed like `result.columns`.
     col_strings: Vec<bool>,
+    /// Per-column "is a JSON/JSONB type", indexed like `result.columns`.
+    col_json: Vec<bool>,
     /// Per-column constraints, indexed like `result.columns`. Empty until the table's
     /// metadata is known (see [`Self::set_rules`]).
     rules: Vec<ColumnRule>,
@@ -423,6 +447,10 @@ impl Edits {
         self.col_strings = columns
             .iter()
             .map(|c| is_string_type(&c.type_name))
+            .collect();
+        self.col_json = columns
+            .iter()
+            .map(|c| c.type_name.to_ascii_uppercase().contains("JSON"))
             .collect();
         self.rules.clear();
         self.rules_synced = false;
@@ -594,15 +622,28 @@ impl Edits {
     /// Open an editor on `(row, col)`, seeding the buffer from the cell's current value.
     /// `origin` is the view that should render the editor (grid or Details panel).
     pub fn begin(&mut self, row: usize, col: usize, current: &Value, origin: EditOrigin) {
-        let buf = match current {
+        let json = self.col_json.get(col).copied().unwrap_or(false);
+        let mut buf = match current {
             Value::Null => String::new(),
             other => other.display(),
         };
-        let rule = self.rules.get(col).cloned().unwrap_or_default();
+        // JSON opens indented so it can be read and edited; an untouched editor still stages
+        // nothing (the seed is the indented text).
+        if json {
+            if let Some(pretty) = crate::value_viewer::pretty_json(&buf) {
+                buf = pretty;
+            }
+        }
+        let mut rule = self.rules.get(col).cloned().unwrap_or_default();
+        let kind = self.col_kind(col);
+        // A boolean is picked from a list like an enum, never typed.
+        if kind == EditorKind::Bool && rule.enum_values.is_empty() {
+            rule.enum_values = vec!["true".into(), "false".into()];
+        }
         self.active = Some(ActiveEdit {
             row,
             col,
-            kind: self.col_kind(col),
+            kind,
             seed: buf.clone(),
             buf,
             origin,
@@ -611,6 +652,7 @@ impl Edits {
             fan_out: Vec::new(),
             expanded: false,
             string_col: self.col_is_string(col),
+            json,
             rule,
         });
     }
@@ -856,6 +898,9 @@ pub fn render_editor(
     fill: Option<egui::Vec2>,
 ) -> EditOutcome {
     let editor_id = egui::Id::new(("cell_editor", active.row, active.col, active.origin));
+    if active.is_enum() {
+        return render_enum_picker(ui, active, editor_id, fill);
+    }
     let was_expanded = active.expanded;
     // Text that can't be edited comfortably on one line opens expanded: it already has line
     // breaks, or (checked once, as the editor opens) it's wider than the cell.
@@ -972,6 +1017,148 @@ pub fn render_editor(
     EditOutcome::Continue
 }
 
+/// The editor for an `ENUM` column: the cell shows the current label and a list of the
+/// allowed ones opens under it, so nothing outside the enum can be typed. Up/Down move the
+/// highlight, Enter or a click picks, Esc (or a click elsewhere) abandons. NULL is offered
+/// wherever the column allows it.
+fn render_enum_picker(
+    ui: &mut egui::Ui,
+    active: &mut ActiveEdit,
+    editor_id: egui::Id,
+    fill: Option<egui::Vec2>,
+) -> EditOutcome {
+    let cell = ui.max_rect();
+    let width = fill.map_or(cell.width(), |size| size.x);
+    let null_ok = active
+        .rule
+        .violation(&Value::Null, is_new_row(active.row))
+        .is_none();
+    // Entries are `None` for NULL, else an index into the rule's labels; NULL comes last.
+    let mut entries: Vec<Option<usize>> = (0..active.rule.enum_values.len()).map(Some).collect();
+    if null_ok {
+        entries.push(None);
+    }
+    let current = if active.buf.is_empty() {
+        None
+    } else if active.kind == EditorKind::Bool {
+        // Backends render booleans differently (true, t, 1…): match by meaning.
+        Some(usize::from(!as_bool(&active.kind.parse(&active.buf))))
+    } else {
+        active
+            .rule
+            .enum_values
+            .iter()
+            .position(|v| *v == active.buf)
+    };
+
+    let hl_id = editor_id.with("highlight");
+    let mut highlight = ui
+        .data(|d| d.get_temp::<usize>(hl_id))
+        .unwrap_or_else(|| {
+            entries
+                .iter()
+                .position(|e| *e == current)
+                .unwrap_or_default()
+        })
+        .min(entries.len().saturating_sub(1));
+    let mut picked: Option<Option<usize>> = None;
+    if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)) {
+        highlight = (highlight + 1).min(entries.len().saturating_sub(1));
+    }
+    if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)) {
+        highlight = highlight.saturating_sub(1);
+    }
+    if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+        picked = entries.get(highlight).copied();
+    }
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        return EditOutcome::Cancel;
+    }
+    ui.data_mut(|d| d.insert_temp(hl_id, highlight));
+
+    // The cell face: current label (or NULL) with a chevron, on the editor's fill.
+    let face = fill.map_or(cell, |size| egui::Rect::from_min_size(cell.min, size));
+    ui.painter().rect_filled(face, 0.0, palette::CODE_BG());
+    let (text, colour) = match current {
+        Some(i) => (active.rule.enum_values[i].as_str(), palette::TEXT()),
+        None => ("NULL", palette::TEXT_WEAK()),
+    };
+    ui.painter().text(
+        face.left_center() + egui::vec2(6.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        text,
+        egui::TextStyle::Body.resolve(ui.style()),
+        colour,
+    );
+    let chevron = egui::Rect::from_center_size(
+        face.right_center() - egui::vec2(12.0, 0.0),
+        egui::Vec2::splat(14.0),
+    );
+    egui::Image::new(crate::icons::chevron_down())
+        .fit_to_exact_size(chevron.size())
+        .tint(palette::TEXT_WEAK())
+        .paint_at(ui, chevron);
+
+    let area = egui::Area::new(editor_id.with("list"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(face.left_bottom() + egui::vec2(0.0, 2.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(width.max(140.0));
+                egui::ScrollArea::vertical()
+                    .max_height(240.0)
+                    .show(ui, |ui| {
+                        for (pos, entry) in entries.iter().enumerate() {
+                            let label = match entry {
+                                Some(i) => active.rule.enum_values[*i].as_str(),
+                                None => "NULL",
+                            };
+                            if entry.is_none() && pos > 0 {
+                                ui.separator();
+                            }
+                            let resp = ui.add_sized(
+                                [ui.available_width(), 22.0],
+                                egui::Button::selectable(*entry == current, label),
+                            );
+                            if resp.hovered() {
+                                highlight = pos;
+                            }
+                            if pos == highlight {
+                                resp.scroll_to_me(None);
+                                // Keyboard/hover highlight is a soft fill, not an accent outline.
+                                if *entry != current {
+                                    ui.painter().rect_filled(
+                                        resp.rect,
+                                        4.0,
+                                        palette::TEXT().gamma_multiply(0.08),
+                                    );
+                                }
+                            }
+                            if resp.clicked() {
+                                picked = Some(*entry);
+                            }
+                        }
+                    });
+            });
+        });
+    ui.data_mut(|d| d.insert_temp(hl_id, highlight));
+
+    if let Some(entry) = picked {
+        active.buf = entry.map_or_else(String::new, |i| active.rule.enum_values[i].clone());
+        ui.data_mut(|d| d.remove_temp::<usize>(hl_id));
+        return EditOutcome::Commit { advance: None };
+    }
+    // A press anywhere outside both the cell and the list abandons the pick.
+    let pressed = ui.input(|i| i.pointer.any_pressed());
+    if pressed {
+        let pos = ui.input(|i| i.pointer.interact_pos());
+        if pos.is_some_and(|p| !face.contains(p) && !area.response.rect.contains(p)) {
+            return EditOutcome::Cancel;
+        }
+    }
+    EditOutcome::Continue
+}
+
 /// The multi-line text editor, as a popover anchored at the cell's top-left (a grid cell is
 /// one row tall, so it can't host the text itself). At least [`EXPANDED_EDITOR_W`] wide,
 /// kept on screen, and scrolling past [`EXPANDED_EDITOR_MAX_H`].
@@ -1010,9 +1197,19 @@ fn render_expanded(
                     let resp = egui::ScrollArea::vertical()
                         .max_height(EXPANDED_EDITOR_MAX_H)
                         .show(ui, |ui| {
+                            let mut layouter =
+                                |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| {
+                                    let mut job = crate::value_viewer::json_layout(text.as_str());
+                                    job.wrap.max_width = wrap;
+                                    ui.fonts_mut(|f| f.layout_job(job))
+                                };
+                            let json = active.json;
+                            let mut edit = egui::TextEdit::multiline(&mut active.buf);
+                            if json {
+                                edit = edit.layouter(&mut layouter).code_editor();
+                            }
                             ui.add(
-                                egui::TextEdit::multiline(&mut active.buf)
-                                    .id(editor_id)
+                                edit.id(editor_id)
                                     .hint_text(hint)
                                     .frame(egui::Frame::NONE)
                                     // Enter commits and Shift+Enter breaks the line — both
@@ -1472,6 +1669,7 @@ mod tests {
             not_null,
             required,
             max_chars,
+            enum_values: Vec::new(),
         }
     }
 
@@ -1782,5 +1980,34 @@ mod tests {
         assert!(!e.can_undo());
         assert!(!e.can_redo());
         assert!(!e.undo());
+    }
+}
+
+#[cfg(test)]
+mod enum_rule_tests {
+    use super::*;
+
+    fn enum_rule(not_null: bool) -> ColumnRule {
+        ColumnRule {
+            not_null,
+            enum_values: vec!["active".into(), "banned".into()],
+            ..ColumnRule::default()
+        }
+    }
+
+    #[test]
+    fn only_declared_labels_are_accepted() {
+        let rule = enum_rule(false);
+        assert!(rule
+            .violation(&Value::Text("active".into()), false)
+            .is_none());
+        assert!(rule.violation(&Value::Null, false).is_none());
+        assert!(rule.violation(&Value::Text("nope".into()), false).is_some());
+        assert!(rule.violation(&Value::Text(String::new()), false).is_some());
+    }
+
+    #[test]
+    fn not_null_enum_rejects_null_on_stored_rows() {
+        assert!(enum_rule(true).violation(&Value::Null, false).is_some());
     }
 }

@@ -322,7 +322,113 @@ fn json_view(ui: &mut egui::Ui, formatted: &str, parse_error: Option<&str>) {
         );
         ui.add_space(6.0);
     }
-    code_surface(ui, "json_value_scroll", formatted);
+    code_surface(
+        ui,
+        "json_value_scroll",
+        formatted,
+        Some(json_layout(formatted)),
+    );
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum JsonToken {
+    Key,
+    Str,
+    Number,
+    Literal,
+    Punct,
+}
+
+/// Split JSON text into coloured runs. Tolerant of invalid input (it just yields plain runs),
+/// and lossless: the runs concatenate back to `text`.
+fn json_tokens(text: &str) -> Vec<(JsonToken, &str)> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let start = i;
+        let token = match bytes[i] {
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                i = (i + 1).min(bytes.len());
+                let after = text[i..].trim_start_matches([' ', '\t']);
+                if after.starts_with(':') {
+                    JsonToken::Key
+                } else {
+                    JsonToken::Str
+                }
+            }
+            b'-' | b'0'..=b'9' => {
+                while i < bytes.len()
+                    && matches!(bytes[i], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
+                {
+                    i += 1;
+                }
+                JsonToken::Number
+            }
+            b't' | b'f' | b'n' => {
+                while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+                    i += 1;
+                }
+                JsonToken::Literal
+            }
+            _ => {
+                i += 1;
+                while i < bytes.len()
+                    && !matches!(bytes[i], b'"' | b'-' | b'0'..=b'9' | b't' | b'f' | b'n')
+                {
+                    i += 1;
+                }
+                JsonToken::Punct
+            }
+        };
+        // `i` may have stopped inside a multi-byte char only in the Punct arm; snap forward.
+        while !text.is_char_boundary(i) {
+            i += 1;
+        }
+        out.push((token, &text[start..i]));
+    }
+    out
+}
+
+/// `text` re-indented for reading, when it is a JSON object or array (key order kept).
+/// Scalars and invalid text return `None`: there is nothing to lay out.
+pub(crate) fn pretty_json(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+        return None;
+    }
+    let value = serde_json::from_str::<serde_json::Value>(trimmed).ok()?;
+    serde_json::to_string_pretty(&value).ok()
+}
+
+/// Syntax-coloured layout for pretty-printed JSON, from the active theme.
+pub(crate) fn json_layout(text: &str) -> egui::text::LayoutJob {
+    let theme = crate::theme::current();
+    let colour = |token| match token {
+        JsonToken::Key => theme.accent,
+        JsonToken::Str => crate::style::mix(theme.danger, theme.warning, 0.4),
+        JsonToken::Number => theme.warning,
+        JsonToken::Literal => crate::style::mix(theme.accent, theme.danger, 0.5),
+        JsonToken::Punct => theme.text_weak,
+    };
+    let font = egui::FontId::monospace(11.5);
+    let mut job = egui::text::LayoutJob::default();
+    for (token, run) in json_tokens(text) {
+        job.append(
+            run,
+            0.0,
+            egui::TextFormat {
+                font_id: font.clone(),
+                color: colour(token),
+                ..Default::default()
+            },
+        );
+    }
+    job
 }
 
 fn blob_view(ui: &mut egui::Ui, bytes: &[u8], hex: &str, truncated: bool) {
@@ -333,7 +439,7 @@ fn blob_view(ui: &mut egui::Ui, bytes: &[u8], hex: &str, truncated: bool) {
             .color(palette::TEXT_FAINT()),
     );
     ui.add_space(4.0);
-    code_surface(ui, "blob_value_scroll", hex);
+    code_surface(ui, "blob_value_scroll", hex, None);
     if truncated {
         ui.add_space(4.0);
         ui.label(
@@ -348,7 +454,12 @@ fn blob_view(ui: &mut egui::Ui, bytes: &[u8], hex: &str, truncated: bool) {
     }
 }
 
-fn code_surface(ui: &mut egui::Ui, id: &'static str, text: &str) {
+fn code_surface(
+    ui: &mut egui::Ui,
+    id: &'static str,
+    text: &str,
+    job: Option<egui::text::LayoutJob>,
+) {
     egui::Frame::new()
         .fill(palette::CODE_BG())
         .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
@@ -360,15 +471,18 @@ fn code_surface(ui: &mut egui::Ui, id: &'static str, text: &str) {
                 .auto_shrink([false, false])
                 .max_height(430.0)
                 .show(ui, |ui| {
+                    let content: egui::WidgetText = match job {
+                        Some(job) => job.into(),
+                        None => egui::RichText::new(text)
+                            .monospace()
+                            .size(11.5)
+                            .color(palette::TEXT())
+                            .into(),
+                    };
                     ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(text)
-                                .monospace()
-                                .size(11.5)
-                                .color(palette::TEXT()),
-                        )
-                        .selectable(true)
-                        .wrap_mode(egui::TextWrapMode::Extend),
+                        egui::Label::new(content)
+                            .selectable(true)
+                            .wrap_mode(egui::TextWrapMode::Extend),
                     );
                 });
         });
@@ -522,6 +636,19 @@ mod tests {
             ValueViewer::kind("TEXT", &Value::Text("ordinary text".into())),
             None
         );
+    }
+
+    #[test]
+    fn json_tokens_classify_and_round_trip() {
+        let text = "{\n  \"a\": [1, -2.5e3, true, null, \"x\\\"y\"],\n  \"b\": \"ก\"\n}";
+        let tokens = json_tokens(text);
+        assert_eq!(tokens.iter().map(|(_, r)| *r).collect::<String>(), text);
+        assert!(tokens.contains(&(JsonToken::Key, "\"a\"")));
+        assert!(tokens.contains(&(JsonToken::Number, "-2.5e3")));
+        assert!(tokens.contains(&(JsonToken::Literal, "true")));
+        assert!(tokens.contains(&(JsonToken::Literal, "null")));
+        assert!(tokens.contains(&(JsonToken::Str, "\"x\\\"y\"")));
+        assert!(tokens.contains(&(JsonToken::Str, "\"ก\"")));
     }
 
     #[test]

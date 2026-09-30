@@ -46,6 +46,7 @@ fn column_rules(
                 } else {
                     None
                 },
+                enum_values: info.enum_values().unwrap_or_default(),
             }
         })
         .collect()
