@@ -3,6 +3,17 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
+## 0.4.14 — 2026-09-30
+
+- Whole-database backup and restore (connection menu, sidebar table menu, Open Anything), with an audit-trail entry for each run.
+- Native macOS menu bar.
+- ENUM columns are picked from a list of their allowed values instead of typed; booleans pick true / false / NULL in the grid and the Details panel.
+- JSON is shown indented and colour-coded in the value viewer and the cell editor, must stay valid to save, and keeps its key order. Details has a View button for JSON values.
+- Double-click a column header to fit it to its content.
+- Details title and type labels no longer shout in capitals.
+- The SQL Server `GO` scan no longer panics on lines that start with Thai or other multi-byte text.
+- The workspace divider stays beneath popovers and dialogs.
+
 ## 0.4.13 — 2026-09-29
 
 - Choosing another connection no longer points an open table tab at it — its SQL could run against the wrong database; a new query tab opens instead. Tabs with unsaved edits can't switch connection.
