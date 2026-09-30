@@ -1761,7 +1761,17 @@ mod tests {
         drop(job);
         drop(db);
 
-        restore_file(DbKind::Sqlite, &backup_path, &db_path).unwrap();
+        // As the app does: on a blocking thread, so this runtime stays free to run the pool's
+        // background tasks that close the old file (Windows won't replace it until they do).
+        {
+            let (backup_path, db_path) = (backup_path.clone(), db_path.clone());
+            tokio::task::spawn_blocking(move || {
+                restore_file(DbKind::Sqlite, &backup_path, &db_path)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        }
         let db = crate::connect(&cfg, None, None).await.unwrap();
         let rows = db.execute("SELECT count(*) FROM t").await.unwrap().rows;
         assert_eq!(
