@@ -4,30 +4,19 @@
 //! constructs it and runs it; this crate owns all rendering and UI state.
 
 mod app;
-mod autocomplete;
-mod chart;
+mod appearance;
+mod catalog;
 mod components;
-mod edit;
-mod editor_tools;
-mod emoji;
-mod erd;
-mod filter;
-mod fold;
-mod fonts;
-mod format;
-mod ghost;
-mod grid;
-mod highlight;
-mod icons;
-mod pet;
-mod query_error;
-mod schema;
-mod sqlctx;
-mod style;
-mod theme;
-mod title_bar;
-mod update;
-mod value_viewer;
+mod editor;
+mod platform;
+mod results;
+
+// Stable module facade; implementations are grouped by responsibility above.
+use appearance::{emoji, fonts, icons, style, theme};
+use catalog::{erd, schema};
+use editor::{autocomplete, editor_tools, fold, ghost, highlight, query_error, sqlctx};
+use platform::{pet, title_bar, update};
+use results::{chart, edit, filter, format, grid, value_viewer};
 
 pub use app::DbGuiApp;
 

@@ -253,7 +253,7 @@ that makes production mistakes harder.
 
 - [`README.md`](../README.md)
 - [`ROADMAP.md`](../ROADMAP.md)
-- [`crates/core/src/database.rs`](../crates/core/src/database.rs)
+- [`crates/core/src/connections/database.rs`](../crates/core/src/connections/database.rs)
 - [`crates/core/src/model.rs`](../crates/core/src/model.rs)
 - [`crates/analysis/src/lib.rs`](../crates/analysis/src/lib.rs)
 

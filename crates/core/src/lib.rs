@@ -8,28 +8,24 @@
 //!
 //! Everything here is testable without a window (see the tests at the bottom of this file).
 
-pub mod audit;
+mod connections;
+mod data;
+mod query;
+mod storage;
+mod transfer;
+
 pub mod backends;
-pub mod bookmarks;
-pub mod clipboard;
-pub mod coerce;
-pub mod config;
-mod connection;
-pub mod database;
-pub mod edits;
 pub mod erd;
 pub mod error;
-pub mod export;
-pub mod favorites;
-pub mod history;
-pub mod import;
 pub mod model;
-pub mod parameters;
-pub mod safety;
-pub mod secrets;
-pub mod syntax;
-pub mod tunnel;
-pub mod value;
+
+// Stable module facade; implementations are grouped by responsibility above.
+use connections::connection;
+pub use connections::{database, tunnel};
+pub use data::{coerce, edits, value};
+pub use query::{parameters, safety, syntax};
+pub use storage::{audit, bookmarks, config, favorites, history, secrets};
+pub use transfer::{clipboard, export, import};
 
 pub use bookmarks::Bookmark;
 pub use clipboard::{copy_rows, CopyFormat};

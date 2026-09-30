@@ -126,19 +126,19 @@ pub(crate) fn install(
         // deterministic app-owned face first.
         (
             "geist",
-            include_bytes!("../../app/assets/Geist-Regular.ttf") as &[u8],
+            include_bytes!("../../../app/assets/Geist-Regular.ttf") as &[u8],
         ),
         (
             "geist_semibold",
-            include_bytes!("../../app/assets/Geist-SemiBold.ttf") as &[u8],
+            include_bytes!("../../../app/assets/Geist-SemiBold.ttf") as &[u8],
         ),
         (
             "noto_thai",
-            include_bytes!("../../app/assets/NotoSansThai.ttf") as &[u8],
+            include_bytes!("../../../app/assets/NotoSansThai.ttf") as &[u8],
         ),
         (
             "ibm_plex_mono",
-            include_bytes!("../../app/assets/IBMPlexMono-Regular.ttf") as &[u8],
+            include_bytes!("../../../app/assets/IBMPlexMono-Regular.ttf") as &[u8],
         ),
         ("inter", app_fonts.ui_regular),
         ("inter_semibold", app_fonts.ui_semibold),
@@ -238,11 +238,11 @@ mod tests {
         install(
             &ctx,
             AppFonts {
-                ui_regular: include_bytes!("../../app/assets/Inter-Regular.ttf"),
-                ui_semibold: include_bytes!("../../app/assets/Inter-SemiBold.ttf"),
-                thai_regular: include_bytes!("../../app/assets/Anuphan-Regular.ttf"),
-                thai_semibold: include_bytes!("../../app/assets/Anuphan-SemiBold.ttf"),
-                universal_regular: include_bytes!("../../app/assets/Unifont-Regular.otf"),
+                ui_regular: include_bytes!("../../../app/assets/Inter-Regular.ttf"),
+                ui_semibold: include_bytes!("../../../app/assets/Inter-SemiBold.ttf"),
+                thai_regular: include_bytes!("../../../app/assets/Anuphan-Regular.ttf"),
+                thai_semibold: include_bytes!("../../../app/assets/Anuphan-SemiBold.ttf"),
+                universal_regular: include_bytes!("../../../app/assets/Unifont-Regular.otf"),
             },
             None,
             None,

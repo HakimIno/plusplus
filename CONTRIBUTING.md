@@ -12,6 +12,10 @@ all useful contributions.
   screenshots containing sensitive information.
 - Report security vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
+## Finding code
+
+See the [source layout](docs/SOURCE_LAYOUT.md) for feature folders and common entry files.
+
 ## Development setup
 
 Install the stable Rust toolchain, then run:

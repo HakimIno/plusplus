@@ -24,7 +24,7 @@ pub fn show(ui: &mut egui::Ui) {
         let size = Vec2::new(max_w, max_w / aspect);
         let img_rect = egui::Rect::from_center_size(rect.center(), size);
 
-        let tex = egui::include_image!("../assets/illus/profile-first-pr-dark.svg").load(
+        let tex = egui::include_image!("../../assets/illus/profile-first-pr-dark.svg").load(
             ui.ctx(),
             egui::TextureOptions::LINEAR,
             egui::SizeHint::Size {
@@ -156,7 +156,7 @@ mod chameleon {
 
             let tint = with_alpha(blend(faint, accent, 0.22), 0.58);
 
-            let tex = egui::include_image!("../assets/illus/empty-chameleon.png").load(
+            let tex = egui::include_image!("../../assets/illus/empty-chameleon.png").load(
                 ui.ctx(),
                 egui::TextureOptions::LINEAR,
                 egui::SizeHint::Size {

@@ -1,6 +1,6 @@
 # Interface icons — Tabler
 
-`crates/ui/src/icons.rs` is the shared icon registry. Pick icons by meaning,
+`crates/ui/src/appearance/icons.rs` is the shared icon registry. Pick icons by meaning,
 not by screen: tables use `table()`, columns use `column()`, SQL and keywords
 use `code()`, functions and stored procedures use `function()`, and copying
 uses `copy()` everywhere.

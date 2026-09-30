@@ -533,7 +533,7 @@ mod tests {
 
     #[test]
     fn bundled_png_is_detected_as_an_image() {
-        let bytes = include_bytes!("../assets/illus/empty-chameleon.png");
+        let bytes = include_bytes!("../../assets/illus/empty-chameleon.png");
         let (format, width, height) = image_metadata(bytes).expect("valid bundled PNG");
         assert_eq!(format, "png");
         assert!(width > 0 && height > 0);
@@ -542,7 +542,7 @@ mod tests {
     #[test]
     fn inline_preview_reuses_its_decoded_texture() {
         let ctx = egui::Context::default();
-        let bytes = include_bytes!("../assets/illus/empty-chameleon.png");
+        let bytes = include_bytes!("../../assets/illus/empty-chameleon.png");
         let key = ImagePreviewKey::new(7, 2, 4, bytes);
         let mut cache = ImagePreviewCache::default();
 
@@ -568,7 +568,7 @@ mod tests {
             ValueViewer::new(
                 "avatar",
                 "BLOB",
-                &Value::Bytes(include_bytes!("../assets/illus/empty-chameleon.png").to_vec()),
+                &Value::Bytes(include_bytes!("../../assets/illus/empty-chameleon.png").to_vec()),
             )
             .unwrap(),
         ];

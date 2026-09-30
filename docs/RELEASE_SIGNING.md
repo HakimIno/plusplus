@@ -7,7 +7,7 @@ plusplus verifies every downloaded update before installing it. The in-app updat
 downloads a release package (DMG on macOS, AppImage on Linux) **and** its detached
 [minisign](https://jedisct1.github.io/minisign/) signature (`<package>.minisig`), then
 checks the signature against a public key compiled into the app (`MINISIGN_PUBLIC_KEY` in
-`crates/ui/src/update.rs`). An update that is unsigned,
+`crates/ui/src/platform/update.rs`). An update that is unsigned,
 tampered with, or signed by any other key is **refused** — even if a release or the GitHub
 account is compromised, an attacker can't forge a signature without the private key.
 
@@ -38,7 +38,7 @@ untrusted comment: minisign public key ABCD...
 RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3
 ```
 
-Copy the **second line** (the base64 key, no comment) into `crates/ui/src/update.rs`:
+Copy the **second line** (the base64 key, no comment) into `crates/ui/src/platform/update.rs`:
 
 ```rust
 pub const MINISIGN_PUBLIC_KEY: &str = "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3";

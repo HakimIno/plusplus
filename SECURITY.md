@@ -27,7 +27,7 @@ Saved connections are persisted to `connections.json` **without any secret field
 `ConnectionConfig` struct (`crates/core/src/model.rs`) simply has no password member.
 Passwords, SSH passphrases, and key passphrases are stored in the OS keychain (macOS
 Keychain, Windows Credential Manager, or the Secret Service on Linux) via the `keyring`
-crate, keyed by the connection's id (`crates/core/src/secrets.rs`). A per-launch,
+crate, keyed by the connection's id (`crates/core/src/storage/secrets.rs`). A per-launch,
 memory-only session cache keeps keychain prompts to at most one per secret; it is never
 persisted and is evicted on password change/delete.
 
@@ -63,7 +63,7 @@ fail-closed**. An unsigned or tampered package is refused, so a compromised GitH
 or MITM cannot ship code through the updater. CI signs every release and fails loudly if
 the signing secret is missing.
 
-**Verify:** `MINISIGN_PUBLIC_KEY` and the verification step in `crates/ui/src/update.rs`;
+**Verify:** `MINISIGN_PUBLIC_KEY` and the verification step in `crates/ui/src/platform/update.rs`;
 signing in `.github/workflows/release.yml`; key handling in `docs/RELEASE_SIGNING.md`.
 
 ### 6–7. No telemetry, no query egress
@@ -75,12 +75,12 @@ can be disabled in **Settings → Privacy → "Check for updates at launch"**. E
 else on the wire is your own database connections. Queries, results, and schema never
 leave your machine; history and audit logs are local files.
 
-**Verify:** the only `reqwest` usage in the tree is `crates/ui/src/update.rs`:
+**Verify:** the only `reqwest` usage in the tree is `crates/ui/src/platform/update.rs`:
 `grep -rl reqwest crates/*/src`.
 
 ### 8. SSH tunnel with host-key verification
 
-Server connections can run through an SSH bastion (`crates/core/src/tunnel.rs`). The
+Server connections can run through an SSH bastion (`crates/core/src/connections/tunnel.rs`). The
 bastion's host key is **verified** against `~/.ssh/known_hosts` plus a plusplus-managed
 `known_hosts` with accept-new (TOFU) semantics: a matching key connects, an unseen host is
 recorded then trusted, and a **changed key is refused** as a potential MITM with a precise
@@ -88,7 +88,7 @@ error. Key files and passphrases follow the keychain rules above.
 
 ### 9. Audit log
 
-An append-only audit trail (`crates/core/src/audit.rs`) records connections (success and
+An append-only audit trail (`crates/core/src/storage/audit.rs`) records connections (success and
 failure), executed statements, staged-edit commits, and schema migrations — each with
 timestamp, connection, target (`user@host:port/db`), outcome, and duration. One JSONL
 file per month in `<config>/audit/`; files are **never compacted, rewritten, or clearable
@@ -102,7 +102,7 @@ entry. Statement text can contain data values, so the trail can be disabled in
 A per-connection **Read-only** switch (connection editor) that actually blocks writes
 rather than asking for confirmation, enforced in two independent layers:
 
-- **Application layer** (`crates/core/src/safety.rs`, `write_statements`): default-deny —
+- **Application layer** (`crates/core/src/query/safety.rs`, `write_statements`): default-deny —
   a statement runs only if it is *provably* a read. Unknown verbs are refused, and
   statements that can smuggle writes are scanned: `WITH x AS (DELETE …) SELECT`,
   `EXPLAIN ANALYZE UPDATE …`, and `SELECT … INTO t` are all blocked. In-grid editing and
