@@ -19,6 +19,8 @@ use platform::{pet, title_bar, update};
 use results::{chart, edit, filter, format, grid, value_viewer};
 
 pub use app::DbGuiApp;
+#[cfg(target_os = "macos")]
+pub use app::NativeMenuCommand;
 
 /// The custom font family used for headings, rendered with Inter Semibold.
 ///

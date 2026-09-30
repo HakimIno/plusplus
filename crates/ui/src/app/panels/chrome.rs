@@ -137,6 +137,14 @@ impl DbGuiApp {
     /// Horizontal strip of query tabs (with a × per tab) plus a + button, directly below the
     /// title bar. Switching a tab swaps the whole editor/result/connection view.
     pub(in crate::app) fn query_tab_bar(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
+        // A native menu (or any modal AppKit tracking loop) swallows the mouse-up, so the
+        // release that normally ends a tab drag never reaches egui and the tab stays glued
+        // to the pointer. A drag with no button held and no release this frame is stale.
+        if self.tab_drag.is_some()
+            && root.input(|i| !i.pointer.primary_down() && !i.pointer.any_released())
+        {
+            self.tab_drag = None;
+        }
         egui::Panel::top("query_tabs")
             .resizable(false)
             .exact_size(34.0)

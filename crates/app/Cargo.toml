@@ -19,6 +19,8 @@ egui.workspace = true
 # AppKit access to fix titlebar hit-testing (see `fix_titlebar_click_through` in main.rs).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSMenu", "NSMenuItem", "NSEvent"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSProcessInfo"] }
 raw-window-handle = "0.6"
 
 # Embeds the .ico + version info into the exe (see build.rs).

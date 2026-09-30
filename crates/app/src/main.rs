@@ -4,6 +4,9 @@
 // On Windows, don't pop up a console window alongside the GUI in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(target_os = "macos")]
+mod menu;
+
 /// Inter, embedded as the primary UI font so the interface stays crisp and portable.
 const INTER_REGULAR: &[u8] = include_bytes!("../assets/Inter-Regular.ttf");
 /// Inter Semibold, used for headings and compact emphasis.
@@ -109,7 +112,7 @@ fn main() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 820.0])
         .with_min_inner_size([800.0, 500.0])
-        .with_title(format!("plusplus v{}", env!("CARGO_PKG_VERSION")))
+        .with_title("Plusplus")
         .with_icon(icon);
 
     // Native macOS traffic lights/titlebar, with egui drawing into the titlebar space.
@@ -138,11 +141,13 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "plusplus",
+        "Plusplus",
         native_options,
         Box::new(|cc| {
             #[cfg(target_os = "macos")]
             fix_titlebar_click_through(cc);
+            #[cfg(target_os = "macos")]
+            menu::install(&cc.egui_ctx);
             let fonts = ui::AppFonts {
                 ui_regular: INTER_REGULAR,
                 ui_semibold: INTER_SEMIBOLD,

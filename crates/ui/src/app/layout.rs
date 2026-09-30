@@ -4,6 +4,11 @@ use super::*;
 use crate::style::{self, palette};
 
 impl eframe::App for DbGuiApp {
+    #[cfg(target_os = "macos")]
+    fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        self.native_menu_input(ctx, input);
+    }
+
     // eframe 0.34 hands us a root `Ui`; panels are added with `show_inside`.
     fn ui(&mut self, ui_root: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.draw(ui_root, Some(frame));

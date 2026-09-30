@@ -22,7 +22,11 @@ mod journal;
 mod layout;
 mod memory;
 mod messages;
+#[cfg(target_os = "macos")]
+mod native_menu;
 mod navigate;
+#[cfg(target_os = "macos")]
+pub use native_menu::NativeMenuCommand;
 mod open_anything;
 mod panels;
 mod query;
