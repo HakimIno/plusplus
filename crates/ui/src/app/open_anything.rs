@@ -15,6 +15,8 @@ enum PaletteCommand {
     Refresh,
     Settings,
     DatabaseDiagram,
+    BackupDatabase,
+    RestoreDatabase,
     ToggleSchema,
     ToggleDetails,
     ToggleConsole,
@@ -269,6 +271,18 @@ impl DbGuiApp {
                 "Show database diagram",
                 "",
                 "erd schema",
+            ),
+            (
+                PaletteCommand::BackupDatabase,
+                "Backup database…",
+                "",
+                "dump export save pg_dump mysqldump",
+            ),
+            (
+                PaletteCommand::RestoreDatabase,
+                "Restore database…",
+                "",
+                "import load pg_restore",
             ),
             (
                 PaletteCommand::ToggleSchema,
@@ -528,6 +542,21 @@ impl DbGuiApp {
                 PaletteCommand::Settings => self.apply_action(Action::OpenSettings),
                 PaletteCommand::DatabaseDiagram if !self.tabs.is_empty() => {
                     self.apply_action(Action::ShowDatabaseDiagram)
+                }
+                PaletteCommand::BackupDatabase | PaletteCommand::RestoreDatabase => {
+                    // The connection the active tab runs on.
+                    let conn = self
+                        .tabs
+                        .get(self.active_query_tab)
+                        .and_then(|tab| tab.conn_id.as_deref())
+                        .and_then(|id| self.connections.iter().position(|c| c.id == id));
+                    match conn {
+                        Some(conn_idx) => self.apply_action(Action::OpenBackup {
+                            conn_idx,
+                            restore: command == PaletteCommand::RestoreDatabase,
+                        }),
+                        None => self.error = Some("Open a connection first.".into()),
+                    }
                 }
                 PaletteCommand::ToggleSchema => self.show_schema_panel = !self.show_schema_panel,
                 PaletteCommand::ToggleDetails => self.show_details_panel = !self.show_details_panel,

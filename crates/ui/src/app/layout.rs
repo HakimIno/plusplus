@@ -752,6 +752,7 @@ impl DbGuiApp {
         self.favorite_folder_dialog(&ctx, &mut actions);
         self.danger_confirm_dialog(&ctx, &mut actions);
         self.import_dialog(&ctx, &mut actions);
+        self.backup_dialog(&ctx, &mut actions);
         if self
             .value_viewer
             .as_ref()

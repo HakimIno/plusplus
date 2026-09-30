@@ -57,6 +57,9 @@
     "split_editor": "outline/layout-board-split",
     "layout_log": "outline/layout-bottombar",
     "plug_off": "outline/plug-off",
-    "mood_sad_dizzy": "outline/mood-sad-dizzy"
+    "mood_sad_dizzy": "outline/mood-sad-dizzy",
+    "database_export": "outline/database-export",
+    "database_import": "outline/database-import",
+    "check": "outline/circle-check"
   }
 }

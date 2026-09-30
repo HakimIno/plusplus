@@ -34,6 +34,10 @@ pub enum AuditAction {
     SchemaApply,
     /// Rows loaded into a table from a CSV/JSON file, as one transaction.
     Import,
+    /// A whole-database backup was written.
+    Backup,
+    /// A whole database was replaced from a backup.
+    Restore,
 }
 
 /// One audited event.

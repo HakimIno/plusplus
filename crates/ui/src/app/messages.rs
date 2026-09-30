@@ -866,6 +866,22 @@ impl DbGuiApp {
                 AppMessage::ImportProgress { rows } => {
                     self.status_msg = format!("Importing… {rows} rows read");
                 }
+                AppMessage::BackupFinished {
+                    conn_id,
+                    restore,
+                    summary,
+                    elapsed_ms,
+                    result,
+                } => {
+                    self.finish_backup_job(&conn_id, restore, &summary, elapsed_ms, result);
+                    ctx.request_repaint();
+                }
+                AppMessage::BackupDefaultDir { conn_id, dir } => {
+                    self.apply_mssql_backup_dir(&conn_id, &dir);
+                }
+                AppMessage::BackupFileTables { conn_id, result } => {
+                    self.apply_backup_file_tables(&conn_id, result);
+                }
                 AppMessage::Imported {
                     table,
                     conn_id,

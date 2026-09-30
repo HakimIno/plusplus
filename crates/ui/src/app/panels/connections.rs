@@ -249,6 +249,39 @@ impl DbGuiApp {
                                                 },
                                             );
                                         }
+                                        if live {
+                                            ui.separator();
+                                            if components::button(
+                                                ui,
+                                                icons::database_export(),
+                                                "Backup Database…",
+                                                true,
+                                            )
+                                            .clicked()
+                                            {
+                                                actions.push(Action::OpenBackup {
+                                                    conn_idx: idx,
+                                                    restore: false,
+                                                });
+                                                ui.close();
+                                            }
+                                            if components::button(
+                                                ui,
+                                                icons::database_import(),
+                                                "Restore Database…",
+                                                !conn.is_read_only(),
+                                            )
+                                            .on_disabled_hover_text("This connection is read-only")
+                                            .clicked()
+                                            {
+                                                actions.push(Action::OpenBackup {
+                                                    conn_idx: idx,
+                                                    restore: true,
+                                                });
+                                                ui.close();
+                                            }
+                                            ui.separator();
+                                        }
                                         if components::button(ui, icons::edit(), "Edit…", true)
                                             .clicked()
                                         {

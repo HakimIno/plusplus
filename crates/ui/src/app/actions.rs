@@ -1067,9 +1067,13 @@ impl DbGuiApp {
             Action::LoadMoreRows => self.load_more_rows(),
             Action::CopyRows(format) => self.copy_selection(format),
             Action::PasteRows(text) => self.paste_rows(&text),
+            Action::OpenBackup { conn_idx, restore } => self.open_backup_dialog(conn_idx, restore),
             Action::SetCells { col, to } => self.set_selected_cells(col, to),
             Action::DuplicateRows => self.duplicate_rows(),
             Action::ExportTable { table, format } => self.export_table(&table, format),
+            Action::ExportTableDump { conn_id, table } => {
+                self.open_table_dump_dialog(&conn_id, &table)
+            }
             Action::ImportIntoTable(table) => self.open_import(&table),
             Action::SetImportMapping { target, source } => {
                 if let Some(draft) = self.import_pending.as_mut() {
@@ -1768,7 +1772,7 @@ fn reveal_history_file(app: &mut DbGuiApp) {
     }
 }
 
-fn reveal_in_file_manager(path: &std::path::Path) -> std::io::Result<()> {
+pub(super) fn reveal_in_file_manager(path: &std::path::Path) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")

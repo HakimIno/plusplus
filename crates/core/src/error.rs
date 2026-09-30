@@ -57,6 +57,11 @@ pub enum CoreError {
     #[error("import error: {0}")]
     Import(String),
 
+    /// A backup or restore failed: a missing client tool, the tool's own error output, or
+    /// an unsupported backend.
+    #[error("{0}")]
+    Backup(String),
+
     /// One statement of a multi-statement batch failed. Carries the 1-based position of the
     /// failing statement so the user can locate it in the editor; statements before it have
     /// already executed (the batch runs in autocommit, statement by statement).

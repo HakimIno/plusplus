@@ -86,6 +86,7 @@ fn table_actions_menu(
     table: &dbcore::TableInfo,
     pinned: bool,
     kind: dbcore::DbKind,
+    conn_id: &str,
     actions: &mut Vec<Action>,
 ) {
     ui.set_min_width(180.0);
@@ -147,6 +148,26 @@ fn table_actions_menu(
                 actions.push(Action::ExportTable {
                     table: table.clone(),
                     format: fmt,
+                });
+                ui.close();
+            }
+        }
+        if matches!(
+            kind,
+            dbcore::DbKind::Postgres
+                | dbcore::DbKind::MySql
+                | dbcore::DbKind::MariaDb
+                | dbcore::DbKind::SqlServer
+        ) {
+            ui.separator();
+            if ui
+                .button("Export as SQL Dump…")
+                .on_hover_text("Back up this table's structure and rows to a local .sql file")
+                .clicked()
+            {
+                actions.push(Action::ExportTableDump {
+                    conn_id: conn_id.to_owned(),
+                    table: table.clone(),
                 });
                 ui.close();
             }
@@ -973,7 +994,9 @@ impl DbGuiApp {
 
         // Right-click anywhere on the row opens the full table actions menu.
         let kind = active.db.kind();
-        row_resp.context_menu(|ui| table_actions_menu(ui, table, pinned, kind, actions));
+        row_resp.context_menu(|ui| {
+            table_actions_menu(ui, table, pinned, kind, &active.config_id, actions)
+        });
 
         // Single-click previews (reuses the italic preview tab); double-click pins a tab.
         let open_pin = row_resp.double_clicked();

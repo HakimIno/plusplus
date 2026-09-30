@@ -39,7 +39,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 
 # --- async runtime ---
 # net + io-util back the SSH tunnel's local listener and byte pump.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "process", "fs"] }
 # CancellationToken drives query cancellation (UI signals, backends race it via select!).
 tokio-util = "0.7"
 

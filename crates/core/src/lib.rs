@@ -25,7 +25,7 @@ pub use connections::{database, tunnel};
 pub use data::{coerce, edits, value};
 pub use query::{parameters, safety, syntax};
 pub use storage::{audit, bookmarks, config, favorites, history, secrets};
-pub use transfer::{clipboard, export, import};
+pub use transfer::{backup, clipboard, export, import};
 
 pub use bookmarks::Bookmark;
 pub use clipboard::{copy_rows, CopyFormat};

@@ -16,6 +16,7 @@ use dbcore::{
 use crate::schema::{ObjectEditor, RoutineEditor, SchemaEditor, TriggerEditor, ViewEditor};
 
 mod actions;
+mod backup;
 mod connection;
 mod edits;
 mod journal;
@@ -229,6 +230,22 @@ enum AppMessage {
         sql: String,
         elapsed_ms: f64,
         result: Result<usize, String>,
+    },
+    /// A whole-database backup or restore finished (see `app/backup.rs`). `summary` is the
+    /// line recorded to the audit trail.
+    BackupFinished {
+        conn_id: String,
+        restore: bool,
+        summary: String,
+        elapsed_ms: f64,
+        result: Result<(), String>,
+    },
+    /// SQL Server reported its default backup folder, to prefill the dialog's path.
+    BackupDefaultDir { conn_id: String, dir: String },
+    /// The tables inside a SQLite/DuckDB file chosen for restore.
+    BackupFileTables {
+        conn_id: String,
+        result: Result<Vec<String>, String>,
     },
     /// Background GitHub Releases check finished.
     #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
@@ -1690,6 +1707,11 @@ enum Action {
     },
     /// Paste clipboard text (TSV) into the active editable table as new (staged) insert rows.
     PasteRows(String),
+    /// Open the backup (`restore: false`) or restore dialog for the saved connection `idx`.
+    OpenBackup {
+        conn_idx: usize,
+        restore: bool,
+    },
     /// Stage NULL / `''` into `col` across the selected rows (cell context menu).
     SetCells {
         col: usize,
@@ -1702,6 +1724,11 @@ enum Action {
     ExportTable {
         table: TableInfo,
         format: dbcore::ExportFormat,
+    },
+    /// Open a SQL dump backup with this table selected.
+    ExportTableDump {
+        conn_id: String,
+        table: TableInfo,
     },
     /// Export the active query chart, using the current axes, series, sort, filter, and theme.
     ExportChart,
@@ -1972,6 +1999,8 @@ pub struct DbGuiApp {
     danger_pending: Option<ProductionGuardPending>,
     /// Open "import file into table" dialog, with its column mapping. `None` = dialog closed.
     import_pending: Option<ImportDraft>,
+    /// Open "Backup / Restore database" dialog. `None` = closed.
+    backup_dialog: Option<backup::BackupDialog>,
     /// Record executed statements to the on-disk query history (settings toggle).
     history_enabled: bool,
     /// Record connections and statements to the append-only audit trail (settings toggle).
@@ -2267,6 +2296,7 @@ impl DbGuiApp {
             schema_reload_pending: None,
             danger_pending: None,
             import_pending: None,
+            backup_dialog: None,
             history_enabled,
             audit_enabled,
             review_edits_before_save,
