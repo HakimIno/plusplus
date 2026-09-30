@@ -8271,3 +8271,83 @@ fn shot_fold() {
     harness.run_steps(4);
     harness.snapshot("sql_fold_closed");
 }
+
+#[test]
+fn query_workspace_border_stays_below_dialogs() {
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+    bind_heading_font(&ctx);
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    connect_fake(&mut app, fake_schema(2, 3));
+    app.tab_mut().kind = crate::components::QueryTabKind::Query;
+    app.tab_mut().set_result(fake_result(2, 3));
+    let footer_id = egui::Id::new((
+        "query_footer",
+        app.tab().id,
+        QueryEditorPlacement::Top,
+        false,
+    ));
+    let overlay_color = egui::Color32::from_rgb(213, 17, 149);
+    let mut output = None;
+    for step in 0..3 {
+        output = Some(ctx.run_ui(
+            egui::RawInput {
+                time: Some(step as f64),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 700.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                app.draw(ui, None);
+                egui::Window::new("Border layering regression")
+                    .fixed_pos(egui::pos2(200.0, 100.0))
+                    .frame(egui::Frame::new().fill(overlay_color))
+                    .show(ui.ctx(), |ui| {
+                        ui.allocate_space(egui::vec2(400.0, 500.0));
+                    });
+            },
+        ));
+    }
+    let footer =
+        egui::containers::panel::PanelState::load(&ctx, footer_id).expect("query toolbar rendered");
+    let border_y = footer.rect.bottom() - 0.5;
+    fn flatten<'a>(shape: &'a egui::Shape, shapes: &mut Vec<&'a egui::Shape>) {
+        if let egui::Shape::Vec(children) = shape {
+            for child in children {
+                flatten(child, shapes);
+            }
+        } else {
+            shapes.push(shape);
+        }
+    }
+    let output = output.unwrap();
+    let mut shapes = Vec::new();
+    for clipped in &output.shapes {
+        flatten(&clipped.shape, &mut shapes);
+    }
+    let border = shapes
+        .iter()
+        .position(|shape| {
+            matches!(shape, egui::Shape::LineSegment { points, stroke }
+            if (points[0].y - border_y).abs() < 0.1
+                && (points[1].y - border_y).abs() < 0.1
+                && points[1].x - points[0].x > 500.0
+                && stroke.color == crate::style::palette::BORDER())
+        })
+        .expect("workspace divider must remain visible");
+    let dialog = shapes
+        .iter()
+        .position(|shape| matches!(shape, egui::Shape::Rect(rect) if rect.fill == overlay_color))
+        .expect("dialog background rendered");
+    assert!(
+        border < dialog,
+        "dialog must paint over the workspace divider"
+    );
+}
