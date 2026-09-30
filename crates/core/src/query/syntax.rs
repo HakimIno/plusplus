@@ -177,8 +177,11 @@ fn go_lines_as_separators(sql: &str) -> String {
     for line in sql.split_inclusive('\n') {
         let body = line.trim_end_matches(['\n', '\r']);
         let trimmed = body.trim();
-        let is_go = trimmed.len() >= 2
-            && trimmed[..2].eq_ignore_ascii_case("GO")
+        // `get` (not `[..2]`): a line starting with a multi-byte char (Thai, CJK) would
+        // otherwise slice inside it and panic.
+        let is_go = trimmed
+            .get(..2)
+            .is_some_and(|head| head.eq_ignore_ascii_case("GO"))
             && trimmed[2..]
                 .trim_start()
                 .chars()
@@ -445,6 +448,15 @@ fn humanize(message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn go_separator_scan_survives_lines_starting_with_multibyte_text() {
+        let sql = "ฆ\nกข ค\nGO\nSELECT 1";
+        assert_eq!(
+            super::go_lines_as_separators(sql).chars().count(),
+            sql.chars().count()
+        );
+    }
+
     use super::*;
 
     /// The text a reported error underlines, so the assertions read like the editor looks.
