@@ -3,7 +3,7 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
-## 0.4.14 — 2026-09-30
+## 0.4.15 — 2026-09-30
 
 - Whole-database backup and restore (connection menu, sidebar table menu, Open Anything), with an audit-trail entry for each run.
 - Native macOS menu bar.
@@ -13,6 +13,7 @@ while pre-1.0 releases may still change workflows and configuration formats.
 - Details title and type labels no longer shout in capitals.
 - The SQL Server `GO` scan no longer panics on lines that start with Thai or other multi-byte text.
 - The workspace divider stays beneath popovers and dialogs.
+- Restoring a SQLite/DuckDB file on Windows waits for the old file to be released instead of failing with "Access is denied". (0.4.14 was never published: its Windows tests failed.)
 
 ## 0.4.13 — 2026-09-29
 
