@@ -1347,15 +1347,45 @@ pub fn restore_file(kind: DbKind, source: &Path, target: &Path) -> Result<()> {
     } else {
         &[".wal"]
     };
-    for suffix in suffixes {
-        let mut sidecar = target.as_os_str().to_owned();
-        sidecar.push(suffix);
-        let _ = std::fs::remove_file(PathBuf::from(sidecar));
+    // Windows can't replace or delete a file another handle still has open, and a pool
+    // closes its connections on background tasks — so right after the app drops the
+    // database the old file can stay locked for a moment. Retry briefly rather than fail a
+    // restore that would succeed a few milliseconds later. Elsewhere the first try is final.
+    let attempts = if cfg!(windows) { 60 } else { 1 };
+    let mut last = None;
+    for attempt in 0..attempts {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let mut sidecars_gone = true;
+        for suffix in suffixes {
+            let mut sidecar = target.as_os_str().to_owned();
+            sidecar.push(suffix);
+            let sidecar = PathBuf::from(sidecar);
+            // A missing sidecar is fine; one that is locked must not survive to be replayed
+            // onto the restored database, so it counts as "not yet".
+            match std::fs::remove_file(&sidecar) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => sidecars_gone = false,
+                _ => {}
+            }
+        }
+        if !sidecars_gone {
+            last = Some(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "the old journal files next to the database are still in use",
+            ));
+            continue;
+        }
+        match std::fs::rename(&staging, target) {
+            Ok(()) => return Ok(()),
+            Err(e) => last = Some(e),
+        }
     }
-    std::fs::rename(&staging, target).inspect_err(|_| {
-        let _ = std::fs::remove_file(&staging);
-    })?;
-    Ok(())
+    let _ = std::fs::remove_file(&staging);
+    Err(last.map_or_else(
+        || CoreError::Backup("restore failed".into()),
+        CoreError::from,
+    ))
 }
 
 #[cfg(test)]
