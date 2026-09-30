@@ -7,6 +7,25 @@ use crate::style;
 use crate::style::palette;
 
 impl DbGuiApp {
+    /// Paint after the result surface, on the workspace layer so popovers and dialogs cover it.
+    pub(in crate::app) fn query_workspace_border(&self, root: &egui::Ui) {
+        let footer_id = egui::Id::new((
+            "query_footer",
+            self.tab().id,
+            QueryEditorPlacement::Top,
+            self.split_tab.is_some(),
+        ));
+        if let Some(panel) = egui::containers::panel::PanelState::load(root.ctx(), footer_id) {
+            let rect = panel.rect;
+            root.painter().hline(
+                (rect.left() + style::WORKSPACE_GUTTER as f32)
+                    ..=(rect.right() - style::WORKSPACE_GUTTER as f32),
+                rect.bottom() - 0.5,
+                egui::Stroke::new(1.0_f32, palette::BORDER()),
+            );
+        }
+    }
+
     /// SQL editor with syntax highlighting and a Run button. Query/definition tabs dock it
     /// above their output; table/view tabs keep it below their data grid.
     pub(in crate::app) fn query_console(
@@ -106,27 +125,11 @@ impl DbGuiApp {
                     egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 0)),
                 )
             };
-            let response = panel
+            panel
                 .exact_size(height)
                 .frame(frame)
                 .show_separator_line(false)
                 .show_inside(root, |ui| app.query_workspace_bar(ui, actions));
-            if placement == QueryEditorPlacement::Top {
-                let rect = response.response.rect;
-                // The result panel paints after this header and overlaps its bottom edge.
-                // Keep the divider above that fill so it remains visible at the join.
-                root.ctx()
-                    .layer_painter(egui::LayerId::new(
-                        egui::Order::Foreground,
-                        footer_id.with("bottom_border"),
-                    ))
-                    .hline(
-                        (rect.left() + style::WORKSPACE_GUTTER as f32)
-                            ..=(rect.right() - style::WORKSPACE_GUTTER as f32),
-                        rect.bottom() - 0.5,
-                        egui::Stroke::new(1.0_f32, palette::BORDER()),
-                    );
-            }
         };
 
         let panel = match placement {

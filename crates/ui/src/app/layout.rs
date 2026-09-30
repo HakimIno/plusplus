@@ -124,6 +124,9 @@ impl DbGuiApp {
             self.view_mode_bar(root, editor_placement, false, actions);
         }
         self.central_panel(root, actions);
+        if console_visible && editor_placement == QueryEditorPlacement::Top {
+            self.query_workspace_border(root);
+        }
     }
 
     fn draw_split_workspace(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -727,6 +730,9 @@ impl DbGuiApp {
                 self.view_mode_bar(&mut workspace_root, editor_placement, false, &mut actions);
             }
             self.central_panel(&mut workspace_root, &mut actions);
+            if console_visible && editor_placement == QueryEditorPlacement::Top {
+                self.query_workspace_border(&workspace_root);
+            }
         }
         self.split_drop_overlay(&mut workspace_root, workspace_drop_rect, &mut actions);
         self.connection_dialog(&ctx, &mut actions);
