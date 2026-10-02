@@ -5,7 +5,345 @@ use dbcore::{
 
 struct DummyDb;
 
-fn app_with_staged_edit() -> DbGuiApp {
+#[test]
+fn switching_a_query_connection_cancels_only_that_tabs_old_execution() {
+    let mut app = app_with_staged_edit();
+    app.tab_mut().edits.clear();
+    let first = app.tab().id;
+    let (_, first_cancel) = app.begin_query_job(first);
+    app.new_tab();
+    let second = app.tab().id;
+    let (_, second_cancel) = app.begin_query_job(second);
+    let mut other = ConnectionConfig::new(DbKind::Sqlite);
+    other.id = "other".into();
+    app.connections.push(other);
+    app.active_connections.push(ActiveConnection {
+        config_id: "other".into(),
+        name: "other".into(),
+        db: Arc::new(DummyDb),
+        databases: Vec::new(),
+        schema: fake_schema(1, 1),
+    });
+    app.bind_connection(1, false);
+    assert!(second_cancel.is_cancelled());
+    assert!(!first_cancel.is_cancelled());
+    assert!(app.is_tab_querying(first));
+    assert_eq!(app.tab().conn_id.as_deref(), Some("other"));
+}
+
+#[test]
+fn run_action_starts_another_tab_without_canceling_the_first() {
+    let mut app = app_with_staged_edit();
+    app.tab_mut().edits.clear();
+    app.tab_mut().sql = "SELECT 1".into();
+    app.apply_action(Action::RunQuery);
+    let first = app.tab().id;
+    let first_cancel = app.query_jobs[&first].cancel.clone();
+    app.new_tab();
+    app.tab_mut().sql = "SELECT 2".into();
+    app.apply_action(Action::RunQuery);
+    let second = app.tab().id;
+    assert!(app.is_tab_querying(first));
+    assert!(app.is_tab_querying(second));
+    assert!(!first_cancel.is_cancelled());
+    let seq = app.tab().query_seq;
+    app.apply_action(Action::RunQuery);
+    assert_eq!(
+        app.tab().query_seq,
+        seq,
+        "a duplicate run on this tab is refused"
+    );
+    app.apply_action(Action::CancelTabQuery(first));
+    assert!(first_cancel.is_cancelled());
+    assert!(app.is_tab_querying(second));
+}
+
+#[test]
+fn schema_changes_and_quit_use_the_same_unsaved_guard() {
+    let mut app = app_with_staged_edit();
+    app.tab_mut().edits.clear();
+    let table = fake_schema(1, 2).tables.remove(0);
+    let mut editor = SchemaEditor::edit_table(&table, DbKind::Sqlite);
+    editor.columns[0].name = "renamed_column".into();
+    app.tab_mut().schema_editor = Some(ObjectEditor::Table(editor));
+    app.apply_action(Action::Quit);
+    assert!(app.pending_leave.is_some());
+    assert!(!app.pending_quit);
+    app.apply_action(Action::CancelLeaving);
+    assert!(app.tab_has_unsaved_changes(0));
+    app.apply_action(Action::ReloadTableStructure);
+    assert!(app.pending_leave.is_some());
+    assert!(app.tab().schema_editor.is_some());
+    app.apply_action(Action::CancelLeaving);
+    app.apply_action(Action::Quit);
+    app.apply_action(Action::DiscardBeforeLeaving);
+    assert!(app.pending_quit);
+}
+
+#[test]
+#[ignore = "UX preview renderer; writes images into the system temporary directory"]
+fn snapshot_ux_improvements() {
+    let dir = std::env::temp_dir().join("plusplus-ux-preview");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut welcome = DbGuiApp::construct();
+    welcome.connections.clear();
+    welcome.show_welcome = true;
+    let mut connection = DbGuiApp::construct();
+    connection.connections.clear();
+    connection.show_welcome = false;
+    connection.apply_action(Action::NewConnection);
+    connection.editor.as_mut().unwrap().selecting_provider = false;
+    let mut unsaved = app_with_staged_edit();
+    unsaved.show_welcome = false;
+    unsaved.apply_action(Action::CloseTab(0));
+    let mut query = DbGuiApp::construct();
+    query.connections.clear();
+    query.show_welcome = false;
+    connect_fake(&mut query, fake_schema(2, 2));
+    query.tab_mut().sql = "SELECT * FROM table_0".into();
+    query.tab_mut().set_result(fake_result(5, 2));
+    query.tab_mut().set_sort(0, true);
+    query.tab_mut().filter.visible = true;
+    let query_id = query.tab().id;
+    query.begin_query_job(query_id);
+    for (name, mut app) in [
+        ("welcome", welcome),
+        ("connection", connection),
+        ("unsaved", unsaved),
+        ("query", query),
+    ] {
+        let mut setup = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1180.0, 760.0))
+            .build_ui(move |ui| {
+                if !setup {
+                    egui_extras::install_image_loaders(ui.ctx());
+                    crate::style::apply(ui.ctx());
+                    setup = true;
+                }
+                app.draw(ui, None);
+            });
+        harness.run_steps(8);
+        harness
+            .render()
+            .unwrap()
+            .save(dir.join(format!("{name}.png")))
+            .unwrap();
+    }
+}
+
+#[test]
+fn closing_dirty_tabs_requires_an_explicit_decision() {
+    let mut app = app_with_staged_edit();
+    let id = app.tab().id;
+    app.apply_action(Action::CloseTab(0));
+    assert_eq!(app.tab().id, id);
+    assert!(app.tab().edits.has_pending());
+    assert!(app.pending_leave.is_some());
+    app.apply_action(Action::CancelLeaving);
+    assert!(app.pending_leave.is_none());
+    assert!(app.tab().edits.has_pending());
+    app.apply_action(Action::CloseAllTabs);
+    app.apply_action(Action::DiscardBeforeLeaving);
+    assert_ne!(app.tab().id, id);
+    assert!(!app.tab().edits.has_pending());
+}
+
+#[test]
+fn disconnect_guard_includes_dirty_inactive_tabs() {
+    let mut app = app_with_staged_edit();
+    app.new_tab();
+    app.apply_action(Action::DisconnectConn(0));
+    assert!(app.pending_leave.is_some());
+    assert_eq!(app.active_connections.len(), 1);
+    assert!(app.tabs[0].edits.has_pending());
+    app.apply_action(Action::SaveBeforeLeaving);
+    assert!(app.pending_leave.is_none());
+    assert_eq!(app.active_query_tab, 0);
+    assert!(app.commit_pending.is_some());
+    assert_eq!(
+        app.active_connections.len(),
+        1,
+        "save review must not disconnect"
+    );
+    app.apply_action(Action::CancelEdits);
+    app.apply_action(Action::DisconnectConn(0));
+    app.apply_action(Action::DiscardBeforeLeaving);
+    assert!(app.active_connections.is_empty());
+    assert!(!app.tabs[0].edits.has_pending());
+}
+
+#[test]
+fn paging_filtering_and_running_preserve_staged_edits() {
+    let mut app = app_with_staged_edit();
+    app.tab_mut().kind = crate::components::QueryTabKind::Table;
+    app.tab_mut().sql = "SELECT * FROM items LIMIT 100".into();
+    let sql = app.tab().sql.clone();
+    app.run_page(100, 100);
+    app.apply_result_filter(0, true);
+    app.apply_action(Action::RunQuery);
+    assert_eq!(app.tab().sql, sql);
+    assert!(app.tab().edits.has_pending());
+    assert!(app.query_jobs.is_empty());
+    assert!(app.error.as_deref().unwrap().contains("Save or discard"));
+}
+
+#[test]
+fn independent_queries_finish_out_of_order_without_stealing_results() {
+    let mut app = DbGuiApp::construct();
+    app.connections.clear();
+    app.history_enabled = false;
+    app.audit_enabled = false;
+    let first = app.tab().id;
+    let (first_seq, first_cancel) = app.begin_query_job(first);
+    app.new_tab();
+    let second = app.tab().id;
+    assert!(app.query_can_run(1));
+    let (second_seq, second_cancel) = app.begin_query_job(second);
+    assert!(!first_cancel.is_cancelled());
+    assert!(!app.query_can_run(0));
+    for (tab_id, seq, value) in [(second, second_seq, 22), (first, first_seq, 11)] {
+        app.tx
+            .send(AppMessage::Queried {
+                tab_id,
+                conn_id: String::new(),
+                sql: "SELECT value".into(),
+                result: Ok(QueryResult {
+                    columns: vec![ColumnMeta {
+                        name: "value".into(),
+                        type_name: "INTEGER".into(),
+                    }],
+                    rows: vec![vec![Value::Int(value)]],
+                    ..QueryResult::default()
+                }),
+                canceled: false,
+                seq,
+            })
+            .unwrap();
+        app.poll_messages(&egui::Context::default());
+        if tab_id == second {
+            assert!(app.is_tab_querying(first));
+            assert_eq!(app.busy, Busy::Querying);
+        }
+    }
+    assert_eq!(
+        app.tabs[0].result.as_ref().unwrap().rows[0][0],
+        Value::Int(11)
+    );
+    assert_eq!(
+        app.tabs[1].result.as_ref().unwrap().rows[0][0],
+        Value::Int(22)
+    );
+    assert!(!second_cancel.is_cancelled());
+    assert_eq!(app.busy, Busy::Idle);
+}
+
+#[test]
+fn cancel_and_disconnect_leave_other_queries_running() {
+    let mut app = app_with_staged_edit();
+    app.tab_mut().edits.clear();
+    let first = app.tab().id;
+    let (_, first_cancel) = app.begin_query_job(first);
+    app.new_tab();
+    app.tab_mut().conn_id = None;
+    let second = app.tab().id;
+    let (_, second_cancel) = app.begin_query_job(second);
+    app.apply_action(Action::DisconnectConn(0));
+    assert!(first_cancel.is_cancelled());
+    assert!(!second_cancel.is_cancelled());
+    assert!(app.is_tab_querying(second));
+    assert_eq!(app.busy, Busy::Querying);
+    app.apply_action(Action::CancelTabQuery(second));
+    assert!(second_cancel.is_cancelled());
+    assert_eq!(app.busy, Busy::Idle);
+}
+
+#[test]
+fn invalid_connection_save_keeps_the_form_and_credentials() {
+    let mut app = DbGuiApp::construct();
+    app.connections.clear();
+    app.apply_action(Action::NewConnection);
+    let editor = app.editor.as_mut().unwrap();
+    editor.config.host.clear();
+    editor.password = "keep this draft".into();
+    app.apply_action(Action::SaveAndConnect);
+    let editor = app.editor.as_ref().expect("invalid form stays open");
+    assert_eq!(editor.password, "keep this draft");
+    assert!(matches!(editor.test_state, ConnTestState::Failed { .. }));
+    assert!(app.connections.is_empty());
+}
+
+#[test]
+fn replacement_result_keeps_edits_created_while_query_was_running() {
+    let mut app = app_with_staged_edit();
+    app.history_enabled = false;
+    app.audit_enabled = false;
+    let tab_id = app.tab().id;
+    let (seq, _) = app.begin_query_job(tab_id);
+    app.tx
+        .send(AppMessage::Queried {
+            tab_id,
+            conn_id: "edit-connection".into(),
+            sql: "SELECT * FROM items".into(),
+            result: Ok(fake_result(3, 1)),
+            canceled: false,
+            seq,
+        })
+        .unwrap();
+    app.poll_messages(&egui::Context::default());
+    assert!(app.tab().edits.has_pending());
+    assert_eq!(app.tab().result.as_ref().unwrap().row_count(), 1);
+    assert_eq!(app.tab().result.as_ref().unwrap().rows[0][0], Value::Int(1));
+    assert!(app.error.as_deref().unwrap().contains("unsaved edits"));
+}
+
+#[test]
+fn concurrent_streams_share_the_materialized_result_budget() {
+    let mut app = DbGuiApp::construct();
+    app.connections.clear();
+    let first = app.tab().id;
+    app.tabs[0].set_result(fake_result(20, 2));
+    app.new_tab();
+    let second = app.tab().id;
+    let (seq, cancel) = app.begin_query_job(second);
+    app.result_memory_budget = app.total_result_memory_bytes() + 1;
+    app.tx
+        .send(AppMessage::QueryStreamStarted {
+            tab_id: second,
+            columns: vec![ColumnMeta {
+                name: "value".into(),
+                type_name: "TEXT".into(),
+            }],
+            append: false,
+            seq,
+        })
+        .unwrap();
+    app.tx
+        .send(AppMessage::QueryRows {
+            tab_id: second,
+            rows: vec![vec![Value::Text("large row".into())]],
+            seq,
+        })
+        .unwrap();
+    app.poll_messages(&egui::Context::default());
+    assert!(cancel.is_cancelled());
+    assert!(!app.is_tab_querying(second));
+    assert!(app
+        .tabs
+        .iter()
+        .find(|t| t.id == first)
+        .unwrap()
+        .result
+        .is_some());
+    assert!(app
+        .tab()
+        .query_error
+        .as_deref()
+        .unwrap()
+        .contains("memory limit"));
+}
+
+pub(super) fn app_with_staged_edit() -> DbGuiApp {
     let mut app = DbGuiApp::construct();
     app.connections.clear();
     app.active_connections.clear();
@@ -48,7 +386,7 @@ fn edit_preview_commits_to_original_tab_after_selection_changes() {
     assert_eq!(app.active_query_tab, 1);
     app.apply_action(Action::ConfirmEdits);
     assert_eq!(app.active_query_tab, 0);
-    assert_eq!(app.busy, Busy::Querying);
+    assert_eq!(app.busy, Busy::Saving);
     assert!(app.commit_pending.is_none());
 }
 
@@ -128,7 +466,7 @@ fn save_skips_the_preview_when_review_is_off() {
     app.review_edits_before_save = false;
     app.apply_action(Action::PreviewEdits);
     assert!(app.commit_pending.is_none(), "no preview left open");
-    assert_eq!(app.busy, Busy::Querying, "saved straight away");
+    assert_eq!(app.busy, Busy::Saving, "saved straight away");
 }
 
 /// Production Guardian still confirms even with review turned off.
@@ -754,6 +1092,7 @@ fn production_connection_gates_destructive_queries() {
     assert!(app.danger_pending.is_none());
     assert_eq!(app.busy, Busy::Querying);
     app.busy = Busy::Idle;
+    app.query_jobs.clear();
 
     // Destructive SQL is intercepted: dialog state set, nothing executed.
     app.tab_mut().sql = "DELETE FROM table_0".into();
@@ -786,6 +1125,7 @@ fn production_connection_gates_destructive_queries() {
 
     // On a non-production connection the same SQL runs without confirmation.
     app.busy = Busy::Idle;
+    app.query_jobs.clear();
     app.connections[0].production = false;
     app.apply_action(Action::RunQuery);
     assert!(app.danger_pending.is_none());
@@ -815,6 +1155,7 @@ fn staging_guard_allows_plain_inserts_but_reviews_other_writes() {
     assert_eq!(app.busy, Busy::Querying);
 
     app.busy = Busy::Idle;
+    app.query_jobs.clear();
     for sql in [
         "CREATE TABLE staging_copy (id INT)",
         "PRAGMA journal_mode = WAL",
@@ -1019,7 +1360,7 @@ fn production_guard_returns_to_the_staged_edit_tab_before_commit() {
     app.apply_action(Action::ConfirmDangerQuery);
     assert_eq!(app.active_query_tab, 0);
     assert!(app.commit_pending.is_none());
-    assert_eq!(app.busy, Busy::Querying);
+    assert_eq!(app.busy, Busy::Saving);
 }
 
 /// A read-only connection refuses writes outright (no confirmation dialog), refuses
@@ -1047,6 +1388,7 @@ fn read_only_connection_blocks_writes() {
     assert!(app.error.is_none());
     assert_eq!(app.busy, Busy::Querying);
     app.busy = Busy::Idle;
+    app.query_jobs.clear();
 
     // A write is refused outright — no danger dialog, no query.
     app.tab_mut().sql = "DELETE FROM table_0".into();
@@ -1477,7 +1819,8 @@ fn pager_rewrites_sql_for_navigation_and_custom_window() {
     }
 
     let go = |app: &mut DbGuiApp, action: Action| {
-        app.busy = Busy::Idle; // each page flip leaves a query in flight
+        app.busy = Busy::Idle;
+        app.query_jobs.clear(); // each page flip leaves a query in flight
         app.apply_action(action);
     };
 
@@ -1549,6 +1892,7 @@ fn pager_survives_on_pk_less_table() {
     );
 
     app.busy = Busy::Idle;
+    app.query_jobs.clear();
     app.apply_action(Action::Page(PageNav::Next));
     // The page advanced …
     assert_eq!(app.tab().sql, "SELECT * FROM table_0 LIMIT 100 OFFSET 100;");
@@ -2036,7 +2380,7 @@ fn reopen_table_after_disconnect_starts_query() {
         crate::components::QueryTabKind::Table,
     );
 
-    assert_eq!(app.querying_tab_id, Some(app.tab().id));
+    assert!(app.is_tab_querying(app.tab().id));
     assert!(app.tab().result.is_none());
 }
 
@@ -2619,7 +2963,7 @@ fn closing_split_repairs_an_active_hidden_pane_index() {
 
     app.close_split_workspace();
 
-    assert_eq!(app.tabs.len(), 1);
+    assert_eq!(app.tabs.len(), 2, "collapsing a split keeps its tabs");
     assert_eq!(app.active_query_tab, 0);
     assert!(app.split_tab.is_none());
     assert!(!app.tabs[0].editor_split);
@@ -2674,6 +3018,717 @@ fn syntax_check_uses_the_tabs_connection_and_rechecks_when_it_changes() {
         Some(DbKind::Sqlite)
     );
     assert!(app.tab().editor_assist.syntax_error.is_some());
+}
+
+/// Unknown tables/columns are marked from the tab's own connection schema, and a schema
+/// refresh re-checks text that hasn't changed (a table created elsewhere stops being flagged).
+#[test]
+fn semantic_check_marks_unknown_names_and_rechecks_when_the_schema_changes() {
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    let tab = app.tab_mut();
+    tab.kind = crate::components::QueryTabKind::Query;
+    tab.sql = "SELECT field_9 FROM table_0\n;\nSELECT * FROM table_9".into();
+    tab.mark_sql_changed();
+
+    let mut time = 0.0;
+    let mut frame = |app: &mut DbGuiApp| {
+        time += 0.5;
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 700.0),
+            )),
+            time: Some(time),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| app.draw(ui, None));
+    };
+    for _ in 0..3 {
+        frame(&mut app);
+    }
+    let assist = &app.tab().editor_assist;
+    assert!(assist.syntax_error.is_none());
+    assert_eq!(
+        assist.semantic_issues.len(),
+        2,
+        "{:?}",
+        assist.semantic_issues
+    );
+
+    // The schema now has a `table_9`: same text, new verdict.
+    let mut schema = fake_schema(10, 1);
+    let mut extra = schema.tables[0].columns[0].clone();
+    extra.name = "field_9".into();
+    schema.tables[0].columns.push(extra);
+    app.active_connections[0].schema = schema;
+    for _ in 0..3 {
+        frame(&mut app);
+    }
+    assert!(app.tab().editor_assist.semantic_issues.is_empty());
+}
+
+/// Resting the pointer over the editor text exercises the symbol-hover path (hit-testing the
+/// galley, mapping through the fold view) on every position without panicking.
+#[test]
+fn pointer_sweep_over_the_editor_with_a_schema_does_not_panic() {
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    let tab = app.tab_mut();
+    tab.kind = crate::components::QueryTabKind::Query;
+    tab.sql = "SELECT t.field_0, \u{e01}\u{e02} FROM table_0 t\nWHERE field_0 = 1".into();
+    tab.mark_sql_changed();
+    let mut time = 0.0;
+    for step in 0..40 {
+        time += 0.1;
+        let pos = egui::pos2(150.0 + step as f32 * 12.0, 120.0 + (step % 4) as f32 * 14.0);
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 700.0),
+            )),
+            time: Some(time),
+            events: vec![egui::Event::PointerMoved(pos)],
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| app.draw(ui, None));
+    }
+}
+
+/// New Table opens as the dense grid, and each of its sections (columns, indexes, foreign
+/// keys) renders and takes input — it must never trap the user on one of them.
+#[test]
+fn new_table_grid_renders_every_section_and_edits_columns() {
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    app.apply_action(Action::OpenNewTable);
+    app.apply_action(Action::AddSchemaColumn);
+    app.apply_action(Action::AddSchemaIndex);
+
+    let mut time = 0.0;
+    let mut frame = |app: &mut DbGuiApp| {
+        time += 0.1;
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100.0, 700.0),
+            )),
+            time: Some(time),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| app.draw(ui, None));
+    };
+    for tab in [
+        crate::schema::SchemaTab::Columns,
+        crate::schema::SchemaTab::Indexes,
+        crate::schema::SchemaTab::ForeignKeys,
+        crate::schema::SchemaTab::Columns,
+    ] {
+        let Some(crate::schema::ObjectEditor::Table(editor)) = app.tab_mut().schema_editor.as_mut()
+        else {
+            panic!("New Table did not open an editor");
+        };
+        assert_eq!(editor.mode, crate::schema::SchemaEditorMode::New);
+        editor.active_tab = tab;
+        for _ in 0..3 {
+            frame(&mut app);
+        }
+    }
+    let Some(crate::schema::ObjectEditor::Table(editor)) = app.tab().schema_editor.as_ref() else {
+        panic!("editor closed while rendering");
+    };
+    assert_eq!(editor.columns.len(), 2, "starter column + AddSchemaColumn");
+    assert_eq!(editor.indexes.len(), 1);
+}
+
+/// New View opens with a free suggested name (selected, so typing replaces it) over a
+/// full-height query editor, and keeps working as the query grows past one line.
+#[test]
+fn new_view_opens_with_a_suggested_name_and_renders_the_editor() {
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    app.apply_action(Action::OpenNewView);
+    let Some(crate::schema::ObjectEditor::View(editor)) = app.tab_mut().schema_editor.as_mut()
+    else {
+        panic!("New View did not open an editor");
+    };
+    assert_eq!(editor.name, "untitled_view_1");
+    // The body is written in the tab's SQL editor; the view editor follows it.
+    app.tab_mut().sql = "SELECT 1\nFROM table_0\nWHERE x = 'ก'".into();
+    app.tab_mut().mark_sql_changed();
+
+    let mut time = 0.0;
+    for _ in 0..4 {
+        time += 0.1;
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100.0, 700.0),
+            )),
+            time: Some(time),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| app.draw(ui, None));
+    }
+    let Some(crate::schema::ObjectEditor::View(editor)) = app.tab().schema_editor.as_ref() else {
+        panic!("editor closed while rendering");
+    };
+    assert_eq!(editor.name, "untitled_view_1", "rendering must not edit it");
+    assert_eq!(editor.select_body.lines().count(), 3);
+}
+
+/// A new table starts with an `id` integer primary key, and double-clicking the blank space
+/// under the grid adds a column (or an index, on the Indexes section).
+#[test]
+fn new_table_starts_with_an_id_key_and_double_click_adds_a_column() {
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    app.apply_action(Action::OpenNewTable);
+    {
+        let Some(crate::schema::ObjectEditor::Table(editor)) = app.tab().schema_editor.as_ref()
+        else {
+            panic!("New Table did not open an editor");
+        };
+        assert_eq!(editor.columns.len(), 1);
+        let id = &editor.columns[0];
+        assert_eq!(id.name, "id");
+        assert!(id.data_type.eq_ignore_ascii_case("integer"));
+        assert!(id.primary_key && !id.nullable);
+    }
+
+    let mut time = 0.0;
+    let mut frame = |app: &mut DbGuiApp, events: Vec<egui::Event>| {
+        // Idle frames let the double-click window lapse, so the second gesture below is a
+        // fresh double-click rather than the third and fourth click of the first.
+        time += if events.is_empty() { 0.3 } else { 0.01 };
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100.0, 700.0),
+            )),
+            time: Some(time),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| app.draw(ui, None));
+    };
+    let columns = |app: &DbGuiApp| match app.tab().schema_editor.as_ref() {
+        Some(crate::schema::ObjectEditor::Table(editor)) => editor.columns.len(),
+        _ => panic!("editor closed"),
+    };
+    let indexes = |app: &DbGuiApp| match app.tab().schema_editor.as_ref() {
+        Some(crate::schema::ObjectEditor::Table(editor)) => editor.indexes.len(),
+        _ => panic!("editor closed"),
+    };
+    for _ in 0..4 {
+        frame(&mut app, Vec::new());
+    }
+    let pos = egui::pos2(600.0, 450.0);
+    let button = |pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::default(),
+    };
+    let double_click =
+        |app: &mut DbGuiApp, frame: &mut dyn FnMut(&mut DbGuiApp, Vec<egui::Event>)| {
+            frame(app, vec![egui::Event::PointerMoved(pos)]);
+            for pressed in [true, false, true, false] {
+                frame(app, vec![button(pressed)]);
+            }
+            frame(app, Vec::new());
+            frame(app, Vec::new());
+        };
+
+    double_click(&mut app, &mut frame);
+    assert_eq!(columns(&app), 2, "blank space under the grid adds a column");
+
+    if let Some(crate::schema::ObjectEditor::Table(editor)) = app.tab_mut().schema_editor.as_mut() {
+        editor.active_tab = crate::schema::SchemaTab::Indexes;
+    }
+    for _ in 0..3 {
+        frame(&mut app, Vec::new());
+    }
+    double_click(&mut app, &mut frame);
+    assert_eq!(indexes(&app), 1, "…and on the Indexes section, an index");
+    assert_eq!(columns(&app), 2);
+}
+
+/// The object editors have no Apply / Cancel buttons: Cmd/Ctrl+S applies the DDL and Esc
+/// leaves, for New Table, New View and New Trigger alike.
+#[test]
+fn object_editors_apply_with_the_save_shortcut_and_leave_with_escape() {
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+    let mut time = 0.0;
+    let mut frame = |app: &mut DbGuiApp, events: Vec<egui::Event>| {
+        time += 0.1;
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100.0, 700.0),
+            )),
+            time: Some(time),
+            // egui reads the held modifiers from the frame's input, not from the key event.
+            modifiers: events
+                .iter()
+                .find_map(|event| match event {
+                    egui::Event::Key { modifiers, .. } => Some(*modifiers),
+                    _ => None,
+                })
+                .unwrap_or_default(),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| app.draw(ui, None));
+    };
+    let key = |key, modifiers| egui::Event::Key {
+        key,
+        physical_key: Some(key),
+        pressed: true,
+        repeat: false,
+        modifiers,
+    };
+
+    for (name, open) in [
+        ("New Table", Action::OpenNewTable),
+        ("New View", Action::OpenNewView),
+        ("New Trigger", Action::OpenNewTrigger),
+    ] {
+        let mut app = app_with_staged_edit();
+        app.show_welcome = false;
+        app.apply_action(open);
+        for _ in 0..3 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(app.tab().schema_editor.is_some(), "{name}: editor opened");
+
+        // Esc, with nothing focused, leaves.
+        ctx.memory_mut(|m| m.surrender_focus(m.focused().unwrap_or(egui::Id::NULL)));
+        frame(&mut app, Vec::new());
+        frame(
+            &mut app,
+            vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        frame(&mut app, Vec::new());
+        assert!(app.tab().schema_editor.is_none(), "{name}: Esc closes it");
+    }
+
+    // Cmd/Ctrl+S applies the DDL. A read-only connection refuses it, which is how the test sees
+    // that the shortcut reached the apply path without running anything against the database.
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    app.connections[0].read_only = true;
+    app.apply_action(Action::OpenNewTable);
+    if let Some(crate::schema::ObjectEditor::Table(editor)) = app.tab_mut().schema_editor.as_mut() {
+        editor.table_name = "customers".into();
+    }
+    for _ in 0..3 {
+        frame(&mut app, Vec::new());
+    }
+    assert!(app.error.is_none());
+    frame(&mut app, vec![key(egui::Key::S, egui::Modifiers::COMMAND)]);
+    frame(&mut app, Vec::new());
+    assert!(
+        app.error
+            .as_deref()
+            .is_some_and(|e| e.contains("read-only")),
+        "the shortcut must reach the apply path, got {:?}",
+        app.error
+    );
+    assert!(
+        app.tab().schema_editor.is_some(),
+        "a refused apply keeps the draft"
+    );
+}
+
+/// Reload (Cmd/Ctrl+R) with unsaved work asks "Discard all changes?" first — for staged row
+/// edits and for a New Table / View / Trigger draft alike — and never runs the query that is
+/// hidden behind a draft.
+#[test]
+fn reload_with_unsaved_work_asks_before_discarding() {
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+    let mut time = 0.0;
+    let mut frame = |app: &mut DbGuiApp, key: Option<(egui::Key, egui::Modifiers)>| {
+        time += 0.1;
+        let (events, modifiers) = match key {
+            Some((key, modifiers)) => (
+                vec![egui::Event::Key {
+                    key,
+                    physical_key: Some(key),
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                }],
+                modifiers,
+            ),
+            None => (Vec::new(), egui::Modifiers::NONE),
+        };
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100.0, 700.0),
+            )),
+            time: Some(time),
+            modifiers,
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| app.draw(ui, None));
+    };
+    let reload = Some((egui::Key::R, egui::Modifiers::COMMAND));
+    let clean_query_tab = || {
+        let mut app = app_with_staged_edit();
+        app.show_welcome = false;
+        app.tab_mut().kind = crate::components::QueryTabKind::Query;
+        app.tab_mut().edits = Default::default();
+        app.tab_mut().sql = "SELECT 1".into();
+        app
+    };
+
+    // Control: nothing unsaved, so reload simply runs.
+    let mut app = clean_query_tab();
+    for _ in 0..3 {
+        frame(&mut app, None);
+    }
+    let before = app.query_seq;
+    frame(&mut app, reload);
+    frame(&mut app, None);
+    assert_ne!(app.query_seq, before, "Cmd+R reloads a clean query tab");
+    assert!(app.pending_leave.is_none());
+
+    // Staged row edits: ask first; Cancel keeps them, Discard drops them and then reloads.
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    app.tab_mut().sql = "SELECT 1".into();
+    for _ in 0..3 {
+        frame(&mut app, None);
+    }
+    assert!(app.tab().edits.has_pending());
+    let before = app.query_seq;
+    frame(&mut app, reload);
+    frame(&mut app, None);
+    assert!(app.pending_leave.is_some(), "reload must ask first");
+    assert_eq!(app.query_seq, before, "nothing runs while it asks");
+    assert!(app.tab().edits.has_pending(), "…and nothing is discarded");
+    app.apply_action(Action::CancelLeaving);
+    assert!(app.pending_leave.is_none() && app.tab().edits.has_pending());
+    frame(&mut app, reload);
+    frame(&mut app, None);
+    app.apply_action(Action::DiscardBeforeLeaving);
+    assert!(!app.tab().edits.has_pending(), "Discard drops the edits");
+    assert_ne!(app.query_seq, before, "…and then reloads");
+
+    // Drafts: the query behind them never runs; a used draft asks, a pristine one resets.
+    for (name, open) in [
+        ("New Table", Action::OpenNewTable),
+        ("New View", Action::OpenNewView),
+        ("New Trigger", Action::OpenNewTrigger),
+    ] {
+        let mut app = clean_query_tab();
+        app.apply_action(open);
+        for _ in 0..3 {
+            frame(&mut app, None);
+        }
+        let before = app.query_seq;
+        frame(&mut app, reload);
+        frame(&mut app, None);
+        assert_eq!(app.query_seq, before, "{name}: reload ran the hidden query");
+        assert!(
+            app.pending_leave.is_none(),
+            "{name}: pristine draft resets silently"
+        );
+        assert!(app.tab().schema_editor.is_some(), "{name}: still open");
+        frame(&mut app, Some((egui::Key::Enter, egui::Modifiers::COMMAND)));
+        frame(&mut app, None);
+        assert_eq!(
+            app.query_seq, before,
+            "{name}: Cmd+Enter ran the hidden query"
+        );
+    }
+
+    let mut app = clean_query_tab();
+    app.apply_action(Action::OpenNewView);
+    app.tab_mut().sql = "SELECT id FROM users".into();
+    app.tab_mut().mark_sql_changed();
+    for _ in 0..3 {
+        frame(&mut app, None);
+    }
+    frame(&mut app, reload);
+    frame(&mut app, None);
+    assert!(
+        app.pending_leave.is_some(),
+        "a written view asks before reset"
+    );
+    assert!(
+        matches!(app.tab().schema_editor.as_ref(), Some(crate::schema::ObjectEditor::View(e)) if e.select_body == "SELECT id FROM users"),
+        "…and keeps it until the answer"
+    );
+    app.apply_action(Action::DiscardBeforeLeaving);
+    assert_eq!(app.tabs.len(), 1, "Discard closes the draft's tab");
+    assert!(!app.tab().draft_tab);
+
+    // Esc out of a used draft asks too.
+    let mut app = clean_query_tab();
+    app.apply_action(Action::OpenNewTable);
+    if let Some(crate::schema::ObjectEditor::Table(editor)) = app.tab_mut().schema_editor.as_mut() {
+        editor.table_name = "customers".into();
+    }
+    for _ in 0..3 {
+        frame(&mut app, None);
+    }
+    ctx.memory_mut(|m| m.surrender_focus(m.focused().unwrap_or(egui::Id::NULL)));
+    frame(&mut app, None);
+    frame(&mut app, Some((egui::Key::Escape, egui::Modifiers::NONE)));
+    frame(&mut app, None);
+    assert!(
+        app.pending_leave.is_some(),
+        "Esc on a used draft asks first"
+    );
+    assert!(app.tab().schema_editor.is_some());
+}
+
+/// Opening a New Table / View / Trigger editor puts the pending object in the explorer, in
+/// its own folder, and the entry follows the name being typed.
+#[test]
+fn new_objects_appear_in_the_explorer_while_they_are_drafted() {
+    use egui_kittest::kittest::Queryable;
+    let build = |open: Action| {
+        let mut app = DbGuiApp::construct();
+        app.show_welcome = false;
+        app.show_schema_panel = true;
+        app.show_details_panel = false;
+        app.show_connection_tabs = false;
+        connect_fake(&mut app, fake_schema(2, 3));
+        app.apply_action(open);
+        app
+    };
+    let render = |app: DbGuiApp| {
+        let mut setup = false;
+        let mut app = app;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1100.0, 700.0))
+            .build_ui(move |ui| {
+                if !setup {
+                    egui_extras::install_image_loaders(ui.ctx());
+                    crate::style::apply(ui.ctx());
+                    setup = true;
+                }
+                app.draw(ui, None);
+            });
+        harness.run_steps(6);
+        harness
+    };
+
+    // Table: suggested name, listed beside the real tables.
+    let harness = render(build(Action::OpenNewTable));
+    let drafts = harness.query_all_by_label("untitled_table_1").count();
+    assert!(drafts >= 2, "listed in the explorer and named on its tab");
+
+    // Typing renames it live.
+    let mut app = build(Action::OpenNewTable);
+    if let Some(crate::schema::ObjectEditor::Table(editor)) = app.tab_mut().schema_editor.as_mut() {
+        editor.table_name = "customers_archive".into();
+    }
+    let harness = render(app);
+    assert!(
+        harness.query_all_by_label("customers_archive").count() >= 2,
+        "named in the explorer and on the tab"
+    );
+    assert!(harness.query_by_label("untitled_table_1").is_none());
+
+    // View: its folder opens by itself even though the connection has no views yet.
+    let harness = render(build(Action::OpenNewView));
+    assert!(harness.query_by_label("Views").is_some());
+    assert!(harness.query_all_by_label("untitled_view_1").count() >= 2);
+
+    // Trigger: unnamed so far, so the placeholder shows.
+    let harness = render(build(Action::OpenNewTrigger));
+    assert!(harness.query_by_label("Triggers").is_some());
+    assert!(harness.query_all_by_label("untitled_trigger").count() >= 2);
+
+    // Leaving the draft takes it away again.
+    let mut app = build(Action::OpenNewTable);
+    app.apply_action(Action::CancelSchema);
+    let harness = render(app);
+    assert!(harness.query_by_label("untitled_table_1").is_none());
+}
+
+/// A New Table / View / Trigger draft gets a tab of its own: it shows in the tab strip under
+/// its name, leaves the tab the user was in alone, closes on cancel, and after Apply is replaced
+/// by the table or view it created.
+#[test]
+fn drafts_open_in_their_own_tab_and_close_with_the_apply_or_cancel() {
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+    let mut time = 0.0;
+    let mut frame = |app: &mut DbGuiApp| {
+        time += 0.1;
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100.0, 700.0),
+            )),
+            time: Some(time),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| app.draw(ui, None));
+    };
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    app.tab_mut().edits = Default::default();
+    app.tab_mut().sql = "SELECT 1".into();
+    let original = app.tab().id;
+
+    app.apply_action(Action::OpenNewTable);
+    assert_eq!(app.tabs.len(), 2, "a tab of its own");
+    assert!(app.tab().draft_tab && app.tab().id != original);
+    assert_eq!(
+        app.tab_kind(app.active_query_tab),
+        crate::components::QueryTabKind::Table
+    );
+    assert_eq!(
+        app.tabs[0].sql, "SELECT 1",
+        "the tab the user was in is untouched"
+    );
+    assert!(app.tabs[0].schema_editor.is_none());
+
+    // The title follows the name being typed.
+    frame(&mut app);
+    assert_eq!(app.tab_label(app.active_query_tab), "untitled_table_1");
+    if let Some(crate::schema::ObjectEditor::Table(editor)) = app.tab_mut().schema_editor.as_mut() {
+        editor.table_name = "customers".into();
+        editor.columns[0].name = "customer_id".into();
+    }
+    frame(&mut app);
+    assert_eq!(app.tab_label(app.active_query_tab), "customers");
+
+    // A second "New Table" while this one has work in it opens a second tab, not a reset.
+    app.apply_action(Action::OpenNewTable);
+    assert_eq!(app.tabs.len(), 3);
+    // Every "New …" opens another tab, even over an untouched draft, with a free name.
+    app.apply_action(Action::OpenNewView);
+    assert_eq!(app.tabs.len(), 4);
+    app.apply_action(Action::OpenNewView);
+    assert_eq!(app.tabs.len(), 5);
+    frame(&mut app);
+    assert_ne!(
+        app.tab_label(app.active_query_tab),
+        app.tab_label(app.active_query_tab - 1),
+        "draft names don't collide"
+    );
+    for _ in 0..3 {
+        app.apply_action(Action::CancelSchema);
+    }
+
+    // Drafts are not saved with the workspace.
+    let saved = app.snapshot_workspace();
+    assert_eq!(saved.tabs.len(), 1, "only the real tab is persisted");
+
+    // Cancel closes a draft's tab (the three untouched ones above).
+    assert_eq!(app.tabs.len(), 2, "the extra drafts' tabs are gone");
+    assert!(
+        app.tab().schema_editor.is_some() && app.tab().draft_tab,
+        "…and the table draft with work in it is still there"
+    );
+
+    // Apply: the draft tab is replaced by the table it created, opened to its rows.
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    app.tab_mut().edits = Default::default();
+    app.apply_action(Action::OpenNewTable);
+    if let Some(crate::schema::ObjectEditor::Table(editor)) = app.tab_mut().schema_editor.as_mut() {
+        editor.table_name = "customers".into();
+    }
+    let draft_id = app.tab().id;
+    app.tx
+        .send(AppMessage::SchemaApplied {
+            tab_id: draft_id,
+            conn_id: "edit-connection".into(),
+            sql: "CREATE TABLE customers (id INTEGER PRIMARY KEY)".into(),
+            elapsed_ms: 1.0,
+            result: Ok("applied".into()),
+        })
+        .unwrap();
+    for _ in 0..4 {
+        frame(&mut app);
+    }
+    assert!(
+        app.tabs.iter().all(|t| !t.draft_tab),
+        "the draft tab is gone"
+    );
+    let opened = app.tab();
+    assert_eq!(opened.title, "customers");
+    assert_eq!(opened.kind, crate::components::QueryTabKind::Table);
+    assert_eq!(
+        opened
+            .edits
+            .pending_source
+            .as_ref()
+            .or(opened.edits.source.as_ref())
+            .map(|s| s.pk_cols.clone()),
+        Some(vec!["id".to_string()]),
+        "opened editable on the key the draft declared"
+    );
+}
+
+/// The "Discard all changes?" confirmation is a modal over the normal screen — the explorer
+/// and the rest stay on screen — and Escape answers it with Cancel.
+#[test]
+fn discard_confirmation_keeps_the_screen_and_escape_cancels() {
+    use egui_kittest::kittest::Queryable;
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    app.show_schema_panel = true;
+    app.active_connections[0].schema = fake_schema(3, 2);
+    let tab_id = app.tab().id;
+    app.pending_leave = Some(super::unsaved::PendingLeave {
+        action: Action::RunQuery,
+        tab_ids: vec![tab_id],
+    });
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1100.0, 700.0))
+        .build_ui_state(
+            move |ui, app: &mut DbGuiApp| {
+                if !setup {
+                    egui_extras::install_image_loaders(ui.ctx());
+                    crate::style::apply(ui.ctx());
+                    setup = true;
+                }
+                app.draw(ui, None);
+            },
+            app,
+        );
+    harness.run_steps(4);
+    harness.get_by_label("Discard all changes?");
+    harness.get_by_label("table_0");
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(3);
+    assert!(harness.state().pending_leave.is_none(), "Esc cancels");
+    assert!(
+        harness.state().tab().edits.has_pending(),
+        "…and keeps the work"
+    );
 }
 
 #[test]
@@ -3146,7 +4201,13 @@ fn data_view_shows_loading_message_before_its_first_result() {
     app.tab_mut().kind = crate::components::QueryTabKind::Table;
     app.busy = Busy::Querying;
     let tab_id = app.tab().id;
-    app.querying_tab_id = Some(tab_id);
+    app.query_jobs.insert(
+        tab_id,
+        query::QueryJob {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            running: true,
+        },
+    );
 
     let mut setup = false;
     let mut harness = egui_kittest::Harness::builder()
@@ -3209,7 +4270,11 @@ fn open_designer_owns_the_tab() {
     };
 
     let query = build(crate::components::QueryTabKind::Query);
-    query.get_by_label("Create Table");
+    query.get_by_label("Columns");
+    assert!(
+        query.query_by_label("Apply").is_none() && query.query_by_label("Cancel").is_none(),
+        "Cmd/Ctrl+S and Esc replace the Apply / Cancel buttons"
+    );
     assert!(
         query.query_by_label("Save query").is_none(),
         "the query workspace bar must hide while designing"
@@ -3442,8 +4507,15 @@ fn superseded_query_result_never_touches_ui_state() {
     let tab_id = app.tab().id;
     // A newer run is in flight: its stamp (1) is ahead of the late result below (0).
     app.query_seq = 1;
+    app.tab_mut().query_seq = 1;
     app.busy = Busy::Querying;
-    app.querying_tab_id = Some(tab_id);
+    app.query_jobs.insert(
+        tab_id,
+        query::QueryJob {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            running: true,
+        },
+    );
     app.tx
         .send(AppMessage::Queried {
             tab_id,
@@ -3460,7 +4532,7 @@ fn superseded_query_result_never_touches_ui_state() {
         Busy::Querying,
         "a stale result must not clear the newer run's busy state"
     );
-    assert_eq!(app.querying_tab_id, Some(tab_id));
+    assert!(app.is_tab_querying(tab_id));
     assert!(
         app.tab().query_error.is_none(),
         "a stale failure must not surface on the tab"
@@ -3490,7 +4562,7 @@ fn reconnect_reloads_the_active_table_tab() {
         .unwrap();
     app.poll_messages(&ctx);
 
-    assert_eq!(app.querying_tab_id, Some(app.tab().id));
+    assert!(app.is_tab_querying(app.tab().id));
     assert_eq!(app.busy, Busy::Querying);
 }
 
@@ -3562,7 +4634,7 @@ fn selecting_an_unloaded_table_tab_after_reconnect_runs_its_query() {
 
     app.select_tab(1);
 
-    assert_eq!(app.querying_tab_id, Some(table_id));
+    assert!(app.is_tab_querying(table_id));
     assert_eq!(app.busy, Busy::Querying);
 }
 
@@ -3571,6 +4643,7 @@ fn exact_table_total_is_routed_only_to_the_matching_query() {
     let mut app = DbGuiApp::construct();
     let tab_id = app.tab().id;
     app.query_seq = 3;
+    app.tab_mut().query_seq = 3;
     app.tab_mut().total_rows_pending = true;
 
     app.tx
@@ -3826,8 +4899,15 @@ fn replacement_stream_stays_hidden_until_finished() {
     let mut app = DbGuiApp::construct();
     let tab_id = app.tab().id;
     app.query_seq = 7;
+    app.tab_mut().query_seq = 7;
     app.busy = Busy::Querying;
-    app.querying_tab_id = Some(tab_id);
+    app.query_jobs.insert(
+        tab_id,
+        query::QueryJob {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            running: true,
+        },
+    );
     app.tx
         .send(AppMessage::QueryStreamStarted {
             tab_id,
@@ -3878,7 +4958,7 @@ fn replacement_stream_stays_hidden_until_finished() {
     assert_eq!(result.row_count(), 3);
     assert_eq!(result.stats.elapsed_ms, 12.5);
     assert_eq!(app.busy, Busy::Idle);
-    assert_eq!(app.querying_tab_id, None);
+    assert!(!app.query_jobs.values().any(|job| job.running));
 }
 
 #[test]
@@ -3886,6 +4966,7 @@ fn memory_limited_stream_is_marked_truncated_and_cannot_auto_continue() {
     let mut app = DbGuiApp::construct();
     let tab_id = app.tab().id;
     app.query_seq = 9;
+    app.tab_mut().query_seq = 9;
     app.tab_mut().stream = Some(QueryStreamUi {
         seq: 9,
         append: false,
@@ -3931,6 +5012,7 @@ fn failed_load_more_stops_auto_continue() {
     let tab_id = app.tab().id;
     app.tab_mut().set_result(fake_result(2, 1));
     app.query_seq = 4;
+    app.tab_mut().query_seq = 4;
     app.tx
         .send(AppMessage::QueryStreamFinished {
             tab_id,
@@ -4032,8 +5114,15 @@ fn canceled_replacement_keeps_the_previous_result() {
         ..QueryResult::default()
     });
     app.query_seq = 2;
+    app.tab_mut().query_seq = 2;
     app.busy = Busy::Querying;
-    app.querying_tab_id = Some(tab_id);
+    app.query_jobs.insert(
+        tab_id,
+        query::QueryJob {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            running: true,
+        },
+    );
     app.tx
         .send(AppMessage::QueryStreamStarted {
             tab_id,
@@ -4096,8 +5185,15 @@ fn replacement_stream_keeps_previous_rows_until_completion() {
         ..QueryResult::default()
     });
     app.query_seq = 4;
+    app.tab_mut().query_seq = 4;
     app.busy = Busy::Querying;
-    app.querying_tab_id = Some(tab_id);
+    app.query_jobs.insert(
+        tab_id,
+        query::QueryJob {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            running: true,
+        },
+    );
     app.tx
         .send(AppMessage::QueryStreamStarted {
             tab_id,
@@ -4256,8 +5352,15 @@ fn continuation_stream_appends_and_marks_a_short_page_exhausted() {
     });
     app.tab_mut().selection.select_one(0);
     app.query_seq = 8;
+    app.tab_mut().query_seq = 8;
     app.busy = Busy::Querying;
-    app.querying_tab_id = Some(tab_id);
+    app.query_jobs.insert(
+        tab_id,
+        query::QueryJob {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            running: true,
+        },
+    );
     app.tx
         .send(AppMessage::QueryStreamStarted {
             tab_id,
@@ -4925,6 +6028,42 @@ fn render_and_snapshot_at(mut app: DbGuiApp, name: &str, expand_groups: bool, pp
     }
     harness.run_steps(6);
     harness.snapshot(name);
+}
+
+/// Cmd/Ctrl+F opens the find widget in every tab that shows the SQL editor — a function,
+/// procedure or trigger definition and a draft view too — not only in query tabs.
+#[test]
+fn cmd_f_finds_in_definition_and_draft_editors() {
+    use crate::components::QueryTabKind;
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    for kind in [
+        QueryTabKind::Function,
+        QueryTabKind::Procedure,
+        QueryTabKind::Trigger,
+    ] {
+        let tab = app.tab_mut();
+        tab.kind = kind;
+        tab.sql = "CREATE FUNCTION f() RETURNS integer".into();
+        tab.mark_sql_changed();
+        tab.find.open = false;
+        run_frame(&ctx, &mut app, vec![]);
+        let editor = egui::Id::new(("sql_editor", app.tab().id, "primary"));
+        ctx.memory_mut(|m| m.request_focus(editor));
+        run_frame(&ctx, &mut app, vec![]);
+        run_frame(
+            &ctx,
+            &mut app,
+            vec![key(egui::Key::F, egui::Modifiers::COMMAND)],
+        );
+        assert!(app.tab().find.open, "{kind:?}: Cmd+F opens find");
+    }
+
+    app.apply_action(Action::OpenNewView);
+    assert!(app.tab_has_sql_editor(), "a draft view is written in the SQL editor");
 }
 
 /// The floating find widget end to end: Cmd/Ctrl+F seeds the query from a one-line editor
@@ -5721,6 +6860,213 @@ fn snapshot_chart_view() {
     });
     app.tab_mut().view = TabView::Chart;
     render_and_snapshot(app, "chart_view", false);
+}
+
+/// "Discard all changes?" — the confirmation for reloading with staged edits.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_discard_changes_dialog() {
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    app.show_schema_panel = true;
+    app.active_connections[0].schema = fake_schema(4, 3);
+    app.tab_mut().sql = "SELECT * FROM items".into();
+    let tab_id = app.tab().id;
+    app.pending_leave = Some(super::unsaved::PendingLeave {
+        action: Action::RunQuery,
+        tab_ids: vec![tab_id],
+    });
+    render_and_snapshot(app, "discard_changes_dialog", false);
+}
+
+/// The explorer lists a table being drafted, highlighted in green.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_explorer_draft_table() {
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = true;
+    app.show_details_panel = false;
+    connect_fake(&mut app, fake_schema(5, 3));
+    app.tab_mut().title = "orders".into();
+    app.tab_mut().kind = crate::components::QueryTabKind::Table;
+    app.apply_action(Action::OpenNewTable);
+    render_and_snapshot(app, "explorer_draft_table", false);
+}
+
+/// New View: compact bar over a full-height highlighted query editor.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_new_view_editor() {
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.apply_action(Action::OpenNewView);
+    app.tab_mut().sql = "SELECT id, email\nFROM users\nWHERE status = 'active'".into();
+    app.tab_mut().mark_sql_changed();
+    render_and_snapshot(app, "new_view_editor", false);
+}
+
+/// New Trigger: the same compact bar as a view, over the full query editor.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_new_trigger_editor() {
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.apply_action(Action::OpenNewTrigger);
+    app.tab_mut().sql = "INSERT INTO audit(msg) VALUES ('changed');".into();
+    app.tab_mut().mark_sql_changed();
+    render_and_snapshot(app, "new_trigger_editor", false);
+}
+
+/// New Function: the same compact bar, with a short parameter list, over the full editor.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_new_routine_editor() {
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    let mut editor = crate::schema::RoutineEditor::new_routine(
+        dbcore::DbKind::Postgres,
+        dbcore::RoutineKind::Function,
+        Some("public"),
+    );
+    editor.name = "order_total".into();
+    editor.return_type = "numeric".into();
+    editor.params.push(crate::schema::ParamDraft::new_empty());
+    editor.params[0].name = "order_id".into();
+    editor.params[0].data_type = "integer".into();
+    app.open_draft_tab(crate::schema::ObjectEditor::Routine(editor));
+    app.tab_mut().sql = "BEGIN\n  RETURN (SELECT sum(price) FROM order_items WHERE order_id = $1);\nEND;".into();
+    app.tab_mut().mark_sql_changed();
+    render_and_snapshot(app, "new_routine_editor", false);
+}
+
+/// A trigger's or routine's body is written in the tab's SQL editor and follows into the
+/// editor that builds the DDL.
+#[test]
+fn trigger_and_routine_bodies_follow_the_sql_editor() {
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    let mut frames = |app: &mut DbGuiApp| {
+        for i in 0..3 {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1100.0, 700.0),
+                )),
+                time: Some(0.1 * (i + 1) as f64),
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(raw, |ui| app.draw(ui, None));
+        }
+    };
+
+    app.apply_action(Action::OpenNewTrigger);
+    app.tab_mut().sql = "INSERT INTO audit(msg) VALUES ('x');".into();
+    app.tab_mut().mark_sql_changed();
+    frames(&mut app);
+    let Some(crate::schema::ObjectEditor::Trigger(trigger)) = app.tab().schema_editor.as_ref()
+    else {
+        panic!("trigger editor closed");
+    };
+    assert_eq!(trigger.body, "INSERT INTO audit(msg) VALUES ('x');");
+
+    let routine = crate::schema::RoutineEditor::new_routine(
+        dbcore::DbKind::Postgres,
+        dbcore::RoutineKind::Function,
+        None,
+    );
+    app.open_draft_tab(crate::schema::ObjectEditor::Routine(routine));
+    app.tab_mut().sql = "BEGIN RETURN 1; END;".into();
+    app.tab_mut().mark_sql_changed();
+    frames(&mut app);
+    let Some(crate::schema::ObjectEditor::Routine(routine)) = app.tab().schema_editor.as_ref()
+    else {
+        panic!("routine editor closed");
+    };
+    assert_eq!(routine.body, "BEGIN RETURN 1; END;");
+}
+
+/// Every kind of draft, routines included, is listed in the explorer under its own group.
+#[test]
+fn every_draft_kind_is_listed_in_the_explorer() {
+    use crate::components::QueryTabKind;
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    app.apply_action(Action::OpenNewTable);
+    app.apply_action(Action::OpenNewView);
+    app.apply_action(Action::OpenNewTrigger);
+    for kind in [dbcore::RoutineKind::Function, dbcore::RoutineKind::Procedure] {
+        let routine = crate::schema::RoutineEditor::new_routine(dbcore::DbKind::Postgres, kind, None);
+        app.open_draft_tab(crate::schema::ObjectEditor::Routine(routine));
+    }
+    let kinds: Vec<_> = app.sidebar_drafts().into_iter().map(|(kind, ..)| kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            QueryTabKind::Table,
+            QueryTabKind::View,
+            QueryTabKind::Trigger,
+            QueryTabKind::Function,
+            QueryTabKind::Procedure
+        ]
+    );
+}
+
+/// A driver that can't create an object says so instead of opening an editor that could
+/// never apply; drivers that can are untouched.
+#[test]
+fn unsupported_objects_are_refused_up_front() {
+    use dbcore::DbKind;
+    assert!(!DbKind::DuckDb.supports_triggers());
+    assert!(!DbKind::Cassandra.supports_triggers() && !DbKind::ScyllaDb.supports_views());
+    assert!(!DbKind::Sqlite.supports_routines());
+    assert!(DbKind::Sqlite.supports_triggers() && DbKind::Sqlite.supports_views());
+    assert!(DbKind::Postgres.supports_routines() && DbKind::MySql.supports_triggers());
+
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    // The test connection is SQLite: it has no stored routines.
+    let tabs = app.tabs.len();
+    app.apply_action(Action::OpenNewRoutine(dbcore::RoutineKind::Function));
+    assert_eq!(app.tabs.len(), tabs, "no draft tab opened");
+    assert!(app.error.as_deref().is_some_and(|e| e.contains("SQLite")));
+    // …while a trigger, which SQLite has, opens.
+    app.error = None;
+    app.apply_action(Action::OpenNewTrigger);
+    assert_eq!(app.tabs.len(), tabs + 1);
+    assert!(app.error.is_none());
+}
+
+/// New Table: the dense column grid with its Columns / Indexes / Foreign Keys switch.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_new_table_grid() {
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.apply_action(Action::OpenNewTable);
+    if let Some(crate::schema::ObjectEditor::Table(editor)) = app.tab_mut().schema_editor.as_mut() {
+        editor.table_name = "customers".into();
+        editor.columns[0].name = "id".into();
+        editor.columns[0].data_type = "INTEGER".into();
+        editor.columns[0].primary_key = true;
+        editor.columns[0].nullable = false;
+    }
+    app.apply_action(Action::AddSchemaColumn);
+    if let Some(crate::schema::ObjectEditor::Table(editor)) = app.tab_mut().schema_editor.as_mut() {
+        editor.columns[1].name = "email".into();
+    }
+    render_and_snapshot(app, "new_table_grid", false);
 }
 
 /// Screenshot generator (ignored): the live syntax check — a red squiggle under the token

@@ -151,7 +151,8 @@ impl DbGuiApp {
     /// Diagram tabs are skipped: their content is a schema snapshot that can't be
     /// rebuilt without a live connection, so they simply don't survive a restart.
     pub(super) fn snapshot_workspace(&self) -> dbcore::config::Workspace {
-        let saved = |t: &&QueryTab| t.kind != crate::components::QueryTabKind::Diagram;
+        let saved =
+            |t: &&QueryTab| t.kind != crate::components::QueryTabKind::Diagram && !t.draft_tab;
         dbcore::config::Workspace {
             active_tab: self
                 .tabs

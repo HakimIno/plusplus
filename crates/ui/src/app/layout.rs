@@ -204,7 +204,42 @@ impl DbGuiApp {
     pub(super) fn draw(&mut self, ui_root: &mut egui::Ui, frame: Option<&eframe::Frame>) {
         let ctx = ui_root.ctx().clone();
         self.poll_messages(&ctx);
+        self.prune_query_jobs();
+        self.refresh_query_busy();
         self.sync_edit_rules();
+        if !self.pending_quit && ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if self.pending_leave.is_none() {
+                self.apply_action(Action::Quit);
+            }
+        }
+        // A confirmation (unsaved changes, discard) is a modal over the normal screen — the
+        // sidebar, tabs and grid stay where they are. While it is up the keyboard belongs to
+        // it alone, so nothing typed or shortcut-pressed reaches the editors underneath;
+        // Escape answers it with "Cancel".
+        if self.pending_leave.is_some() {
+            let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            ctx.input_mut(|i| {
+                i.events.retain(|event| {
+                    !matches!(
+                        event,
+                        egui::Event::Key { .. }
+                            | egui::Event::Text(_)
+                            | egui::Event::Paste(_)
+                            | egui::Event::Copy
+                            | egui::Event::Cut
+                    )
+                });
+            });
+            if escape {
+                self.pending_leave = None;
+            }
+        }
+        if self.pending_quit {
+            self.maybe_save_workspace(true);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
         if !self.show_welcome {
             self.open_anything_shortcut(&ctx);
         }
@@ -280,8 +315,12 @@ impl DbGuiApp {
             return;
         }
 
+        // A New Table / View / Trigger editor is a draft that has taken over the tab. The SQL
+        // behind it is not on screen, so running or "reloading" it would execute a query the
+        // user cannot see — those shortcuts do nothing there.
+        let draft_open = self.draft_editor_open();
         // Cmd/Ctrl+Enter runs the selection/current statement; Shift adds the whole buffer.
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter)) {
+        if !draft_open && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter)) {
             actions.push(if ctx.input(|i| i.modifiers.shift) {
                 Action::RunQuery
             } else {
@@ -294,14 +333,36 @@ impl DbGuiApp {
                 self.tab().schema_editor.as_ref(),
                 Some(crate::schema::ObjectEditor::Table(_))
             );
+        // A New/Edit Table, View or Trigger editor owns the tab and has no Apply/Cancel buttons:
+        // Cmd/Ctrl+S applies it and Esc leaves it. (The ER designer keeps its own buttons.)
+        let object_editor = if self.schema_pending.is_none() {
+            self.tab().schema_editor.as_ref()
+        } else {
+            None
+        };
+        let design_editor = matches!(
+            object_editor,
+            Some(crate::schema::ObjectEditor::Table(editor))
+                if matches!(
+                    editor.mode,
+                    crate::schema::SchemaEditorMode::DesignNew
+                        | crate::schema::SchemaEditorMode::DesignEdit
+                )
+        );
+        let object_editor_open = object_editor.is_some() && !editing_table_schema;
         // Cmd/Ctrl+S commits whichever grid is being edited: row DML in Data, table DDL in
-        // Structure/Indexes. Production connections still review through Guardian.
+        // Structure/Indexes and in the object editors. Production connections still review
+        // through Guardian.
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
-            actions.push(if editing_table_schema {
-                Action::GenerateSchema
-            } else {
-                Action::PreviewEdits
-            });
+            actions.push(
+                if editing_table_schema || (object_editor_open && !design_editor) {
+                    Action::GenerateSchema
+                } else if object_editor_open {
+                    Action::SaveErdTable
+                } else {
+                    Action::PreviewEdits
+                },
+            );
         }
         // Cmd/Ctrl+R reloads the current result. Structure edits need an explicit decision:
         // silently rebuilding the editor would lose pending DDL changes.
@@ -319,6 +380,8 @@ impl DbGuiApp {
                 self.schema_reload_pending = Some(self.tab().id);
             } else if editing_table_schema {
                 actions.push(Action::ReloadTableStructure);
+            } else if draft_open {
+                actions.extend(self.draft_exit_action(false));
             } else {
                 actions.push(Action::RunQuery);
             }
@@ -328,6 +391,16 @@ impl DbGuiApp {
         // cell only). Skipped while the filter bar is up, which uses Esc to close itself.
         // Recorded as one undo step so an accidental discard can be taken back with Cmd/Ctrl+Z.
         let typing_now = ctx.memory(|m| m.focused().is_some());
+        // Esc leaves an object editor (a draft, like a dialog). In a text field the first Esc
+        // only drops focus, so a half-typed name is never thrown away by a stray keypress.
+        if object_editor_open
+            && !design_editor
+            && !typing_now
+            && !egui::Popup::is_any_open(&ctx)
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            actions.extend(self.draft_exit_action(true));
+        }
         let discard_schema = editing_table_schema
             && !typing_now
             && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
@@ -632,15 +705,16 @@ impl DbGuiApp {
         }
         // Cmd/Ctrl+F belongs to the SQL editor while text has focus; outside the editor it
         // keeps the existing result-filter shortcut.
+        let sql_editor_tab = self.tab_has_sql_editor();
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
-            if typing && self.tab().kind == crate::components::QueryTabKind::Query {
+            if typing && sql_editor_tab {
                 self.open_find(&ctx, false);
             } else if self.tab().result.is_some() {
                 actions.push(Action::ToggleFilter(self.tab().id));
             }
         }
         if typing
-            && self.tab().kind == crate::components::QueryTabKind::Query
+            && sql_editor_tab
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::H))
         {
             self.open_find(&ctx, true);
@@ -683,6 +757,10 @@ impl DbGuiApp {
         }
         if self.show_schema_panel {
             self.left_panel(&mut workspace_root, &mut actions);
+        }
+        if self.show_details_panel != self.details_flag_seen {
+            self.details_flag_seen = self.show_details_panel;
+            self.details_dismissed = None;
         }
         if self.show_details_panel {
             self.right_panel(&mut workspace_root, &mut actions);
@@ -753,6 +831,7 @@ impl DbGuiApp {
         self.danger_confirm_dialog(&ctx, &mut actions);
         self.import_dialog(&ctx, &mut actions);
         self.backup_dialog(&ctx, &mut actions);
+        self.unsaved_changes_dialog(&ctx, &mut actions);
         if self
             .value_viewer
             .as_ref()
@@ -809,5 +888,20 @@ impl DbGuiApp {
         if self.busy != Busy::Idle || self.update.is_busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
+    }
+}
+
+impl DbGuiApp {
+    /// Whether the active tab is showing an unsaved New/Edit View, Trigger, Routine or New
+    /// Table editor (as opposed to an existing table's Structure view, which reloads from the
+    /// database, or the ER designer).
+    pub(super) fn draft_editor_open(&self) -> bool {
+        use crate::schema::{ObjectEditor, SchemaEditorMode};
+        self.schema_pending.is_none()
+            && match self.tab().schema_editor.as_ref() {
+                Some(ObjectEditor::Table(editor)) => editor.mode == SchemaEditorMode::New,
+                Some(_) => true,
+                None => false,
+            }
     }
 }

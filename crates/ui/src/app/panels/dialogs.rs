@@ -204,6 +204,7 @@ impl DbGuiApp {
                     if components::button(ui, icons::trash(), "Discard", true).clicked() {
                         actions.push(Action::SelectTab(tab_index));
                         actions.push(Action::CancelSchemaReload);
+                        actions.push(Action::DiscardSchemaChanges);
                         actions.push(Action::ReloadTableStructure);
                     }
                     if components::button(ui, icons::close(), "Cancel", true).clicked() {

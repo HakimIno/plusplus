@@ -327,6 +327,79 @@ fn visible_object_row_range(
     first.min(end)..end
 }
 
+/// A not-yet-created object, shown in the explorer while its New … editor is open, so the
+/// list already reads as it will after Apply. Green marks a pending addition, as in the grids;
+/// the name follows what is typed in the editor.
+fn draft_object_row(
+    ui: &mut egui::Ui,
+    indent: f32,
+    icon: egui::ImageSource<'static>,
+    name: &str,
+    placeholder: &str,
+    selected: bool,
+) -> bool {
+    let (row_rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), TREE_ROW_H),
+        egui::Sense::click(),
+    );
+    // Every draft is green; the one open in the active tab is a shade stronger.
+    ui.painter().rect_filled(
+        row_rect,
+        egui::CornerRadius::same(6),
+        palette::SUCCESS().linear_multiply(if selected || response.hovered() {
+            0.4
+        } else {
+            0.28
+        }),
+    );
+    let content = egui::Rect::from_min_max(
+        egui::pos2(row_rect.left() + indent, row_rect.top()),
+        row_rect.max,
+    );
+    let shown = name.trim();
+    ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let (icon_rect, _) =
+                ui.allocate_exact_size(egui::vec2(16.0, TREE_ROW_H), egui::Sense::hover());
+            egui::Image::new(icon).tint(palette::TEXT()).paint_at(
+                ui,
+                egui::Rect::from_center_size(icon_rect.center(), egui::Vec2::splat(TREE_ICON)),
+            );
+            let (text, color) = if shown.is_empty() {
+                (placeholder, palette::TEXT_WEAK())
+            } else {
+                (shown, palette::TEXT())
+            };
+            ui.add(
+                egui::Label::new(egui::RichText::new(text).color(color))
+                    .truncate()
+                    .selectable(false)
+                    .sense(egui::Sense::hover()),
+            );
+        });
+    });
+    let response = response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Not created yet — click to open its tab, apply to create it");
+    response.clicked()
+}
+
+/// Open a folder group the first time a draft appears in it, so the draft isn't hidden inside
+/// a collapsed "Views" / "Triggers" folder. Later the user can collapse it again.
+fn reveal_group_for_draft(ui: &egui::Ui, id_key: &str, draft_id: egui::Id) {
+    use egui::collapsing_header::CollapsingState;
+    let seen = ui.data(|d| d.get_temp::<bool>(draft_id)).unwrap_or(false);
+    if seen {
+        return;
+    }
+    ui.data_mut(|d| d.insert_temp(draft_id, true));
+    let id = ui.make_persistent_id(("obj_group", id_key));
+    let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, false);
+    state.set_open(true);
+    state.store(ui.ctx());
+}
+
 /// A single clickable leaf row (a routine or trigger) in the sidebar tree: an icon, the object
 /// name, and `detail` shown as a hover tooltip. The full row is interactive so a click beside a
 /// short name still opens the intended object.
@@ -465,13 +538,14 @@ impl DbGuiApp {
                 inactive.bg_stroke = egui::Stroke::NONE;
                 let connected = self.active().is_some();
                 let active_kind = self.active().map(|a| a.db.kind());
-                let supports_routines = active_kind.is_some_and(|kind| {
-                    !matches!(kind, dbcore::DbKind::Sqlite | dbcore::DbKind::DuckDb)
-                        && !kind.is_cql()
-                });
-                let supports_views = active_kind.is_some_and(|kind| !kind.is_cql());
-                let supports_triggers = active_kind
-                    .is_some_and(|kind| kind != dbcore::DbKind::DuckDb && !kind.is_cql());
+                // An object the driver can't create stays listed but disabled, with the reason
+                // on hover, rather than vanishing from the menu.
+                let supports = |check: fn(dbcore::DbKind) -> bool| active_kind.is_none_or(check);
+                let supports_routines = supports(dbcore::DbKind::supports_routines);
+                let supports_views = supports(dbcore::DbKind::supports_views);
+                let supports_triggers = supports(dbcore::DbKind::supports_triggers);
+                let driver = active_kind.map_or("this driver", dbcore::DbKind::label);
+                let unavailable = format!("Not available for {driver}");
                 let menu = ui.add_enabled_ui(connected, |ui| {
                     let plus = egui::Image::new(icons::plus())
                         .fit_to_exact_size(egui::vec2(icons::SIZE, icons::SIZE))
@@ -482,33 +556,44 @@ impl DbGuiApp {
                             actions.push(Action::OpenNewTable);
                             ui.close();
                         }
-                        if supports_views
-                            && components::button(ui, icons::view(), "New View…", true).clicked()
+                        if components::button(ui, icons::view(), "New View…", supports_views)
+                            .on_disabled_hover_text(&unavailable)
+                            .clicked()
                         {
                             actions.push(Action::OpenNewView);
                             ui.close();
                         }
-                        if supports_triggers
-                            && components::button(ui, icons::play(), "New Trigger…", true).clicked()
+                        if components::button(ui, icons::play(), "New Trigger…", supports_triggers)
+                            .on_disabled_hover_text(&unavailable)
+                            .clicked()
                         {
                             actions.push(Action::OpenNewTrigger);
                             ui.close();
                         }
-                        if supports_routines {
-                            ui.separator();
-                            if components::button(ui, icons::function(), "New Function…", true)
-                                .clicked()
-                            {
-                                actions.push(Action::OpenNewRoutine(dbcore::RoutineKind::Function));
-                                ui.close();
-                            }
-                            if components::button(ui, icons::function(), "New Procedure…", true)
-                                .clicked()
-                            {
-                                actions
-                                    .push(Action::OpenNewRoutine(dbcore::RoutineKind::Procedure));
-                                ui.close();
-                            }
+                        ui.separator();
+                        if components::button(
+                            ui,
+                            icons::function(),
+                            "New Function…",
+                            supports_routines,
+                        )
+                        .on_disabled_hover_text(&unavailable)
+                        .clicked()
+                        {
+                            actions.push(Action::OpenNewRoutine(dbcore::RoutineKind::Function));
+                            ui.close();
+                        }
+                        if components::button(
+                            ui,
+                            icons::function(),
+                            "New Procedure…",
+                            supports_routines,
+                        )
+                        .on_disabled_hover_text(&unavailable)
+                        .clicked()
+                        {
+                            actions.push(Action::OpenNewRoutine(dbcore::RoutineKind::Procedure));
+                            ui.close();
                         }
                         // The ER designer lives here rather than behind its own toolbar icon;
                         // a single table's diagram is also on its right-click menu.
@@ -587,6 +672,12 @@ impl DbGuiApp {
                             .alt_text("Connect to a database to browse its schema."),
                     )
                     .on_hover_text("Connect to a database to browse its schema.");
+                    ui.add_space(12.0);
+                    if components::primary_button(ui, icons::connect(), "Connect a database", true)
+                        .clicked()
+                    {
+                        actions.push(Action::NewConnection);
+                    }
                 }
             });
         }
@@ -696,21 +787,15 @@ impl DbGuiApp {
         let scope = self.sidebar_schema_scope();
         let in_scope = |schema: Option<&str>| scope.is_none_or(|s| schema == Some(s));
 
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::Image::new(icons::database())
-                    .fit_to_exact_size(egui::Vec2::splat(icons::DB_KIND_ICON_SIZE))
-                    .tint(palette::TEXT()),
-            )
-            .on_hover_text(active.db.kind().label());
-            components::truncated_label(
-                ui,
-                &active.schema.database_name,
-                None,
-                false,
-                egui::Sense::hover(),
-            );
-        });
+        // The connection rail and the title bar already say which driver this is.
+        components::truncated_label(
+            ui,
+            &active.schema.database_name,
+            None,
+            false,
+            egui::Sense::hover(),
+        )
+        .on_hover_text(active.db.kind().label());
         ui.add_space(2.0);
 
         let conn_id = active.config_id.as_str();
@@ -768,6 +853,21 @@ impl DbGuiApp {
 
         for (table, pinned, _, _) in tables {
             self.schema_table_row(ui, active, table, pinned, "tbl", actions);
+        }
+        for (kind, name, idx) in self.sidebar_drafts() {
+            if kind == crate::components::QueryTabKind::Table
+                // Same inset as a table row: its padding, chevron slot and gap.
+                && draft_object_row(
+                    ui,
+                    22.0,
+                    kind.icon(),
+                    &name,
+                    "untitled_table",
+                    idx == self.active_query_tab,
+                )
+            {
+                actions.push(Action::SelectTab(idx));
+            }
         }
 
         // Views, functions, procedures, and triggers follow the tables.
@@ -1059,7 +1159,20 @@ impl DbGuiApp {
             .iter()
             .filter(|v| in_scope(v.schema.as_deref()) && matches(&v.name))
             .collect();
-        if !views.is_empty() {
+        let drafts = self.sidebar_drafts();
+        let view_drafts: Vec<(&String, usize)> = drafts
+            .iter()
+            .filter(|(kind, _, _)| *kind == crate::components::QueryTabKind::View)
+            .map(|(_, name, idx)| (name, *idx))
+            .collect();
+        if !views.is_empty() || !view_drafts.is_empty() {
+            if !view_drafts.is_empty() {
+                reveal_group_for_draft(
+                    ui,
+                    "views_group",
+                    ui.id().with(("view_draft", self.tab().id)),
+                );
+            }
             object_group(ui, "views_group", "Views", false, |ui| {
                 virtualized_object_rows(ui, &views, |ui, index, view| {
                     let tab_kind = crate::components::QueryTabKind::View;
@@ -1110,6 +1223,18 @@ impl DbGuiApp {
                         },
                     );
                 });
+                for (name, idx) in &view_drafts {
+                    if draft_object_row(
+                        ui,
+                        TREE_CHILD_INDENT,
+                        crate::components::QueryTabKind::View.icon(),
+                        name,
+                        "untitled_view",
+                        *idx == self.active_query_tab,
+                    ) {
+                        actions.push(Action::SelectTab(*idx));
+                    }
+                }
             });
         }
 
@@ -1124,8 +1249,20 @@ impl DbGuiApp {
                 .iter()
                 .filter(|r| r.kind == rk && in_scope(r.schema.as_deref()) && matches(&r.name))
                 .collect();
-            if routines.is_empty() {
+            let tab_kind = match rk {
+                dbcore::RoutineKind::Function => crate::components::QueryTabKind::Function,
+                dbcore::RoutineKind::Procedure => crate::components::QueryTabKind::Procedure,
+            };
+            let routine_drafts: Vec<(&String, usize)> = drafts
+                .iter()
+                .filter(|(kind, _, _)| *kind == tab_kind)
+                .map(|(_, name, idx)| (name, *idx))
+                .collect();
+            if routines.is_empty() && routine_drafts.is_empty() {
                 continue;
+            }
+            if !routine_drafts.is_empty() {
+                reveal_group_for_draft(ui, key, ui.id().with((key, "draft", self.tab().id)));
             }
             object_group(ui, key, title, false, |ui| {
                 virtualized_object_rows(ui, &routines, |ui, index, r| {
@@ -1175,6 +1312,18 @@ impl DbGuiApp {
                         },
                     );
                 });
+                for (name, idx) in &routine_drafts {
+                    if draft_object_row(
+                        ui,
+                        TREE_CHILD_INDENT,
+                        tab_kind.icon(),
+                        name,
+                        "untitled_routine",
+                        *idx == self.active_query_tab,
+                    ) {
+                        actions.push(Action::SelectTab(*idx));
+                    }
+                }
             });
         }
 
@@ -1185,7 +1334,19 @@ impl DbGuiApp {
             .iter()
             .filter(|t| in_scope(t.schema.as_deref()) && matches(&t.name))
             .collect();
-        if !triggers.is_empty() {
+        let trigger_drafts: Vec<(&String, usize)> = drafts
+            .iter()
+            .filter(|(kind, _, _)| *kind == crate::components::QueryTabKind::Trigger)
+            .map(|(_, name, idx)| (name, *idx))
+            .collect();
+        if !triggers.is_empty() || !trigger_drafts.is_empty() {
+            if !trigger_drafts.is_empty() {
+                reveal_group_for_draft(
+                    ui,
+                    "trig_group",
+                    ui.id().with(("trigger_draft", self.tab().id)),
+                );
+            }
             object_group(ui, "trig_group", "Triggers", false, |ui| {
                 virtualized_object_rows(ui, &triggers, |ui, index, t| {
                     let tab_kind = crate::components::QueryTabKind::Trigger;
@@ -1230,7 +1391,53 @@ impl DbGuiApp {
                         },
                     );
                 });
+                for (name, idx) in &trigger_drafts {
+                    if draft_object_row(
+                        ui,
+                        TREE_CHILD_INDENT,
+                        crate::components::QueryTabKind::Trigger.icon(),
+                        name,
+                        "untitled_trigger",
+                        *idx == self.active_query_tab,
+                    ) {
+                        actions.push(Action::SelectTab(*idx));
+                    }
+                }
             });
         }
+    }
+
+    /// The objects drafted in open New Table / View / Trigger tabs, with the name typed so far —
+    /// only tabs on the connection the explorer shows.
+    pub(in crate::app) fn sidebar_drafts(&self) -> Vec<(crate::components::QueryTabKind, String, usize)> {
+        use crate::components::QueryTabKind;
+        use crate::schema::{ObjectEditor, ObjectMode, SchemaEditorMode};
+        let Some(active) = self.active() else {
+            return Vec::new();
+        };
+        self.tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| tab.conn_id.as_deref() == Some(active.config_id.as_str()))
+            .filter_map(|(idx, tab)| match tab.schema_editor.as_ref()? {
+                ObjectEditor::Table(e) if e.mode == SchemaEditorMode::New => {
+                    Some((QueryTabKind::Table, e.table_name.clone(), idx))
+                }
+                ObjectEditor::View(e) if e.mode == ObjectMode::Create => {
+                    Some((QueryTabKind::View, e.name.clone(), idx))
+                }
+                ObjectEditor::Trigger(e) if e.mode == ObjectMode::Create => {
+                    Some((QueryTabKind::Trigger, e.name.clone(), idx))
+                }
+                ObjectEditor::Routine(e) if e.mode == ObjectMode::Create => {
+                    let kind = match e.kind {
+                        dbcore::RoutineKind::Function => QueryTabKind::Function,
+                        dbcore::RoutineKind::Procedure => QueryTabKind::Procedure,
+                    };
+                    Some((kind, e.name.clone(), idx))
+                }
+                _ => None,
+            })
+            .collect()
     }
 }

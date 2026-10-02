@@ -5,41 +5,29 @@ use super::schema_grid::schema_fk_tab;
 use super::schema_grid::schema_grid_keyboard;
 use super::schema_grid::schema_indexes_grid;
 use super::schema_grid::schema_indexes_tab;
+use super::schema_grid::schema_new_table_grid;
 use super::schema_grid::schema_structure_grid;
 use super::schema_grid::SchemaStructureGridState;
 use crate::app::{Action, DbGuiApp, TabView};
 use crate::components;
 use crate::icons;
-use crate::style::palette;
+use crate::style::{self, palette};
 
-/// The header (title + Apply / Cancel buttons) shared by every object editor. Returns
-/// nothing; the buttons push actions directly.
-fn object_editor_header(ui: &mut egui::Ui, actions: &mut Vec<Action>, title: &str) {
+/// The header shared by the object editors: an optional title over a rule. There are no
+/// Apply / Cancel buttons — Cmd/Ctrl+S applies and Esc leaves (see `layout.rs`).
+fn object_editor_header(ui: &mut egui::Ui, title: &str) {
     ui.add_space(10.0);
-    ui.horizontal(|ui| {
+    if !title.is_empty() {
         ui.label(
             egui::RichText::new(title)
                 .size(16.0)
                 .strong()
                 .color(palette::TEXT()),
         );
-        // Action buttons on the right of the header, where the eye lands first.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if components::primary_button(ui, icons::play(), "Apply", true)
-                .on_hover_text("Apply the generated DDL as a single transaction")
-                .clicked()
-            {
-                actions.push(Action::GenerateSchema);
-            }
-            ui.add_space(6.0);
-            if components::button(ui, icons::close(), "Cancel", true).clicked() {
-                actions.push(Action::CancelSchema);
-            }
-        });
-    });
-    ui.add_space(10.0);
-    ui.separator();
-    ui.add_space(10.0);
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(10.0);
+    }
 }
 
 /// Compact metadata bar used when an existing table is edited in-place. Keeping this separate
@@ -120,6 +108,204 @@ fn embedded_table_editor_header(
     ui.separator();
 }
 
+/// The name field of a new object. A brand-new editor opens with this field focused and its
+/// suggested name selected: type to replace it, or just carry on. `select_on_open` is cleared
+/// once that has happened, so a later edit of the text is never re-selected.
+fn object_name_input(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    text: &mut String,
+    hint: &str,
+    width: f32,
+    select_on_open: &mut bool,
+) {
+    let id = ui.id().with(id_salt);
+    if std::mem::take(select_on_open) {
+        let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                egui::text::CCursor::new(text.chars().count()),
+            )));
+        state.store(ui.ctx(), id);
+        ui.memory_mut(|m| m.request_focus(id));
+    }
+    ui.add_sized(
+        egui::vec2(width, style::CONTROL_H),
+        egui::TextEdit::singleline(text)
+            .id(id)
+            .hint_text(hint)
+            .vertical_align(egui::Align::Center)
+            .margin(egui::Margin::symmetric(6, 0)),
+    );
+}
+
+/// Double-clicking the blank space under a grid's last row. The zone starts where the content
+/// ends, so it can never sit over a row or a cell and steal their clicks.
+fn empty_space_double_clicked(ui: &mut egui::Ui, id: &'static str) -> bool {
+    let content = ui.min_rect();
+    let visible = ui.clip_rect();
+    let zone = egui::Rect::from_min_max(
+        egui::pos2(content.left(), content.bottom()),
+        egui::pos2(visible.right(), visible.bottom()),
+    );
+    if zone.height() < 4.0 || zone.width() < 4.0 {
+        return false;
+    }
+    let response = ui.interact(zone, ui.id().with(id), egui::Sense::click());
+    response.double_clicked()
+}
+
+/// Whether a new object on this backend is placed in a named schema. SQLite and MySQL/MariaDB
+/// have none to type, so offering the field (with a `public` hint) would only mislead.
+fn has_schemas(kind: dbcore::DbKind) -> bool {
+    matches!(
+        kind,
+        dbcore::DbKind::Postgres | dbcore::DbKind::SqlServer | dbcore::DbKind::DuckDb
+    )
+}
+
+/// New Table: one compact bar (name, schema, search, Cancel / Apply), a Columns / Indexes /
+/// Foreign Keys switch, and the dense grid for whichever is showing — the same surface as an
+/// existing table's Structure and Indexes views, so nothing here is a dialog-style form.
+fn new_table_grid_view(
+    ui: &mut egui::Ui,
+    actions: &mut Vec<Action>,
+    editor: &mut crate::schema::SchemaEditor,
+) {
+    use crate::schema::SchemaTab;
+
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("Name")
+                .size(11.0)
+                .strong()
+                .color(palette::TEXT_WEAK()),
+        );
+        object_name_input(
+            ui,
+            "new_table_name",
+            &mut editor.table_name,
+            "table_name",
+            220.0,
+            &mut editor.select_name_on_open,
+        );
+        if !editor.schema_name.is_empty() || has_schemas(editor.db_kind) {
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("Schema")
+                    .size(11.0)
+                    .strong()
+                    .color(palette::TEXT_WEAK()),
+            );
+            components::text_input(ui, &mut editor.schema_name, "public", 110.0);
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if editor.active_tab == SchemaTab::Columns {
+                let width = 240.0_f32.min(ui.available_width());
+                components::icon_text_input(
+                    ui,
+                    &mut editor.column_filter,
+                    "Search for column…",
+                    icons::search(),
+                    width,
+                );
+            }
+        });
+    });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let tabs = [
+            SchemaTab::Columns,
+            SchemaTab::Indexes,
+            SchemaTab::ForeignKeys,
+        ];
+        let selected = tabs
+            .iter()
+            .position(|tab| *tab == editor.active_tab)
+            .unwrap_or(0);
+        let choice = components::segmented_sized(
+            ui,
+            &[
+                (icons::column(), "Columns"),
+                (icons::index(), "Indexes"),
+                (icons::key(), "Foreign Keys"),
+            ],
+            selected,
+            340.0,
+            false,
+        );
+        editor.active_tab = tabs[choice];
+        ui.add_space(6.0);
+        match editor.active_tab {
+            SchemaTab::Columns => {
+                if components::button(ui, icons::plus(), "Column", true).clicked() {
+                    actions.push(Action::AddSchemaColumn);
+                }
+            }
+            SchemaTab::Indexes => {
+                if components::button(ui, icons::plus(), "Index", true).clicked() {
+                    actions.push(Action::AddSchemaIndex);
+                }
+            }
+            SchemaTab::ForeignKeys => {}
+        }
+    });
+    ui.add_space(6.0);
+    ui.separator();
+
+    // Arrow keys / Delete / Enter act on whichever grid is showing.
+    schema_grid_keyboard(
+        ui,
+        editor,
+        Some(if editor.active_tab == SchemaTab::Indexes {
+            TabView::Indexes
+        } else {
+            TabView::Structure
+        }),
+    );
+
+    let viewport_width = ui.available_width();
+    egui::ScrollArea::both()
+        .id_salt("new_table_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.set_min_width(760.0_f32.max(viewport_width));
+            match editor.active_tab {
+                SchemaTab::Columns => {
+                    schema_new_table_grid(
+                        ui,
+                        &mut editor.columns,
+                        editor.db_kind,
+                        &editor.column_filter,
+                        SchemaStructureGridState {
+                            editing_type_row: &mut editor.editing_type_row,
+                            selection: &mut editor.grid_selection,
+                            focus_selected_cell: &mut editor.focus_selected_cell,
+                        },
+                    );
+                    if empty_space_double_clicked(ui, "new_column_zone") {
+                        actions.push(Action::AddSchemaColumn);
+                    }
+                }
+                SchemaTab::Indexes => {
+                    schema_indexes_grid(
+                        ui,
+                        &mut editor.indexes,
+                        &mut editor.grid_selection,
+                        &mut editor.focus_selected_cell,
+                    );
+                    if empty_space_double_clicked(ui, "new_index_zone") {
+                        actions.push(Action::AddSchemaIndex);
+                    }
+                }
+                SchemaTab::ForeignKeys => schema_fk_tab(ui, &mut editor.fks),
+            }
+        });
+}
+
 /// Render the table create/edit form (columns, indexes, foreign keys) into the central panel.
 fn table_editor_view(
     ui: &mut egui::Ui,
@@ -128,6 +314,13 @@ fn table_editor_view(
     table_section: Option<TabView>,
 ) {
     use crate::schema::{SchemaEditorMode, SchemaTab};
+    // A table that doesn't exist yet gets the same dense grid as the Structure view of one
+    // that does. CQL tables keep the legacy form, whose partition/clustering model the grid
+    // doesn't express.
+    if table_section.is_none() && editor.mode == SchemaEditorMode::New && !editor.db_kind.is_cql() {
+        new_table_grid_view(ui, actions, editor);
+        return;
+    }
     let title = match (table_section, editor.mode) {
         (Some(TabView::Structure), _) => format!("Structure — {}", editor.table_name),
         (Some(TabView::Indexes), _) => format!("Indexes — {}", editor.table_name),
@@ -165,7 +358,7 @@ fn table_editor_view(
     } else if table_section.is_some() {
         embedded_table_editor_header(ui, editor, table_section);
     } else {
-        object_editor_header(ui, actions, &title);
+        object_editor_header(ui, &title);
     }
 
     // Live EditTable keeps the database object's name fixed; portable designs allow renames.
@@ -283,51 +476,107 @@ fn table_editor_view(
         });
 }
 
-/// Render the view create/edit form: name/schema, an optional materialized toggle (Postgres),
-/// and the defining `SELECT` as a multi-line editor.
+/// View create/edit: one compact bar (name, schema, materialized, Cancel / Apply) over a
+/// full-height SQL editor with the app's own highlighting and font, so writing a view feels
+/// like writing a query rather than filling in a dialog.
+///
+/// With `own_editor` false only the bar is drawn: the caller supplies the SQL editor below it.
 fn view_editor_view(
     ui: &mut egui::Ui,
-    actions: &mut Vec<Action>,
     editor: &mut crate::schema::ViewEditor,
+    font_size: f32,
+    own_editor: bool,
 ) {
     use crate::schema::ObjectMode;
-    let title = match editor.mode {
-        ObjectMode::Create => "Create View".to_string(),
-        ObjectMode::Edit => format!("Edit View — {}", editor.name),
-    };
-    object_editor_header(ui, actions, &title);
+    let creating = editor.mode == ObjectMode::Create;
 
+    ui.add_space(8.0);
     ui.horizontal(|ui| {
-        ui.label("View name:");
-        components::text_input(ui, &mut editor.name, "my_view", 200.0);
-        if !editor.schema_name.is_empty() || editor.mode == ObjectMode::Create {
-            ui.label("Schema:");
-            components::text_input(ui, &mut editor.schema_name, "public", 120.0);
+        ui.label(
+            egui::RichText::new("Name")
+                .size(11.0)
+                .strong()
+                .color(palette::TEXT_WEAK()),
+        );
+        object_name_input(
+            ui,
+            "view_editor_name",
+            &mut editor.name,
+            "view_name",
+            240.0,
+            &mut editor.select_name_on_open,
+        );
+        if !editor.schema_name.is_empty() || (creating && has_schemas(editor.db_kind)) {
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("Schema")
+                    .size(11.0)
+                    .strong()
+                    .color(palette::TEXT_WEAK()),
+            );
+            components::text_input(ui, &mut editor.schema_name, "public", 110.0);
         }
         // Materialized views are Postgres-only.
         if editor.db_kind == dbcore::DbKind::Postgres {
+            ui.add_space(8.0);
             components::accent_checkbox(ui, true, &mut editor.materialized, Some("Materialized"));
         }
     });
     ui.add_space(6.0);
+    ui.separator();
+    if !own_editor {
+        return;
+    }
 
-    ui.label(
-        egui::RichText::new("Defining query (the SELECT after AS)")
-            .color(palette::TEXT_WEAK())
-            .size(12.0),
-    );
-    ui.add_space(2.0);
+    // The defining query: line numbers beside a frameless, highlighted editor that fills the
+    // rest of the tab.
+    let mut font = egui::TextStyle::Monospace.resolve(ui.style());
+    font.size = font_size;
+    let row_height = ui.fonts_mut(|f| f.row_height(&font));
+    let rows = ((ui.available_height() / row_height).floor() as usize).max(6);
+    let lines = editor.select_body.split('\n').count().max(1);
+    let digits = lines.to_string().len().max(2);
+    let gutter_width = digits as f32 * font_size * 0.62 + 14.0;
+    let numbers = (1..=lines)
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
     egui::ScrollArea::vertical()
         .id_salt("view_editor_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            ui.add(
-                egui::TextEdit::multiline(&mut editor.select_body)
-                    .code_editor()
-                    .desired_rows(16)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("SELECT ..."),
-            );
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.allocate_ui_with_layout(
+                    egui::vec2(gutter_width, row_height * lines as f32),
+                    egui::Layout::top_down(egui::Align::Max),
+                    |ui| {
+                        ui.add_space(0.0);
+                        ui.label(
+                            egui::RichText::new(numbers)
+                                .font(font.clone())
+                                .color(palette::TEXT_FAINT()),
+                        );
+                    },
+                );
+                ui.add_space(10.0);
+                let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+                    let mut job =
+                        crate::highlight::highlight_sql_folded(buf.as_str(), font.clone(), &[]);
+                    job.wrap.max_width = wrap_width;
+                    ui.ctx().fonts_mut(|f| f.layout_job(job))
+                };
+                ui.add(
+                    egui::TextEdit::multiline(&mut editor.select_body)
+                        .code_editor()
+                        .frame(egui::Frame::NONE)
+                        .margin(egui::Margin::ZERO)
+                        .desired_rows(rows)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("SELECT …")
+                        .layouter(&mut layouter),
+                );
+            });
         });
 }
 
@@ -343,170 +592,173 @@ fn trigger_body_hint(kind: dbcore::DbKind) -> &'static str {
     }
 }
 
-/// Render the dialect-adaptive trigger create/edit form. Controls a dialect can't express are
-/// hidden (e.g. row/statement level off Postgres, WHEN off MySQL/SQL Server), so the same
-/// editor serves all four backends.
+/// A small caps-free label for the compact object-editor bars (Name, Table, Timing…).
+fn bar_caption(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        egui::RichText::new(text)
+            .size(11.0)
+            .strong()
+            .color(palette::TEXT_WEAK()),
+    );
+}
+
+/// A segmented choice among `labels`, returning the clicked index if it changed.
+fn bar_choice(ui: &mut egui::Ui, labels: &[&str], selected: usize) -> Option<usize> {
+    let items: Vec<_> = labels.iter().map(|label| (icons::play(), *label)).collect();
+    let width = labels.iter().map(|l| l.len() as f32 * 7.5 + 24.0).sum();
+    let choice = components::segmented_sized(ui, &items, selected, width, false);
+    (choice != selected).then_some(choice)
+}
+
+/// Trigger create/edit: the same compact bar as a view — name, table, timing, event, and the
+/// dialect's extras — over the body. Controls a dialect can't express are hidden (row/statement
+/// level off Postgres, WHEN off MySQL/SQL Server), so one form serves every driver.
+///
+/// Returns whether the caller should show the body editor (Postgres' "execute an existing
+/// function" takes just a name, which the bar already holds). With `own_body` the plain text
+/// box is drawn here, for editing an existing trigger; a new one is written in the SQL editor.
 fn trigger_editor_view(
     ui: &mut egui::Ui,
-    actions: &mut Vec<Action>,
     editor: &mut crate::schema::TriggerEditor,
-) {
+    own_body: bool,
+) -> bool {
     use crate::schema::ObjectMode;
     use dbcore::{DbKind, TriggerEvent, TriggerLevel, TriggerTiming};
 
-    let title = match editor.mode {
-        ObjectMode::Create => "Create Trigger".to_string(),
-        ObjectMode::Edit => format!("Edit Trigger — {}", editor.name),
-    };
-    object_editor_header(ui, actions, &title);
     let kind = editor.db_kind;
-
-    egui::ScrollArea::vertical()
-        .id_salt("trigger_editor_scroll")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Name:");
-                components::text_input(ui, &mut editor.name, "my_trigger", 180.0);
-                if !editor.schema_name.is_empty() || editor.mode == ObjectMode::Create {
-                    ui.label("Schema:");
-                    components::text_input(ui, &mut editor.schema_name, "public", 110.0);
-                }
-            });
-            ui.add_space(4.0);
-
-            ui.horizontal(|ui| {
-                ui.label("Table:");
-                let selected = if editor.table.is_empty() {
-                    "select…".to_string()
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        bar_caption(ui, "Name");
+        components::text_input(ui, &mut editor.name, "my_trigger", 200.0);
+        if !editor.schema_name.is_empty()
+            || (editor.mode == ObjectMode::Create && has_schemas(editor.db_kind))
+        {
+            ui.add_space(8.0);
+            bar_caption(ui, "Schema");
+            components::text_input(ui, &mut editor.schema_name, "public", 110.0);
+        }
+        ui.add_space(8.0);
+        bar_caption(ui, "Table");
+        let selected = if editor.table.is_empty() {
+            "select…".to_string()
+        } else {
+            editor.table.clone()
+        };
+        let current = editor
+            .tables
+            .iter()
+            .position(|table| table == &editor.table);
+        if let Some(Some(table)) = components::searchable_combo_box(
+            ui,
+            "trig_table",
+            &selected,
+            180.0,
+            &editor.tables,
+            current,
+            None,
+        ) {
+            editor.table.clone_from(&editor.tables[table]);
+        }
+        // Row vs statement — only Postgres lets you choose; the others are fixed.
+        if kind == DbKind::Postgres {
+            ui.add_space(8.0);
+            bar_caption(ui, "For each");
+            let selected = usize::from(editor.level == TriggerLevel::Statement);
+            if let Some(choice) = bar_choice(ui, &["ROW", "STATEMENT"], selected) {
+                editor.level = if choice == 0 {
+                    TriggerLevel::Row
                 } else {
-                    editor.table.clone()
+                    TriggerLevel::Statement
                 };
-                let current = editor
-                    .tables
-                    .iter()
-                    .position(|table| table == &editor.table);
-                if let Some(Some(table)) = components::searchable_combo_box(
-                    ui,
-                    "trig_table",
-                    &selected,
-                    180.0,
-                    &editor.tables,
-                    current,
-                    None,
-                ) {
-                    editor.table.clone_from(&editor.tables[table]);
-                }
-            });
-            ui.add_space(6.0);
-
-            // Timing — the available options depend on the dialect.
-            let timings: &[TriggerTiming] = match kind {
-                DbKind::MySql | DbKind::MariaDb => &[TriggerTiming::Before, TriggerTiming::After],
-                DbKind::SqlServer => &[TriggerTiming::After, TriggerTiming::InsteadOf],
-                _ => TriggerTiming::ALL,
-            };
-            ui.horizontal(|ui| {
-                ui.label("Timing:");
-                for &t in timings {
-                    ui.selectable_value(&mut editor.timing, t, t.label());
-                }
-            });
-            ui.add_space(4.0);
-
-            // Events — MySQL/SQLite fire on one (radio); Postgres/SQL Server allow several.
-            let single = matches!(kind, DbKind::MySql | DbKind::MariaDb | DbKind::Sqlite);
-            ui.horizontal(|ui| {
-                ui.label("Events:");
-                for &e in TriggerEvent::ALL {
-                    let mut on = editor.has_event(e);
-                    if single {
-                        if ui.selectable_label(on, e.label()).clicked() {
-                            editor.events = vec![e];
-                        }
-                    } else if components::accent_checkbox(ui, true, &mut on, Some(e.label()))
-                        .changed()
-                    {
-                        editor.set_event(e, on);
-                    }
-                }
-            });
-            if single {
-                ui.label(
-                    egui::RichText::new("This dialect fires on a single event.")
-                        .size(11.0)
-                        .color(palette::TEXT_FAINT()),
-                );
             }
-            ui.add_space(4.0);
+        }
+    });
+    ui.add_space(6.0);
 
-            // Row vs statement — only Postgres lets you choose; the others are fixed.
-            if kind == DbKind::Postgres {
-                ui.horizontal(|ui| {
-                    ui.label("For each:");
-                    ui.selectable_value(&mut editor.level, TriggerLevel::Row, "ROW");
-                    ui.selectable_value(&mut editor.level, TriggerLevel::Statement, "STATEMENT");
-                });
-                ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        // Timing — the available options depend on the dialect.
+        let timings: &[TriggerTiming] = match kind {
+            DbKind::MySql | DbKind::MariaDb => &[TriggerTiming::Before, TriggerTiming::After],
+            DbKind::SqlServer => &[TriggerTiming::After, TriggerTiming::InsteadOf],
+            _ => TriggerTiming::ALL,
+        };
+        bar_caption(ui, "Timing");
+        let labels: Vec<&str> = timings.iter().map(|t| t.label()).collect();
+        let selected = timings.iter().position(|t| *t == editor.timing).unwrap_or(0);
+        if let Some(choice) = bar_choice(ui, &labels, selected) {
+            editor.timing = timings[choice];
+        }
+
+        // Events — MySQL/SQLite fire on one (segmented); Postgres/SQL Server allow several.
+        ui.add_space(8.0);
+        bar_caption(ui, "Event");
+        let single = matches!(kind, DbKind::MySql | DbKind::MariaDb | DbKind::Sqlite);
+        if single {
+            let labels: Vec<&str> = TriggerEvent::ALL.iter().map(|e| e.label()).collect();
+            let selected = TriggerEvent::ALL
+                .iter()
+                .position(|e| editor.has_event(*e))
+                .unwrap_or(0);
+            if let Some(choice) = bar_choice(ui, &labels, selected) {
+                editor.events = vec![TriggerEvent::ALL[choice]];
             }
-
-            // WHEN guard — Postgres & SQLite only.
-            if matches!(kind, DbKind::Postgres | DbKind::Sqlite) {
-                ui.horizontal(|ui| {
-                    ui.label("When:");
-                    components::text_input(
-                        ui,
-                        &mut editor.when_condition,
-                        "optional: NEW.col > 0",
-                        320.0,
-                    );
-                });
-                ui.add_space(6.0);
-            }
-
-            // Body — Postgres can execute an existing function instead of an inline body.
-            if kind == DbKind::Postgres {
-                ui.horizontal(|ui| {
-                    components::accent_checkbox(
-                        ui,
-                        true,
-                        &mut editor.pg_existing_function,
-                        Some("Execute existing function"),
-                    );
-                });
-                if editor.pg_existing_function {
-                    ui.add_space(2.0);
-                    ui.label(
-                        egui::RichText::new("Function to execute")
-                            .color(palette::TEXT_WEAK())
-                            .size(12.0),
-                    );
-                    components::text_input(ui, &mut editor.body, "my_trigger_fn", 280.0);
-                    return;
+        } else {
+            for &event in TriggerEvent::ALL {
+                let mut on = editor.has_event(event);
+                if components::accent_checkbox(ui, true, &mut on, Some(event.label())).changed() {
+                    editor.set_event(event, on);
                 }
-                ui.label(
-                    egui::RichText::new(
-                        "PL/pgSQL function body (a RETURNS trigger function is generated)",
-                    )
-                    .color(palette::TEXT_WEAK())
-                    .size(12.0),
-                );
-            } else {
-                ui.label(
-                    egui::RichText::new("Trigger body")
-                        .color(palette::TEXT_WEAK())
-                        .size(12.0),
-                );
             }
-            ui.add_space(2.0);
-            ui.add(
-                egui::TextEdit::multiline(&mut editor.body)
-                    .code_editor()
-                    .desired_rows(12)
-                    .desired_width(f32::INFINITY)
-                    .hint_text(trigger_body_hint(kind)),
+        }
+
+        // WHEN guard — Postgres & SQLite only.
+        if matches!(kind, DbKind::Postgres | DbKind::Sqlite) {
+            ui.add_space(8.0);
+            bar_caption(ui, "When");
+            let width = ui.available_width().clamp(120.0, 260.0);
+            components::text_input(ui, &mut editor.when_condition, "NEW.col > 0", width);
+        }
+    });
+
+    // Postgres can execute an existing function instead of an inline body.
+    let mut wants_body = true;
+    if kind == DbKind::Postgres {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let before = editor.pg_existing_function;
+            components::accent_checkbox(
+                ui,
+                true,
+                &mut editor.pg_existing_function,
+                Some("Execute existing function"),
             );
+            if before != editor.pg_existing_function {
+                // The body holds an inline body or a function name, never both.
+                editor.body.clear();
+            }
+            if editor.pg_existing_function {
+                ui.add_space(8.0);
+                components::text_input(ui, &mut editor.body, "my_trigger_fn", 240.0);
+            }
         });
+        wants_body = !editor.pg_existing_function;
+    }
+    ui.add_space(6.0);
+    ui.separator();
+
+    if own_body && wants_body {
+        ui.add_space(6.0);
+        bar_caption(ui, "Body");
+        ui.add_space(2.0);
+        ui.add(
+            egui::TextEdit::multiline(&mut editor.body)
+                .code_editor()
+                .desired_rows(12)
+                .desired_width(f32::INFINITY)
+                .hint_text(trigger_body_hint(kind)),
+        );
+    }
+    wants_body
 }
 
 /// A placeholder routine body, tailored to the dialect and routine kind.
@@ -521,123 +773,122 @@ fn routine_body_hint(kind: dbcore::DbKind, is_function: bool) -> &'static str {
     }
 }
 
-/// Render the function/procedure create/edit form: a parameter grid plus return type,
-/// language (Postgres), and body. Dialect-adaptive — the mode column is hidden for MySQL
-/// functions, the language picker shows only on Postgres.
+/// Function/procedure create/edit: the same compact bar as a view or trigger — kind, name,
+/// return type, language — then a short parameter list, over the body. Dialect-adaptive: the
+/// mode column is hidden for MySQL functions, the language picker shows only on Postgres.
+///
+/// With `own_body` the plain body box is drawn here, for editing an existing routine; a new
+/// one is written in the SQL editor the caller draws below.
 fn routine_editor_view(
     ui: &mut egui::Ui,
-    actions: &mut Vec<Action>,
     editor: &mut crate::schema::RoutineEditor,
+    own_body: bool,
 ) {
     use crate::schema::{ObjectMode, ParamDraft};
     use dbcore::{DbKind, ParamMode, RoutineKind};
 
-    let title = match editor.mode {
-        ObjectMode::Create if editor.kind == RoutineKind::Function => "Create Function".to_string(),
-        ObjectMode::Create => "Create Procedure".to_string(),
-        ObjectMode::Edit => format!("Edit {} — {}", editor.kind.label(), editor.name),
-    };
-    object_editor_header(ui, actions, &title);
     let kind = editor.db_kind;
+    let creating = editor.mode == ObjectMode::Create;
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        // The kind is fixed once the routine exists.
+        if creating {
+            let selected = usize::from(editor.kind == RoutineKind::Procedure);
+            if let Some(choice) = bar_choice(ui, &["Function", "Procedure"], selected) {
+                editor.kind = if choice == 0 {
+                    RoutineKind::Function
+                } else {
+                    RoutineKind::Procedure
+                };
+            }
+            ui.add_space(8.0);
+        }
+        bar_caption(ui, "Name");
+        components::text_input(ui, &mut editor.name, "my_routine", 200.0);
+        if !editor.schema_name.is_empty() || creating {
+            ui.add_space(8.0);
+            bar_caption(ui, "Schema");
+            components::text_input(ui, &mut editor.schema_name, "public", 110.0);
+        }
+        // Return type (functions) and language (Postgres).
+        if editor.kind == RoutineKind::Function {
+            ui.add_space(8.0);
+            bar_caption(ui, "Returns");
+            components::text_input(ui, &mut editor.return_type, "integer", 140.0);
+        }
+        if kind == DbKind::Postgres {
+            ui.add_space(8.0);
+            bar_caption(ui, "Language");
+            egui::ComboBox::from_id_salt("routine_lang")
+                .selected_text(editor.language.clone())
+                .icon(components::combo_chevron_icon)
+                .show_ui(ui, |ui| {
+                    for l in ["plpgsql", "sql"] {
+                        ui.selectable_value(&mut editor.language, l.to_string(), l);
+                    }
+                });
+        }
+    });
     let is_fn = editor.kind == RoutineKind::Function;
 
-    egui::ScrollArea::vertical()
-        .id_salt("routine_editor_scroll")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            // Function/Procedure switch (create mode only; the kind is fixed once it exists).
-            if editor.mode == ObjectMode::Create {
-                ui.horizontal(|ui| {
-                    ui.label("Kind:");
-                    ui.selectable_value(&mut editor.kind, RoutineKind::Function, "Function");
-                    ui.selectable_value(&mut editor.kind, RoutineKind::Procedure, "Procedure");
-                });
-                ui.add_space(4.0);
-            }
-
-            ui.horizontal(|ui| {
-                ui.label("Name:");
-                components::text_input(ui, &mut editor.name, "my_routine", 180.0);
-                if !editor.schema_name.is_empty() || editor.mode == ObjectMode::Create {
-                    ui.label("Schema:");
-                    components::text_input(ui, &mut editor.schema_name, "public", 110.0);
+    // Parameters: one compact row each, scrolling past a few so the body keeps the room.
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        bar_caption(ui, "Parameters");
+        if components::button(ui, icons::plus(), "Add", true).clicked() {
+            editor.params.push(ParamDraft::new_empty());
+        }
+    });
+    if !editor.params.is_empty() {
+        // MySQL/MariaDB functions take no parameter mode.
+        let show_mode = !(matches!(kind, DbKind::MySql | DbKind::MariaDb) && is_fn);
+        let mut remove: Option<usize> = None;
+        egui::ScrollArea::vertical()
+            .id_salt("routine_params_scroll")
+            .max_height(132.0)
+            .auto_shrink([true, true])
+            .show(ui, |ui| {
+                for (i, p) in editor.params.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        components::text_input(ui, &mut p.name, "name", 140.0);
+                        components::text_input(ui, &mut p.data_type, "type", 140.0);
+                        if show_mode {
+                            egui::ComboBox::from_id_salt(("pmode", i))
+                                .selected_text(p.mode.label())
+                                .width(82.0)
+                                .icon(components::combo_chevron_icon)
+                                .show_ui(ui, |ui| {
+                                    for m in ParamMode::ALL {
+                                        ui.selectable_value(&mut p.mode, *m, m.label());
+                                    }
+                                });
+                        }
+                        components::text_input(ui, &mut p.default, "default", 120.0);
+                        if components::button(ui, icons::trash(), "", true).clicked() {
+                            remove = Some(i);
+                        }
+                    });
                 }
             });
-            ui.add_space(4.0);
+        if let Some(i) = remove {
+            editor.params.remove(i);
+        }
+    }
+    ui.add_space(6.0);
+    ui.separator();
 
-            // Return type (functions) and language (Postgres).
-            if is_fn || kind == DbKind::Postgres {
-                ui.horizontal(|ui| {
-                    if is_fn {
-                        ui.label("Returns:");
-                        components::text_input(ui, &mut editor.return_type, "integer", 150.0);
-                    }
-                    if kind == DbKind::Postgres {
-                        ui.label("Language:");
-                        egui::ComboBox::from_id_salt("routine_lang")
-                            .selected_text(editor.language.clone())
-                            .show_ui(ui, |ui| {
-                                for l in ["plpgsql", "sql"] {
-                                    ui.selectable_value(&mut editor.language, l.to_string(), l);
-                                }
-                            });
-                    }
-                });
-                ui.add_space(6.0);
-            }
-
-            // Parameters grid.
-            ui.label(
-                egui::RichText::new("Parameters")
-                    .color(palette::TEXT_WEAK())
-                    .size(12.0),
-            );
-            ui.add_space(2.0);
-            // MySQL/MariaDB functions take no parameter mode.
-            let show_mode = !(matches!(kind, DbKind::MySql | DbKind::MariaDb) && is_fn);
-            let mut remove: Option<usize> = None;
-            for (i, p) in editor.params.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    components::text_input(ui, &mut p.name, "name", 110.0);
-                    components::text_input(ui, &mut p.data_type, "type", 120.0);
-                    if show_mode {
-                        egui::ComboBox::from_id_salt(("pmode", i))
-                            .selected_text(p.mode.label())
-                            .width(82.0)
-                            .show_ui(ui, |ui| {
-                                for m in ParamMode::ALL {
-                                    ui.selectable_value(&mut p.mode, *m, m.label());
-                                }
-                            });
-                    }
-                    components::text_input(ui, &mut p.default, "default", 100.0);
-                    if components::button(ui, icons::trash(), "", true).clicked() {
-                        remove = Some(i);
-                    }
-                });
-            }
-            if let Some(i) = remove {
-                editor.params.remove(i);
-            }
-            if components::button(ui, icons::plus(), "Add parameter", true).clicked() {
-                editor.params.push(ParamDraft::new_empty());
-            }
-            ui.add_space(6.0);
-
-            ui.label(
-                egui::RichText::new("Body")
-                    .color(palette::TEXT_WEAK())
-                    .size(12.0),
-            );
-            ui.add_space(2.0);
-            ui.add(
-                egui::TextEdit::multiline(&mut editor.body)
-                    .code_editor()
-                    .desired_rows(12)
-                    .desired_width(f32::INFINITY)
-                    .hint_text(routine_body_hint(kind, is_fn)),
-            );
-        });
+    if own_body {
+        ui.add_space(6.0);
+        bar_caption(ui, "Body");
+        ui.add_space(2.0);
+        ui.add(
+            egui::TextEdit::multiline(&mut editor.body)
+                .code_editor()
+                .desired_rows(12)
+                .desired_width(f32::INFINITY)
+                .hint_text(routine_body_hint(kind, is_fn)),
+        );
+    }
 }
 
 impl DbGuiApp {
@@ -648,6 +899,7 @@ impl DbGuiApp {
     /// a dialog. Applying DDL on a production connection opens Guardian review.
     pub(super) fn schema_editor_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let idx = self.active_query_tab;
+        self.sync_draft_title(idx);
         let tab_id = self.tabs[idx].id;
         let editing_existing_table = matches!(
             self.tabs[idx].schema_editor.as_ref(),
@@ -662,7 +914,51 @@ impl DbGuiApp {
         {
             self.tabs[idx].view = TabView::Structure;
         }
+        // A new view, trigger or routine is written in the same SQL editor as a query tab — highlighting,
+        // folds, autocomplete, ghost text, hover, diagnostics, find — over the tab's own `sql`,
+        // which `open_draft_tab` seeds from the editor. The editor's body follows it.
+        if self.draft_uses_sql_editor(idx) {
+            let rect = ui
+                .available_rect_before_wrap()
+                .shrink2(egui::vec2(10.0, 2.0));
+            let font_size = self.editor_font_size;
+            ui.push_id(("schema_editor", tab_id), |ui| {
+                ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                    use crate::schema::ObjectEditor;
+                    let wants_body = match self.tabs[idx].schema_editor.as_mut() {
+                        Some(ObjectEditor::View(editor)) => {
+                            view_editor_view(ui, editor, font_size, false);
+                            true
+                        }
+                        Some(ObjectEditor::Trigger(editor)) => {
+                            trigger_editor_view(ui, editor, false)
+                        }
+                        Some(ObjectEditor::Routine(editor)) => {
+                            routine_editor_view(ui, editor, false);
+                            true
+                        }
+                        _ => true,
+                    };
+                    if !wants_body {
+                        return;
+                    }
+                    self.sql_editor_body(ui, idx);
+                    let tab = &mut self.tabs[idx];
+                    let body = match tab.schema_editor.as_mut() {
+                        Some(ObjectEditor::View(editor)) => Some(&mut editor.select_body),
+                        Some(ObjectEditor::Trigger(editor)) => Some(&mut editor.body),
+                        Some(ObjectEditor::Routine(editor)) => Some(&mut editor.body),
+                        _ => None,
+                    };
+                    if let Some(body) = body.filter(|body| **body != tab.sql) {
+                        body.clone_from(&tab.sql);
+                    }
+                });
+            });
+            return;
+        }
         let table_section = editing_existing_table.then_some(self.tabs[idx].view);
+        let font_size = self.editor_font_size;
         // The designer owns the whole tab; a slim margin keeps the form off the panel edge.
         let rect = ui
             .available_rect_before_wrap()
@@ -681,13 +977,13 @@ impl DbGuiApp {
                         table_editor_view(ui, actions, editor, table_section)
                     }
                     Some(crate::schema::ObjectEditor::View(editor)) => {
-                        view_editor_view(ui, actions, editor)
+                        view_editor_view(ui, editor, font_size, true)
                     }
                     Some(crate::schema::ObjectEditor::Trigger(editor)) => {
-                        trigger_editor_view(ui, actions, editor)
+                        trigger_editor_view(ui, editor, true);
                     }
                     Some(crate::schema::ObjectEditor::Routine(editor)) => {
-                        routine_editor_view(ui, actions, editor)
+                        routine_editor_view(ui, editor, true)
                     }
                     None => {}
                 }

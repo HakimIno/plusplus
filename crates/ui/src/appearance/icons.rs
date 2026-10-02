@@ -10,9 +10,6 @@ use egui::{include_image, ImageSource};
 /// Default on-canvas size for an icon, in points.
 pub const SIZE: f32 = 16.0;
 
-/// Size for database-kind logos in pickers and labels.
-pub const DB_KIND_ICON_SIZE: f32 = 18.0;
-
 macro_rules! icon_fns {
     ($($name:ident => $path:literal),* $(,)?) => {
         $(

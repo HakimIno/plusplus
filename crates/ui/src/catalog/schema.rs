@@ -300,6 +300,9 @@ pub struct SchemaEditor {
     pub column_filter: String,
     /// Original table name when editing, used to detect and build a rename.
     pub original_table_name: Option<String>,
+    /// A brand-new editor opens with its name field focused and the suggested name selected;
+    /// cleared once that has happened.
+    pub select_name_on_open: bool,
 }
 
 fn sqlserver_string(value: &str) -> String {
@@ -467,12 +470,25 @@ impl SchemaEditor {
     }
 
     pub fn new_table(db_kind: DbKind, default_schema: Option<&str>) -> Self {
+        // Nearly every table wants a key, so start with one: `id`, an integer primary key. CQL
+        // keys are partition/clustering columns with their own rules, so it starts blank there.
+        let first = if db_kind.is_cql() {
+            ColumnDraft::new_empty()
+        } else {
+            ColumnDraft {
+                name: "id".into(),
+                data_type: "INTEGER".into(),
+                nullable: false,
+                primary_key: true,
+                ..ColumnDraft::new_empty()
+            }
+        };
         Self {
             mode: SchemaEditorMode::New,
             table_name: String::new(),
             schema_name: default_schema.unwrap_or("").to_string(),
             db_kind,
-            columns: vec![ColumnDraft::new_empty()],
+            columns: vec![first],
             indexes: Vec::new(),
             fks: Vec::new(),
             active_tab: SchemaTab::Columns,
@@ -481,6 +497,7 @@ impl SchemaEditor {
             editing_type_row: None,
             column_filter: String::new(),
             original_table_name: None,
+            select_name_on_open: true,
         }
     }
 
@@ -514,6 +531,7 @@ impl SchemaEditor {
             editing_type_row: None,
             column_filter: String::new(),
             original_table_name: Some(table.name.clone()),
+            select_name_on_open: false,
         }
     }
 
@@ -579,6 +597,7 @@ impl SchemaEditor {
             editing_type_row: None,
             column_filter: String::new(),
             original_table_name: Some(table.name.clone()),
+            select_name_on_open: false,
         }
     }
 
@@ -1048,6 +1067,8 @@ pub struct ViewEditor {
     /// In Edit mode, the view's `(name, materialized)` as introspected — needed to DROP the
     /// old object when a rename or a drop-then-create is required.
     pub original: Option<(String, bool)>,
+    /// See [`SchemaEditor::select_name_on_open`].
+    pub select_name_on_open: bool,
 }
 
 impl ViewEditor {
@@ -1060,6 +1081,7 @@ impl ViewEditor {
             select_body: "SELECT ".to_string(),
             db_kind,
             original: None,
+            select_name_on_open: true,
         }
     }
 
@@ -1076,6 +1098,7 @@ impl ViewEditor {
             },
             db_kind,
             original: Some((view.name.clone(), view.materialized)),
+            select_name_on_open: false,
         }
     }
 

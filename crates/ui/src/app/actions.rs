@@ -70,7 +70,37 @@ impl DbGuiApp {
     }
 
     pub(super) fn apply_action(&mut self, action: Action) {
+        let Some(action) = self.guard_leaving(action) else {
+            return;
+        };
         match action {
+            Action::SaveBeforeLeaving => self.save_before_leaving(),
+            Action::DiscardBeforeLeaving => self.discard_before_leaving(),
+            Action::CancelLeaving => self.pending_leave = None,
+            Action::CancelTabQuery(tab_id) => {
+                self.cancel_tab_query(tab_id);
+                self.status_msg = "Query cancelled".into();
+            }
+            Action::Quit => self.pending_quit = true,
+            Action::SaveAndConnect => {
+                if self
+                    .editor
+                    .as_ref()
+                    .is_some_and(|editor| self.connection_jobs.contains(&editor.config.id))
+                {
+                    self.error = Some(
+                        "Wait for this connection's schema load to finish before reconnecting."
+                            .into(),
+                    );
+                    return;
+                }
+                if let Some(idx) = self.save_connection() {
+                    let id = self.connections[idx].id.clone();
+                    self.disconnect_conn(&id);
+                    self.bind_connection(idx, true);
+                }
+            }
+            Action::OpenSampleDatabase => self.open_sample_database(),
             Action::ForTab { tab_id, action } => {
                 let Some(target) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
                     return;
@@ -263,7 +293,9 @@ impl DbGuiApp {
                 self.bind_connection(conn_idx, true);
             }
             Action::TestConnection => self.start_connection_test(),
-            Action::SaveConnection => self.save_connection(),
+            Action::SaveConnection => {
+                self.save_connection();
+            }
             Action::CancelDialog => self.editor = None,
             Action::OpenSettings => self.settings_open = true,
             Action::CloseSettings => self.settings_open = false,
@@ -731,6 +763,9 @@ impl DbGuiApp {
             Action::DismissWelcome => {
                 self.show_welcome = false;
                 self.persist_settings();
+                if self.connections.is_empty() {
+                    self.apply_action(Action::NewConnection);
+                }
             }
             Action::BrowseSqlitePath => {
                 if let Some(path) = rfd::FileDialog::new().pick_file() {
@@ -767,19 +802,14 @@ impl DbGuiApp {
                 // The Run button is disabled while busy, but the Cmd+Enter / Cmd+R shortcuts
                 // land here unconditionally. Refuse instead of silently racing a second run
                 // against the one in flight (or against a connect/import in progress).
-                if self.busy == Busy::Querying {
-                    return;
-                }
-                if self.busy != Busy::Idle {
-                    self.status_msg =
-                        "Busy — wait for the current operation to finish.".to_string();
-                    return;
-                }
                 let idx = if self.split_focus {
                     self.split_tab.unwrap_or(self.active_query_tab)
                 } else {
                     self.active_query_tab
                 };
+                if !self.query_can_run(idx) {
+                    return;
+                }
                 self.tabs[idx].plan_result = false;
                 // Clicking a toolbar button temporarily takes egui focus. Keep the last editor
                 // pane focused once the frame completes, so its stored caret still defines
@@ -861,15 +891,14 @@ impl DbGuiApp {
                 }
             }
             Action::ExplainQuery { analyze } => {
-                if self.busy != Busy::Idle {
-                    self.status_msg = "Busy — wait for the current operation to finish.".into();
-                    return;
-                }
                 let idx = if self.split_focus {
                     self.split_tab.unwrap_or(self.active_query_tab)
                 } else {
                     self.active_query_tab
                 };
+                if !self.query_can_run(idx) {
+                    return;
+                }
                 let sql = match self.resolved_current_sql_for(idx) {
                     Ok(sql) if !sql.trim().is_empty() => sql,
                     Ok(_) => {
@@ -1146,16 +1175,38 @@ impl DbGuiApp {
             Action::ConfirmKeyChooser => self.confirm_key_chooser(),
             Action::CancelKeyChooser => self.key_chooser = None,
             Action::OpenNewTable => {
+                self.status_msg = if cfg!(target_os = "macos") {
+                    "⌘S to apply · Esc to cancel".into()
+                } else {
+                    "Ctrl+S to apply · Esc to cancel".into()
+                };
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
                 let schema = self
                     .active()
                     .and_then(|a| a.schema.tables.first().and_then(|t| t.schema.as_deref()))
                     .map(|s| s.to_string());
-                self.tab_mut().schema_editor = Some(ObjectEditor::Table(SchemaEditor::new_table(
-                    kind,
-                    schema.as_deref(),
-                )));
-                self.schema_pending = None;
+                // Suggest a free name, as New View does, so the new table already has a place in
+                // the explorer and the name field can open with it selected.
+                let taken: Vec<String> = self
+                    .active()
+                    .map(|a| {
+                        a.schema
+                            .tables
+                            .iter()
+                            .map(|t| t.name.to_lowercase())
+                            .chain(a.schema.views.iter().map(|v| v.name.to_lowercase()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut taken = taken;
+                taken.extend(self.open_draft_titles());
+                let mut n = 1;
+                while taken.contains(&format!("untitled_table_{n}")) {
+                    n += 1;
+                }
+                let mut editor = SchemaEditor::new_table(kind, schema.as_deref());
+                editor.table_name = format!("untitled_table_{n}");
+                self.open_draft_tab(ObjectEditor::Table(editor));
             }
             Action::OpenEditTable(table) => {
                 if !matches!(self.tab().view, TabView::Structure | TabView::Indexes) {
@@ -1341,16 +1392,40 @@ impl DbGuiApp {
                 }
             }
             Action::OpenNewView => {
+                if !self.object_supported(DbKind::supports_views, "Views") {
+                    return;
+                }
+                self.status_msg = if cfg!(target_os = "macos") {
+                    "⌘S to apply · Esc to cancel".into()
+                } else {
+                    "Ctrl+S to apply · Esc to cancel".into()
+                };
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
                 let schema = self
                     .active()
                     .and_then(|a| a.schema.tables.first().and_then(|t| t.schema.as_deref()))
                     .map(|s| s.to_string());
-                self.tab_mut().schema_editor = Some(ObjectEditor::View(ViewEditor::new_view(
-                    kind,
-                    schema.as_deref(),
-                )));
-                self.schema_pending = None;
+                // Suggest a free name so the editor can open with it selected.
+                let taken: Vec<String> = self
+                    .active()
+                    .map(|a| {
+                        a.schema
+                            .views
+                            .iter()
+                            .map(|v| v.name.to_lowercase())
+                            .chain(a.schema.tables.iter().map(|t| t.name.to_lowercase()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut taken = taken;
+                taken.extend(self.open_draft_titles());
+                let mut n = 1;
+                while taken.contains(&format!("untitled_view_{n}")) {
+                    n += 1;
+                }
+                let mut editor = ViewEditor::new_view(kind, schema.as_deref());
+                editor.name = format!("untitled_view_{n}");
+                self.open_draft_tab(ObjectEditor::View(editor));
             }
             Action::OpenEditView(view) => {
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
@@ -1369,6 +1444,14 @@ impl DbGuiApp {
                 )]);
             }
             Action::OpenNewTrigger => {
+                if !self.object_supported(DbKind::supports_triggers, "Triggers") {
+                    return;
+                }
+                self.status_msg = if cfg!(target_os = "macos") {
+                    "⌘S to apply · Esc to cancel".into()
+                } else {
+                    "Ctrl+S to apply · Esc to cancel".into()
+                };
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
                 let (schema, tables) = self
                     .active()
@@ -1383,10 +1466,11 @@ impl DbGuiApp {
                         (schema, tables)
                     })
                     .unwrap_or_default();
-                self.tab_mut().schema_editor = Some(ObjectEditor::Trigger(
-                    TriggerEditor::new_trigger(kind, schema.as_deref(), tables),
-                ));
-                self.schema_pending = None;
+                self.open_draft_tab(ObjectEditor::Trigger(TriggerEditor::new_trigger(
+                    kind,
+                    schema.as_deref(),
+                    tables,
+                )));
             }
             Action::OpenEditTrigger(trg) => {
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
@@ -1410,15 +1494,19 @@ impl DbGuiApp {
                 )]);
             }
             Action::OpenNewRoutine(routine_kind) => {
+                if !self.object_supported(DbKind::supports_routines, "Functions and procedures") {
+                    return;
+                }
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
                 let schema = self
                     .active()
                     .and_then(|a| a.schema.tables.first().and_then(|t| t.schema.as_deref()))
                     .map(|s| s.to_string());
-                self.tab_mut().schema_editor = Some(ObjectEditor::Routine(
-                    RoutineEditor::new_routine(kind, routine_kind, schema.as_deref()),
-                ));
-                self.schema_pending = None;
+                self.open_draft_tab(ObjectEditor::Routine(RoutineEditor::new_routine(
+                    kind,
+                    routine_kind,
+                    schema.as_deref(),
+                )));
             }
             Action::OpenEditRoutine(routine) => {
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
@@ -1569,8 +1657,14 @@ impl DbGuiApp {
                     {
                         self.tab_mut().view = TabView::Data;
                     }
-                    self.tab_mut().schema_editor = None;
-                    self.tab_mut().design_edit_index = None;
+                    if self.tab().draft_tab {
+                        // A draft lives in a tab of its own: leaving it closes the tab.
+                        self.close_tab(self.active_query_tab);
+                        self.status_msg = "Ready".into();
+                    } else {
+                        self.tab_mut().schema_editor = None;
+                        self.tab_mut().design_edit_index = None;
+                    }
                 }
             }
             Action::OpenUpdateDialog => self.update_dialog_open = true,
@@ -1600,6 +1694,7 @@ impl DbGuiApp {
             }
             Action::DismissWhatsNew => self.show_whats_new = false,
         }
+        self.prune_query_jobs();
     }
 
     /// Start one production confirmation for the exact staged edit transaction snapshot.
@@ -1679,7 +1774,7 @@ impl DbGuiApp {
         let n = stmts.len();
         let tab_id = self.tab().id;
         let tx = self.tx.clone();
-        self.busy = Busy::Querying;
+        self.busy = Busy::Saving;
         self.error = None;
         self.status_msg = format!("Applying {n} DDL statement(s)…");
         self.rt.spawn(async move {

@@ -8,7 +8,7 @@ impl DbGuiApp {
             tab.result.is_none()
                 && !tab.result_evicted
                 && tab.stream.is_none()
-                && self.querying_tab_id != Some(tab.id)
+                && !self.is_tab_querying(tab.id)
                 && matches!(
                     tab.kind,
                     crate::components::QueryTabKind::Table | crate::components::QueryTabKind::View
@@ -88,8 +88,7 @@ impl DbGuiApp {
         self.workspace_dirty = true;
     }
 
-    /// Remove the hidden tab that backs the right-hand split pane and always leave the
-    /// top-level active-tab index pointing at a real, visible tab.
+    /// Collapse the split, returning its tabs to the main strip without losing their work.
     pub(super) fn close_split_workspace(&mut self) {
         let Some(split_idx) = self.split_tab.take() else {
             return;
@@ -125,7 +124,6 @@ impl DbGuiApp {
                 primary.editor_pane = super::EditorPane::Primary;
             }
         }
-        self.tabs.retain(|tab| !split_ids.contains(&tab.id));
         self.active_query_tab = primary_id
             .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
             .unwrap_or(0)
@@ -319,9 +317,194 @@ impl DbGuiApp {
     }
     /// Icon kind for the tab strip, recorded when the tab is opened from the schema tree.
     pub(super) fn tab_kind(&self, idx: usize) -> crate::components::QueryTabKind {
+        use crate::components::QueryTabKind;
+        use crate::schema::ObjectEditor;
+        let Some(tab) = self.tabs.get(idx) else {
+            return QueryTabKind::Query;
+        };
+        // A draft tab is a plain editor tab underneath; the strip shows what it is drafting.
+        if tab.draft_tab {
+            return match tab.schema_editor.as_ref() {
+                Some(ObjectEditor::Table(_)) => QueryTabKind::Table,
+                Some(ObjectEditor::View(_)) => QueryTabKind::View,
+                Some(ObjectEditor::Trigger(_)) => QueryTabKind::Trigger,
+                Some(ObjectEditor::Routine(e)) if e.kind == dbcore::RoutineKind::Procedure => {
+                    QueryTabKind::Procedure
+                }
+                Some(ObjectEditor::Routine(_)) => QueryTabKind::Function,
+                None => tab.kind,
+            };
+        }
+        tab.kind
+    }
+
+    /// Whether the active connection's driver can create the object kind `check` asks about.
+    /// When it can't, say so (and why nothing opened) instead of failing later at Apply.
+    pub(super) fn object_supported(&mut self, check: fn(DbKind) -> bool, what: &str) -> bool {
+        let Some(kind) = self.active().map(|a| a.db.kind()) else {
+            return true;
+        };
+        if check(kind) {
+            return true;
+        }
+        self.error = Some(format!("{what} are not available for {}.", kind.label()));
+        self.status_msg = "Not available for this driver".into();
+        false
+    }
+
+    /// Lower-cased titles of the open draft tabs, so a new draft's `untitled_…` name is free.
+    pub(super) fn open_draft_titles(&self) -> Vec<String> {
         self.tabs
-            .get(idx)
-            .map_or(crate::components::QueryTabKind::Query, |tab| tab.kind)
+            .iter()
+            .filter(|t| t.draft_tab)
+            .map(|t| t.title.to_lowercase())
+            .collect()
+    }
+
+    /// Start drafting a new table / view / trigger / routine in a tab of its own, so it shows
+    /// in the tab strip like any other object instead of taking over the tab the user was in.
+    /// Every "New …" opens a tab of its own, so several drafts can be open side by side.
+    pub(super) fn open_draft_tab(&mut self, editor: crate::schema::ObjectEditor) {
+        self.new_tab();
+        let tab = self.tab_mut();
+        tab.draft_tab = true;
+        // A new view's SELECT trigger's or routine's body is edited in the tab's own SQL editor.
+        let body = match &editor {
+            crate::schema::ObjectEditor::View(view) => Some(&view.select_body),
+            crate::schema::ObjectEditor::Trigger(trigger) => Some(&trigger.body),
+            crate::schema::ObjectEditor::Routine(routine) => Some(&routine.body),
+            _ => None,
+        };
+        if let Some(body) = body {
+            tab.sql.clone_from(body);
+            tab.mark_sql_changed();
+        }
+        tab.schema_editor = Some(editor);
+        self.sync_draft_title(self.active_query_tab);
+        self.schema_pending = None;
+        self.status_msg = if cfg!(target_os = "macos") {
+            "⌘S to apply · Esc to cancel".into()
+        } else {
+            "Ctrl+S to apply · Esc to cancel".into()
+        };
+    }
+
+    /// Whether the active tab shows the SQL editor — a query, a function / procedure / trigger
+    /// definition, or a draft written in it — so Cmd/Ctrl+F and +H belong to its find widget.
+    pub(super) fn tab_has_sql_editor(&self) -> bool {
+        use crate::components::QueryTabKind;
+        matches!(
+            self.tab().kind,
+            QueryTabKind::Query
+                | QueryTabKind::Function
+                | QueryTabKind::Procedure
+                | QueryTabKind::Trigger
+        ) || self.draft_uses_sql_editor(self.active_query_tab)
+    }
+
+    /// Whether the tab at `idx` is a New View / Trigger / Routine draft, whose body is written
+    /// in the full SQL editor.
+    pub(super) fn draft_uses_sql_editor(&self, idx: usize) -> bool {
+        use crate::schema::{ObjectEditor, ObjectMode};
+        self.tabs.get(idx).is_some_and(|tab| {
+            tab.draft_tab
+                && match tab.schema_editor.as_ref() {
+                    Some(ObjectEditor::View(e)) => e.mode == ObjectMode::Create,
+                    Some(ObjectEditor::Trigger(e)) => e.mode == ObjectMode::Create,
+                    Some(ObjectEditor::Routine(e)) => e.mode == ObjectMode::Create,
+                    _ => false,
+                }
+        })
+    }
+
+    /// What a draft tab just created, as the action that opens it — a table or view opens to its
+    /// rows. `None` for a trigger or routine (nothing to browse) or when `tab_id` isn't a draft.
+    pub(super) fn draft_created_object(&self, tab_id: u64) -> Option<Action> {
+        use crate::schema::{ObjectEditor, ObjectMode, SchemaEditorMode};
+        let tab = self.tabs.iter().find(|t| t.id == tab_id && t.draft_tab)?;
+        let kind = tab
+            .conn_id
+            .as_deref()
+            .and_then(|id| self.active_connections.iter().find(|c| c.config_id == id))
+            .map(|c| c.db.kind())?;
+        let schema_of = |name: &str| (!name.trim().is_empty()).then(|| name.trim().to_string());
+        match tab.schema_editor.as_ref()? {
+            ObjectEditor::Table(e) if e.mode == SchemaEditorMode::New => {
+                let table = dbcore::TableInfo {
+                    schema: schema_of(&e.schema_name),
+                    name: e.table_name.trim().to_string(),
+                    columns: Vec::new(),
+                    indexes: Vec::new(),
+                    foreign_keys: Vec::new(),
+                };
+                Some(Action::OpenTable {
+                    sql: kind.preview_query(&table.qualified(kind), 100),
+                    source: EditSource {
+                        schema: table.schema.clone(),
+                        table: table.name.clone(),
+                        pk_cols: e
+                            .columns
+                            .iter()
+                            .filter(|c| c.primary_key && !c.name.trim().is_empty())
+                            .map(|c| c.name.trim().to_string())
+                            .collect(),
+                    },
+                    pin: true,
+                    kind: crate::components::QueryTabKind::Table,
+                })
+            }
+            ObjectEditor::View(e) if e.mode == ObjectMode::Create && !e.materialized => {
+                let view = dbcore::ViewInfo {
+                    schema: schema_of(&e.schema_name),
+                    name: e.name.trim().to_string(),
+                    columns: Vec::new(),
+                    definition: String::new(),
+                    materialized: false,
+                };
+                Some(Action::OpenTable {
+                    sql: kind.preview_query(&view.qualified(kind), 100),
+                    source: EditSource {
+                        schema: view.schema.clone(),
+                        table: view.name.clone(),
+                        pk_cols: Vec::new(),
+                    },
+                    pin: true,
+                    kind: crate::components::QueryTabKind::View,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Keep a draft tab's title in step with the name being typed (a placeholder while empty).
+    pub(super) fn sync_draft_title(&mut self, idx: usize) {
+        use crate::schema::{ObjectEditor, ObjectMode, SchemaEditorMode};
+        let Some(tab) = self.tabs.get_mut(idx).filter(|tab| tab.draft_tab) else {
+            return;
+        };
+        let (name, placeholder): (&str, &str) = match tab.schema_editor.as_ref() {
+            Some(ObjectEditor::Table(e)) if e.mode == SchemaEditorMode::New => {
+                (&e.table_name, "untitled_table")
+            }
+            Some(ObjectEditor::View(e)) if e.mode == ObjectMode::Create => {
+                (&e.name, "untitled_view")
+            }
+            Some(ObjectEditor::Trigger(e)) if e.mode == ObjectMode::Create => {
+                (&e.name, "untitled_trigger")
+            }
+            Some(ObjectEditor::Routine(e)) if e.mode == ObjectMode::Create => {
+                (&e.name, "untitled_routine")
+            }
+            _ => return,
+        };
+        let title = if name.trim().is_empty() {
+            placeholder.to_string()
+        } else {
+            name.trim().to_string()
+        };
+        if tab.title != title {
+            tab.title = title;
+        }
     }
     pub(super) fn select_tab(&mut self, idx: usize) {
         let Some(target_id) = self.tabs.get(idx).map(|tab| tab.id) else {

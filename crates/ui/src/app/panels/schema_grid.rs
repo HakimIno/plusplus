@@ -332,7 +332,9 @@ fn schema_grid_row_tint(ui: &mut egui::Ui, drop: bool, is_new: bool) {
     let fill = if drop {
         palette::DANGER().linear_multiply(0.10)
     } else if is_new {
-        palette::ACCENT().linear_multiply(0.07)
+        // Green marks a pending addition, the same way the data grid marks a new row, so
+        // what was just added is easy to check before Apply.
+        palette::SUCCESS().linear_multiply(0.12)
     } else {
         return;
     };
@@ -842,6 +844,184 @@ pub(super) fn schema_structure_grid(
                 });
             }
         });
+}
+
+/// Editable column grid for a table that doesn't exist yet. It speaks the same dense-grid
+/// language as the Structure view of an existing table (so creating and altering feel like one
+/// tool), plus the two things a new table needs that an existing one doesn't: a primary-key
+/// cell and a way to remove a row.
+pub(super) fn schema_new_table_grid(
+    ui: &mut egui::Ui,
+    columns: &mut Vec<crate::schema::ColumnDraft>,
+    db_kind: dbcore::DbKind,
+    column_filter: &str,
+    state: SchemaStructureGridState<'_>,
+) {
+    use crate::schema::{SchemaGridSelection, SchemaTab};
+    use egui_extras::{Column, TableBuilder};
+
+    let SchemaStructureGridState {
+        editing_type_row,
+        selection,
+        focus_selected_cell,
+    } = state;
+    let query = column_filter.trim().to_lowercase();
+    let mut remove: Option<usize> = None;
+    TableBuilder::new(ui)
+        .id_salt("new_table_columns")
+        .sense(egui::Sense::click())
+        .striped(true)
+        .resizable(true)
+        .vscroll(false)
+        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+        .auto_shrink([false, true])
+        .column(Column::exact(34.0))
+        .column(Column::initial(200.0).at_least(110.0).clip(true))
+        .column(Column::initial(170.0).at_least(100.0).clip(true))
+        .column(Column::initial(110.0).at_least(80.0).clip(true))
+        .column(Column::initial(110.0).at_least(80.0).clip(true))
+        .column(Column::remainder().at_least(140.0).clip(true))
+        .column(Column::exact(34.0))
+        .header(24.0, |mut header| {
+            for label in [
+                "#",
+                "column_name",
+                "data_type",
+                "primary_key",
+                "is_nullable",
+                "column_default",
+                "",
+            ] {
+                header.col(|ui| schema_grid_header(ui, label));
+            }
+        })
+        .body(|mut body| {
+            for (row_index, column) in columns.iter_mut().enumerate().filter(|(_, column)| {
+                query.is_empty() || column.name.to_lowercase().contains(&query)
+            }) {
+                body.row(24.0, |mut row| {
+                    let selected = selection.is_some_and(|selected| {
+                        selected.tab == SchemaTab::Columns && selected.row == row_index
+                    });
+                    row.set_selected(selected);
+                    row.col(|ui| {
+                        schema_grid_row_tint(ui, false, !column.is_existing);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new((row_index + 1).to_string())
+                                    .size(11.0)
+                                    .monospace()
+                                    .color(palette::TEXT_FAINT()),
+                            );
+                        });
+                    });
+                    row.col(|ui| {
+                        schema_grid_row_tint(ui, false, !column.is_existing);
+                        let response = schema_grid_text(ui, true, &mut column.name, "column_name");
+                        schema_grid_select_on_click(
+                            &response,
+                            selection,
+                            SchemaTab::Columns,
+                            row_index,
+                        );
+                        if selected && *focus_selected_cell {
+                            response.request_focus();
+                            *focus_selected_cell = false;
+                        }
+                    });
+                    row.col(|ui| {
+                        schema_grid_row_tint(ui, false, !column.is_existing);
+                        let response = schema_grid_type_editor(
+                            ui,
+                            true,
+                            &mut column.data_type,
+                            db_kind,
+                            row_index,
+                            editing_type_row,
+                        );
+                        schema_grid_select_on_click(
+                            &response,
+                            selection,
+                            SchemaTab::Columns,
+                            row_index,
+                        );
+                    });
+                    row.col(|ui| {
+                        schema_grid_row_tint(ui, false, !column.is_existing);
+                        let response = schema_grid_bool(
+                            ui,
+                            true,
+                            &mut column.primary_key,
+                            "Click to make this column part of the primary key",
+                        );
+                        // A key column can't be NULL.
+                        if response.clicked() && column.primary_key {
+                            column.nullable = false;
+                        }
+                        schema_grid_select_on_click(
+                            &response,
+                            selection,
+                            SchemaTab::Columns,
+                            row_index,
+                        );
+                    });
+                    row.col(|ui| {
+                        schema_grid_row_tint(ui, false, !column.is_existing);
+                        let response = schema_grid_bool(
+                            ui,
+                            !column.primary_key,
+                            &mut column.nullable,
+                            "Click to change nullability",
+                        );
+                        schema_grid_select_on_click(
+                            &response,
+                            selection,
+                            SchemaTab::Columns,
+                            row_index,
+                        );
+                    });
+                    row.col(|ui| {
+                        schema_grid_row_tint(ui, false, !column.is_existing);
+                        let response = schema_grid_text(ui, true, &mut column.default, "NULL");
+                        schema_grid_select_on_click(
+                            &response,
+                            selection,
+                            SchemaTab::Columns,
+                            row_index,
+                        );
+                    });
+                    row.col(|ui| {
+                        schema_grid_row_tint(ui, false, !column.is_existing);
+                        ui.with_layout(
+                            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                            |ui| {
+                                let trash = egui::Image::new(icons::trash())
+                                    .fit_to_exact_size(egui::vec2(13.0, 13.0))
+                                    .tint(palette::TEXT_FAINT());
+                                if ui
+                                    .add(egui::Button::image(trash).frame(false))
+                                    .on_hover_text("Remove column")
+                                    .clicked()
+                                {
+                                    remove = Some(row_index);
+                                }
+                            },
+                        );
+                    });
+                    if row.response().clicked() {
+                        *selection = Some(SchemaGridSelection {
+                            tab: SchemaTab::Columns,
+                            row: row_index,
+                        });
+                    }
+                });
+            }
+        });
+    if let Some(row) = remove {
+        columns.remove(row);
+        *selection = None;
+    }
 }
 
 pub(super) fn schema_indexes_grid(

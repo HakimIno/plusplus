@@ -33,6 +33,7 @@ mod panels;
 mod query;
 mod tabs;
 mod transfer;
+mod unsaved;
 mod workspace;
 
 use crate::edit::{EditSource, Edits};
@@ -268,6 +269,7 @@ enum Busy {
     Idle,
     Connecting,
     Querying,
+    Saving,
     Importing,
 }
 
@@ -721,6 +723,10 @@ struct EditorAssistState {
     ghost_suggestion: Option<String>,
     ghost_key: Option<(u64, String, usize)>,
     syntax_error: Option<dbcore::SyntaxError>,
+    /// Unknown tables/columns found by the last check. Empty whenever `syntax_error` is set.
+    semantic_issues: Vec<dbcore::SemanticIssue>,
+    /// `(tables, views, columns)` of the schema the last check saw; a refresh re-checks.
+    schema_stamp: (usize, usize, usize),
     syntax_checked: String,
     /// The dialect `syntax_checked` was parsed with: the tab's own connection, `None` when
     /// it has none. A connection change re-checks unchanged text.
@@ -759,6 +765,8 @@ struct QueryTab {
     /// Incremented whenever production code changes `sql`; drives the bounded editor cache.
     sql_revision: u64,
     sql_editor_cache: SqlEditorCache,
+    /// Last execution on this tab; unrelated tabs cannot supersede its results.
+    query_seq: u64,
     /// Collapsed regions of `sql`, held by the char offset of the folded region's first line
     /// (see [`crate::fold`]). Edits move these along with the text; a region that stops being
     /// foldable drops out. Deliberately not part of the saved workspace: a fold is a way of
@@ -793,6 +801,9 @@ struct QueryTab {
     query_error: Option<String>,
     /// The current result came from Explain/Analyze and should use the hierarchical plan view.
     plan_result: bool,
+    /// The tab exists only to draft a new table / view / trigger / routine (its own tab, like
+    /// any other object). It closes on cancel and after apply, and is never saved to the workspace.
+    draft_tab: bool,
     result: Option<QueryResult>,
     /// Changes whenever the displayed result is replaced; invalidates edit previews.
     result_revision: u64,
@@ -858,6 +869,7 @@ impl QueryTab {
             conn_id: None,
             sql: String::new(),
             sql_revision: 0,
+            query_seq: 0,
             sql_editor_cache: SqlEditorCache::default(),
             folds: std::collections::BTreeSet::new(),
             query_parameters: Vec::new(),
@@ -876,6 +888,7 @@ impl QueryTab {
             editor_size: None,
             query_error: None,
             plan_result: false,
+            draft_tab: false,
             result: None,
             result_revision: 0,
             batch_results: Vec::new(),
@@ -1398,7 +1411,7 @@ fn validate_connection_test_config(
         Ok(())
     } else {
         Err((
-            "Fill the highlighted field(s) before testing.".to_string(),
+            "Fill the highlighted connection fields.".to_string(),
             fields,
         ))
     }
@@ -1544,6 +1557,13 @@ enum Action {
     },
     TestConnection,
     SaveConnection,
+    SaveAndConnect,
+    OpenSampleDatabase,
+    SaveBeforeLeaving,
+    DiscardBeforeLeaving,
+    CancelLeaving,
+    CancelTabQuery(u64),
+    Quit,
     CancelDialog,
     OpenSettings,
     CloseSettings,
@@ -1894,16 +1914,10 @@ pub struct DbGuiApp {
     rx: Receiver<AppMessage>,
     busy: Busy,
     next_connection_test_id: u64,
-    /// Tab id of the in-flight query (cleared by its terminal result message).
-    querying_tab_id: Option<u64>,
-    /// Generation stamp of the most recently started query run. Every `start_query_for`
-    /// increments it and tags every materialized or streaming result message. An older stamp
-    /// belongs to a superseded run and must not touch UI state (it may otherwise clobber the
-    /// newer rows, busy flag, or the tab's pending edit source).
+    /// Unique execution id source. Each tab keeps its own latest id for stale-result checks.
     query_seq: u64,
-    /// Cancellation handle for the in-flight query; firing it asks the backend to abort and
-    /// kill the server-side statement. `None` when no query is running.
-    query_cancel: Option<tokio_util::sync::CancellationToken>,
+    /// Independent query/counter cancellation and loading state per workspace tab.
+    query_jobs: HashMap<u64, query::QueryJob>,
 
     // --- connection state ---
     /// Pool of live connections (one per connected config), shared across tabs.
@@ -1946,6 +1960,7 @@ pub struct DbGuiApp {
 
     // --- transient UI state ---
     editor: Option<ConnEditor>,
+    pending_leave: Option<unsaved::PendingLeave>,
     /// Live drag-to-reorder state for a query tab (cleared on mouse release).
     tab_drag: Option<TabDrag>,
     /// Live drag-to-reorder state for a saved connection (cleared on mouse release).
@@ -2045,6 +2060,13 @@ pub struct DbGuiApp {
     show_connection_tabs: bool,
     show_schema_panel: bool,
     show_details_panel: bool,
+    /// The (tab, row) whose Details the panel's ✕ dismissed. Selecting any other row — or
+    /// coming back to this one later — brings the panel back; the toolbar/menu toggle is
+    /// the persistent hide.
+    details_dismissed: Option<(u64, usize)>,
+    /// `show_details_panel` as of the previous frame, to notice a toggle and drop
+    /// `details_dismissed` with it.
+    details_flag_seen: bool,
     show_query_console: bool,
     show_live_log: bool,
 
@@ -2233,9 +2255,8 @@ impl DbGuiApp {
             rx,
             busy: Busy::Idle,
             next_connection_test_id: 1,
-            querying_tab_id: None,
             query_seq: 0,
-            query_cancel: None,
+            query_jobs: HashMap::new(),
             active_connections: Vec::new(),
             connection_jobs: HashSet::new(),
             connection_cancels: HashMap::new(),
@@ -2253,6 +2274,7 @@ impl DbGuiApp {
             workspace_dirty: false,
             last_workspace_save: std::time::Instant::now(),
             editor: None,
+            pending_leave: None,
             tab_drag: None,
             connection_drag: None,
             open_anything: None,
@@ -2275,6 +2297,8 @@ impl DbGuiApp {
             show_connection_tabs: true,
             show_schema_panel: true,
             show_details_panel: true,
+            details_dismissed: None,
+            details_flag_seen: true,
             show_query_console: true,
             show_live_log: true,
             theme,
