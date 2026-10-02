@@ -19,7 +19,10 @@ impl DbGuiApp {
                         self.connection_cancels.remove(&conn_id);
                         continue;
                     }
-                    self.busy = Busy::Idle;
+                    if self.busy == Busy::Connecting {
+                        self.busy = Busy::Idle;
+                    }
+                    self.refresh_query_busy();
                     match result {
                         Ok(db) => {
                             let arrived_id = conn_id.clone();
@@ -407,18 +410,9 @@ impl DbGuiApp {
                     // this one finished) must not touch busy/status or the tab: whichever run
                     // finished last would otherwise win, showing stale rows or stealing the
                     // pending edit source. It did execute, though, so it still goes to history.
-                    let stale = seq != self.query_seq;
+                    let stale = !self.query_is_current(tab_id, seq);
                     if !stale {
-                        self.busy = Busy::Idle;
-                        self.querying_tab_id = None;
-                        if !self
-                            .tabs
-                            .iter()
-                            .find(|tab| tab.id == tab_id)
-                            .is_some_and(|tab| tab.total_rows_pending)
-                        {
-                            self.query_cancel = None;
-                        }
+                        self.finish_query_job(tab_id);
                     }
                     // A user cancel isn't a failure: don't log it as a failed statement and
                     // don't flag a red error — just note it and leave the previous result up.
@@ -453,6 +447,9 @@ impl DbGuiApp {
                         ),
                     }
                     if stale {
+                        continue;
+                    }
+                    if result.is_ok() && self.replacement_would_lose_edits(tab_id) {
                         continue;
                     }
                     let is_active = self
@@ -501,11 +498,9 @@ impl DbGuiApp {
                     canceled,
                     seq,
                 } => {
-                    let stale = seq != self.query_seq;
+                    let stale = !self.query_is_current(tab_id, seq);
                     if !stale {
-                        self.busy = Busy::Idle;
-                        self.querying_tab_id = None;
-                        self.query_cancel = None;
+                        self.finish_query_job(tab_id);
                     }
                     for (sql, result) in &results {
                         match result {
@@ -536,6 +531,9 @@ impl DbGuiApp {
                         }
                     }
                     if stale {
+                        continue;
+                    }
+                    if self.replacement_would_lose_edits(tab_id) {
                         continue;
                     }
                     let is_active = self
@@ -584,7 +582,7 @@ impl DbGuiApp {
                     self.enforce_result_memory_budget();
                 }
                 AppMessage::QueryTotal { tab_id, total, seq } => {
-                    if seq != self.query_seq {
+                    if !self.query_is_current(tab_id, seq) {
                         continue;
                     }
                     let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
@@ -592,8 +590,8 @@ impl DbGuiApp {
                     };
                     tab.total_rows = total;
                     tab.total_rows_pending = false;
-                    if self.querying_tab_id.is_none() {
-                        self.query_cancel = None;
+                    if !self.is_tab_querying(tab_id) {
+                        self.query_jobs.remove(&tab_id);
                     }
                     ctx.request_repaint();
                 }
@@ -603,7 +601,7 @@ impl DbGuiApp {
                     append,
                     seq,
                 } => {
-                    if seq != self.query_seq {
+                    if !self.query_is_current(tab_id, seq) {
                         continue;
                     }
                     let disconnected = self
@@ -641,7 +639,36 @@ impl DbGuiApp {
                     ctx.request_repaint();
                 }
                 AppMessage::QueryRows { tab_id, rows, seq } => {
-                    if seq != self.query_seq {
+                    if !self.query_is_current(tab_id, seq) {
+                        continue;
+                    }
+                    // Concurrent streams share the same result budget. Stop this fetch before
+                    // installing rows that would push the combined UI results past the ceiling.
+                    let incoming_bytes = rows.capacity()
+                        * std::mem::size_of::<Vec<dbcore::Value>>()
+                        + rows
+                            .iter()
+                            .map(|row| {
+                                row.capacity() * std::mem::size_of::<dbcore::Value>()
+                                    + row
+                                        .iter()
+                                        .map(|value| {
+                                            value.estimated_memory_bytes()
+                                .saturating_sub(std::mem::size_of::<dbcore::Value>())
+                                        })
+                                        .sum::<usize>()
+                            })
+                            .sum::<usize>();
+                    if incoming_bytes
+                        > self
+                            .result_memory_budget
+                            .saturating_sub(self.total_result_memory_bytes())
+                    {
+                        self.cancel_tab_query(tab_id);
+                        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                            tab.page_exhausted = true;
+                            tab.set_query_error("Result memory limit reached. Narrow this query or release results in another tab, then run again.".into());
+                        }
                         continue;
                     }
                     let disconnected = self
@@ -714,11 +741,9 @@ impl DbGuiApp {
                     row_truncated,
                     seq,
                 } => {
-                    let stale = seq != self.query_seq;
+                    let stale = !self.query_is_current(tab_id, seq);
                     if !stale {
-                        self.busy = Busy::Idle;
-                        self.querying_tab_id = None;
-                        self.query_cancel = None;
+                        self.finish_query_job(tab_id);
                     }
                     if canceled {
                         if !stale {
@@ -756,6 +781,9 @@ impl DbGuiApp {
                         ),
                     }
                     if stale {
+                        continue;
+                    }
+                    if !append && result.is_ok() && self.replacement_would_lose_edits(tab_id) {
                         continue;
                     }
                     let is_active = self
@@ -1042,6 +1070,9 @@ impl DbGuiApp {
                             self.status_msg = msg;
                             self.error = None;
                             self.schema_pending = None;
+                            // A draft tab ends here; for a table or view, what it created is
+                            // opened in its place.
+                            let created = self.draft_created_object(tab_id);
                             // Close the editor on the tab that applied the migration (the
                             // user may have switched tabs while it ran).
                             let source_tab = self.tabs.iter_mut().find(|t| t.id == tab_id);
@@ -1085,6 +1116,14 @@ impl DbGuiApp {
                                     });
                                 }
                             }
+                            if let Some(idx) =
+                                self.tabs.iter().position(|t| t.id == tab_id && t.draft_tab)
+                            {
+                                self.close_tab(idx);
+                                if let Some(open) = created {
+                                    self.apply_action(open);
+                                }
+                            }
                         }
                         Err(e) => {
                             self.error = Some(format!("Schema migration failed: {e}"));
@@ -1094,6 +1133,7 @@ impl DbGuiApp {
                 }
             }
             self.enforce_result_memory_budget();
+            self.refresh_query_busy();
             ctx.request_repaint();
         }
     }

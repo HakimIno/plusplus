@@ -26,6 +26,7 @@ const COMMANDS: &[NativeMenuCommand] = &[
     NativeMenuCommand::SelectAll,
     NativeMenuCommand::Undo,
     NativeMenuCommand::Redo,
+    NativeMenuCommand::Quit,
 ];
 
 extern "C-unwind" fn dispatch(_this: &AnyObject, _sel: Sel, item: &NSMenuItem) {
@@ -103,6 +104,18 @@ pub fn install(ctx: &egui::Context) {
             ] {
                 if let Some(entry) = menu.itemAtIndex(index) {
                     entry.setTitle(&NSString::from_str(title));
+                    if index == 7 {
+                        // Route Cmd+Q through the same unsaved-work guard as window close.
+                        unsafe {
+                            entry.setAction(Some(sel!(plusplusMenuCommand:)));
+                            TARGET.with(|target| {
+                                entry.setTarget(
+                                    target.borrow().as_ref().map(|(object, _)| &**object),
+                                );
+                            });
+                        }
+                        entry.setTag(13);
+                    }
                 }
             }
             command(mtm, &menu, "Settings…", ",", 3);

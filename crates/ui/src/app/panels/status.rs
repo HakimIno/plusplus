@@ -30,6 +30,12 @@ impl DbGuiApp {
                                     .color(palette::TEXT_WEAK()),
                             );
                             if let Some(tab) = self.tabs.get(self.active_query_tab) {
+                                if tab.sort.is_some() {
+                                    ui.colored_label(
+                                        palette::TEXT_WEAK(),
+                                        "· Sorted loaded rows only",
+                                    );
+                                }
                                 if let Some(res) = &tab.result {
                                     if tab.filter.is_active()
                                         && tab.row_order.len() != res.row_count()

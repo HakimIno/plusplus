@@ -33,6 +33,7 @@ impl DbGuiApp {
                 );
                 return;
             } else {
+                self.cancel_tab_query(self.tab().id);
                 // The result on screen, its edit source and its paging came from the previous
                 // database; keeping them would let an edit or a load-more reach the new one.
                 let tab = self.tab_mut();
@@ -52,10 +53,19 @@ impl DbGuiApp {
         // A portable diagram can be retargeted from the normal connection switcher. Keep
         // its refresh/apply routing in sync with the tab while leaving the design untouched.
         if let Some(diagram) = self.tab_mut().diagram.as_mut() {
-            diagram.conn_id = id;
+            diagram.conn_id = id.clone();
         }
         self.workspace_dirty = true;
         if force || !live {
+            if force && live && self.connection_jobs.contains(&id) {
+                self.status_msg = format!(
+                    "{name} is loading its schema. Wait for it to finish before reconnecting."
+                );
+                return;
+            }
+            if force && live {
+                self.disconnect_conn(&id);
+            }
             self.start_connect(idx);
         } else {
             self.status_msg = format!("Switched to {name}");
@@ -87,17 +97,14 @@ impl DbGuiApp {
                 tab.design_edit_index = None;
             }
         }
-        if self.querying_tab_id.is_some_and(|qid| {
-            self.tabs
-                .iter()
-                .any(|t| t.id == qid && t.conn_id.as_deref() == Some(id))
-        }) {
-            // Abort the in-flight query on the connection we're dropping.
-            if let Some(cancel) = self.query_cancel.take() {
-                cancel.cancel();
-            }
-            self.busy = Busy::Idle;
-            self.querying_tab_id = None;
+        let tab_ids: Vec<_> = self
+            .tabs
+            .iter()
+            .filter(|t| t.conn_id.as_deref() == Some(id))
+            .map(|t| t.id)
+            .collect();
+        for tab_id in tab_ids {
+            self.cancel_tab_query(tab_id);
         }
         self.status_msg = "Disconnected".to_string();
         self.error = None;
@@ -156,7 +163,9 @@ impl DbGuiApp {
         let name = cfg.name.clone();
         let cancel = tokio_util::sync::CancellationToken::new();
         self.connection_cancels.insert(id.clone(), cancel.clone());
-        self.busy = Busy::Connecting;
+        if self.busy == Busy::Idle {
+            self.busy = Busy::Connecting;
+        }
         self.error = None;
         self.status_msg = format!("Connecting to {name}…");
         self.rt.spawn(async move {
@@ -302,31 +311,129 @@ impl DbGuiApp {
             });
         });
     }
-    pub(super) fn save_connection(&mut self) {
-        let Some(ed) = self.editor.take() else { return };
-        let mut cfg = ed.config;
+    pub(super) fn save_connection(&mut self) -> Option<usize> {
+        let ed = self.editor.as_ref()?;
+        let mut cfg = ed.config.clone();
         cfg.apply_safety_profile();
-        self.schema_cache.remove(&cfg.id);
+        if let Err((message, fields)) = validate_connection_test_config(&cfg) {
+            self.editor.as_mut()?.test_state = ConnTestState::Failed { message, fields };
+            return None;
+        }
         // Persist the password to the keychain (server backends only); never to JSON.
         if cfg.kind.is_server() && !ed.password.is_empty() {
             if let Err(e) = dbcore::secrets::set_password(&cfg.id, &ed.password) {
-                self.error = Some(format!("Could not store password: {e}"));
+                self.connection_save_failed(format!("Could not store password: {e}"));
+                return None;
             }
         }
         // Same for the SSH password / key passphrase, in its own keychain entry.
         if cfg.kind.is_server() && cfg.ssh_enabled && !ed.ssh_password.is_empty() {
             if let Err(e) = dbcore::secrets::set_ssh_secret(&cfg.id, &ed.ssh_password) {
-                self.error = Some(format!("Could not store SSH password: {e}"));
+                self.connection_save_failed(format!("Could not store SSH password: {e}"));
+                return None;
             }
         }
-        match ed.edit_index {
-            Some(i) if i < self.connections.len() => self.connections[i] = cfg,
-            _ => self.connections.push(cfg),
-        }
-        if let Err(e) = dbcore::config::save_connections(&self.connections) {
-            self.error = Some(e.to_string());
+        let idx = ed
+            .edit_index
+            .filter(|i| *i < self.connections.len())
+            .unwrap_or(self.connections.len());
+        let mut connections = self.connections.clone();
+        if idx < connections.len() {
+            connections[idx] = cfg.clone();
         } else {
-            self.status_msg = "Connection saved".to_string();
+            connections.push(cfg.clone());
         }
+        if let Err(e) = dbcore::config::save_connections(&connections) {
+            self.connection_save_failed(e.to_string());
+            return None;
+        }
+        self.schema_cache.remove(&cfg.id);
+        self.connections = connections;
+        self.editor = None;
+        self.error = None;
+        self.status_msg = "Connection saved".to_string();
+        Some(idx)
+    }
+
+    fn connection_save_failed(&mut self, message: String) {
+        if let Some(editor) = self.editor.as_mut() {
+            editor.test_state = ConnTestState::Failed {
+                message: message.clone(),
+                fields: Vec::new(),
+            };
+        }
+        self.error = Some(message);
+    }
+
+    pub(super) fn open_sample_database(&mut self) {
+        let path = match dbcore::config::config_dir() {
+            Ok(dir) => dir.join("sample.sqlite"),
+            Err(e) => {
+                self.error = Some(e.to_string());
+                return;
+            }
+        };
+        let create = || -> std::io::Result<()> {
+            use std::io::Write;
+            std::fs::create_dir_all(path.parent().expect("config directory"))?;
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    file.write_all(include_bytes!("../../../../examples/sample.sqlite"))
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+                Err(e) => Err(e),
+            }
+        };
+        if let Err(e) = create() {
+            self.error = Some(format!("Could not open sample database: {e}"));
+            return;
+        }
+        let sample_path = path.to_string_lossy().into_owned();
+        let idx = match self
+            .connections
+            .iter()
+            .position(|c| c.kind == DbKind::Sqlite && c.sqlite_path == sample_path)
+        {
+            Some(idx) => idx,
+            None => {
+                let mut config = ConnectionConfig::new(DbKind::Sqlite);
+                config.name = "Sample database".into();
+                config.sqlite_path = sample_path;
+                config.set_safety_profile(dbcore::SafetyProfile::Development);
+                let mut connections = self.connections.clone();
+                connections.push(config);
+                if let Err(e) = dbcore::config::save_connections(&connections) {
+                    self.error = Some(e.to_string());
+                    return;
+                }
+                self.connections = connections;
+                self.connections.len() - 1
+            }
+        };
+        self.show_welcome = false;
+        self.persist_settings();
+        if !self.tabs.get(self.active_query_tab).is_some_and(|tab| {
+            tab.kind == crate::components::QueryTabKind::Query
+                && tab.sql.trim().is_empty()
+                && tab.result.is_none()
+                && !tab.edits.has_pending()
+        }) {
+            self.new_tab();
+        }
+        self.bind_connection(idx, false);
+        self.open_table(
+            DbKind::Sqlite.preview_query("\"customers\"", 100),
+            EditSource {
+                schema: None,
+                table: "customers".into(),
+                pk_cols: vec!["id".into()],
+            },
+            true,
+            crate::components::QueryTabKind::Table,
+        );
     }
 }

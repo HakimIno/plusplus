@@ -67,7 +67,9 @@ impl DbGuiApp {
                     |ui| {
                         #[cfg(not(target_os = "macos"))]
                         {
-                            title_bar::window_controls(ui);
+                            if title_bar::window_controls(ui) {
+                                actions.push(Action::Quit);
+                            }
                             title_bar::group_separator(ui);
                         }
                         #[cfg(target_os = "macos")]

@@ -959,8 +959,12 @@ impl DbGuiApp {
                 }
                 components::dialog_footer(ui, |ui| {
                     let testing = matches!(editor.test_state, ConnTestState::Testing(_));
-                    // Footer paints right-to-left: first widget is rightmost (Save).
-                    if components::button(ui, icons::save(), "Save", true).clicked() {
+                    if components::primary_button(ui, icons::connect(), "Save & Connect", !testing)
+                        .clicked()
+                    {
+                        actions.push(Action::SaveAndConnect);
+                    }
+                    if components::button(ui, icons::save(), "Save", !testing).clicked() {
                         actions.push(Action::SaveConnection);
                     }
                     if components::button(ui, icons::close(), "Cancel", true).clicked() {

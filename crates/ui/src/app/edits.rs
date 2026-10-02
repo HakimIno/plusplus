@@ -327,7 +327,7 @@ impl DbGuiApp {
         };
         let n = stmts.len();
         let tx = self.tx.clone();
-        self.busy = Busy::Querying;
+        self.busy = Busy::Saving;
         self.error = None;
         self.status_msg = format!("Saving {n} change(s)…");
         self.rt.spawn(async move {

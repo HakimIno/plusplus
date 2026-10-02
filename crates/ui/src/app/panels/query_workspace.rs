@@ -1,6 +1,6 @@
 //! Query workspace rendering and interaction.
 
-use crate::app::{Action, Busy, DbGuiApp, QueryParameterKind};
+use crate::app::{Action, DbGuiApp, QueryParameterKind};
 use crate::components;
 use crate::icons;
 use crate::style::palette;
@@ -36,7 +36,14 @@ impl DbGuiApp {
                     ui.allocate_exact_size(egui::vec2(8.0, row_h), egui::Sense::hover());
                 ui.painter().circle_filled(dot_rect.center(), 3.0, dot);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let can_run = self.active().is_some() && self.busy == Busy::Idle && has_sql;
+                    let can_run = self.active().is_some()
+                        && self.query_can_run(self.active_query_tab)
+                        && has_sql;
+                    if self.is_tab_querying(self.tab().id)
+                        && components::button(ui, icons::close(), "Cancel query", true).clicked()
+                    {
+                        actions.push(Action::CancelTabQuery(self.tab().id));
+                    }
                     let run = components::run_button(ui, can_run, has_sql, self.run_all_by_default);
                     if let Some(run_all_by_default) = run.default_run_all {
                         self.run_all_by_default = run_all_by_default;

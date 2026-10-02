@@ -93,7 +93,9 @@ impl DbGuiApp {
                         .max_rect(strip.shrink2(egui::vec2(10.0, 0.0)))
                         .layout(egui::Layout::right_to_left(egui::Align::Center)),
                     |ui| {
-                        title_bar::window_controls(ui);
+                        if title_bar::window_controls(ui) {
+                            actions.push(Action::Quit);
+                        }
                     },
                 );
 
@@ -290,7 +292,13 @@ impl DbGuiApp {
                             if resp.clicked() {
                                 actions.push(Action::DismissWelcome);
                             }
-
+                            ui.add_space(8.0);
+                            if crate::components::button(ui, icons::database(), "Try sample database", true).clicked() {
+                                actions.push(Action::OpenSampleDatabase);
+                            }
+                            if let Some(error) = &self.error {
+                                ui.colored_label(palette::DANGER(), error);
+                            }
                             ui.add_space(2.0);
                         });
                     card_rect = card.response.rect;

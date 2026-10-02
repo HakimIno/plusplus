@@ -16,6 +16,7 @@ pub enum NativeMenuCommand {
     SelectAll,
     Undo,
     Redo,
+    Quit,
 }
 
 impl NativeMenuCommand {
@@ -38,11 +39,15 @@ impl DbGuiApp {
             use NativeMenuCommand::*;
             // The welcome screen has no workspace yet.
             if self.show_welcome
-                && !matches!(command, Help | Copy | Cut | Paste | SelectAll | Undo | Redo)
+                && !matches!(
+                    command,
+                    Help | Copy | Cut | Paste | SelectAll | Undo | Redo | Quit
+                )
             {
                 continue;
             }
             match command {
+                Quit => self.apply_action(Action::Quit),
                 NewTab => self.apply_action(if self.split_tab.is_some() {
                     Action::NewSplitPaneTab(self.split_focus)
                 } else {
@@ -119,6 +124,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_quit_preserves_unsaved_row_edits_until_confirmed() {
+        let mut app = super::super::tests::app_with_staged_edit();
+        app.show_welcome = false;
+        let ctx = egui::Context::default();
+        NativeMenuCommand::Quit.enqueue(&ctx);
+        app.native_menu_input(&ctx, &mut egui::RawInput::default());
+        assert!(app.pending_leave.is_some());
+        assert!(!app.pending_quit);
+        assert!(app.tab().edits.has_pending());
+    }
+
+    #[test]
     fn native_menu_reopens_an_empty_workspace_and_delivers_copy_once() {
         let mut app = DbGuiApp::construct();
         app.show_welcome = false;
@@ -161,7 +178,7 @@ mod tests {
                     command.enqueue(ctx);
                     app.native_menu_input(ctx, &mut raw);
                 }
-                ctx.run_ui(raw, |ui| app.draw(ui, None));
+                let _ = ctx.run_ui(raw, |ui| app.draw(ui, None));
             };
         frame(&ctx, &mut app, None);
         let editor = egui::Id::new(("sql_editor", app.tab().id, "primary"));

@@ -104,6 +104,16 @@ impl DbGuiApp {
             )
             .show_separator_line(true)
             .show_inside(root, |ui| {
+                let scope = if self.result_filter_runs_on_database(idx) {
+                    "Filter scope: entire table"
+                } else {
+                    "Filter scope: loaded rows only"
+                };
+                ui.label(
+                    egui::RichText::new(scope)
+                        .small()
+                        .color(palette::TEXT_WEAK()),
+                );
                 event = filter::ui(ui, &mut self.tabs[idx].filter, &col_names);
             });
 
@@ -542,18 +552,19 @@ impl DbGuiApp {
             }
         }
         if self.tabs[idx].plan_result && self.tabs[idx].view == TabView::Data {
+            let plan_kind = self.tab_db_kind(idx);
             egui::CentralPanel::default()
                 .frame(result_frame)
                 .show_inside(root, |ui| {
                     if let Some(result) = self.tabs[idx].result.as_ref() {
-                        plan_viewer(ui, result);
+                        plan_viewer(ui, result, plan_kind);
                     } else {
                         crate::pet::show(ui);
                     }
                 });
             return;
         }
-        let editable = self.tabs[idx].edits.editable();
+        let editable = self.tabs[idx].edits.editable() && !self.is_tab_querying(self.tabs[idx].id);
         // Per-column FK labels for the grid's link/"Follow →" affordance (owned, so it doesn't
         // hold a borrow across the mutable tab access below).
         let fk_cols = self.fk_column_labels(idx);
@@ -562,7 +573,7 @@ impl DbGuiApp {
         let tab_id = self.tabs[idx].id;
         let kind = self.tabs[idx].kind;
         let query_error = self.tabs[idx].query_error.clone();
-        let loading = self.querying_tab_id == Some(tab_id);
+        let loading = self.is_tab_querying(tab_id);
         let can_load_more = !loading
             && matches!(
                 self.tabs[idx].kind,

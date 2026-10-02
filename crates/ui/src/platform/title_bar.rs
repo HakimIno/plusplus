@@ -252,10 +252,9 @@ pub fn group_separator(ui: &mut Ui) {
 
 /// Window controls for undecorated Linux/Windows windows.
 #[cfg(not(target_os = "macos"))]
-pub fn window_controls(ui: &mut Ui) {
-    if window_button(ui, WindowButton::Close, "Close").clicked() {
-        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-    }
+pub fn window_controls(ui: &mut Ui) -> bool {
+    // The app decides whether unsaved work permits closing the window.
+    let close_requested = window_button(ui, WindowButton::Close, "Close").clicked();
 
     let maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
     let max_kind = if maximized {
@@ -273,4 +272,5 @@ pub fn window_controls(ui: &mut Ui) {
         ui.ctx()
             .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
     }
+    close_requested
 }

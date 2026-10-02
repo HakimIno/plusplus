@@ -1,6 +1,6 @@
 //! Pager rendering and interaction.
 
-use crate::app::{Action, Busy, DbGuiApp, PageNav, MAX_FETCH_ROWS};
+use crate::app::{Action, DbGuiApp, PageNav, MAX_FETCH_ROWS};
 use crate::components;
 use crate::icons;
 use crate::style;
@@ -94,7 +94,7 @@ impl DbGuiApp {
             });
             return;
         };
-        let idle = self.busy == Busy::Idle;
+        let idle = self.query_can_run(self.active_query_tab);
         let at_start = win.offset == 0;
         let loaded = tab
             .result

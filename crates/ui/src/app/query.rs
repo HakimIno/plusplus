@@ -5,6 +5,103 @@ use std::io;
 
 use super::*;
 
+pub(super) struct QueryJob {
+    pub cancel: tokio_util::sync::CancellationToken,
+    pub running: bool,
+}
+
+impl DbGuiApp {
+    pub(super) fn is_tab_querying(&self, tab_id: u64) -> bool {
+        self.query_jobs.get(&tab_id).is_some_and(|job| job.running)
+    }
+
+    pub(super) fn query_is_current(&self, tab_id: u64, seq: u64) -> bool {
+        self.tabs
+            .iter()
+            .any(|tab| tab.id == tab_id && tab.query_seq == seq)
+    }
+
+    pub(super) fn query_can_run(&self, idx: usize) -> bool {
+        self.tabs
+            .get(idx)
+            .is_some_and(|tab| !self.is_tab_querying(tab.id))
+            && (self.busy == Busy::Idle
+                || (self.busy == Busy::Querying && self.query_jobs.values().any(|job| job.running)))
+    }
+
+    pub(super) fn begin_query_job(
+        &mut self,
+        tab_id: u64,
+    ) -> (u64, tokio_util::sync::CancellationToken) {
+        if let Some(previous) = self.query_jobs.remove(&tab_id) {
+            previous.cancel.cancel();
+        }
+        self.query_seq = self.query_seq.wrapping_add(1);
+        let seq = self.query_seq;
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.query_seq = seq;
+        }
+        let cancel = tokio_util::sync::CancellationToken::new();
+        self.query_jobs.insert(
+            tab_id,
+            QueryJob {
+                cancel: cancel.clone(),
+                running: true,
+            },
+        );
+        self.refresh_query_busy();
+        (seq, cancel)
+    }
+
+    pub(super) fn finish_query_job(&mut self, tab_id: u64) {
+        if let Some(job) = self.query_jobs.get_mut(&tab_id) {
+            job.running = false;
+        }
+        if !self
+            .tabs
+            .iter()
+            .any(|tab| tab.id == tab_id && tab.total_rows_pending)
+        {
+            self.query_jobs.remove(&tab_id);
+        }
+        self.refresh_query_busy();
+    }
+
+    pub(super) fn refresh_query_busy(&mut self) {
+        if matches!(self.busy, Busy::Idle | Busy::Querying) {
+            self.busy = if self.query_jobs.values().any(|job| job.running) {
+                Busy::Querying
+            } else {
+                Busy::Idle
+            };
+        }
+    }
+
+    pub(super) fn cancel_tab_query(&mut self, tab_id: u64) {
+        if let Some(job) = self.query_jobs.remove(&tab_id) {
+            job.cancel.cancel();
+            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                tab.query_seq = tab.query_seq.wrapping_add(1);
+                tab.stream = None;
+                tab.total_rows_pending = false;
+            }
+            self.refresh_query_busy();
+        }
+    }
+
+    pub(super) fn prune_query_jobs(&mut self) {
+        let closed: Vec<_> = self
+            .query_jobs
+            .keys()
+            .copied()
+            .filter(|id| !self.tabs.iter().any(|tab| tab.id == *id))
+            .collect();
+        for id in closed {
+            self.cancel_tab_query(id);
+        }
+    }
+}
+
 async fn fetch_query_total(
     db: std::sync::Arc<dyn dbcore::Database>,
     count_sql: String,
@@ -274,6 +371,9 @@ impl DbGuiApp {
     }
 
     pub(super) fn start_resolved_query_batch(&mut self, idx: usize, sql: String) {
+        if !self.allow_result_replacement(idx) {
+            return;
+        }
         let statements: Vec<String> = dbcore::split_query_statements(&sql)
             .into_iter()
             .map(str::to_owned)
@@ -300,15 +400,7 @@ impl DbGuiApp {
             return;
         };
 
-        if let Some(previous) = self.query_cancel.take() {
-            previous.cancel();
-        }
-        self.query_seq += 1;
-        let seq = self.query_seq;
-        let cancel = tokio_util::sync::CancellationToken::new();
-        self.query_cancel = Some(cancel.clone());
-        self.busy = Busy::Querying;
-        self.querying_tab_id = Some(tab_id);
+        let (seq, cancel) = self.begin_query_job(tab_id);
         self.tabs[idx].query_error = None;
         self.tabs[idx].stream = None;
         self.tabs[idx].clear_batch_results();
@@ -436,6 +528,9 @@ impl DbGuiApp {
     }
 
     fn start_query_for_with_total(&mut self, idx: usize, refresh_total: bool) {
+        if !self.allow_result_replacement(idx) {
+            return;
+        }
         let Some(tab) = self.tabs.get(idx) else {
             return;
         };
@@ -547,11 +642,7 @@ impl DbGuiApp {
         // its (or any earlier run's) late result cannot clobber this run's result or state.
         // This point is only reached when the new run definitely starts — cancelling on an
         // earlier bail-out path would strand `busy` with no message left to reset it.
-        if let Some(previous) = self.query_cancel.take() {
-            previous.cancel();
-        }
-        self.query_seq += 1;
-        let seq = self.query_seq;
+        let (seq, cancel) = self.begin_query_job(tab_id);
         let parsed_page = dbcore::parse_page_window(&sql).filter(|window| {
             window
                 .limit
@@ -563,10 +654,7 @@ impl DbGuiApp {
                 offset: 0,
             })
         });
-        let cancel = tokio_util::sync::CancellationToken::new();
-        self.query_cancel = Some(cancel.clone());
-        self.busy = Busy::Querying;
-        self.querying_tab_id = Some(tab_id);
+
         self.tabs[idx].query_error = None;
         self.tabs[idx].stream = page.map(|_| QueryStreamUi {
             seq,
@@ -686,7 +774,7 @@ impl DbGuiApp {
     /// Fetch the next page when the virtualized grid approaches its loaded tail. The query is
     /// derived from the tab's original page SQL but its rows append to the current result.
     pub(super) fn load_more_rows(&mut self) {
-        if self.busy != Busy::Idle {
+        if !self.query_can_run(self.active_query_tab) {
             return;
         }
         let idx = self.active_query_tab;
@@ -746,6 +834,9 @@ impl DbGuiApp {
     /// Apply the filter draft. Simple table/view reads run it on the database; unsupported
     /// result shapes retain the bounded in-memory fallback.
     pub(super) fn apply_result_filter(&mut self, idx: usize, clear: bool) {
+        if !self.allow_result_replacement(idx) {
+            return;
+        }
         if clear {
             self.tabs[idx].filter.reset();
         }
@@ -759,12 +850,7 @@ impl DbGuiApp {
             self.tabs[idx].recompute_view();
             return;
         };
-        let server_capable = !kind.is_cql()
-            && matches!(
-                self.tabs[idx].kind,
-                crate::components::QueryTabKind::Table | crate::components::QueryTabKind::View
-            )
-            && dbcore::parse_page_window(&self.tabs[idx].sql).is_some();
+        let server_capable = self.result_filter_runs_on_database(idx);
         let predicate = if !clear && server_capable {
             self.tabs[idx].result.as_ref().and_then(|result| {
                 filter::server_predicate(kind, &self.tabs[idx].filter, &result.columns)
@@ -795,6 +881,9 @@ impl DbGuiApp {
     /// Rewrite the active tab's paging window to `(limit, offset)` in its connection's
     /// dialect and re-run. No-op when the tab isn't a paged simple-table read.
     pub(super) fn run_page(&mut self, limit: u64, offset: u64) {
+        if !self.allow_result_replacement(self.active_query_tab) {
+            return;
+        }
         let Some(kind) = self.active().map(|a| a.db.kind()) else {
             return;
         };
@@ -811,7 +900,7 @@ impl DbGuiApp {
     }
     /// Pager navigation for the active (paged) table tab.
     pub(super) fn page_nav(&mut self, nav: PageNav) {
-        if self.busy != Busy::Idle {
+        if !self.query_can_run(self.active_query_tab) {
             return;
         }
         let tab = self.tab();
@@ -832,7 +921,8 @@ impl DbGuiApp {
     }
     /// Apply the exact LIMIT/OFFSET window entered in the pager popover.
     pub(super) fn set_page_window(&mut self, limit: u64, offset: u64) {
-        if self.busy != Busy::Idle || limit == 0 || limit > MAX_FETCH_ROWS as u64 {
+        if !self.query_can_run(self.active_query_tab) || limit == 0 || limit > MAX_FETCH_ROWS as u64
+        {
             return;
         }
         let Some(win) = dbcore::parse_page_window(&self.tab().sql) else {
@@ -842,6 +932,20 @@ impl DbGuiApp {
             return;
         }
         self.run_page(limit, offset);
+    }
+
+    pub(super) fn result_filter_runs_on_database(&self, idx: usize) -> bool {
+        self.tabs.get(idx).is_some_and(|tab| {
+            matches!(
+                tab.kind,
+                crate::components::QueryTabKind::Table | crate::components::QueryTabKind::View
+            ) && dbcore::parse_page_window(&tab.sql).is_some()
+                && tab.conn_id.as_deref().is_some_and(|id| {
+                    self.active_connections.iter().any(|connection| {
+                        connection.config_id == id && !connection.db.kind().is_cql()
+                    })
+                })
+        })
     }
 }
 
