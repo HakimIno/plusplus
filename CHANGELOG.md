@@ -3,6 +3,20 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
+## 0.4.16 — 2026-10-02
+
+- New Table / View / Trigger / Function / Procedure each open in a draft tab of their own — open as many as you like — and are listed in the explorer (click one to jump to its tab). Esc, or Discard after Cmd+R, closes the draft.
+- A new view, trigger or routine is written in the full SQL editor: highlighting, autocomplete, ghost text, hover, error squiggles, folding, find. Cmd+F now works in function / procedure / trigger definition tabs too.
+- Trigger and routine forms use the same compact bar as views.
+- Drivers that can't create an object (triggers on DuckDB, routines on SQLite, views on Cassandra/ScyllaDB) show it disabled in the + menu with the reason, instead of failing at Apply.
+- The SQL editor underlines tables and columns that don't exist in the connected database, and hovering a name shows its type, key, nullability and foreign keys.
+- Ghost text suggests the next clause as well as the first.
+- `EXPLAIN` results on PostgreSQL and SQLite open as a plan tree with the costly steps called out.
+- Queries run per tab: one tab's query no longer blocks or cancels another's. Cancel a running query from its own tab.
+- Quitting, reloading or switching with unsaved edits asks first (including Cmd+Q).
+- Fonts: `.ttc` files can be imported; the grid can use a monospace font throughout; the interface type scale is one point larger.
+- Removed the database icon above the explorer's table list.
+
 ## 0.4.15 — 2026-09-30
 
 - Whole-database backup and restore (connection menu, sidebar table menu, Open Anything), with an audit-trail entry for each run.
