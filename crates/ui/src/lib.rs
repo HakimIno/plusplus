@@ -14,7 +14,7 @@ mod results;
 // Stable module facade; implementations are grouped by responsibility above.
 use appearance::{emoji, fonts, icons, style, theme};
 use catalog::{erd, schema};
-use editor::{autocomplete, editor_tools, fold, ghost, highlight, query_error, sqlctx};
+use editor::{autocomplete, editor_tools, fold, ghost, highlight, hover, query_error, sqlctx};
 use platform::{pet, title_bar, update};
 use results::{chart, edit, filter, format, grid, value_viewer};
 

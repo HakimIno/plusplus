@@ -513,8 +513,82 @@ impl DbGuiApp {
         }
     }
 
-    /// Re-check the editor's SQL for syntax errors and mark the first one: a red squiggle
-    /// under the offending token, explained in a tooltip on hover.
+    /// Tooltip for the table/column name under the pointer: type, key role, nullability,
+    /// default, comment and foreign keys from the connected schema.
+    ///
+    /// Registered *before* [`Self::update_diagnostics`] so that when a name is also underlined
+    /// as an error, the error's tooltip (registered later, so on top) is the one shown.
+    pub(super) fn show_symbol_hover(
+        &mut self,
+        ui: &egui::Ui,
+        galley: &egui::Galley,
+        galley_pos: egui::Pos2,
+        view: &crate::fold::View,
+    ) {
+        let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) else {
+            return;
+        };
+        let text_rect = galley.rect.translate(galley_pos.to_vec2());
+        if !text_rect.contains(pointer) {
+            return;
+        }
+        let idx = self.active_query_tab;
+        let Some(conn) = self.tabs[idx]
+            .conn_id
+            .as_deref()
+            .and_then(|id| self.active_connections.iter().find(|c| c.config_id == id))
+        else {
+            return;
+        };
+        let display = galley.cursor_from_pos(pointer - galley_pos).index;
+        let source = view.to_source(display);
+        let Some(hover) = crate::hover::describe_at(&self.tabs[idx].sql, source, &conn.schema)
+        else {
+            return;
+        };
+        let (Some(start), Some(end)) = (
+            view.to_display(hover.range.start),
+            view.to_display(hover.range.end),
+        ) else {
+            return;
+        };
+        let offset = galley_pos.to_vec2();
+        let from = galley
+            .pos_from_cursor(egui::text::CCursor::new(start))
+            .translate(offset);
+        let to = galley
+            .pos_from_cursor(egui::text::CCursor::new(end))
+            .translate(offset);
+        // A name wrapped over two rows would make a nonsense rect; hover only single-row names.
+        if (from.top() - to.top()).abs() > 1.0 {
+            return;
+        }
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(from.left(), from.top()),
+            egui::pos2(to.left().max(from.left() + 2.0), from.bottom()),
+        );
+        ui.interact(rect, ui.id().with("sql_symbol_hover"), egui::Sense::hover())
+            .on_hover_ui(|ui| {
+                ui.set_max_width(360.0);
+                ui.label(
+                    egui::RichText::new(&hover.title)
+                        .strong()
+                        .color(palette::TEXT()),
+                );
+                for line in &hover.lines {
+                    ui.label(
+                        egui::RichText::new(line)
+                            .monospace()
+                            .size(crate::style::font::CAPTION)
+                            .color(palette::TEXT_WEAK()),
+                    );
+                }
+            });
+    }
+
+    /// Re-check the editor's SQL and mark what's wrong: the first syntax error, or — once the
+    /// SQL parses — every table/column the connected schema doesn't have. Each is a red squiggle
+    /// under the token, explained in a tooltip on hover.
     ///
     /// Two rules keep it from nagging while the query is still being written. The parse runs
     /// only after a short pause in typing (every half-typed keyword is a "syntax error", and
@@ -543,8 +617,26 @@ impl DbGuiApp {
             .as_deref()
             .and_then(|id| self.active_connections.iter().find(|c| c.config_id == id))
             .map(|c| c.db.kind());
+        // A schema refresh (or a first load) can change what counts as an unknown name, so it
+        // re-checks unchanged text just as a typed character does.
+        let schema_stamp = self.tabs[idx]
+            .conn_id
+            .as_deref()
+            .and_then(|id| self.active_connections.iter().find(|c| c.config_id == id))
+            .map_or((0, 0, 0), |c| {
+                (
+                    c.schema.tables.len(),
+                    c.schema.views.len(),
+                    c.schema
+                        .tables
+                        .iter()
+                        .map(|t| t.columns.len())
+                        .sum::<usize>(),
+                )
+            });
         let stale = self.tabs[idx].sql != self.tabs[idx].editor_assist.syntax_checked
-            || kind != self.tabs[idx].editor_assist.syntax_checked_kind;
+            || kind != self.tabs[idx].editor_assist.syntax_checked_kind
+            || schema_stamp != self.tabs[idx].editor_assist.schema_stamp;
         if text_changed || (stale && self.tabs[idx].editor_assist.syntax_dirty_at.is_none()) {
             self.tabs[idx].editor_assist.syntax_dirty_at = Some(now);
         }
@@ -552,10 +644,26 @@ impl DbGuiApp {
             let waited = now - since;
             if waited >= DEBOUNCE {
                 let sql = self.tabs[idx].sql.clone();
-                self.tabs[idx].editor_assist.syntax_error = dbcore::check_syntax(kind, &sql);
-                self.tabs[idx].editor_assist.syntax_checked = sql;
-                self.tabs[idx].editor_assist.syntax_checked_kind = kind;
-                self.tabs[idx].editor_assist.syntax_dirty_at = None;
+                let syntax_error = dbcore::check_syntax(kind, &sql);
+                // Unknown names only matter once the SQL parses; until then the syntax
+                // error is the one thing worth saying.
+                let semantic_issues = if syntax_error.is_none() {
+                    self.tabs[idx]
+                        .conn_id
+                        .as_deref()
+                        .and_then(|id| self.active_connections.iter().find(|c| c.config_id == id))
+                        .map(|c| dbcore::check_semantics(kind, &sql, &c.schema))
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                let assist = &mut self.tabs[idx].editor_assist;
+                assist.syntax_error = syntax_error;
+                assist.semantic_issues = semantic_issues;
+                assist.syntax_checked = sql;
+                assist.syntax_checked_kind = kind;
+                assist.schema_stamp = schema_stamp;
+                assist.syntax_dirty_at = None;
             } else {
                 // Nothing else would repaint an idle editor, so ask for the frame that runs
                 // the check once the pause is long enough.
@@ -565,81 +673,89 @@ impl DbGuiApp {
             }
         }
 
-        let Some(error) = self.tabs[idx].editor_assist.syntax_error.as_ref() else {
-            return;
-        };
         // The check ran against this exact text (the debounce above guarantees it), so the
-        // range still indexes the buffer on screen.
+        // ranges still index the buffer on screen.
+        let assist = &self.tabs[idx].editor_assist;
+        let marks: Vec<(std::ops::Range<usize>, &str, &str)> = assist
+            .syntax_error
+            .iter()
+            .map(|e| (e.range.clone(), "Syntax error", e.message.as_str()))
+            .chain(assist.semantic_issues.iter().map(|issue| {
+                let title = match issue.kind {
+                    dbcore::semantic::IssueKind::Table => "Unknown table",
+                    dbcore::semantic::IssueKind::Column => "Unknown column",
+                };
+                (issue.range.clone(), title, issue.message.as_str())
+            }))
+            .filter(|(range, _, _)| !error_under_caret(range, cursor_char))
+            .collect();
         let sql = &self.tabs[idx].sql;
-        if error_under_caret(&error.range, cursor_char) {
-            return;
-        }
 
-        // Keep the mark on one row: a range that runs past a newline (an unterminated string
-        // swallowing the rest of the query) is clipped to the line it starts on.
-        let line_end = sql
-            .chars()
-            .skip(error.range.start)
-            .position(|c| c == '\n')
-            .map_or(usize::MAX, |n| error.range.start + n);
-        let end = error
-            .range
-            .end
-            .min(line_end)
-            .max(error.range.start.saturating_add(1));
-        // Nothing to mark when the offending token is inside a collapsed region: the galley
-        // has no position for text it isn't showing.
-        let (Some(start), Some(end)) = (view.to_display(error.range.start), view.to_display(end))
-        else {
-            return;
-        };
-        let offset = galley_pos.to_vec2();
-        let from = galley
-            .pos_from_cursor(egui::text::CCursor::new(start))
-            .translate(offset);
-        let to = galley
-            .pos_from_cursor(egui::text::CCursor::new(end))
-            .translate(offset);
-        let x0 = from.left();
-        let x1 = to.left().max(x0 + 2.0 * WAVE);
-        let y = from.bottom() - WAVE;
+        for (n, (range, title, message)) in marks.into_iter().enumerate() {
+            // Keep the mark on one row: a range that runs past a newline (an unterminated
+            // string swallowing the rest of the query) is clipped to the line it starts on.
+            let line_end = sql
+                .chars()
+                .skip(range.start)
+                .position(|c| c == '\n')
+                .map_or(usize::MAX, |n| range.start + n);
+            let end = range.end.min(line_end).max(range.start.saturating_add(1));
+            // Nothing to mark when the offending token is inside a collapsed region: the
+            // galley has no position for text it isn't showing.
+            let (Some(start), Some(end)) = (view.to_display(range.start), view.to_display(end))
+            else {
+                continue;
+            };
+            let offset = galley_pos.to_vec2();
+            let from = galley
+                .pos_from_cursor(egui::text::CCursor::new(start))
+                .translate(offset);
+            let to = galley
+                .pos_from_cursor(egui::text::CCursor::new(end))
+                .translate(offset);
+            let x0 = from.left();
+            let x1 = to.left().max(x0 + 2.0 * WAVE);
+            let y = from.bottom() - WAVE;
 
-        // A hand-drawn wave rather than a straight rule: it reads as "this is wrong" without
-        // competing with the caret or the selection, exactly like every code editor's.
-        let mut points = Vec::new();
-        let mut x = x0;
-        let mut down = false;
-        while x < x1 {
-            points.push(egui::pos2(x, if down { y + WAVE } else { y }));
-            x += WAVE;
-            down = !down;
-        }
-        points.push(egui::pos2(x1, if down { y + WAVE } else { y }));
-        ui.painter().add(egui::Shape::line(
-            points,
-            egui::Stroke::new(1.0_f32, palette::DANGER()),
-        ));
+            // A hand-drawn wave rather than a straight rule: it reads as "this is wrong"
+            // without competing with the caret or the selection, exactly like every code
+            // editor's.
+            let mut points = Vec::new();
+            let mut x = x0;
+            let mut down = false;
+            while x < x1 {
+                points.push(egui::pos2(x, if down { y + WAVE } else { y }));
+                x += WAVE;
+                down = !down;
+            }
+            points.push(egui::pos2(x1, if down { y + WAVE } else { y }));
+            ui.painter().add(egui::Shape::line(
+                points,
+                egui::Stroke::new(1.0_f32, palette::DANGER()),
+            ));
 
-        // Hover the *token*, not just the two pixels of squiggle under it. Registered after
-        // the editor so it wins the hover, and hover-only so clicks and drags still reach the
-        // text beneath.
-        let hover =
-            egui::Rect::from_min_max(egui::pos2(x0, from.top()), egui::pos2(x1, y + WAVE + 1.0));
-        let message = error.message.clone();
-        ui.interact(
-            hover,
-            ui.id().with("sql_syntax_error"),
-            egui::Sense::hover(),
-        )
-        .on_hover_ui(|ui| {
-            ui.set_max_width(340.0);
-            ui.label(
-                egui::RichText::new("Syntax error")
-                    .size(crate::style::font::CAPTION)
-                    .color(palette::DANGER()),
+            // Hover the *token*, not just the two pixels of squiggle under it. Registered
+            // after the editor so it wins the hover, and hover-only so clicks and drags
+            // still reach the text beneath.
+            let hover = egui::Rect::from_min_max(
+                egui::pos2(x0, from.top()),
+                egui::pos2(x1, y + WAVE + 1.0),
             );
-            ui.label(message);
-        });
+            ui.interact(
+                hover,
+                ui.id().with(("sql_diagnostic", n)),
+                egui::Sense::hover(),
+            )
+            .on_hover_ui(|ui| {
+                ui.set_max_width(340.0);
+                ui.label(
+                    egui::RichText::new(title)
+                        .size(crate::style::font::CAPTION)
+                        .color(palette::DANGER()),
+                );
+                ui.label(message);
+            });
+        }
     }
 
     /// Insert an accepted ghost suggestion at the source caret and move the caret past it.

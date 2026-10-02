@@ -18,6 +18,7 @@
 //! All of it is pure and offline — no model, no network. The suggestion is the text to
 //! *append* at the caret; the typed prefix is never rewritten (so its casing is kept).
 
+use super::ghost_flow;
 use crate::sqlctx;
 use dbcore::{DbKind, SchemaTree, TableInfo};
 
@@ -64,9 +65,18 @@ pub fn suggest(
         return None;
     }
 
-    history_suggestion(&stmt_str, history)
+    let suggestion = history_suggestion(&stmt_str, history)
         .or_else(|| identifier_suggestion(sql, cursor, schema, kind))
         .or_else(|| schema_suggestion(stmt, schema, kind))
+        // The first step has its heuristics above; this keeps the chain going afterwards.
+        .or_else(|| ghost_flow::next_clause(stmt, history, schema?, kind))?;
+    // The caret already sits after a space: don't stack a second one on top of it.
+    let after_space = stmt.last().is_some_and(|c| c.is_whitespace());
+    Some(if after_space {
+        suggestion.trim_start_matches(' ').to_string()
+    } else {
+        suggestion
+    })
 }
 
 /// Turn a one-row identifier popup into append-only ghost text. Ambiguous matches and
@@ -81,30 +91,41 @@ fn identifier_suggestion(
     crate::autocomplete::inline_suffix(&completion)
 }
 
-/// Most-recent history entry that starts with `sql` (case-insensitively) and is strictly
-/// longer; the suggestion is the untyped remainder, in the history entry's own casing.
+/// The history entry that starts with `sql` (case-insensitively) and is strictly longer,
+/// best by **frequency weighted toward recency**: a statement run many times beats one run
+/// once a moment ago, and among equals the newest wins. The suggestion is the untyped
+/// remainder, in the history entry's own casing.
 fn history_suggestion(sql: &str, history: &[&str]) -> Option<String> {
+    /// How many of the newest entries are considered.
+    const WINDOW: usize = 1_000;
     let typed_len = sql.chars().count();
-    // Newest first: the last matching entry the user ran wins.
-    for entry in history.iter().rev() {
+    let mut scores: Vec<(String, f64)> = Vec::new();
+    for (rank, entry) in history.iter().rev().take(WINDOW).enumerate() {
         let entry_chars: Vec<char> = entry.chars().collect();
         if entry_chars.len() <= typed_len {
             continue;
         }
         let prefix: String = entry_chars[..typed_len].iter().collect();
-        if prefix.eq_ignore_ascii_case(sql) {
-            let remainder: String = entry_chars[typed_len..].iter().collect();
-            // A ghost is an inline hint, not a second editor layer. Painting a whole
-            // multi-line history entry at the caret makes existing SQL look duplicated.
-            if !remainder.trim().is_empty()
-                && !remainder.contains('\n')
-                && !remainder.contains('\r')
-            {
-                return Some(remainder);
-            }
+        if !prefix.eq_ignore_ascii_case(sql) {
+            continue;
+        }
+        let remainder: String = entry_chars[typed_len..].iter().collect();
+        // A ghost is an inline hint, not a second editor layer. Painting a whole
+        // multi-line history entry at the caret makes existing SQL look duplicated.
+        if remainder.trim().is_empty() || remainder.contains('\n') || remainder.contains('\r') {
+            continue;
+        }
+        let weight = 1.0 / (1.0 + rank as f64 * 0.1);
+        match scores.iter_mut().find(|(seen, _)| *seen == remainder) {
+            Some((_, score)) => *score += weight,
+            None => scores.push((remainder, weight)),
         }
     }
-    None
+    // Strict `>` keeps the earlier (newer) entry on a tie.
+    scores
+        .into_iter()
+        .reduce(|best, next| if next.1 > best.1 { next } else { best })
+        .map(|(remainder, _)| remainder)
 }
 
 /// Deterministic clause completions from the schema. Conservative by design — only fires
@@ -136,11 +157,14 @@ fn schema_suggestion(
 
     match keyword {
         // `JOIN t ` needs an `ON`, and the schema knows which columns it goes on.
-        Keyword::Join => on_from_fk(table, &correlation, &in_scope, schema, kind),
+        // Both end in a space: that's what lets the next clause's suggestion follow on accept.
+        Keyword::Join => {
+            on_from_fk(table, &correlation, &in_scope, schema, kind).map(|on| format!("{on} "))
+        }
         Keyword::From => {
             // Prefer a JOIN derived from a foreign key — the highest-value completion.
             if let Some(join) = join_from_fk(table, &correlation, &in_scope, schema, kind) {
-                return Some(join);
+                return Some(format!("{join} "));
             }
             // Otherwise, with a single-column primary key, scaffold a WHERE on it.
             let pk = single_pk(table)?;
@@ -309,7 +333,7 @@ fn on_from_fk(
 /// Tables already in scope are skipped. Joining one a second time (a self-join through a
 /// `manager_id`, say) needs a distinct alias on the target, and inventing one risks
 /// colliding with an alias the user picked; leaving the suggestion out is the safe move.
-fn join_from_fk(
+pub(super) fn join_from_fk(
     table: &TableInfo,
     correlation: &str,
     in_scope: &[(String, String)],
@@ -380,7 +404,7 @@ fn on_clause(
 }
 
 /// The sole primary-key column of `table`, if it has exactly one.
-fn single_pk(table: &TableInfo) -> Option<&str> {
+pub(super) fn single_pk(table: &TableInfo) -> Option<&str> {
     let mut pks = table.columns.iter().filter(|c| c.primary_key);
     let first = pks.next()?;
     if pks.next().is_some() {
@@ -391,7 +415,7 @@ fn single_pk(table: &TableInfo) -> Option<&str> {
 
 /// Quote an identifier for the dialect only when it isn't a plain lowercase word, keeping
 /// ghost text readable (`users`, but `"My Table"`). Mirrors the editor's own quoting.
-fn qual(name: &str, kind: Option<DbKind>) -> String {
+pub(super) fn qual(name: &str, kind: Option<DbKind>) -> String {
     let plain = !name.is_empty()
         && name
             .chars()
@@ -556,7 +580,7 @@ mod tests {
         let s = schema();
         // orders has an outgoing FK to users.
         let g = suggest_end("SELECT * FROM orders ", &[], Some(&s)).unwrap();
-        assert_eq!(g, "JOIN users ON users.id = orders.user_id");
+        assert_eq!(g, "JOIN users ON users.id = orders.user_id ");
     }
 
     #[test]
@@ -564,7 +588,7 @@ mod tests {
         let s = schema();
         // users is referenced by orders.user_id.
         let g = suggest_end("SELECT * FROM users ", &[], Some(&s)).unwrap();
-        assert_eq!(g, "JOIN orders ON orders.user_id = users.id");
+        assert_eq!(g, "JOIN orders ON orders.user_id = users.id ");
     }
 
     #[test]
@@ -641,7 +665,7 @@ mod tests {
     fn schema_heuristics_see_past_a_finished_statement() {
         let s = schema();
         let g = suggest_end("SELECT 1;\nSELECT * FROM orders ", &[], Some(&s)).unwrap();
-        assert_eq!(g, "JOIN users ON users.id = orders.user_id");
+        assert_eq!(g, "JOIN users ON users.id = orders.user_id ");
     }
 
     #[test]
@@ -657,14 +681,14 @@ mod tests {
     fn alias_resolves_for_fk_join() {
         let s = schema();
         let g = suggest_end("SELECT * FROM orders o ", &[], Some(&s)).unwrap();
-        assert_eq!(g, "JOIN users ON users.id = o.user_id");
+        assert_eq!(g, "JOIN users ON users.id = o.user_id ");
     }
 
     #[test]
     fn as_alias_resolves_for_fk_join() {
         let s = schema();
         let g = suggest_end("SELECT * FROM orders AS o ", &[], Some(&s)).unwrap();
-        assert_eq!(g, "JOIN users ON users.id = o.user_id");
+        assert_eq!(g, "JOIN users ON users.id = o.user_id ");
     }
 
     #[test]
@@ -684,8 +708,12 @@ mod tests {
     #[test]
     fn keyword_after_table_is_not_an_alias() {
         let s = schema();
-        // `WHERE` closes the table reference; it must never be read as `orders`' alias.
-        assert!(suggest_end("SELECT * FROM orders WHERE ", &[], Some(&s)).is_none());
+        // `WHERE` closes the table reference; it must never be read as `orders`' alias. What
+        // follows is a filter on the key, not a second join.
+        assert_eq!(
+            suggest_end("SELECT * FROM orders WHERE ", &[], Some(&s)).as_deref(),
+            Some("id = ")
+        );
     }
 
     // --- generated SQL is valid -------------------------------------------------------
@@ -698,7 +726,7 @@ mod tests {
         s.tables[1].foreign_keys[0].ref_schema = Some("app".to_string());
         // The target is qualified; its correlation name stays bare, as SQL requires.
         let g = suggest_end("SELECT * FROM orders ", &[], Some(&s)).unwrap();
-        assert_eq!(g, "JOIN app.users ON users.id = orders.user_id");
+        assert_eq!(g, "JOIN app.users ON users.id = orders.user_id ");
     }
 
     #[test]
@@ -709,7 +737,7 @@ mod tests {
         let g = suggest_end("SELECT * FROM orders ", &[], Some(&s)).unwrap();
         assert_eq!(
             g,
-            "JOIN users ON users.id = orders.user_id AND users.tenant_id = orders.tenant_id"
+            "JOIN users ON users.id = orders.user_id AND users.tenant_id = orders.tenant_id "
         );
     }
 
@@ -729,7 +757,7 @@ mod tests {
     fn join_target_scaffolds_its_on_clause() {
         let s = schema();
         let g = suggest_end("SELECT * FROM orders o JOIN users ", &[], Some(&s)).unwrap();
-        assert_eq!(g, "ON users.id = o.user_id");
+        assert_eq!(g, "ON users.id = o.user_id ");
     }
 
     #[test]
@@ -737,7 +765,7 @@ mod tests {
         let s = schema();
         // The FK runs the other way here: the target declares it.
         let g = suggest_end("SELECT * FROM users u JOIN orders o ", &[], Some(&s)).unwrap();
-        assert_eq!(g, "ON u.id = o.user_id");
+        assert_eq!(g, "ON u.id = o.user_id ");
     }
 
     #[test]
@@ -775,5 +803,65 @@ mod tests {
         // A self-join needs an alias on the target; fall back to the WHERE scaffold.
         let g = suggest_end("SELECT * FROM employees ", &[], Some(&s)).unwrap();
         assert_eq!(g, "WHERE employees.id = ");
+    }
+
+    // --- frequency, chaining ------------------------------------------------------------
+
+    #[test]
+    fn a_habit_beats_a_one_off_even_when_the_one_off_is_newer() {
+        let hist = vec![
+            "SELECT * FROM users WHERE status = 'active'".to_string(),
+            "SELECT * FROM users WHERE status = 'active'".to_string(),
+            "SELECT * FROM users WHERE status = 'active'".to_string(),
+            "SELECT * FROM users WHERE status = 'banned'".to_string(),
+        ];
+        let g = suggest_end("SELECT * FROM users WHERE status = ", &hist, None).unwrap();
+        assert_eq!(g, "'active'");
+    }
+
+    #[test]
+    fn the_newest_wins_when_frequency_ties() {
+        let hist = vec![
+            "SELECT * FROM users WHERE id = 1".to_string(),
+            "SELECT * FROM users WHERE id = 2".to_string(),
+        ];
+        assert_eq!(
+            suggest_end("SELECT * FROM users WHERE id = ", &hist, None).as_deref(),
+            Some("2")
+        );
+    }
+
+    #[test]
+    fn accepting_each_suggestion_leads_to_the_next_one() {
+        let s = schema();
+        let mut sql = String::from("SELECT * FROM orders ");
+        let mut steps = Vec::new();
+        for _ in 0..8 {
+            let Some(next) = suggest_end(&sql, &[], Some(&s)) else {
+                break;
+            };
+            steps.push(next.clone());
+            sql.push_str(&next);
+        }
+        assert_eq!(
+            steps,
+            [
+                "JOIN users ON users.id = orders.user_id ",
+                "WHERE orders.id = ",
+            ],
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn no_double_space_when_the_caret_is_already_after_one() {
+        assert_eq!(
+            suggest_end("SELECT ", &[], None).as_deref(),
+            Some("* FROM ")
+        );
+        assert_eq!(
+            suggest_end("SELECT", &[], None).as_deref(),
+            Some(" * FROM ")
+        );
     }
 }
