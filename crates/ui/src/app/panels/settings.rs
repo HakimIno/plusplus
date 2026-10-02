@@ -639,7 +639,7 @@ impl DbGuiApp {
                                                         ui.add_space(3.0);
                                                         ui.label(
                                                             egui::RichText::new(
-                                                                "TTF or OTF · up to 32 MiB",
+                                                                "TTF, OTF or TTC · up to 32 MiB",
                                                             )
                                                             .size(12.0)
                                                             .color(palette::TEXT_WEAK()),
@@ -649,7 +649,7 @@ impl DbGuiApp {
                                                 if components::Btn::new("Import…")
                                                     .show(ui)
                                                     .on_hover_text(
-                                                        "Copy a .ttf or .otf file into the plusplus font library",
+                                                        "Copy a .ttf, .otf or .ttc file into the plusplus font library",
                                                     )
                                                     .clicked()
                                                 {
@@ -749,7 +749,7 @@ impl DbGuiApp {
         }
         if import_font {
             if let Some(path) = rfd::FileDialog::new()
-                .add_filter("OpenType font", &["ttf", "otf"])
+                .add_filter("Font", &["ttf", "otf", "ttc"])
                 .pick_file()
             {
                 match crate::fonts::import(&path) {

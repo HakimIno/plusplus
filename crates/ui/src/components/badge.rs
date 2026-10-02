@@ -50,9 +50,9 @@ pub(crate) fn section_title(ui: &mut egui::Ui, text: &str) {
     ui.add(
         egui::Label::new(
             egui::RichText::new(text)
-                .size(13.0)
+                .size(14.5)
                 .strong()
-                .color(palette::TEXT_WEAK()),
+                .color(palette::TEXT()),
         )
         .selectable(false),
     );

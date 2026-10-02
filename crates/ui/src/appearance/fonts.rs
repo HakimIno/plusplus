@@ -28,6 +28,11 @@ pub(crate) fn list_imported() -> Vec<FontOption> {
     options
 }
 
+/// The bytes behind a font choice: a validated imported file.
+fn font_bytes(key: &str) -> Result<Vec<u8>, String> {
+    read_valid_font(&imported_path(key)?)
+}
+
 fn option_from_path(path: &Path) -> Option<FontOption> {
     if !supported_extension(path) {
         return None;
@@ -40,7 +45,12 @@ fn option_from_path(path: &Path) -> Option<FontOption> {
 fn supported_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "ttf" | "otf"))
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "ttf" | "otf" | "ttc"
+            )
+        })
 }
 
 fn imported_path(key: &str) -> Result<PathBuf, String> {
@@ -64,7 +74,8 @@ fn read_valid_font(path: &Path) -> Result<Vec<u8>, String> {
     }
     let bytes = std::fs::read(path)
         .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
-    skrifa::FontRef::new(&bytes)
+    // A .ttc collection (e.g. macOS's Menlo) is read at its first face, its regular weight.
+    skrifa::FontRef::from_index(&bytes, 0)
         .map_err(|_| "The selected file is not a valid font".to_string())?;
     Ok(bytes)
 }
@@ -73,7 +84,7 @@ fn read_valid_font(path: &Path) -> Result<Vec<u8>, String> {
 /// a numeric suffix prevents an import from silently replacing a different font.
 pub(crate) fn import(path: &Path) -> Result<FontOption, String> {
     if !supported_extension(path) {
-        return Err("Choose a .ttf or .otf font file".to_string());
+        return Err("Choose a .ttf, .otf or .ttc font file".to_string());
     }
     let bytes = read_valid_font(path)?;
     let dir = dbcore::config::fonts_dir().map_err(|error| error.to_string())?;
@@ -114,6 +125,16 @@ fn insert(fonts: &mut FontDefinitions, name: &str, bytes: &[u8]) {
     );
 }
 
+fn grid_mono_id() -> egui::Id {
+    egui::Id::new("grid_all_monospace")
+}
+
+/// Whether the results grid and Details set every value in the code font. True once the user
+/// has picked an "Editor & data font", so their choice reaches the data, not just numbers.
+pub(crate) fn grid_all_monospace(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<bool>(grid_mono_id()).unwrap_or(false))
+}
+
 pub(crate) fn install(
     ctx: &egui::Context,
     app_fonts: AppFonts,
@@ -149,16 +170,8 @@ pub(crate) fn install(
         insert(&mut fonts, name, bytes);
     }
 
-    let ui_custom = ui_font
-        .map(imported_path)
-        .transpose()?
-        .map(|path| read_valid_font(&path))
-        .transpose()?;
-    let code_custom = code_font
-        .map(imported_path)
-        .transpose()?
-        .map(|path| read_valid_font(&path))
-        .transpose()?;
+    let ui_custom = ui_font.map(font_bytes).transpose()?;
+    let code_custom = code_font.map(font_bytes).transpose()?;
     if let Some(bytes) = &ui_custom {
         insert(&mut fonts, "custom_ui", bytes);
     }
@@ -213,12 +226,23 @@ pub(crate) fn install(
         .families
         .insert(FontFamily::Name(HEADING_FAMILY.into()), headings);
     ctx.set_fonts(fonts);
+    ctx.data_mut(|d| d.insert_temp(grid_mono_id(), code_font.is_some()));
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_font_collection_loads_at_its_first_face() {
+        // macOS ships Menlo as a .ttc; skip where it doesn't exist.
+        let menlo = Path::new("/System/Library/Fonts/Menlo.ttc");
+        if menlo.exists() {
+            assert!(supported_extension(menlo));
+            assert!(read_valid_font(menlo).is_ok());
+        }
+    }
 
     #[test]
     fn rejects_paths_outside_the_font_library() {

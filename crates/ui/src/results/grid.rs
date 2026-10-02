@@ -61,6 +61,7 @@ fn fitted_column_width(ui: &egui::Ui, result: &QueryResult, col: usize) -> Optio
     let body_font = egui::TextStyle::Body.resolve(ui.style());
     let header_font = egui::TextStyle::Heading.resolve(ui.style());
     let mono_font = egui::FontId::new(GRID_MONO_SIZE, egui::FontFamily::Monospace);
+    let all_mono = crate::fonts::grid_all_monospace(ui.ctx());
     let sample_step = result.rows.len().div_ceil(MAX_SAMPLED_ROWS).max(1);
     let measure = |text: &str, font: &egui::FontId| {
         ui.ctx().fonts_mut(|fonts| {
@@ -84,7 +85,10 @@ fn fitted_column_width(ui: &egui::Ui, result: &QueryResult, col: usize) -> Optio
             Value::Text(value) => value.clone(),
             Value::Bytes(value) => format!("[{} bytes]", value.len()),
         };
-        let font = if matches!(value, Value::Int(_) | Value::Float(_)) || kind.monospace_value() {
+        let font = if matches!(value, Value::Int(_) | Value::Float(_))
+            || kind.monospace_value()
+            || all_mono
+        {
             &mono_font
         } else {
             &body_font
@@ -1260,8 +1264,8 @@ fn header_menu(
         "Hide this column",
         "Fit this column",
         "Reset columns",
-        "Sort ascending",
-        "Sort descending",
+        "Sort loaded rows ascending",
+        "Sort loaded rows descending",
         "Remove sort",
     ];
     let font = egui::TextStyle::Button.resolve(ui.style());
@@ -1345,11 +1349,25 @@ fn header_menu(
         ui.close();
     }
     ui.separator();
-    if header_menu_item(ui, crate::icons::sort_ascending(), "Sort ascending", true).clicked() {
+    if header_menu_item(
+        ui,
+        crate::icons::sort_ascending(),
+        "Sort loaded rows ascending",
+        true,
+    )
+    .clicked()
+    {
         out.sort = Some(SortCmd::Asc(col));
         ui.close();
     }
-    if header_menu_item(ui, crate::icons::sort_descending(), "Sort descending", true).clicked() {
+    if header_menu_item(
+        ui,
+        crate::icons::sort_descending(),
+        "Sort loaded rows descending",
+        true,
+    )
+    .clicked()
+    {
         out.sort = Some(SortCmd::Desc(col));
         ui.close();
     }
@@ -2410,9 +2428,23 @@ fn cell(
                     palette::ACCENT(),
                 );
             }
+            let all_mono = crate::fonts::grid_all_monospace(ui.ctx());
+            let mono_if = |text: egui::RichText| {
+                if all_mono {
+                    text.font(egui::FontId::new(
+                        GRID_MONO_SIZE,
+                        egui::FontFamily::Monospace,
+                    ))
+                } else {
+                    text
+                }
+            };
             let resp = match value {
-                Value::Null => label(ui, egui::RichText::new("NULL").italics()),
-                Value::Bool(v) => label(ui, egui::RichText::new(if *v { "true" } else { "false" })),
+                Value::Null => label(ui, mono_if(egui::RichText::new("NULL").italics())),
+                Value::Bool(v) => label(
+                    ui,
+                    mono_if(egui::RichText::new(if *v { "true" } else { "false" })),
+                ),
                 Value::Int(_) | Value::Float(_) => label(
                     ui,
                     egui::RichText::new(value.display()).font(egui::FontId::new(
@@ -2431,7 +2463,7 @@ fn cell(
                             egui::FontFamily::Monospace,
                         ))
                     } else {
-                        text
+                        mono_if(text)
                     };
                     label(ui, text)
                 }

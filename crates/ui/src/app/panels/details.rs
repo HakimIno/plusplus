@@ -79,7 +79,7 @@ fn details_field(
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         egui::RichText::new(col.type_name.to_lowercase())
-                            .size(11.0)
+                            .size(12.0)
                             .color(kind_color(kind)),
                     );
                 });
@@ -345,7 +345,9 @@ fn details_value_box(
         } else {
             palette::TEXT()
         };
-        let font = if kind.monospace_value() && !shown.is_null() {
+        let font = if (kind.monospace_value() || crate::fonts::grid_all_monospace(ui.ctx()))
+            && !shown.is_null()
+        {
             egui::TextStyle::Monospace.resolve(ui.style())
         } else {
             egui::TextStyle::Body.resolve(ui.style())
@@ -563,13 +565,23 @@ impl DbGuiApp {
         let tab_id = self.tabs[idx].id;
         let tab = &mut self.tabs[idx];
         // The selected row belongs to the data grid, which every other result surface hides.
-        if tab.view != TabView::Data {
+        let selected_row = match (tab.view, tab.result.as_ref(), tab.selection.lead()) {
+            (TabView::Data, Some(_), Some(disp)) if disp < tab.row_order.len() => {
+                Some(tab.row_order[disp])
+            }
+            _ => None,
+        };
+        // ✕ hides Details for the row it was pressed on only: any other selection (or none)
+        // forgets the dismissal, so the panel returns with the next row.
+        if self.details_dismissed != selected_row.map(|row| (tab_id, row)) {
+            self.details_dismissed = None;
+        }
+        let Some(row_idx) = selected_row else {
+            return;
+        };
+        if self.details_dismissed.is_some() {
             return;
         }
-        let row_idx = match (tab.result.as_ref(), tab.selection.lead()) {
-            (Some(_), Some(disp)) if disp < tab.row_order.len() => tab.row_order[disp],
-            _ => return,
-        };
         let editable = tab.edits.editable();
         // Split the borrow so the closure can hold the result immutably and edits mutably.
         let QueryTab { result, edits, .. } = tab;
@@ -578,8 +590,7 @@ impl DbGuiApp {
         let details_filter = &mut self.details_filter;
         let details_date_pick = &mut self.details_date_pick;
         let details_image_preview = &mut self.details_image_preview;
-        let show_details_panel = &mut self.show_details_panel;
-        let workspace_dirty = &mut self.workspace_dirty;
+        let details_dismissed = &mut self.details_dismissed;
 
         egui::Panel::right("details_panel")
             .resizable(true)
@@ -592,12 +603,11 @@ impl DbGuiApp {
                     components::section_title(ui, "Details");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if components::Btn::ghost_icon(icons::close())
-                            .tooltip("Close Details panel")
+                            .tooltip("Close Details for this row")
                             .show(ui)
                             .clicked()
                         {
-                            *show_details_panel = false;
-                            *workspace_dirty = true;
+                            *details_dismissed = Some((tab_id, row_idx));
                         }
                     });
                 });

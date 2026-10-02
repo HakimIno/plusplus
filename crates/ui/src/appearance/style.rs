@@ -206,7 +206,8 @@ pub fn apply(ctx: &egui::Context) {
 
     let v = visuals();
 
-    // Compact, minimal type scale — small but still readable.
+    // Compact, minimal type scale. One point above the original 12.5 body size: the old
+    // scale read too small on most displays.
     // Headless tests do not install the app's embedded fonts; resolving an unbound named
     // family panics in epaint before the behavioral assertion can run.
     let heading_family = if cfg!(test) {
@@ -215,19 +216,19 @@ pub fn apply(ctx: &egui::Context) {
         FontFamily::Name(crate::HEADING_FAMILY.into())
     };
     let text_styles = [
-        (TextStyle::Heading, FontId::new(12.5, heading_family)),
-        (TextStyle::Body, FontId::new(12.5, FontFamily::Proportional)),
+        (TextStyle::Heading, FontId::new(13.0, heading_family)),
+        (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
         (
             TextStyle::Button,
-            FontId::new(12.5, FontFamily::Proportional),
+            FontId::new(13.0, FontFamily::Proportional),
         ),
         (
             TextStyle::Monospace,
-            FontId::new(12.0, FontFamily::Monospace),
+            FontId::new(13.0, FontFamily::Monospace),
         ),
         (
             TextStyle::Small,
-            FontId::new(10.5, FontFamily::Proportional),
+            FontId::new(11.5, FontFamily::Proportional),
         ),
     ];
 
