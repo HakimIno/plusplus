@@ -260,7 +260,7 @@ impl DbGuiApp {
             let mut actions = Vec::new();
             self.top_bar(ui_root, frame, &mut actions);
             self.query_tab_bar(ui_root, &mut actions);
-            self.status_bar(ui_root);
+            self.status_bar(ui_root, &mut actions);
             self.draw_settings_page(ui_root, &mut actions);
             self.open_anything_dialog(&ctx);
             for action in actions {
@@ -282,7 +282,7 @@ impl DbGuiApp {
 
             self.top_bar(ui_root, frame, &mut actions);
             self.query_tab_bar(ui_root, &mut actions);
-            self.status_bar(ui_root);
+            self.status_bar(ui_root, &mut actions);
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(palette::BASE()))
                 .show_inside(ui_root, |_ui| {});
@@ -734,7 +734,7 @@ impl DbGuiApp {
         if self.split_tab.is_none() {
             self.query_tab_bar(ui_root, &mut actions);
         }
-        self.status_bar(ui_root);
+        self.status_bar(ui_root, &mut actions);
         // Paint the shared seam colour once behind the docks. Panel outer margins are transparent
         // by design, so this keeps the gap visibly darker than either adjacent surface.
         let workspace_rect = ui_root.available_rect_before_wrap();

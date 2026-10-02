@@ -4206,6 +4206,7 @@ fn data_view_shows_loading_message_before_its_first_result() {
         query::QueryJob {
             cancel: tokio_util::sync::CancellationToken::new(),
             running: true,
+            started: std::time::Instant::now(),
         },
     );
 
@@ -4514,6 +4515,7 @@ fn superseded_query_result_never_touches_ui_state() {
         query::QueryJob {
             cancel: tokio_util::sync::CancellationToken::new(),
             running: true,
+            started: std::time::Instant::now(),
         },
     );
     app.tx
@@ -4906,6 +4908,7 @@ fn replacement_stream_stays_hidden_until_finished() {
         query::QueryJob {
             cancel: tokio_util::sync::CancellationToken::new(),
             running: true,
+            started: std::time::Instant::now(),
         },
     );
     app.tx
@@ -5121,6 +5124,7 @@ fn canceled_replacement_keeps_the_previous_result() {
         query::QueryJob {
             cancel: tokio_util::sync::CancellationToken::new(),
             running: true,
+            started: std::time::Instant::now(),
         },
     );
     app.tx
@@ -5192,6 +5196,7 @@ fn replacement_stream_keeps_previous_rows_until_completion() {
         query::QueryJob {
             cancel: tokio_util::sync::CancellationToken::new(),
             running: true,
+            started: std::time::Instant::now(),
         },
     );
     app.tx
@@ -5359,6 +5364,7 @@ fn continuation_stream_appends_and_marks_a_short_page_exhausted() {
         query::QueryJob {
             cancel: tokio_util::sync::CancellationToken::new(),
             running: true,
+            started: std::time::Instant::now(),
         },
     );
     app.tx
@@ -6955,7 +6961,7 @@ fn trigger_and_routine_bodies_follow_the_sql_editor() {
     crate::style::apply(&ctx);
     let mut app = app_with_staged_edit();
     app.show_welcome = false;
-    let mut frames = |app: &mut DbGuiApp| {
+    let frames = |app: &mut DbGuiApp| {
         for i in 0..3 {
             let raw = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -7019,6 +7025,19 @@ fn every_draft_kind_is_listed_in_the_explorer() {
             QueryTabKind::Procedure
         ]
     );
+}
+
+/// The status bar with a result, a multi-row selection, a staged edit and a running clock.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_status_bar() {
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.tab_mut().selection.select_one(0);
+    app.tab_mut().selection.range_to(2);
+    render_and_snapshot(app, "status_bar", false);
 }
 
 /// A driver that can't create an object says so instead of opening an editor that could

@@ -8,6 +8,8 @@ use super::*;
 pub(super) struct QueryJob {
     pub cancel: tokio_util::sync::CancellationToken,
     pub running: bool,
+    /// When the run began, for the status bar's elapsed-time readout.
+    pub started: std::time::Instant,
 }
 
 impl DbGuiApp {
@@ -47,6 +49,7 @@ impl DbGuiApp {
             QueryJob {
                 cancel: cancel.clone(),
                 running: true,
+                started: std::time::Instant::now(),
             },
         );
         self.refresh_query_busy();

@@ -331,6 +331,18 @@ impl Edits {
                 .any(|(row, m)| !is_new_row(*row) && !m.is_empty())
     }
 
+    /// How many changes are staged: edited cells on stored rows, rows marked for deletion and
+    /// new rows. What the status bar counts and the commit preview lists.
+    pub fn pending_count(&self) -> usize {
+        let edited: usize = self
+            .cells
+            .iter()
+            .filter(|(row, _)| !is_new_row(**row) && !self.deleted.contains(*row))
+            .map(|(_, cells)| cells.len())
+            .sum();
+        edited + self.deleted.len() + self.new_rows
+    }
+
     pub fn row_dirty(&self, row: usize) -> bool {
         self.cells.get(&row).is_some_and(|m| !m.is_empty())
     }
