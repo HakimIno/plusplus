@@ -172,7 +172,7 @@ fn check_kind(kind: Option<DbKind>, sql: &str) -> Option<SyntaxError> {
 
 /// Turn each SQL Server `GO` batch-separator line (`GO`, or `GO 5` to repeat) into a `;`,
 /// padded with spaces to the same length so reported char ranges still index the original.
-fn go_lines_as_separators(sql: &str) -> String {
+pub(crate) fn go_lines_as_separators(sql: &str) -> String {
     let mut out = String::with_capacity(sql.len());
     for line in sql.split_inclusive('\n') {
         let body = line.trim_end_matches(['\n', '\r']);
@@ -256,7 +256,7 @@ fn mssql_explicit_adds(sql: &str, tokens: &[TokenWithSpan]) -> Option<String> {
 
 /// Char index in `sql` of a 1-based tokenizer `(line, column)`. The tokenizer counts
 /// columns in `char`s, so this stays in chars too — the UI indexes the buffer the same way.
-fn char_index(sql: &str, location: Location) -> usize {
+pub(crate) fn char_index(sql: &str, location: Location) -> usize {
     let mut line = 1;
     let mut column = 1;
     for (i, c) in sql.chars().enumerate() {

@@ -40,6 +40,22 @@ impl DbKind {
         matches!(self, DbKind::Cassandra | DbKind::ScyllaDb)
     }
 
+    /// Whether `CREATE VIEW` exists. CQL has only materialized views, which are not built here.
+    pub fn supports_views(self) -> bool {
+        !self.is_cql()
+    }
+
+    /// Whether `CREATE TRIGGER` exists as plain SQL DDL. DuckDB has no triggers at all and CQL
+    /// triggers are Java classes loaded on the server.
+    pub fn supports_triggers(self) -> bool {
+        !matches!(self, DbKind::DuckDb) && !self.is_cql()
+    }
+
+    /// Whether `CREATE FUNCTION` / `CREATE PROCEDURE` with a stored body exists.
+    pub fn supports_routines(self) -> bool {
+        !matches!(self, DbKind::Sqlite | DbKind::DuckDb) && !self.is_cql()
+    }
+
     /// Whether this backend authenticates with a server (host/port/user/password)
     /// versus a local file path.
     pub fn is_server(self) -> bool {

@@ -23,7 +23,7 @@ pub mod model;
 use connections::connection;
 pub use connections::{database, tunnel};
 pub use data::{coerce, edits, value};
-pub use query::{parameters, safety, syntax};
+pub use query::{parameters, plan, safety, semantic, syntax};
 pub use storage::{audit, bookmarks, config, favorites, history, secrets};
 pub use transfer::{backup, clipboard, export, import};
 
@@ -55,6 +55,7 @@ pub use model::{
     ViewInfo,
 };
 pub use parameters::{query_parameter_names, resolve_query_parameters, ParameterError};
+pub use semantic::{check_semantics, SemanticIssue};
 pub use syntax::{check_syntax, SyntaxError};
 pub use value::Value;
 
