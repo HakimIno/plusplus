@@ -3,6 +3,11 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
+## 0.4.17 — 2026-10-02
+
+- The status bar shows more: the last result's rows and time, the SQL editor's line and column, the number of staged changes (click to review and save), a running query's clock with a cancel button, the tab's connection with a READ-ONLY flag, and Count / Sum / Avg of the selected rows' numeric column.
+- CI: clippy 1.99 no longer fails the build on the `Database` trait.
+
 ## 0.4.16 — 2026-10-02
 
 - New Table / View / Trigger / Function / Procedure each open in a draft tab of their own — open as many as you like — and are listed in the explorer (click one to jump to its tab). Esc, or Discard after Cmd+R, closes the draft.
