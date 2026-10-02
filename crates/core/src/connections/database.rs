@@ -13,6 +13,9 @@ use crate::safety::{DangerousStatement, ProductionPreflight};
 ///
 /// Implementors wrap a connection pool and are cheap to clone behind an `Arc`. All methods
 /// are async and run on the tokio runtime; the UI never calls them on its own thread.
+// `async_trait` boxes each method's future, which is already `#[must_use]`; newer clippy
+// (1.99) flags the attribute it adds on top as a double `must_use`.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Database: Send + Sync {
     /// Which backend this is.
