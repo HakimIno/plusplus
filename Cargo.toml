@@ -5,7 +5,6 @@
 resolver = "2"
 members = [
     "crates/core",
-    "crates/analysis",
     "crates/ui",
     "crates/app",
 ]
@@ -26,7 +25,6 @@ rust-version = "1.94"
 # Imported as `dbcore` (not `core`) so it doesn't shadow Rust's std `core` crate in
 # dependents, which would break macro expansions that reference `::core::`.
 dbcore = { path = "crates/core", package = "plusplus-core" }
-analysis = { path = "crates/analysis", package = "plusplus-analysis" }
 ui = { path = "crates/ui", package = "plusplus-ui" }
 
 # --- GUI ---
@@ -82,9 +80,6 @@ rustls-native-certs = "0.8"
 # Pure-Rust SSH on tokio. The `ring` backend (instead of the default aws-lc-rs) keeps the
 # whole tree on the single ring crypto stack that rustls/tiberius/sqlx already use.
 russh = { version = "0.62.6", default-features = false, features = ["flate2", "ring", "rsa"] }
-
-# --- data analysis ---
-polars = { version = "0.54", default-features = false, features = ["lazy", "describe", "dtype-full"] }
 
 # --- SQL formatting (the query editor's Beautify action) ---
 sqlformat = "0.5"

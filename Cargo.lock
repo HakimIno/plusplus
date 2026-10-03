@@ -4600,13 +4600,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "plusplus-analysis"
-version = "0.4.17"
-dependencies = [
- "plusplus-core",
-]
-
-[[package]]
 name = "plusplus-app"
 version = "0.4.17"
 dependencies = [

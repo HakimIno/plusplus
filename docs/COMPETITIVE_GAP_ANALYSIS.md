@@ -255,7 +255,6 @@ that makes production mistakes harder.
 - [`ROADMAP.md`](../ROADMAP.md)
 - [`crates/core/src/connections/database.rs`](../crates/core/src/connections/database.rs)
 - [`crates/core/src/model.rs`](../crates/core/src/model.rs)
-- [`crates/analysis/src/lib.rs`](../crates/analysis/src/lib.rs)
 
 ### TablePlus
 

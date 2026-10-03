@@ -207,7 +207,6 @@ opening a window.
 crates/
 ├── app/        Application entry point and platform packaging
 ├── core/       Connections, database backends, safety, import, and export
-├── analysis/   Data-analysis primitives
 └── ui/         Desktop interface
 website/        Product and download site
 examples/       Sample database, themes, and ScyllaDB environment

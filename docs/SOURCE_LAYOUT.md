@@ -38,7 +38,6 @@ Integration tests remain in `crates/core/tests`, and benchmarks in `crates/core/
 ## Other workspace crates
 
 - `crates/app`: executable entry point, build integration and bundled fonts.
-- `crates/analysis`: analysis-layer placeholder.
 
 ## Adding code
 
