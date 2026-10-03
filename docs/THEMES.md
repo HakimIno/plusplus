@@ -1,9 +1,10 @@
 # Custom themes
 
-plusplus ships five built-in themes: Midnight Conversational IDE, Carbon, Midnight, Daylight,
-and Graphite. You can also install your own — a theme is just a small JSON file of colours,
-no recompile required. This is the first plugin "contribution point": more contribution types
-(snippets, keybindings, WASM plugins) will follow the same drop-a-file model.
+plusplus ships four built-in themes: Carbon, Midnight, Daylight, and Blue Studio.
+You can also install your own — a theme is just a
+small JSON file of colours, no recompile required. This is the first plugin "contribution
+point": more contribution types (snippets, keybindings, WASM plugins) will follow the same
+drop-a-file model.
 
 ## Installing a theme
 
@@ -17,21 +18,23 @@ no recompile required. This is the first plugin "contribution point": more contr
 
 2. Copy a `*.json` theme file into it. A ready-made custom example lives at
    [Dracula](../examples/themes/dracula.json). Former built-ins (Lotus Dusk, Tidal Ledger,
-   Copper Circuit) live there too if you want them back. Graphite's JSON source is an
-   authoring reference for the built-in of the same name.
+   Copper Circuit, and Graphite) live there too if you want them back.
+   [IntelliJ Light](../examples/themes/intellij-light.json) provides a light IDE palette
+   with independent SQL colours.
 
 3. In plusplus, open **Settings → Appearance** and click **Reload themes** (or restart).
    Your theme appears in the picker next to the built-ins.
 
 The file name (without `.json`) is the theme's stable id, persisted to `settings.json`.
 If you later delete a selected theme file, plusplus falls back to the default
-(Midnight Conversational IDE).
+(Carbon). Saved built-in keys that are no longer available also fall back to Carbon.
 
 ## Authoring a theme
 
 Copy any file in `examples/themes/` and edit the colours. Every field is required and is an
 opaque `#rrggbb` (or shorthand `#rgb`) hex string, except `name` (display name), the optional
-`author`, and `is_dark` (a boolean that selects egui's dark/light base).
+`author`, `is_dark` (a boolean that selects egui's dark/light base), and the optional
+`syntax` object described below.
 
 ```json
 {
@@ -78,3 +81,22 @@ opaque `#rrggbb` (or shorthand `#rgb`) hex string, except `name` (display name),
 
 A malformed or unreadable theme file is skipped silently — it never blocks startup. A file
 whose name collides with any built-in key is ignored so the defaults are always available.
+
+### SQL colours
+
+Without `syntax`, SQL colours follow the workspace's accent, text, and status tokens.
+To choose them independently, add a `syntax` object with all seven hex colour fields:
+
+```json
+"syntax": {
+  "keyword": "#0033b3",
+  "string": "#067d17",
+  "number": "#1750eb",
+  "comment": "#6e776e",
+  "punctuation": "#080808",
+  "identifier": "#080808",
+  "qualified_identifier": "#871094"
+}
+```
+
+`qualified_identifier` colours names after a dot, such as `title` in `f.title`.

@@ -51,6 +51,29 @@ pub struct Theme {
     pub success: Color32,
     pub danger: Color32,
     pub warning: Color32,
+
+    /// Optional editor colours; absent palettes derive SQL colours from the UI tokens.
+    pub syntax: Option<SyntaxTheme>,
+}
+
+/// SQL editor colours, independent of the workspace's action and status colours.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct SyntaxTheme {
+    #[serde(with = "hex")]
+    pub keyword: Color32,
+    #[serde(with = "hex")]
+    pub string: Color32,
+    #[serde(with = "hex")]
+    pub number: Color32,
+    #[serde(with = "hex")]
+    pub comment: Color32,
+    #[serde(with = "hex")]
+    pub punctuation: Color32,
+    #[serde(with = "hex")]
+    pub identifier: Color32,
+    /// Names following a dot, such as `title` in `f.title`.
+    #[serde(with = "hex")]
+    pub qualified_identifier: Color32,
 }
 
 /// The on-disk form of a [`Theme`]: a human-authored JSON file with `#rrggbb` colours, a
@@ -102,11 +125,14 @@ pub struct ThemeFile {
     pub danger: Color32,
     #[serde(with = "hex")]
     pub warning: Color32,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub syntax: Option<SyntaxTheme>,
 }
 
 impl ThemeFile {
     /// Flatten into the runtime [`Theme`] the rest of the app reads.
-    fn to_theme(&self) -> Theme {
+    pub(crate) fn to_theme(&self) -> Theme {
         Theme {
             is_dark: self.is_dark,
             base: self.base,
@@ -127,6 +153,7 @@ impl ThemeFile {
             success: self.success,
             danger: self.danger,
             warning: self.warning,
+            syntax: self.syntax,
         }
     }
 }
@@ -167,7 +194,7 @@ mod hex {
 }
 
 /// Stable key of the built-in default theme.
-pub const DEFAULT_KEY: &str = "midnight-conversational";
+pub const DEFAULT_KEY: &str = "carbon";
 
 /// One selectable theme — a resolved [`Theme`] plus the metadata the picker needs.
 #[derive(Clone)]
@@ -299,13 +326,6 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
 fn builtins() -> Vec<ThemeEntry> {
     vec![
         ThemeEntry {
-            key: "midnight-conversational".into(),
-            name: "Midnight Conversational IDE".into(),
-            author: None,
-            builtin: true,
-            theme: midnight_conversational(),
-        },
-        ThemeEntry {
             key: "carbon".into(),
             name: "Carbon".into(),
             author: None,
@@ -327,13 +347,6 @@ fn builtins() -> Vec<ThemeEntry> {
             theme: daylight(),
         },
         ThemeEntry {
-            key: "graphite".into(),
-            name: "Graphite".into(),
-            author: None,
-            builtin: true,
-            theme: graphite(),
-        },
-        ThemeEntry {
             key: "blue-studio".into(),
             name: "Blue Studio".into(),
             author: None,
@@ -341,31 +354,6 @@ fn builtins() -> Vec<ThemeEntry> {
             theme: blue_studio(),
         },
     ]
-}
-
-/// Deep, conversational IDE palette: near-black editor wells, soft panels, clear cyan accent.
-fn midnight_conversational() -> Theme {
-    Theme {
-        is_dark: true,
-        base: rgb(0x08, 0x09, 0x0d),
-        panel: rgb(0x0f, 0x12, 0x18),
-        surface: rgb(0x17, 0x1b, 0x24),
-        surface_hover: rgb(0x21, 0x27, 0x33),
-        code_bg: rgb(0x06, 0x07, 0x0a),
-        stripe: rgb(0x0c, 0x10, 0x16),
-        selection: rgb(0x1d, 0x36, 0x46),
-        border: rgb(0x1b, 0x21, 0x2b),
-        border_strong: rgb(0x31, 0x3b, 0x4b),
-        text: rgb(0xea, 0xef, 0xf6),
-        text_weak: rgb(0xa6, 0xb1, 0xc0),
-        text_faint: rgb(0x68, 0x74, 0x84),
-        accent: rgb(0x66, 0xd9, 0xef),
-        accent_hover: rgb(0x8b, 0xe8, 0xf7),
-        on_accent: rgb(0x05, 0x12, 0x17),
-        success: rgb(0x67, 0xd3, 0x91),
-        danger: rgb(0xff, 0x6b, 0x7a),
-        warning: rgb(0xf2, 0xc9, 0x72),
-    }
 }
 
 /// Near-black, neutral. Editor wells fall all the way to true black; panels lift just
@@ -391,6 +379,7 @@ fn carbon() -> Theme {
         success: rgb(0x4a, 0xcf, 0x8b),
         danger: rgb(0xee, 0x6a, 0x6a),
         warning: rgb(0xe0, 0xaf, 0x68),
+        syntax: None,
     }
 }
 
@@ -416,6 +405,7 @@ fn midnight() -> Theme {
         success: rgb(0x4a, 0xcf, 0x8b),
         danger: rgb(0xee, 0x6a, 0x6a),
         warning: rgb(0xe0, 0xaf, 0x68),
+        syntax: None,
     }
 }
 
@@ -444,32 +434,7 @@ fn daylight() -> Theme {
         success: rgb(0x1f, 0x9d, 0x57),
         danger: rgb(0xd8, 0x3a, 0x3a),
         warning: rgb(0xb6, 0x80, 0x2a),
-    }
-}
-
-/// TablePlus-style charcoal: a #1e1e1e workspace, a slightly lifted sidebar, striped
-/// grid rows, and a vivid azure accent (SQL keywords, active tabs, links).
-fn graphite() -> Theme {
-    Theme {
-        is_dark: true,
-        base: rgb(0x1e, 0x1e, 0x1e),
-        panel: rgb(0x25, 0x25, 0x25),
-        surface: rgb(0x2a, 0x2a, 0x2a),
-        surface_hover: rgb(0x34, 0x34, 0x34),
-        code_bg: rgb(0x1e, 0x1e, 0x1e),
-        stripe: rgb(0x29, 0x29, 0x29),
-        selection: rgb(0x16, 0x32, 0x4d),
-        border: rgb(0x33, 0x33, 0x33),
-        border_strong: rgb(0x42, 0x42, 0x42),
-        text: rgb(0xe8, 0xe8, 0xe8),
-        text_weak: rgb(0xa8, 0xa8, 0xa8),
-        text_faint: rgb(0x73, 0x73, 0x73),
-        accent: rgb(0x0f, 0x7e, 0xff),
-        accent_hover: rgb(0x3a, 0x96, 0xff),
-        on_accent: rgb(0xff, 0xff, 0xff),
-        success: rgb(0x3e, 0xcf, 0x7a),
-        danger: rgb(0xe0, 0x5c, 0x5c),
-        warning: rgb(0xe0, 0xb0, 0x40),
+        syntax: None,
     }
 }
 
@@ -496,11 +461,12 @@ fn blue_studio() -> Theme {
         success: rgb(0x89, 0xd1, 0x85),
         danger: rgb(0xf4, 0x87, 0x71),
         warning: rgb(0xcc, 0xa7, 0x00),
+        syntax: None,
     }
 }
 
 thread_local! {
-    static CURRENT: Cell<Theme> = Cell::new(midnight_conversational());
+    static CURRENT: Cell<Theme> = Cell::new(carbon());
 }
 
 /// The colour set in effect right now. Cheap (a `Cell` read of a `Copy` struct).
@@ -534,10 +500,17 @@ mod tests {
         let reg = ThemeRegistry {
             entries: builtins(),
         };
-        assert!(reg.get("graphite").is_some_and(|entry| entry.builtin));
-        assert!(reg.get("blue-studio").is_some_and(|entry| entry.builtin));
-        for key in ["lotus-dusk", "tidal-ledger", "copper-circuit"] {
+        assert_eq!(
+            reg.entries()
+                .iter()
+                .map(|entry| entry.key.as_str())
+                .collect::<Vec<_>>(),
+            ["carbon", "midnight", "daylight", "blue-studio"]
+        );
+        assert!(reg.entries().iter().all(|entry| entry.builtin));
+        for key in ["midnight-conversational", "graphite", "intellij-light"] {
             assert!(reg.get(key).is_none());
+            assert_eq!(reg.resolve_key(key), "carbon");
         }
     }
 
@@ -588,10 +561,22 @@ mod tests {
         let theme = file.to_theme();
         assert_eq!(theme.accent, Color32::from_rgb(0x6e, 0x8e, 0xff));
         assert_eq!(theme.code_bg, Color32::from_rgb(0, 0, 0));
+        assert!(theme.syntax.is_none());
 
         // Re-serialize and parse again; colours survive.
         let back: ThemeFile = serde_json::from_str(&serde_json::to_string(&file).unwrap()).unwrap();
         assert_eq!(back.accent, file.accent);
+    }
+
+    #[test]
+    fn optional_syntax_palette_round_trips() {
+        let json = include_str!("../../../../examples/themes/intellij-light.json");
+        let file: ThemeFile = serde_json::from_str(json).unwrap();
+        let back: ThemeFile = serde_json::from_str(&serde_json::to_string(&file).unwrap()).unwrap();
+        assert_eq!(
+            back.to_theme().syntax.unwrap().qualified_identifier,
+            file.syntax.unwrap().qualified_identifier
+        );
     }
 
     /// `#rgb` shorthand expands to the full byte form.

@@ -14,10 +14,22 @@ pub(crate) struct SqlColors {
     comment: Color32,
     punct: Color32,
     ident: Color32,
+    qualified_ident: Color32,
 }
 
 pub(crate) fn sql_colors() -> SqlColors {
     let t = crate::theme::current();
+    if let Some(syntax) = t.syntax {
+        return SqlColors {
+            keyword: syntax.keyword,
+            string: syntax.string,
+            number: syntax.number,
+            comment: syntax.comment,
+            punct: syntax.punctuation,
+            ident: syntax.identifier,
+            qualified_ident: syntax.qualified_identifier,
+        };
+    }
     SqlColors {
         keyword: t.accent,
         string: mix(t.danger, t.warning, 0.4),
@@ -25,6 +37,7 @@ pub(crate) fn sql_colors() -> SqlColors {
         comment: t.success,
         punct: mix(t.accent, t.text_weak, if t.is_dark { 0.62 } else { 0.45 }),
         ident: t.text,
+        qualified_ident: t.text,
     }
 }
 
@@ -206,6 +219,10 @@ fn append_sql(job: &mut LayoutJob, text: &str, font: &FontId, colors: &SqlColors
             let word: String = chars[start..i].iter().collect();
             let color = if is_keyword(&word) {
                 colors.keyword
+            } else if colors.qualified_ident != colors.ident
+                && chars[..start].iter().rev().find(|c| !c.is_whitespace()) == Some(&'.')
+            {
+                colors.qualified_ident
             } else {
                 colors.ident
             };
@@ -336,3 +353,50 @@ pub(crate) const KEYWORDS: &[&str] = &[
     "CAST",
     "COALESCE",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intellij_sql_colours_follow_tokens_and_theme_switches() {
+        let registry = crate::theme::ThemeRegistry::load();
+        let previous = crate::theme::current();
+        let light = serde_json::from_str::<crate::theme::ThemeFile>(include_str!(
+            "../../../../examples/themes/intellij-light.json"
+        ))
+        .unwrap()
+        .to_theme();
+        let syntax = light.syntax.unwrap();
+        let ctx = egui::Context::default();
+        let sql =
+            "select f.title, f . name from film f where f.id = 42 and f.title = 'Film'; -- note";
+        crate::theme::set_current(light);
+        let job = highlight_sql_cached(&ctx, sql, FontId::monospace(13.0));
+        let colour = |job: &LayoutJob, token: &str| {
+            job.sections
+                .iter()
+                .find(|section| &job.text[section.byte_range.clone()] == token)
+                .unwrap()
+                .format
+                .color
+        };
+        assert_eq!(colour(&job, "select"), syntax.keyword);
+        assert_eq!(colour(&job, "f"), syntax.identifier);
+        assert_eq!(colour(&job, "film"), syntax.identifier);
+        assert_eq!(colour(&job, "title"), syntax.qualified_identifier);
+        assert_eq!(colour(&job, "name"), syntax.qualified_identifier);
+        assert_eq!(colour(&job, "."), syntax.punctuation);
+        assert_eq!(colour(&job, "42"), syntax.number);
+        assert_eq!(colour(&job, "'Film'"), syntax.string);
+        assert_eq!(colour(&job, "-- note"), syntax.comment);
+
+        // The same SQL in the same context must refresh when the palette changes.
+        let dark = registry.theme_of("carbon");
+        crate::theme::set_current(dark);
+        let job = highlight_sql_cached(&ctx, sql, FontId::monospace(13.0));
+        assert_eq!(colour(&job, "select"), dark.accent);
+        assert_eq!(colour(&job, "title"), dark.text);
+        crate::theme::set_current(previous);
+    }
+}

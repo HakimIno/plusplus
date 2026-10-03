@@ -368,7 +368,7 @@ mod tests {
     #[test]
     fn apply_keeps_both_egui_style_buckets_on_the_plusplus_palette() {
         let ctx = egui::Context::default();
-        let theme = crate::theme::ThemeRegistry::load().theme_of("graphite");
+        let theme = crate::theme::ThemeRegistry::load().theme_of("carbon");
         crate::theme::set_current(theme);
         apply(&ctx);
 

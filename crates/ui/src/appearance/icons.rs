@@ -157,7 +157,7 @@ mod tests {
     #[ignore = "screenshot generator; run manually with --ignored"]
     fn snapshot_icon_gallery() {
         let mut results = egui_kittest::SnapshotResults::new();
-        for theme_key in ["midnight-conversational", "daylight"] {
+        for theme_key in ["carbon", "daylight"] {
             let theme = crate::theme::ThemeRegistry::load().theme_of(theme_key);
             let mut setup = false;
             let mut harness = egui_kittest::Harness::builder()

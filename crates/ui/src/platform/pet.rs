@@ -1,11 +1,11 @@
 //! Empty-state illustration.
 //!
-//! Currently the GitHub "first pull request" tugboat SVG. The blinking chameleon
-//! is kept in [`chameleon`] so it can come back later.
+//! Currently light/dark variants of the GitHub "first pull request" tugboat SVG.
+//! The blinking chameleon is kept in [`chameleon`] so it can come back later.
 
 use egui::{Color32, Pos2, Sense, Vec2};
 
-/// Native size of `profile-first-pr-dark.svg`.
+/// Native size of both tugboat illustrations.
 const SVG_SIZE: Vec2 = Vec2::new(500.0, 300.0);
 
 /// Draw the empty-state illustration, centred in the available area.
@@ -24,7 +24,12 @@ pub fn show(ui: &mut egui::Ui) {
         let size = Vec2::new(max_w, max_w / aspect);
         let img_rect = egui::Rect::from_center_size(rect.center(), size);
 
-        let tex = egui::include_image!("../../assets/illus/profile-first-pr-dark.svg").load(
+        let illustration = if crate::theme::current().is_dark {
+            egui::include_image!("../../assets/illus/profile-first-pr-dark.svg")
+        } else {
+            egui::include_image!("../../assets/illus/profile-first-pr-light.svg")
+        };
+        let tex = illustration.load(
             ui.ctx(),
             egui::TextureOptions::LINEAR,
             egui::SizeHint::Size {

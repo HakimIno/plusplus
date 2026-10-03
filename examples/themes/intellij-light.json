@@ -1,0 +1,31 @@
+{
+  "name": "IntelliJ Light",
+  "is_dark": false,
+  "base": "#ffffff",
+  "panel": "#f5f7f9",
+  "surface": "#eef0f2",
+  "surface_hover": "#dfe1e5",
+  "code_bg": "#ffffff",
+  "stripe": "#f8f9fb",
+  "selection": "#d4e2ff",
+  "border": "#e6e8eb",
+  "border_strong": "#c9cdd3",
+  "text": "#1f2326",
+  "text_weak": "#60656d",
+  "text_faint": "#7a7e85",
+  "accent": "#3574f0",
+  "accent_hover": "#2b62d4",
+  "on_accent": "#ffffff",
+  "success": "#208a4e",
+  "danger": "#c7364a",
+  "warning": "#9a6700",
+  "syntax": {
+    "keyword": "#0033b3",
+    "string": "#067d17",
+    "number": "#1750eb",
+    "comment": "#6e776e",
+    "punctuation": "#080808",
+    "identifier": "#080808",
+    "qualified_identifier": "#871094"
+  }
+}

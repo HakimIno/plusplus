@@ -1125,7 +1125,7 @@ mod tests {
     #[test]
     #[ignore = "screenshot generator; run manually with --ignored"]
     fn snapshot_popup() {
-        render_popup_snapshot("midnight-conversational", "autocomplete_popup");
+        render_popup_snapshot("carbon", "autocomplete_popup");
     }
 
     /// Screenshot generator (ignored): the same popup on the light theme, where the kind
