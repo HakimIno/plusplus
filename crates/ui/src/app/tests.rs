@@ -7819,7 +7819,7 @@ fn frame_budget_probe() {
             egui::Event::PointerMoved(egui::pos2(500.0, 400.0)),
             egui::Event::MouseWheel {
                 unit: egui::MouseWheelUnit::Line,
-                delta: egui::vec2(0.0, if i % 2 == 0 { -3.0 } else { 3.0 }),
+                delta: egui::vec2(0.0, if i.is_multiple_of(2) { -3.0 } else { 3.0 }),
                 modifiers: egui::Modifiers::NONE,
                 phase: egui::TouchPhase::Move,
             },

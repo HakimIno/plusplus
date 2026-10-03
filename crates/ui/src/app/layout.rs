@@ -278,8 +278,8 @@ impl DbGuiApp {
 
         // Dividers sit on the seam the cards already leave between columns, so a split costs
         // no more space than any other pair of neighbouring cards.
-        for divider_index in 0..columns.len() - 1 {
-            let seam_x = columns[divider_index].right();
+        for (divider_index, column) in columns[..columns.len() - 1].iter().enumerate() {
+            let seam_x = column.right();
             let divider = egui::Rect::from_center_size(
                 egui::pos2(seam_x, area.center().y),
                 egui::vec2(SPLIT_HANDLE_WIDTH, area.height()),
