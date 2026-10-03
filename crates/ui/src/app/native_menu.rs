@@ -75,6 +75,8 @@ impl DbGuiApp {
                     self.apply_action(Action::NewConnection);
                 }
                 Settings => self.apply_action(Action::OpenSettings),
+                // Clicking the menu item toggles the palette, like the Cmd+P shortcut does.
+                OpenAnything if self.open_anything.is_some() => self.open_anything = None,
                 OpenAnything => self.open_open_anything(),
                 BeautifySql if !self.tabs.is_empty() => self.apply_action(Action::BeautifySql),
                 BeautifySql => {}
@@ -152,6 +154,20 @@ mod tests {
         app.native_menu_input(&ctx, &mut next);
         assert!(next.events.is_empty());
         assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[test]
+    fn the_open_anything_menu_item_toggles_the_palette() {
+        let mut app = DbGuiApp::construct();
+        app.show_welcome = false;
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        NativeMenuCommand::OpenAnything.enqueue(&ctx);
+        app.native_menu_input(&ctx, &mut input);
+        assert!(app.open_anything.is_some(), "the menu item opens it");
+        NativeMenuCommand::OpenAnything.enqueue(&ctx);
+        app.native_menu_input(&ctx, &mut input);
+        assert!(app.open_anything.is_none(), "and a second click closes it");
     }
 
     #[test]

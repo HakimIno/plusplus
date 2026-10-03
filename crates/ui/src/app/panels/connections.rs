@@ -464,7 +464,6 @@ impl DbGuiApp {
                 ui.add_space(3.0);
                 egui::Frame::new()
                     .fill(palette::SURFACE())
-                    .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
                     .corner_radius(egui::CornerRadius::same(8))
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
@@ -494,7 +493,6 @@ impl DbGuiApp {
                 ui.add_space(3.0);
                 egui::Frame::new()
                     .fill(palette::SURFACE())
-                    .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
                     .corner_radius(egui::CornerRadius::same(8))
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {

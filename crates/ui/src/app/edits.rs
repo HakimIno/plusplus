@@ -210,6 +210,40 @@ impl DbGuiApp {
                 }
         })
     }
+    /// A table with no rows comes back from every backend without column metadata (they read
+    /// it off the first row), so the grid would say "No columns" and "+ Row" would have nothing
+    /// to add to. Fill the columns in from the table's introspected definition once it is known.
+    pub(super) fn fill_empty_result_columns(&mut self) {
+        let visible = [Some(self.active_query_tab), self.split_tab];
+        for idx in visible.into_iter().flatten() {
+            let Some(tab) = self.tabs.get(idx) else {
+                continue;
+            };
+            let empty = tab.result.as_ref().is_some_and(|result| {
+                result.columns.is_empty() && result.rows.is_empty() && !result.truncated
+            });
+            if !empty || tab.edits.source.is_none() || self.is_tab_querying(tab.id) {
+                continue;
+            }
+            let Some(table) = self.structure_table(idx).filter(|t| !t.columns.is_empty()) else {
+                continue;
+            };
+            let columns: Vec<dbcore::ColumnMeta> = table
+                .columns
+                .iter()
+                .map(|column| dbcore::ColumnMeta {
+                    name: column.name.clone(),
+                    type_name: column.data_type.clone(),
+                })
+                .collect();
+            let tab = &mut self.tabs[idx];
+            if let Some(mut result) = tab.result.take() {
+                result.columns = columns;
+                tab.set_result(result);
+            }
+        }
+    }
+
     /// Install column constraints on the visible tabs' edits once their table metadata is
     /// known. Cheap per frame: a tab is skipped once synced for its current result.
     pub(super) fn sync_edit_rules(&mut self) {

@@ -289,19 +289,13 @@ impl ValueViewer {
         };
 
         ui.horizontal(|ui| {
-            egui::Frame::new()
-                .fill(palette::ACCENT().linear_multiply(0.14))
-                .corner_radius(egui::CornerRadius::same(4))
-                .inner_margin(egui::Margin::symmetric(7, 3))
-                .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new(kind)
-                            .monospace()
-                            .size(10.5)
-                            .strong()
-                            .color(palette::ACCENT()),
-                    );
-                });
+            ui.label(
+                egui::RichText::new(kind)
+                    .monospace()
+                    .size(10.5)
+                    .strong()
+                    .color(palette::TEXT_WEAK()),
+            );
             ui.label(
                 egui::RichText::new(&self.type_name)
                     .monospace()
@@ -462,7 +456,6 @@ fn code_surface(
 ) {
     egui::Frame::new()
         .fill(palette::CODE_BG())
-        .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
         .corner_radius(egui::CornerRadius::same(6))
         .inner_margin(egui::Margin::same(10))
         .show(ui, |ui| {
@@ -492,7 +485,6 @@ fn image_view(ui: &mut egui::Ui, bytes: Arc<[u8]>, uri: &str, width: u32, height
     let available = egui::vec2(ui.available_width(), ui.available_height().min(430.0));
     egui::Frame::new()
         .fill(palette::CODE_BG())
-        .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
         .corner_radius(egui::CornerRadius::same(6))
         .inner_margin(egui::Margin::same(12))
         .show(ui, |ui| {

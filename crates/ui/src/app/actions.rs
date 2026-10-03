@@ -1436,12 +1436,20 @@ impl DbGuiApp {
             Action::DropView(view) => {
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
                 self.tab_mut().schema_editor = None;
-                self.stage_schema_ddl(vec![dbcore::build_drop_view_sql(
+                let sql = dbcore::build_drop_view_sql(
                     kind,
                     view.schema.as_deref(),
                     &view.name,
                     view.materialized,
-                )]);
+                );
+                let conn_id = self.active().map(|a| a.config_id.clone());
+                self.stage_schema_ddl(vec![sql.clone()]);
+                self.pending_drop = conn_id.map(|conn_id| PendingDrop {
+                    sql,
+                    conn_id,
+                    schema: view.schema.clone(),
+                    name: view.name.clone(),
+                });
             }
             Action::OpenNewTrigger => {
                 if !self.object_supported(DbKind::supports_triggers, "Triggers") {
@@ -1548,11 +1556,15 @@ impl DbGuiApp {
             Action::DropTable(table) => {
                 let kind = self.active().map(|a| a.db.kind()).unwrap_or(DbKind::Sqlite);
                 self.tab_mut().schema_editor = None;
-                self.stage_schema_ddl(vec![dbcore::build_drop_table_sql(
-                    kind,
-                    table.schema.as_deref(),
-                    &table.name,
-                )]);
+                let sql = dbcore::build_drop_table_sql(kind, table.schema.as_deref(), &table.name);
+                let conn_id = self.active().map(|a| a.config_id.clone());
+                self.stage_schema_ddl(vec![sql.clone()]);
+                self.pending_drop = conn_id.map(|conn_id| PendingDrop {
+                    sql,
+                    conn_id,
+                    schema: table.schema.clone(),
+                    name: table.name.clone(),
+                });
             }
             Action::ToggleBookmark { schema, table } => {
                 // Bookmarks are keyed by the active connection's config id; ignore the toggle

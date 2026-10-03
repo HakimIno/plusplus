@@ -206,6 +206,7 @@ impl DbGuiApp {
         self.poll_messages(&ctx);
         self.prune_query_jobs();
         self.refresh_query_busy();
+        self.fill_empty_result_columns();
         self.sync_edit_rules();
         if !self.pending_quit && ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);

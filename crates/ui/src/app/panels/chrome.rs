@@ -92,23 +92,6 @@ impl DbGuiApp {
                         {
                             self.open_open_anything();
                         }
-                        if components::toolbar_icon_button(
-                            ui,
-                            icons::split_editor(),
-                            if self.split_tab.is_some() {
-                                "Close split workspace"
-                            } else {
-                                "Split query workspace"
-                            },
-                        )
-                        .clicked()
-                        {
-                            if self.split_tab.is_some() {
-                                self.close_split_workspace();
-                            } else {
-                                self.open_split_workspace();
-                            }
-                        }
                         #[cfg(not(target_os = "macos"))]
                         title_bar::group_separator(ui);
                         components::layout_menu(

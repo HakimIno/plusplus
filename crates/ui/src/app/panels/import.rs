@@ -1,6 +1,5 @@
 //! Import rendering and interaction.
 
-use super::details::kind_color;
 use super::details::SCROLLBAR_GUTTER;
 use crate::app::{Action, Busy, DbGuiApp};
 use crate::components;
@@ -95,7 +94,12 @@ impl DbGuiApp {
                             ui.spacing_mut().item_spacing.x = 6.0;
                             icons::show_weak(ui, icons::code(), icons::SIZE);
                             ui.label(egui::RichText::new(draft.file_name()).strong());
-                            components::type_badge(ui, draft.format.label(), palette::ACCENT());
+                            ui.label(
+                                egui::RichText::new(draft.format.label())
+                                    .small()
+                                    .monospace()
+                                    .color(palette::TEXT_WEAK()),
+                            );
                         });
 
                         // JSON objects are always keyed by name, so the switch is CSV-only.
@@ -221,13 +225,19 @@ impl DbGuiApp {
                                         name.color(palette::TEXT_WEAK())
                                     });
 
-                                    let kind = dbcore::EditorKind::classify(&col.data_type);
-                                    let badge_color = if is_binary {
+                                    // The column's type as quiet text; only a type that can't be
+                                    // imported (binary) is called out.
+                                    let type_color = if is_binary {
                                         palette::DANGER()
                                     } else {
-                                        kind_color(kind)
+                                        palette::TEXT_FAINT()
                                     };
-                                    components::type_badge(ui, &col.data_type, badge_color);
+                                    ui.label(
+                                        egui::RichText::new(&col.data_type)
+                                            .small()
+                                            .monospace()
+                                            .color(type_color),
+                                    );
 
                                     let selected = source
                                         .and_then(|s| draft.headers.get(s))

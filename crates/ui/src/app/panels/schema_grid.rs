@@ -867,6 +867,9 @@ pub(super) fn schema_new_table_grid(
     } = state;
     let query = column_filter.trim().to_lowercase();
     let mut remove: Option<usize> = None;
+    // No gap between columns and a hairline between rows, so a row's tint (new, dropped,
+    // changed) runs unbroken across it instead of showing dark seams around every cell.
+    let grid_gap = std::mem::replace(&mut ui.spacing_mut().item_spacing, egui::vec2(0.0, 1.0));
     TableBuilder::new(ui)
         .id_salt("new_table_columns")
         .sense(egui::Sense::click())
@@ -1018,6 +1021,7 @@ pub(super) fn schema_new_table_grid(
                 });
             }
         });
+    ui.spacing_mut().item_spacing = grid_gap;
     if let Some(row) = remove {
         columns.remove(row);
         *selection = None;

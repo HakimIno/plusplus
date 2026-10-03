@@ -83,7 +83,6 @@ icon_fns! {
     layout_schema => "../../assets/icons/outline/layout-columns.svg",
     layout_details => "../../assets/icons/outline/layout-sidebar-right.svg",
     layout_query => "../../assets/icons/outline/layout-navbar.svg",
-    split_editor => "../../assets/icons/outline/layout-board-split.svg",
     layout_log => "../../assets/icons/outline/layout-bottombar.svg",
     db_postgres => "../../assets/icondb/postgres.svg",
     db_mysql => "../../assets/icondb/mysql.svg",

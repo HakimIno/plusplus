@@ -1070,6 +1070,12 @@ impl DbGuiApp {
                             self.status_msg = msg;
                             self.error = None;
                             self.schema_pending = None;
+                            // A table or view that was dropped takes its open tabs with it.
+                            if let Some(drop) = self.pending_drop.take() {
+                                if drop.sql == sql && drop.conn_id == history_conn_id {
+                                    self.close_tabs_of_dropped(&drop);
+                                }
+                            }
                             // A draft tab ends here; for a table or view, what it created is
                             // opened in its place.
                             let created = self.draft_created_object(tab_id);

@@ -355,9 +355,6 @@ pub struct View {
     pub text: String,
     /// For each display line, the 0-based source line it stands for. Drives the gutter.
     pub source_lines: Vec<usize>,
-    /// For each display line, the char index it starts at in [`Self::text`], so the gutter can
-    /// ask the galley where that line ended up on screen.
-    pub line_starts: Vec<usize>,
     gaps: Vec<Gap>,
 }
 
@@ -409,11 +406,10 @@ impl View {
         }
         text.extend(&chars[cursor..]);
 
-        let (source_lines, line_starts) = display_lines(&chars, &gaps, &text);
+        let source_lines = display_lines(&chars, &gaps, &text);
         Self {
             text,
             source_lines,
-            line_starts,
             gaps,
         }
     }
@@ -421,11 +417,10 @@ impl View {
     /// The unfolded view: what the editor shows when nothing is collapsed.
     pub fn whole(sql: &str) -> Self {
         let chars: Vec<char> = sql.chars().collect();
-        let (source_lines, line_starts) = display_lines(&chars, &[], sql);
+        let source_lines = display_lines(&chars, &[], sql);
         Self {
             text: sql.to_string(),
             source_lines,
-            line_starts,
             gaps: Vec::new(),
         }
     }
@@ -478,17 +473,15 @@ impl View {
 }
 
 /// For every display line: the source line it shows, and the display char index it starts at.
-fn display_lines(chars: &[char], gaps: &[Gap], text: &str) -> (Vec<usize>, Vec<usize>) {
+fn display_lines(chars: &[char], gaps: &[Gap], text: &str) -> Vec<usize> {
     let source_starts = line_starts(chars);
     let mut lines = Vec::new();
-    let mut starts = Vec::new();
     let mut display = 0usize;
     for line in text.split('\n') {
         lines.push(line_of(&source_starts, to_source(gaps, display, false)));
-        starts.push(display);
         display += line.chars().count() + 1;
     }
-    (lines, starts)
+    lines
 }
 
 fn to_source(gaps: &[Gap], display: usize, past_hidden: bool) -> usize {

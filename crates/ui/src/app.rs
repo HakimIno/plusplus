@@ -541,6 +541,14 @@ struct ActiveConnection {
     databases: Vec<String>,
 }
 
+/// A table or view whose `DROP` is staged: the SQL to match on, and what to close afterwards.
+struct PendingDrop {
+    sql: String,
+    conn_id: String,
+    schema: Option<String>,
+    name: String,
+}
+
 #[derive(Clone, Copy)]
 enum ConnectStage {
     Connect,
@@ -2007,6 +2015,9 @@ pub struct DbGuiApp {
     /// DDL statements staged for the schema-preview dialog. `None` = preview closed.
     /// (The schema editor itself lives on each [`QueryTab`].)
     schema_pending: Option<Vec<String>>,
+    /// The table or view the staged DDL drops, so its open tabs can follow it out once the drop
+    /// has actually been applied. Matched against the applied SQL, so a stale one never fires.
+    pending_drop: Option<PendingDrop>,
     /// Tab awaiting a Save/Discard decision before its Structure view is reloaded.
     schema_reload_pending: Option<u64>,
     /// Destructive statements found when running a query against a production
@@ -2317,6 +2328,7 @@ impl DbGuiApp {
             key_chooser: None,
             foreign_key_editor: None,
             schema_pending: None,
+            pending_drop: None,
             schema_reload_pending: None,
             danger_pending: None,
             import_pending: None,

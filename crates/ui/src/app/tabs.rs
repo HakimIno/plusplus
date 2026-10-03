@@ -65,6 +65,9 @@ impl DbGuiApp {
         }
     }
 
+    /// Open the split with a fresh tab beside the current one. Users split by dragging a tab
+    /// or table to the edge; this is how the tests build a split directly.
+    #[cfg(test)]
     pub(super) fn open_split_workspace(&mut self) {
         if self.split_tab.is_some() || self.active_query_tab >= self.tabs.len() {
             return;
@@ -389,17 +392,56 @@ impl DbGuiApp {
         };
     }
 
+    /// Close every table / view tab on the connection that was showing `dropped`, now that the
+    /// object is gone. Tabs holding unsaved edits are closed too: their rows no longer exist.
+    pub(super) fn close_tabs_of_dropped(&mut self, dropped: &PendingDrop) {
+        use crate::components::QueryTabKind;
+        let same_schema = |schema: &Option<String>| match (schema, &dropped.schema) {
+            (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+            _ => true,
+        };
+        let ids: Vec<u64> = self
+            .tabs
+            .iter()
+            .filter(|tab| {
+                tab.conn_id.as_deref() == Some(dropped.conn_id.as_str())
+                    && matches!(tab.kind, QueryTabKind::Table | QueryTabKind::View)
+                    && tab.schema_editor.as_ref().is_none_or(|_| !tab.draft_tab)
+                    && match tab.edits.source.as_ref().or(tab.edits.pending_source.as_ref()) {
+                        Some(source) => {
+                            source.table.eq_ignore_ascii_case(&dropped.name)
+                                && same_schema(&source.schema)
+                        }
+                        None => tab.title.eq_ignore_ascii_case(&dropped.name),
+                    }
+            })
+            .map(|tab| tab.id)
+            .collect();
+        for id in ids {
+            // Closing by id: indices shift as tabs go.
+            if let Some(idx) = self.tabs.iter().position(|tab| tab.id == id) {
+                self.tabs[idx].edits.clear();
+                self.close_tab(idx);
+            }
+        }
+    }
+
     /// Whether the active tab shows the SQL editor — a query, a function / procedure / trigger
     /// definition, or a draft written in it — so Cmd/Ctrl+F and +H belong to its find widget.
     pub(super) fn tab_has_sql_editor(&self) -> bool {
         use crate::components::QueryTabKind;
+        let tab = self.tab();
+        if tab.draft_tab {
+            // A draft is a form; only some of them hold a SQL editor (a table designer doesn't).
+            return self.draft_uses_sql_editor(self.active_query_tab);
+        }
         matches!(
-            self.tab().kind,
+            tab.kind,
             QueryTabKind::Query
                 | QueryTabKind::Function
                 | QueryTabKind::Procedure
                 | QueryTabKind::Trigger
-        ) || self.draft_uses_sql_editor(self.active_query_tab)
+        )
     }
 
     /// Whether the tab at `idx` is a New View / Trigger / Routine draft, whose body is written

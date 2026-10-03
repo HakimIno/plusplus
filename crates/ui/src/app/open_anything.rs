@@ -123,7 +123,12 @@ impl DbGuiApp {
 
     pub(super) fn open_anything_shortcut(&mut self, ctx: &egui::Context) {
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::P)) {
-            self.open_open_anything();
+            // The shortcut that opens the palette also closes it.
+            if self.open_anything.is_some() {
+                self.open_anything = None;
+            } else {
+                self.open_open_anything();
+            }
         }
     }
 
@@ -329,7 +334,7 @@ impl DbGuiApp {
         let mut activate = None;
         let before = state.query.clone();
 
-        egui::Window::new("Open Anything")
+        let shown = egui::Window::new("Open Anything")
             .id(egui::Id::new("open_anything"))
             .anchor(egui::Align2::CENTER_TOP, [0.0, 72.0])
             .collapsible(false)
@@ -416,7 +421,7 @@ impl DbGuiApp {
                                 |ui| {
                                     ui.label(
                                         egui::RichText::new(format!(
-                                            "{} results",
+                                            "{} results · Esc to close",
                                             state.results.len()
                                         ))
                                         .small()
@@ -495,6 +500,20 @@ impl DbGuiApp {
                         }
                     });
             });
+
+        // A click anywhere outside the palette dismisses it, as in other quick pickers.
+        if let Some(window) = shown.as_ref().map(|shown| shown.response.rect) {
+            let clicked_outside = ctx.input(|input| {
+                input.pointer.primary_pressed()
+                    && input
+                        .pointer
+                        .interact_pos()
+                        .is_some_and(|pos| !window.contains(pos))
+            });
+            if clicked_outside {
+                keep_open = false;
+            }
+        }
 
         if let Some(target) = activate {
             self.activate_open_anything(target);

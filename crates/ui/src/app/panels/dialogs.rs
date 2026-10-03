@@ -77,7 +77,6 @@ impl DbGuiApp {
 
             egui::Frame::new()
                 .fill(palette::SURFACE())
-                .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
                 .corner_radius(egui::CornerRadius::same(8))
                 .inner_margin(egui::Margin::same(12))
                 .show(ui, |ui| {
@@ -262,20 +261,25 @@ impl DbGuiApp {
                     .max_height(320.0)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
-                        for (i, stmt) in stmts.iter().enumerate() {
-                            if i > 0 {
-                                ui.add_space(4.0);
-                                ui.separator();
-                                ui.add_space(4.0);
-                            }
-                            let preview = commit_statement_preview(stmt);
-                            let job = crate::highlight::highlight_sql_cached(
-                                ui.ctx(),
-                                preview.as_ref(),
-                                font.clone(),
-                            );
-                            ui.label(job);
-                        }
+                        // One flat code surface, like an editor: no frame lines, no rules
+                        // between statements — whitespace does the separating.
+                        egui::Frame::new()
+                            .fill(palette::CODE_BG())
+                            .corner_radius(egui::CornerRadius::same(6))
+                            .inner_margin(egui::Margin::symmetric(12, 10))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.spacing_mut().item_spacing.y = 10.0;
+                                for stmt in stmts.iter() {
+                                    let preview = commit_statement_preview(stmt);
+                                    let job = crate::highlight::highlight_sql_cached(
+                                        ui.ctx(),
+                                        preview.as_ref(),
+                                        font.clone(),
+                                    );
+                                    ui.label(job);
+                                }
+                            });
                     });
 
                 components::dialog_footer(ui, |ui| {
@@ -508,15 +512,11 @@ impl DbGuiApp {
                             let preflight =
                                 pending.preflights.as_ref().and_then(|items| items.get(i));
                             let risk = pending.preflights.as_ref().map(|_| pending.risk(i));
-                            let (risk_label, risk_color) = match risk {
-                                Some(dbcore::safety::RiskLevel::Low) => ("Low", palette::SUCCESS()),
-                                Some(dbcore::safety::RiskLevel::Medium) => {
-                                    ("Medium", palette::WARNING())
-                                }
-                                Some(dbcore::safety::RiskLevel::Critical) => {
-                                    ("Critical", palette::DANGER())
-                                }
-                                None => ("Checking", palette::TEXT_WEAK()),
+                            let risk_label = match risk {
+                                Some(dbcore::safety::RiskLevel::Low) => "Low",
+                                Some(dbcore::safety::RiskLevel::Medium) => "Medium",
+                                Some(dbcore::safety::RiskLevel::Critical) => "Critical",
+                                None => "Checking",
                             };
                             let target = if stmt.targets.is_empty() {
                                 "unknown target".to_string()
@@ -524,163 +524,153 @@ impl DbGuiApp {
                                 stmt.targets.join(", ")
                             };
 
-                            egui::Frame::new()
-                                .fill(palette::SURFACE())
-                                .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
-                                .corner_radius(egui::CornerRadius::same(10))
-                                .inner_margin(egui::Margin::same(10))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 8.0;
-                                        components::type_badge(
-                                            ui,
-                                            stmt.kind.label(),
-                                            palette::ACCENT(),
-                                        );
+                            if i > 0 {
+                                ui.separator();
+                            }
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 8.0;
+                                ui.label(
+                                    egui::RichText::new(stmt.kind.label())
+                                        .small()
+                                        .monospace()
+                                        .color(palette::TEXT_WEAK()),
+                                );
+                                ui.label(egui::RichText::new(&target).color(palette::TEXT()));
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        // Plain words; only Critical borrows the danger colour.
+                                        let color = if risk_label == "Critical" {
+                                            palette::DANGER()
+                                        } else {
+                                            palette::TEXT_WEAK()
+                                        };
                                         ui.label(
-                                            egui::RichText::new(&target).color(palette::TEXT()),
+                                            egui::RichText::new(risk_label).small().color(color),
                                         );
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                components::type_badge(ui, risk_label, risk_color);
-                                            },
+                                    },
+                                );
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                match preflight {
+                                    Some(preflight) => {
+                                        let rows = preflight
+                                            .affected_rows
+                                            .map(|rows| format!("{rows} rows affected"))
+                                            .or_else(|| {
+                                                preflight.plan.as_ref().and_then(|plan| {
+                                                    plan.estimated_rows
+                                                        .map(|rows| format!("~{rows} rows estimated"))
+                                                })
+                                            })
+                                            .unwrap_or_else(|| "Impact unknown".to_string());
+                                        ui.label(
+                                            egui::RichText::new(rows)
+                                                .small()
+                                                .color(palette::TEXT_FAINT()),
                                         );
-                                    });
-                                    ui.add_space(6.0);
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 8.0;
-                                        match preflight {
-                                            Some(preflight) => {
-                                                let rows = preflight
-                                                    .affected_rows
-                                                    .map(|rows| format!("{rows} rows affected"))
-                                                    .or_else(|| {
-                                                        preflight.plan.as_ref().and_then(|plan| {
-                                                            plan.estimated_rows.map(|rows| {
-                                                                format!("~{rows} rows estimated")
-                                                            })
-                                                        })
-                                                    })
-                                                    .unwrap_or_else(|| {
-                                                        "Impact unknown".to_string()
-                                                    });
-                                                ui.label(
-                                                    egui::RichText::new(rows)
-                                                        .small()
-                                                        .color(palette::TEXT_FAINT()),
-                                                );
-                                            }
-                                            None => {
-                                                ui.spinner();
-                                                ui.label(
-                                                    egui::RichText::new("Checking impact…")
-                                                        .small()
-                                                        .color(palette::TEXT_FAINT()),
-                                                );
-                                            }
-                                        }
-                                        if stmt.missing_where {
-                                            components::type_badge(
-                                                ui,
-                                                "No WHERE",
-                                                palette::DANGER(),
-                                            );
-                                        }
-                                        if preflight
-                                            .and_then(|item| item.plan.as_ref())
-                                            .is_some_and(|plan| plan.full_scan)
-                                        {
-                                            components::type_badge(
-                                                ui,
-                                                "Full scan",
-                                                palette::DANGER(),
-                                            );
-                                        }
-                                    });
-
-                                    ui.add_space(4.0);
-                                    egui::CollapsingHeader::new(
-                                        egui::RichText::new("Review SQL")
+                                    }
+                                    None => {
+                                        ui.spinner();
+                                        ui.label(
+                                            egui::RichText::new("Checking impact…")
+                                                .small()
+                                                .color(palette::TEXT_FAINT()),
+                                        );
+                                    }
+                                }
+                                let mut flags = Vec::new();
+                                if stmt.missing_where {
+                                    flags.push("No WHERE");
+                                }
+                                if preflight
+                                    .and_then(|item| item.plan.as_ref())
+                                    .is_some_and(|plan| plan.full_scan)
+                                {
+                                    flags.push("Full scan");
+                                }
+                                if !flags.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(format!("· {}", flags.join(" · ")))
                                             .small()
-                                            .color(palette::TEXT_WEAK()),
-                                    )
-                                    .id_salt(("production_guard_sql", i))
-                                    .show(ui, |ui| {
-                                        let mut job = crate::highlight::highlight_sql_cached(
-                                            ui.ctx(),
-                                            &stmt.sql,
-                                            sql_font.clone(),
-                                        );
-                                        job.wrap.max_width = ui.available_width().max(40.0);
-                                        egui::Frame::new()
-                                            .fill(palette::CODE_BG())
-                                            .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
-                                            .corner_radius(egui::CornerRadius::same(8))
-                                            .inner_margin(egui::Margin::symmetric(10, 8))
-                                            .show(ui, |ui| {
-                                                ui.set_width(ui.available_width());
-                                                ui.add(
-                                                    egui::Label::new(job).wrap().selectable(false),
-                                                );
-                                            });
-                                    });
+                                            .color(palette::DANGER()),
+                                    );
+                                }
+                            });
 
-                                    let has_details = stmt.analysis_warning.is_some()
-                                        || preflight.is_some_and(|item| {
-                                            item.plan.is_some() || !item.warnings.is_empty()
-                                        });
-                                    if has_details {
-                                        ui.add_space(4.0);
-                                        egui::CollapsingHeader::new(
-                                            egui::RichText::new("Details")
+                            egui::CollapsingHeader::new(
+                                egui::RichText::new("Review SQL")
+                                    .small()
+                                    .color(palette::TEXT_WEAK()),
+                            )
+                            .id_salt(("production_guard_sql", i))
+                            .show(ui, |ui| {
+                                let mut job = crate::highlight::highlight_sql_cached(
+                                    ui.ctx(),
+                                    &stmt.sql,
+                                    sql_font.clone(),
+                                );
+                                job.wrap.max_width = ui.available_width().max(40.0);
+                                egui::Frame::new()
+                                    .fill(palette::CODE_BG())
+                                    .corner_radius(egui::CornerRadius::same(6))
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.add(egui::Label::new(job).wrap().selectable(false));
+                                    });
+                            });
+
+                            let has_details = stmt.analysis_warning.is_some()
+                                || preflight
+                                    .is_some_and(|item| item.plan.is_some() || !item.warnings.is_empty());
+                            if has_details {
+                                egui::CollapsingHeader::new(
+                                    egui::RichText::new("Details")
+                                        .small()
+                                        .color(palette::TEXT_WEAK()),
+                                )
+                                .id_salt(("production_guard_details", i))
+                                .show(ui, |ui| {
+                                    if let Some(warning) = &stmt.analysis_warning {
+                                        ui.label(
+                                            egui::RichText::new(warning)
                                                 .small()
                                                 .color(palette::TEXT_WEAK()),
-                                        )
-                                        .id_salt(("production_guard_details", i))
-                                        .show(ui, |ui| {
-                                            if let Some(warning) = &stmt.analysis_warning {
-                                                ui.label(
-                                                    egui::RichText::new(warning)
-                                                        .small()
-                                                        .color(palette::TEXT_WEAK()),
-                                                );
-                                            }
-                                            if let Some(plan) =
-                                                preflight.and_then(|item| item.plan.as_ref())
-                                            {
-                                                ui.label(
-                                                    egui::RichText::new(format!(
-                                                        "Plan · {}{}{}",
-                                                        plan.scan_type
-                                                            .as_deref()
-                                                            .unwrap_or("scan type unavailable"),
-                                                        plan.index
-                                                            .as_deref()
-                                                            .map(|index| format!(
-                                                                " · index {index}"
-                                                            ))
-                                                            .unwrap_or_default(),
-                                                        plan.estimated_rows
-                                                            .map(|rows| format!(" · ~{rows} rows"))
-                                                            .unwrap_or_default(),
-                                                    ))
+                                        );
+                                    }
+                                    if let Some(plan) = preflight.and_then(|item| item.plan.as_ref())
+                                    {
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "Plan · {}{}{}",
+                                                plan.scan_type
+                                                    .as_deref()
+                                                    .unwrap_or("scan type unavailable"),
+                                                plan.index
+                                                    .as_deref()
+                                                    .map(|index| format!(" · index {index}"))
+                                                    .unwrap_or_default(),
+                                                plan.estimated_rows
+                                                    .map(|rows| format!(" · ~{rows} rows"))
+                                                    .unwrap_or_default(),
+                                            ))
+                                            .small()
+                                            .color(palette::TEXT_FAINT()),
+                                        );
+                                    }
+                                    if let Some(preflight) = preflight {
+                                        for warning in &preflight.warnings {
+                                            ui.label(
+                                                egui::RichText::new(warning)
                                                     .small()
-                                                    .color(palette::TEXT_FAINT()),
-                                                );
-                                            }
-                                            if let Some(preflight) = preflight {
-                                                for warning in &preflight.warnings {
-                                                    ui.label(
-                                                        egui::RichText::new(warning)
-                                                            .small()
-                                                            .color(palette::WARNING()),
-                                                    );
-                                                }
-                                            }
-                                        });
+                                                    .color(palette::TEXT_WEAK()),
+                                            );
+                                        }
                                     }
                                 });
+                            }
                         }
                     });
 
@@ -691,17 +681,12 @@ impl DbGuiApp {
                         ui.label(
                             egui::RichText::new("Confirm by typing").color(palette::TEXT_WEAK()),
                         );
-                        egui::Frame::new()
-                            .fill(palette::SELECTION())
-                            .corner_radius(egui::CornerRadius::same(4))
-                            .inner_margin(egui::Margin::symmetric(6, 2))
-                            .show(ui, |ui| {
-                                ui.label(
-                                    egui::RichText::new(phrase)
-                                        .monospace()
-                                        .color(palette::TEXT()),
-                                );
-                            });
+                        ui.label(
+                            egui::RichText::new(phrase)
+                                .monospace()
+                                .color(palette::TEXT())
+                                .background_color(palette::SURFACE()),
+                        );
                     });
                     ui.add_space(6.0);
                     let mut confirmation = pending.confirmation.clone();

@@ -232,7 +232,7 @@ impl DbGuiApp {
         if let Some(conn) = connection {
             let read_only = self.tab_connection_is_read_only(self.active_query_tab);
             let label = if read_only {
-                format!("{} · READ-ONLY", conn.name)
+                format!("{} · Read-only", conn.name)
             } else {
                 conn.name.clone()
             };

@@ -673,7 +673,8 @@ impl DbGuiApp {
                     )
                     .on_hover_text("Connect to a database to browse its schema.");
                     ui.add_space(12.0);
-                    if components::primary_button(ui, icons::connect(), "Connect a database", true)
+                    // A quiet neutral button: this is an empty state, not a call to act now.
+                    if components::button(ui, icons::connect(), "Connect a database", true)
                         .clicked()
                     {
                         actions.push(Action::NewConnection);

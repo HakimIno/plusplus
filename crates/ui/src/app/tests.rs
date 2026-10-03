@@ -7040,6 +7040,307 @@ fn snapshot_status_bar() {
     render_and_snapshot(app, "status_bar", false);
 }
 
+/// Frame-time probe for the 120 fps goal (8.3 ms per frame). Prints the average, 95th
+/// percentile and worst CPU time of `run_ui` for the heaviest screens. Run optimized, since
+/// debug builds say nothing about it:
+/// `CARGO_PROFILE_DEV_OPT_LEVEL=2 cargo test -p plusplus-ui frame_budget -- --ignored --nocapture`
+#[test]
+#[ignore = "performance probe; run manually with --ignored --nocapture"]
+fn frame_budget_probe() {
+    fn measure(
+        label: &str,
+        ctx: &egui::Context,
+        app: &mut DbGuiApp,
+        frames: usize,
+        mut events: impl FnMut(usize) -> Vec<egui::Event>,
+    ) {
+        for i in 0..10 {
+            run_frame(ctx, app, events(i));
+        }
+        let mut ms: Vec<f64> = (0..frames)
+            .map(|i| {
+                let evs = events(i);
+                let t = std::time::Instant::now();
+                run_frame(ctx, app, evs);
+                t.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let avg = ms.iter().sum::<f64>() / ms.len() as f64;
+        let p95 = ms[(ms.len() as f64 * 0.95) as usize - 1];
+        println!(
+            "{label:<44} avg {avg:6.2} ms  p95 {p95:6.2} ms  max {:6.2} ms  {}",
+            ms[ms.len() - 1],
+            if p95 <= 8.3 { "ok for 120 fps" } else { "OVER 8.3 ms" }
+        );
+    }
+    let scroll = |i: usize| {
+        vec![
+            egui::Event::PointerMoved(egui::pos2(500.0, 400.0)),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, if i % 2 == 0 { -3.0 } else { 3.0 }),
+                modifiers: egui::Modifiers::NONE,
+                phase: egui::TouchPhase::Move,
+            },
+        ]
+    };
+
+    for (rows, cols) in [(1_000, 12), (100_000, 20)] {
+        let (ctx, mut app) = grid_nav_app(rows, cols);
+        measure(
+            &format!("grid {rows}x{cols}: idle"),
+            &ctx,
+            &mut app,
+            200,
+            |_| vec![],
+        );
+        measure(
+            &format!("grid {rows}x{cols}: scrolling"),
+            &ctx,
+            &mut app,
+            200,
+            scroll,
+        );
+    }
+
+    let (ctx, mut app) = grid_nav_app(10, 3);
+    let sql: String = (0..5_000)
+        .map(|i| format!("SELECT col{i}, name FROM table_{i} WHERE id = {i};\n"))
+        .collect();
+    app.tab_mut().sql = sql;
+    app.tab_mut().mark_sql_changed();
+    measure("editor 5000 lines: idle", &ctx, &mut app, 200, |_| vec![]);
+    measure("editor 5000 lines: scrolling", &ctx, &mut app, 200, scroll);
+    measure("editor 5000 lines: typing", &ctx, &mut app, 100, |i| {
+        vec![egui::Event::Text(((b'a' + (i % 26) as u8) as char).to_string())]
+    });
+}
+
+/// One long-running screen for `sample`: a 5,000-line editor redrawn for ~25 s.
+#[test]
+#[ignore = "profiling target; run manually with --ignored"]
+fn frame_budget_editor_loop() {
+    let (ctx, mut app) = grid_nav_app(10, 3);
+    app.tab_mut().sql = (0..5_000)
+        .map(|i| format!("SELECT col{i}, name FROM table_{i} WHERE id = {i};\n"))
+        .collect();
+    app.tab_mut().mark_sql_changed();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(25);
+    while std::time::Instant::now() < until {
+        run_frame(&ctx, &mut app, vec![]);
+    }
+}
+
+/// An empty table comes back from the database without column metadata. The grid fills the
+/// columns in from the table's definition so "+ Row" has something to add to.
+#[test]
+fn an_empty_table_gets_its_columns_from_the_schema() {
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    app.tab_mut().edits.cells.clear();
+    app.tab_mut().edits.source = Some(EditSource {
+        schema: None,
+        table: "table_0".into(),
+        pk_cols: vec!["field_0".into()],
+    });
+    app.tab_mut().set_result(QueryResult::default());
+    assert_eq!(app.tab().result.as_ref().unwrap().column_count(), 0);
+
+    app.fill_empty_result_columns();
+
+    let result = app.tab().result.as_ref().unwrap();
+    assert_eq!(result.column_count(), 1);
+    assert_eq!(result.columns[0].name, "field_0");
+    assert_eq!(result.columns[0].type_name, "TEXT");
+    // The new-row editor now has a column to start in.
+    let id = app.tab_mut().edits.add_new_row();
+    assert!(crate::edit::is_new_row(id));
+    assert_eq!(app.tab().edits.new_rows, 1);
+
+    // A query that is not a table read keeps its (empty) result untouched.
+    app.tab_mut().edits.source = None;
+    app.tab_mut().set_result(QueryResult::default());
+    app.fill_empty_result_columns();
+    assert_eq!(app.tab().result.as_ref().unwrap().column_count(), 0);
+}
+
+/// The "Review N Change(s)" dialog: one flat code surface, no rules or badges.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_review_changes_dialog() {
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.tab_mut().edits.cells.insert(
+        0,
+        HashMap::from([(0, Value::Int(2))]),
+    );
+    app.apply_action(Action::PreviewEdits);
+    assert!(app.commit_pending.is_some());
+    render_and_snapshot(app, "review_changes_dialog", false);
+}
+
+/// The production Guardian dialog: plain rows, plain-word risk, one danger accent.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_production_review_dialog() {
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.connections[0].production = true;
+    app.review_edits_before_save = false;
+    app.apply_action(Action::PreviewEdits);
+    if let Some(pending) = app.danger_pending.as_mut() {
+        pending.preflights = Some(vec![dbcore::safety::ProductionPreflight::default(); pending.statements.len()]);
+    }
+    assert!(app.danger_pending.is_some());
+    render_and_snapshot(app, "production_review_dialog", false);
+}
+
+/// The Open Anything palette closes with Esc, a click outside it, or Cmd/Ctrl+P again — not
+/// only Esc — and a click inside it keeps it open.
+#[test]
+fn open_anything_closes_by_click_outside_or_its_shortcut() {
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    let press = |pos: egui::Pos2| {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    };
+    let release = |pos: egui::Pos2| {
+        vec![egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        }]
+    };
+
+    // Opens with the shortcut; a click inside the palette's search box leaves it open.
+    app.open_open_anything();
+    for _ in 0..3 {
+        run_frame(&ctx, &mut app, vec![]);
+    }
+    assert!(app.open_anything.is_some());
+    run_frame(&ctx, &mut app, press(egui::pos2(500.0, 100.0)));
+    run_frame(&ctx, &mut app, release(egui::pos2(500.0, 100.0)));
+    assert!(app.open_anything.is_some(), "a click inside keeps it open");
+
+    // A click well outside it (bottom-left corner) closes it.
+    run_frame(&ctx, &mut app, press(egui::pos2(5.0, 690.0)));
+    assert!(app.open_anything.is_none(), "click outside closes");
+    run_frame(&ctx, &mut app, release(egui::pos2(5.0, 690.0)));
+
+    // Cmd+P opens it, and Cmd+P again closes it.
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::P, egui::Modifiers::COMMAND)],
+    );
+    assert!(app.open_anything.is_some(), "Cmd+P opens");
+    run_frame(&ctx, &mut app, vec![]);
+    run_frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::P, egui::Modifiers::COMMAND)],
+    );
+    assert!(app.open_anything.is_none(), "Cmd+P again closes");
+}
+
+/// Dropping a table closes the tabs that were showing it — once the drop has been applied, not
+/// when it is merely staged, and only for that table.
+#[test]
+fn dropping_a_table_closes_its_open_tabs() {
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    app.tab_mut().edits.cells.clear();
+    app.tab_mut().kind = crate::components::QueryTabKind::Table;
+    app.tab_mut().title = "table_0".into();
+    app.tab_mut().edits.source = Some(EditSource {
+        schema: None,
+        table: "table_0".into(),
+        pk_cols: vec!["field_0".into()],
+    });
+    // A second tab on another table, which must survive.
+    app.apply_action(Action::NewTab);
+    app.tab_mut().conn_id = Some("edit-connection".into());
+    app.tab_mut().kind = crate::components::QueryTabKind::Table;
+    app.tab_mut().title = "other".into();
+    app.tab_mut().edits.source = Some(EditSource {
+        schema: None,
+        table: "other".into(),
+        pk_cols: Vec::new(),
+    });
+    assert_eq!(app.tabs.len(), 2);
+
+    let table = app.active().unwrap().schema.tables[0].clone();
+    app.apply_action(Action::DropTable(table));
+    assert!(app.pending_drop.is_some(), "staged, not applied");
+    assert_eq!(app.tabs.len(), 2, "nothing closes before the drop is applied");
+
+    // The apply itself is fire-and-forget on a dummy database; deliver its result by hand.
+    let sql = app.pending_drop.as_ref().unwrap().sql.clone();
+    app.tx
+        .send(AppMessage::SchemaApplied {
+            tab_id: app.tab().id,
+            conn_id: "edit-connection".into(),
+            sql,
+            elapsed_ms: 1.0,
+            result: Ok("applied".into()),
+        })
+        .unwrap();
+    for _ in 0..3 {
+        run_frame(&ctx, &mut app, vec![]);
+    }
+    assert_eq!(app.tabs.len(), 1, "the dropped table's tab is gone");
+    assert_eq!(app.tabs[0].title, "other", "other tables' tabs stay");
+    assert!(app.pending_drop.is_none());
+}
+
+/// The title-bar Layout menu: a plain list of panels with a check on the ones shown.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_layout_menu() {
+    use egui_kittest::kittest::Queryable;
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = true;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    app.connections.clear();
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1000.0, 520.0))
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+        });
+    harness.run_steps(4);
+    harness.get_by_label("Layout").click();
+    harness.run_steps(4);
+    harness.snapshot("layout_menu");
+}
+
 /// A driver that can't create an object says so instead of opening an editor that could
 /// never apply; drivers that can are untouched.
 #[test]

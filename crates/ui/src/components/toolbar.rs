@@ -4,12 +4,8 @@ use crate::icons;
 use crate::style::palette;
 
 const TOOLBAR_ICON_GAP: f32 = 0.0;
-const LAYOUT_TILE: egui::Vec2 = egui::vec2(46.0, 34.0);
-const LAYOUT_GAP: f32 = 8.0;
-
-fn layout_grid_width() -> f32 {
-    LAYOUT_TILE.x * 3.0 + LAYOUT_GAP * 2.0
-}
+const LAYOUT_MENU_W: f32 = 230.0;
+const LAYOUT_ROW_H: f32 = 28.0;
 
 /// Visibility of the workspace chrome toggled from the title-bar Layout menu.
 pub(crate) struct LayoutChrome<'a> {
@@ -20,147 +16,148 @@ pub(crate) struct LayoutChrome<'a> {
     pub live_log: &'a mut bool,
 }
 
-/// One title-bar icon that opens a layout popover: a macOS-style grid of panel glyphs.
+/// One title-bar icon that opens the layout menu: a plain list of the workspace's panels, each
+/// with its icon, its name and a check while it is shown — the way editors list their layout.
 pub(crate) fn layout_menu(ui: &mut egui::Ui, chrome: &mut LayoutChrome<'_>) {
     let btn = super::soft_icon_button(ui, icons::layout_schema(), "Layout", true);
     ui.add_space(TOOLBAR_ICON_GAP);
 
-    let popup_id = btn.id.with("layout_menu");
-    let grid_w = layout_grid_width();
     let popup_frame = egui::Frame::popup(ui.style())
         .fill(palette::PANEL())
-        .stroke(egui::Stroke::new(1.0_f32, palette::BORDER_STRONG()))
-        .corner_radius(egui::CornerRadius::same(14))
-        .inner_margin(egui::Margin::symmetric(10, 10));
-    let popup = egui::Popup::from_toggle_button_response(&btn)
-        .id(popup_id)
-        .align(egui::RectAlign::BOTTOM)
+        .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin::symmetric(6, 8));
+    egui::Popup::from_toggle_button_response(&btn)
+        .id(btn.id.with("layout_menu"))
+        .align(egui::RectAlign::BOTTOM_END)
         .align_alternatives(&[])
-        .gap(9.0)
-        .width(grid_w)
+        .gap(6.0)
+        .width(LAYOUT_MENU_W)
         .frame(popup_frame)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .layout(egui::Layout::top_down(egui::Align::Min))
         .show(|ui| {
-            ui.set_width(grid_w);
+            ui.set_width(LAYOUT_MENU_W);
+            ui.spacing_mut().item_spacing.y = 1.0;
             layout_section(ui, "Panels");
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = LAYOUT_GAP;
-                layout_tile(
-                    ui,
-                    icons::layout_schema(),
-                    "Schema",
-                    "Schema panel",
-                    chrome.schema,
-                );
-                layout_tile(
-                    ui,
-                    icons::layout_details(),
-                    "Details",
-                    "Details panel",
-                    chrome.details,
-                );
-                layout_tile(
-                    ui,
-                    icons::layout_connections(),
-                    "Connections",
-                    "Connection tabs",
-                    chrome.connections,
-                );
-            });
-            ui.add_space(8.0);
-            let y = ui.cursor().top();
-            ui.painter().hline(
-                ui.max_rect().x_range(),
-                y,
-                egui::Stroke::new(1.0_f32, palette::BORDER()),
+            layout_row(
+                ui,
+                icons::layout_schema(),
+                "Schema",
+                "Schema panel",
+                chrome.schema,
             );
-            ui.add_space(10.0);
+            layout_row(
+                ui,
+                icons::layout_details(),
+                "Details",
+                "Details panel",
+                chrome.details,
+            );
+            layout_row(
+                ui,
+                icons::layout_connections(),
+                "Connections",
+                "Connection tabs",
+                chrome.connections,
+            );
+            ui.add_space(6.0);
             layout_section(ui, "Editor");
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = LAYOUT_GAP;
-                layout_tile(
-                    ui,
-                    icons::layout_query(),
-                    "Query console",
-                    "Query console",
-                    chrome.query,
-                );
-                layout_tile(
-                    ui,
-                    icons::layout_log(),
-                    "Live log",
-                    "Live log panel",
-                    chrome.live_log,
-                );
-            });
+            layout_row(
+                ui,
+                icons::layout_query(),
+                "Query console",
+                "Query console",
+                chrome.query,
+            );
+            layout_row(
+                ui,
+                icons::layout_log(),
+                "Live log",
+                "Live log panel",
+                chrome.live_log,
+            );
         });
-
-    if let Some(response) = popup {
-        let rect = response.response.rect;
-        let anchor_x = btn
-            .rect
-            .center()
-            .x
-            .clamp(rect.left() + 10.0, rect.right() - 10.0);
-        let left = egui::pos2(anchor_x - 8.0, rect.top() + 1.0);
-        let right = egui::pos2(anchor_x + 8.0, rect.top() + 1.0);
-        let tip = egui::pos2(anchor_x, rect.top() - 8.0);
-        let painter = ui.ctx().layer_painter(response.response.layer_id);
-        painter.add(egui::Shape::convex_polygon(
-            vec![left, right, tip],
-            palette::PANEL(),
-            egui::Stroke::NONE,
-        ));
-        let stroke = egui::Stroke::new(1.0_f32, palette::BORDER_STRONG());
-        painter.line_segment([left, tip], stroke);
-        painter.line_segment([tip, right], stroke);
-    }
 }
 
 fn layout_section(ui: &mut egui::Ui, title: &str) {
-    ui.label(
-        egui::RichText::new(title)
-            .size(12.0)
-            .color(palette::TEXT_WEAK()),
-    );
-    ui.add_space(8.0);
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new(title)
+                .size(11.0)
+                .color(palette::TEXT_FAINT()),
+        );
+    });
+    ui.add_space(2.0);
 }
 
-fn layout_tile(
+/// One full-width row: icon, name, and a check on the right while the panel is shown.
+fn layout_row(
     ui: &mut egui::Ui,
     icon: egui::ImageSource<'static>,
-    tooltip: &str,
+    label: &str,
     a11y: &str,
     on: &mut bool,
 ) {
-    let (rect, resp) = ui.allocate_exact_size(LAYOUT_TILE, egui::Sense::click());
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, *on, a11y));
-    let resp = resp.on_hover_text(tooltip);
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), LAYOUT_ROW_H),
+        egui::Sense::click(),
+    );
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, *on, a11y));
     if resp.clicked() {
         *on = !*on;
     }
     if !ui.is_rect_visible(rect) {
         return;
     }
-    let radius = egui::CornerRadius::same(8);
-    let accent = palette::ACCENT();
-    let (fill, tint) = if *on {
-        (
-            egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 28),
-            accent,
-        )
-    } else if resp.hovered() {
-        (palette::SURFACE_HOVER(), palette::TEXT())
+    if resp.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(6),
+            palette::SURFACE_HOVER(),
+        );
+    }
+    let color = if *on {
+        palette::TEXT()
     } else {
-        (egui::Color32::TRANSPARENT, palette::TEXT_FAINT())
+        palette::TEXT_WEAK()
     };
-    ui.painter().rect_filled(rect, radius, fill);
-    let glyph = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(22.0));
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 18.0, rect.center().y),
+        egui::Vec2::splat(16.0),
+    );
     egui::Image::new(icon)
-        .fit_to_exact_size(glyph.size())
-        .tint(tint)
-        .paint_at(ui, glyph);
+        .fit_to_exact_size(icon_rect.size())
+        .tint(color)
+        .paint_at(ui, icon_rect);
+    ui.painter().text(
+        egui::pos2(rect.left() + 34.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(13.0),
+        color,
+    );
+    if *on {
+        solid_check(
+            ui.painter(),
+            egui::pos2(rect.right() - 16.0, rect.center().y),
+            7.5,
+        );
+    }
+}
+
+/// A filled disc in the text colour with a check cut out of it in the panel colour — the solid
+/// "on" mark, drawn rather than loaded because the icon set only has the outlined circle.
+fn solid_check(painter: &egui::Painter, center: egui::Pos2, radius: f32) {
+    painter.circle_filled(center, radius, palette::TEXT());
+    let u = radius / 7.5;
+    let at = |x: f32, y: f32| center + egui::vec2(x * u, y * u);
+    painter.add(egui::Shape::line(
+        vec![at(-3.3, 0.2), at(-0.9, 2.6), at(3.5, -2.4)],
+        egui::Stroke::new(1.7 * u, palette::PANEL()),
+    ));
 }
 
 /// Outline accent button for the title-bar update affordance.

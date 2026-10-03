@@ -131,13 +131,27 @@ impl DbGuiApp {
         let idx = self.active_query_tab;
         let mut toggle = None;
 
-        for (display_line, &source_line) in view.source_lines.iter().enumerate() {
-            let start = view.line_starts[display_line];
-            let top = galley
-                .pos_from_cursor(egui::text::CCursor::new(start))
-                .translate(galley_pos.to_vec2())
-                .top();
-            if top + row_height < clip.top() || top > clip.bottom() {
+        // Walk the galley's rows once instead of asking it for each line's position: a cursor
+        // lookup scans rows from the top, which made this loop quadratic in the line count
+        // (~100 ms a frame at 5,000 lines). A row starts a display line when the one above it
+        // ended with a newline; a wrapped line's later rows belong to the line already placed.
+        let mut display_line = 0usize;
+        let mut starts_line = true;
+        for placed in &galley.rows {
+            let begins = std::mem::replace(&mut starts_line, placed.ends_with_newline);
+            if !begins {
+                continue;
+            }
+            let line = display_line;
+            display_line += 1;
+            let Some(&source_line) = view.source_lines.get(line) else {
+                break;
+            };
+            let top = galley_pos.y + placed.pos.y;
+            if top > clip.bottom() {
+                break;
+            }
+            if top + row_height < clip.top() {
                 continue;
             }
             // Number first, then the chevron column hard against the code — the fold marker

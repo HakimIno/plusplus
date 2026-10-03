@@ -502,7 +502,6 @@ fn section_label(ui: &mut egui::Ui, text: &str) {
 fn section_frame(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
         .fill(palette::SURFACE())
-        .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
         .corner_radius(egui::CornerRadius::same(8))
         .inner_margin(egui::Margin::symmetric(12, 10))
         .show(ui, |ui| {
@@ -577,7 +576,6 @@ fn table_picker(ui: &mut egui::Ui, dialog: &mut crate::app::backup::BackupDialog
         ui.add_space(4.0);
         egui::Frame::new()
             .fill(palette::CODE_BG())
-            .stroke(egui::Stroke::new(1.0_f32, palette::BORDER()))
             .corner_radius(egui::CornerRadius::same(6))
             .inner_margin(egui::Margin::same(4))
             .show(ui, |ui| {

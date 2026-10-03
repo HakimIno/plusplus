@@ -492,6 +492,9 @@ fn view_editor_view(
 
     ui.add_space(8.0);
     ui.horizontal(|ui| {
+        // The row is as tall as its controls from the first item, so every caption sits on
+        // their centre line instead of riding high until the taller widgets arrive.
+        ui.set_min_height(style::CONTROL_H);
         ui.label(
             egui::RichText::new("Name")
                 .size(11.0)
@@ -592,20 +595,59 @@ fn trigger_body_hint(kind: dbcore::DbKind) -> &'static str {
     }
 }
 
-/// A small caps-free label for the compact object-editor bars (Name, Table, Timing…).
+/// A small label for the compact object-editor bars (Name, Table, Timing…). It takes the full
+/// height of the controls beside it, so it sits on their centre line rather than above it.
 fn bar_caption(ui: &mut egui::Ui, text: &str) {
-    ui.label(
-        egui::RichText::new(text)
-            .size(11.0)
-            .strong()
-            .color(palette::TEXT_WEAK()),
+    let color = palette::TEXT_WEAK();
+    let galley = ui.painter().layout_no_wrap(
+        text.to_string(),
+        egui::FontId::proportional(11.0),
+        color,
+    );
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(galley.size().x + 4.0, style::CONTROL_H),
+        egui::Sense::hover(),
+    );
+    // Painted on the row's centre line: a label laid out by `add_sized` hugs the top instead.
+    ui.painter().galley(
+        egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0),
+        galley,
+        color,
     );
 }
 
-/// A segmented choice among `labels`, returning the clicked index if it changed.
-fn bar_choice(ui: &mut egui::Ui, labels: &[&str], selected: usize) -> Option<usize> {
-    let items: Vec<_> = labels.iter().map(|label| (icons::play(), *label)).collect();
-    let width = labels.iter().map(|l| l.len() as f32 * 7.5 + 24.0).sum();
+/// `INSTEAD OF` → `Instead of`: the SQL keywords the dialects use, shown the way the rest of
+/// the interface writes its words.
+fn sentence_case(text: &str) -> String {
+    let lower = text.to_lowercase();
+    let mut chars = lower.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// A segmented choice among `labels`, returning the clicked index if it changed. Every segment
+/// is as wide as the longest label needs, so the text never touches an edge.
+fn bar_choice(ui: &mut egui::Ui, labels: &[String], selected: usize) -> Option<usize> {
+    let items: Vec<_> = labels
+        .iter()
+        .map(|label| (icons::play(), label.as_str()))
+        .collect();
+    let widest = labels
+        .iter()
+        .map(|label| {
+            ui.painter()
+                .layout_no_wrap(
+                    label.clone(),
+                    egui::FontId::proportional(12.0),
+                    palette::TEXT(),
+                )
+                .size()
+                .x
+        })
+        .fold(0.0_f32, f32::max);
+    let width = (widest + 30.0) * labels.len() as f32;
     let choice = components::segmented_sized(ui, &items, selected, width, false);
     (choice != selected).then_some(choice)
 }
@@ -628,6 +670,9 @@ fn trigger_editor_view(
     let kind = editor.db_kind;
     ui.add_space(8.0);
     ui.horizontal(|ui| {
+        // The row is as tall as its controls from the first item, so every caption sits on
+        // their centre line instead of riding high until the taller widgets arrive.
+        ui.set_min_height(style::CONTROL_H);
         bar_caption(ui, "Name");
         components::text_input(ui, &mut editor.name, "my_trigger", 200.0);
         if !editor.schema_name.is_empty()
@@ -664,7 +709,7 @@ fn trigger_editor_view(
             ui.add_space(8.0);
             bar_caption(ui, "For each");
             let selected = usize::from(editor.level == TriggerLevel::Statement);
-            if let Some(choice) = bar_choice(ui, &["ROW", "STATEMENT"], selected) {
+            if let Some(choice) = bar_choice(ui, &["Row".into(), "Statement".into()], selected) {
                 editor.level = if choice == 0 {
                     TriggerLevel::Row
                 } else {
@@ -676,6 +721,9 @@ fn trigger_editor_view(
     ui.add_space(6.0);
 
     ui.horizontal(|ui| {
+        // The row is as tall as its controls from the first item, so every caption sits on
+        // their centre line instead of riding high until the taller widgets arrive.
+        ui.set_min_height(style::CONTROL_H);
         // Timing — the available options depend on the dialect.
         let timings: &[TriggerTiming] = match kind {
             DbKind::MySql | DbKind::MariaDb => &[TriggerTiming::Before, TriggerTiming::After],
@@ -683,7 +731,7 @@ fn trigger_editor_view(
             _ => TriggerTiming::ALL,
         };
         bar_caption(ui, "Timing");
-        let labels: Vec<&str> = timings.iter().map(|t| t.label()).collect();
+        let labels: Vec<String> = timings.iter().map(|t| sentence_case(t.label())).collect();
         let selected = timings.iter().position(|t| *t == editor.timing).unwrap_or(0);
         if let Some(choice) = bar_choice(ui, &labels, selected) {
             editor.timing = timings[choice];
@@ -694,7 +742,10 @@ fn trigger_editor_view(
         bar_caption(ui, "Event");
         let single = matches!(kind, DbKind::MySql | DbKind::MariaDb | DbKind::Sqlite);
         if single {
-            let labels: Vec<&str> = TriggerEvent::ALL.iter().map(|e| e.label()).collect();
+            let labels: Vec<String> = TriggerEvent::ALL
+                .iter()
+                .map(|e| sentence_case(e.label()))
+                .collect();
             let selected = TriggerEvent::ALL
                 .iter()
                 .position(|e| editor.has_event(*e))
@@ -705,7 +756,9 @@ fn trigger_editor_view(
         } else {
             for &event in TriggerEvent::ALL {
                 let mut on = editor.has_event(event);
-                if components::accent_checkbox(ui, true, &mut on, Some(event.label())).changed() {
+                if components::accent_checkbox(ui, true, &mut on, Some(&sentence_case(event.label())))
+                    .changed()
+                {
                     editor.set_event(event, on);
                 }
             }
@@ -725,6 +778,9 @@ fn trigger_editor_view(
     if kind == DbKind::Postgres {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
+        // The row is as tall as its controls from the first item, so every caption sits on
+        // their centre line instead of riding high until the taller widgets arrive.
+        ui.set_min_height(style::CONTROL_H);
             let before = editor.pg_existing_function;
             components::accent_checkbox(
                 ui,
@@ -791,10 +847,13 @@ fn routine_editor_view(
     let creating = editor.mode == ObjectMode::Create;
     ui.add_space(8.0);
     ui.horizontal(|ui| {
+        // The row is as tall as its controls from the first item, so every caption sits on
+        // their centre line instead of riding high until the taller widgets arrive.
+        ui.set_min_height(style::CONTROL_H);
         // The kind is fixed once the routine exists.
         if creating {
             let selected = usize::from(editor.kind == RoutineKind::Procedure);
-            if let Some(choice) = bar_choice(ui, &["Function", "Procedure"], selected) {
+            if let Some(choice) = bar_choice(ui, &["Function".into(), "Procedure".into()], selected) {
                 editor.kind = if choice == 0 {
                     RoutineKind::Function
                 } else {
@@ -834,6 +893,9 @@ fn routine_editor_view(
     // Parameters: one compact row each, scrolling past a few so the body keeps the room.
     ui.add_space(6.0);
     ui.horizontal(|ui| {
+        // The row is as tall as its controls from the first item, so every caption sits on
+        // their centre line instead of riding high until the taller widgets arrive.
+        ui.set_min_height(style::CONTROL_H);
         bar_caption(ui, "Parameters");
         if components::button(ui, icons::plus(), "Add", true).clicked() {
             editor.params.push(ParamDraft::new_empty());
@@ -850,6 +912,9 @@ fn routine_editor_view(
             .show(ui, |ui| {
                 for (i, p) in editor.params.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
+        // The row is as tall as its controls from the first item, so every caption sits on
+        // their centre line instead of riding high until the taller widgets arrive.
+        ui.set_min_height(style::CONTROL_H);
                         components::text_input(ui, &mut p.name, "name", 140.0);
                         components::text_input(ui, &mut p.data_type, "type", 140.0);
                         if show_mode {

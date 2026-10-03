@@ -64,7 +64,14 @@ fn command(mtm: MainThreadMarker, menu: &NSMenu, title: &str, key: &str, tag: us
     // Text-editing commands (tags 7..=12) get no key equivalent: AppKit would swallow the
     // keystroke, flash the "Edit" title as if clicked, and hand egui a synthetic event.
     // Without one, winit delivers Cmd+A/Z/C/X/V straight to the focused widget.
-    let key = if (7..=12).contains(&tag) { "" } else { key };
+    // Open Anything (tag 4) is the same: with Cmd+P bound to the menu item the Navigate title
+    // took the focus highlight on every press, and the palette could not be toggled shut with
+    // the key that opened it. egui handles Cmd+P itself.
+    let key = if (7..=12).contains(&tag) || tag == 4 {
+        ""
+    } else {
+        key
+    };
     let entry = item(mtm, title, sel!(plusplusMenuCommand:), key);
     entry.setTag(tag as isize);
     TARGET.with(|target| unsafe {
