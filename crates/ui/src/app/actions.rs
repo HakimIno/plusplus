@@ -1058,8 +1058,8 @@ impl DbGuiApp {
             } => self.open_tab_in_split(id, primary_id, pane),
             Action::OpenDefinition { title, sql, kind } => self.open_definition(title, sql, kind),
             Action::FollowForeignKey { row, col } => self.follow_foreign_key(row, col),
-            Action::SetSort { col, asc } => self.tab_mut().set_sort(col, asc),
-            Action::ClearSort => self.tab_mut().clear_sort(),
+            Action::SetSort { col, asc } => self.apply_result_sort(Some((col, asc))),
+            Action::ClearSort => self.apply_result_sort(None),
             Action::FilterColumn { tab_id, col } => {
                 let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
                     return;

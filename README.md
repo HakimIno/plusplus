@@ -101,9 +101,10 @@ Explore tables, columns, keys, indexes, views, routines, and triggers where the 
 supports them. The SQL and CQL editor includes syntax highlighting, formatting,
 schema-aware autocomplete, saved queries, and history.
 
-Results support filtering, sorting, pagination, and value inspection. Queries, counts,
-and exports run in the background with cancellation support. Turn query results into
-charts and export them as SVG.
+Results support filtering, database-side sorting before pagination, and value inspection.
+Column sort controls cycle through ascending, descending, and the original query ordering.
+Queries, counts, and exports run in the background with cancellation support. Turn query
+results into charts and export them as SVG.
 
 ### Edit and transfer data
 

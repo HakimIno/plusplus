@@ -788,7 +788,7 @@ impl DbGuiApp {
         ) || tab.page_exhausted
             || tab.result.is_none()
             || (tab.edits.source.is_none() && tab.edits.pending_source.is_none())
-            || tab.sort.is_some()
+            || (tab.sort.is_some() && tab.sort_base_sql.is_none())
         {
             return;
         }
@@ -935,6 +935,62 @@ impl DbGuiApp {
             return;
         }
         self.run_page(limit, offset);
+    }
+
+    /// Header sorting re-executes the query at the database instead of rearranging its cache.
+    pub(super) fn apply_result_sort(&mut self, sort: Option<(usize, bool)>) {
+        let idx = self.active_query_tab;
+        if !self.query_can_run(idx) || !self.allow_result_replacement(idx) {
+            return;
+        }
+        let Some(kind) = self.active().map(|connection| connection.db.kind()) else {
+            self.error = Some("Connect to the database before sorting.".into());
+            return;
+        };
+        if kind.is_cql() {
+            self.error = Some("This database only supports ORDER BY on clustering columns with a partition-key filter. Add that ordering in the query.".into());
+            return;
+        }
+        let tab = &self.tabs[idx];
+        let mut sql = match sort {
+            Some((col, ascending)) => {
+                if tab
+                    .result
+                    .as_ref()
+                    .is_none_or(|result| col >= result.column_count())
+                {
+                    return;
+                }
+                let Some(sql) = dbcore::with_result_sort(kind, &tab.sql, col, ascending) else {
+                    self.error = Some("Automatic sorting needs a single read-only SELECT. Add ORDER BY in the query for this result.".into());
+                    return;
+                };
+                sql
+            }
+            None => {
+                let Some(sql) = tab.sort_base_sql.clone() else {
+                    self.tabs[idx].clear_sort();
+                    return;
+                };
+                sql
+            }
+        };
+        // A new ordering starts at page one, using the user's current page size.
+        if let Some(limit) = dbcore::parse_page_window(&tab.sql).and_then(|window| window.limit) {
+            if let Some(first_page) = dbcore::with_page_window(kind, &sql, limit, 0) {
+                sql = first_page;
+            }
+        }
+        let base_sql = sort.map(|_| tab.sort_base_sql.clone().unwrap_or_else(|| tab.sql.clone()));
+        self.tabs[idx].replace_sql(sql);
+        self.tabs[idx].sort_base_sql = base_sql;
+        match sort {
+            Some((col, ascending)) => self.tabs[idx].set_sort(col, ascending),
+            None => self.tabs[idx].clear_sort(),
+        }
+        self.tabs[idx].edits.pending_source = self.derive_edit_source(idx);
+        self.workspace_dirty = true;
+        self.start_query_for(idx);
     }
 
     pub(super) fn result_filter_runs_on_database(&self, idx: usize) -> bool {

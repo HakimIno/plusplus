@@ -16,6 +16,8 @@ const FALLBACK_COL_W: f32 = 120.0;
 /// Header row height. Used both by the `TableBuilder` header and by the empty-table
 /// double-click zone, which measures down from the header — they must agree.
 const HEADER_H: f32 = 28.0;
+const SORT_SLOT: f32 = 18.0;
+const SORT_INSET_X: f32 = 4.0;
 
 /// Horizontal breathing room shared by header labels and body cells.
 const CELL_INSET_X: f32 = 8.0;
@@ -49,7 +51,7 @@ fn column_view_id(grid_id: u64) -> egui::Id {
 fn fitted_column_width(ui: &egui::Ui, result: &QueryResult, col: usize) -> Option<f32> {
     const MIN_WIDTH: f32 = 72.0;
     const MAX_WIDTH: f32 = 320.0;
-    const HEADER_CHROME: f32 = CELL_INSET_X * 2.0;
+    const HEADER_CHROME: f32 = (CELL_INSET_X + SORT_SLOT) * 2.0;
     const CELL_PADDING: f32 = CELL_INSET_X * 2.0;
     // Font layout is considerably more expensive than iterating the result set. Keep initial
     // auto-fit and the explicit "Fit this column" action responsive for large results by
@@ -1165,11 +1167,7 @@ fn header_cell(
         );
     }
     let cell_rect = ui.max_rect();
-    let sort_slot = if sorted_dir.is_some() {
-        (cell_rect.width() * 0.18).min(18.0)
-    } else {
-        0.0
-    };
+    let sort_slot = SORT_SLOT.min((cell_rect.width() - CELL_INSET_X * 2.0).max(0.0) * 0.25);
     let label_rect = egui::Rect::from_min_max(
         egui::pos2(cell_rect.left() + CELL_INSET_X + sort_slot, cell_rect.top()),
         egui::pos2(
@@ -1178,8 +1176,11 @@ fn header_cell(
         ),
     );
     let sort_rect = egui::Rect::from_min_max(
-        egui::pos2(cell_rect.right() - sort_slot - 2.0, cell_rect.top()),
-        cell_rect.right_bottom(),
+        egui::pos2(
+            cell_rect.right() - SORT_INSET_X - sort_slot,
+            cell_rect.top(),
+        ),
+        egui::pos2(cell_rect.right() - SORT_INSET_X, cell_rect.bottom()),
     );
 
     let color = if sorted_dir.is_some() {
@@ -1205,26 +1206,55 @@ fn header_cell(
             );
         },
     );
-    if let Some(ascending) = sorted_dir {
-        let src = if ascending {
-            crate::icons::arrow_up()
-        } else {
-            crate::icons::arrow_down()
-        };
-        egui::Image::new(src)
-            .fit_to_exact_size(egui::Vec2::splat(12.0))
-            .tint(palette::ACCENT())
-            .paint_at(
-                ui,
-                egui::Rect::from_center_size(sort_rect.center(), egui::Vec2::splat(12.0)),
-            );
-    }
-
     let header_response = ui.interact(
         cell_rect,
         egui::Id::new(("result_header_context", grid_id, i)),
         egui::Sense::click(),
     );
+    let sort_button_rect =
+        egui::Rect::from_center_size(sort_rect.center(), egui::vec2(sort_rect.width(), 22.0));
+    let sort_icon_rect = egui::Rect::from_center_size(sort_rect.center(), egui::Vec2::splat(16.0));
+    let sort_response = ui.interact(
+        sort_button_rect,
+        header_response.id.with("sort"),
+        egui::Sense::click(),
+    );
+    let (icon, next, hint) = match sorted_dir {
+        None => (
+            crate::icons::result_sort_unsorted(),
+            SortCmd::Asc(i),
+            format!("Sort {} ascending", col.name),
+        ),
+        Some(true) => (
+            crate::icons::result_sort_ascending(),
+            SortCmd::Desc(i),
+            format!("Sort {} descending", col.name),
+        ),
+        Some(false) => (
+            crate::icons::result_sort_descending(),
+            SortCmd::Clear,
+            format!("Remove sort from {}", col.name),
+        ),
+    };
+    sort_response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &hint));
+    if sort_response.hovered() || sort_response.has_focus() {
+        ui.painter()
+            .rect_filled(sort_icon_rect.expand(0.5), 4.0, palette::SURFACE_HOVER());
+    }
+    egui::Image::new(icon)
+        .fit_to_exact_size(egui::Vec2::splat(16.0))
+        .tint(if sorted_dir.is_some() {
+            palette::ACCENT()
+        } else {
+            palette::TEXT_FAINT()
+        })
+        .paint_at(ui, sort_icon_rect);
+    if sort_response.clicked() {
+        out.sort = Some(next);
+    }
+    sort_response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(hint);
     // Double-clicking a header fits the column to its content — same as "Fit this column".
     if header_response.double_clicked() {
         update_column_view(ui, grid_id, |view| {
@@ -1264,8 +1294,8 @@ fn header_menu(
         "Hide this column",
         "Fit this column",
         "Reset columns",
-        "Sort loaded rows ascending",
-        "Sort loaded rows descending",
+        "Sort ascending",
+        "Sort descending",
         "Remove sort",
     ];
     let font = egui::TextStyle::Button.resolve(ui.style());
@@ -1287,7 +1317,11 @@ fn header_menu(
         egui::vec2(header_width, 22.0),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
-            ui.label(egui::RichText::new(&meta.name).strong());
+            ui.label(
+                egui::RichText::new(&meta.name)
+                    .strong()
+                    .color(palette::TEXT()),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if !meta.type_name.is_empty() {
                     ui.label(
@@ -1351,8 +1385,8 @@ fn header_menu(
     ui.separator();
     if header_menu_item(
         ui,
-        crate::icons::sort_ascending(),
-        "Sort loaded rows ascending",
+        crate::icons::result_sort_ascending(),
+        "Sort ascending",
         true,
     )
     .clicked()
@@ -1362,8 +1396,8 @@ fn header_menu(
     }
     if header_menu_item(
         ui,
-        crate::icons::sort_descending(),
-        "Sort loaded rows descending",
+        crate::icons::result_sort_descending(),
+        "Sort descending",
         true,
     )
     .clicked()
@@ -1993,6 +2027,74 @@ mod tests {
             }
         }
         shapes.iter().find_map(|cs| walk(&cs.shape, needle))
+    }
+
+    #[test]
+    fn header_sort_control_cycles_without_triggering_column_fit() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let meta = ColumnMeta {
+            name: "id".into(),
+            type_name: "INTEGER".into(),
+        };
+        let cell_rect =
+            egui::Rect::from_min_size(egui::pos2(24.0, 20.0), egui::vec2(120.0, HEADER_H));
+        let pointer = egui::pos2(
+            cell_rect.right() - SORT_INSET_X - SORT_SLOT * 0.5,
+            cell_rect.center().y,
+        );
+        let mut time = 0.0;
+        let mut render = |sort, events| {
+            time += 0.01;
+            let mut response = GridResponse::default();
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 100.0),
+                    )),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(cell_rect), |ui| {
+                        header_cell(ui, 0, &meta, sort, &mut response, 777, 1);
+                    });
+                },
+            );
+            response.sort
+        };
+        for sort in [None, Some((0, true)), Some((0, false))] {
+            render(sort, vec![egui::Event::PointerMoved(pointer)]);
+            render(
+                sort,
+                vec![egui::Event::PointerButton {
+                    pos: pointer,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+            let command = render(
+                sort,
+                vec![egui::Event::PointerButton {
+                    pos: pointer,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+            assert!(matches!(
+                (sort, command),
+                (None, Some(SortCmd::Asc(0)))
+                    | (Some((0, true)), Some(SortCmd::Desc(0)))
+                    | (Some((0, false)), Some(SortCmd::Clear))
+            ));
+        }
+        assert!(ctx
+            .data(|data| data.get_temp::<GridColumnView>(column_view_id(777)))
+            .is_none_or(|view| view.fit_content_next_frame.is_none()));
     }
 
     #[test]

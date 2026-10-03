@@ -631,6 +631,47 @@ pub fn with_page_window(kind: DbKind, sql: &str, limit: u64, offset: u64) -> Opt
     })
 }
 
+/// Replace only the outer query's ordering. Ordinals identify result columns unambiguously,
+/// including projected aliases, joins and UNIONs, and apply before LIMIT/TOP/FETCH.
+pub fn with_result_sort(kind: DbKind, sql: &str, col: usize, ascending: bool) -> Option<String> {
+    use sqlparser::ast::{Expr, OrderBy, OrderByExpr, OrderByKind, OrderByOptions, Statement};
+    use sqlparser::parser::Parser;
+
+    if kind.is_cql() || !crate::safety::write_statements(sql).is_empty() {
+        return None;
+    }
+    let dialect = crate::syntax::dialect_for(Some(kind));
+    let mut statements = Parser::new(dialect.as_ref())
+        .with_recursion_limit(128)
+        .try_with_sql(sql)
+        .ok()?
+        .parse_statements()
+        .ok()?;
+    if statements.len() != 1 {
+        return None;
+    }
+    let Statement::Query(query) = &mut statements[0] else {
+        return None;
+    };
+    if query.for_clause.is_some() || !query.locks.is_empty() {
+        return None;
+    }
+    query.order_by = Some(OrderBy {
+        kind: OrderByKind::Expressions(vec![OrderByExpr {
+            expr: Expr::Value(
+                sqlparser::ast::Value::Number(col.checked_add(1)?.to_string(), false).into(),
+            ),
+            options: OrderByOptions {
+                asc: Some(ascending),
+                nulls_first: None,
+            },
+            with_fill: None,
+        }]),
+        interpolate: None,
+    });
+    Some(format!("{};", statements[0]))
+}
+
 /// Add `predicate` to a simple single-table read while preserving its existing ORDER BY and
 /// paging clauses. Callers must build the predicate from quoted identifiers and escaped values.
 /// Existing WHERE conditions are parenthesized before being combined so their boolean precedence

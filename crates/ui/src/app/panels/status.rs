@@ -172,7 +172,16 @@ impl DbGuiApp {
             return;
         };
         if tab.sort.is_some() {
-            ui.colored_label(palette::TEXT_WEAK(), "· Sorted loaded rows only");
+            dot(ui);
+            chip(
+                ui,
+                if tab.sort_base_sql.is_some() {
+                    "Sorted at database"
+                } else {
+                    "Sorted loaded rows only"
+                },
+                palette::TEXT_WEAK(),
+            );
         }
         let Some(res) = &tab.result else {
             return;

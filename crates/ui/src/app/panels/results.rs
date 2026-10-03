@@ -611,7 +611,7 @@ impl DbGuiApp {
                 crate::components::QueryTabKind::Table | crate::components::QueryTabKind::View
             )
             && !self.tabs[idx].page_exhausted
-            && self.tabs[idx].sort.is_none()
+            && (self.tabs[idx].sort.is_none() || self.tabs[idx].sort_base_sql.is_some())
             && (self.tabs[idx].edits.source.is_some()
                 || self.tabs[idx].edits.pending_source.is_some());
         let QueryTab {

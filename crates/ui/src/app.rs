@@ -846,6 +846,9 @@ struct QueryTab {
     /// Indices into `result.rows` giving the current display order (filter + sort).
     row_order: Vec<usize>,
     sort: Option<(usize, bool)>,
+    /// SQL before a header sort. Its presence distinguishes database ordering from a local
+    /// preview sort, and allows Remove sort to restore the user's original ORDER BY.
+    sort_base_sql: Option<String>,
     /// Current multi-row selection over display rows. Its `lead` drives the Details panel.
     selection: crate::grid::Selection,
     /// Staged cell edits and the editable source of the current result.
@@ -927,6 +930,7 @@ impl QueryTab {
             result_evicted: false,
             row_order: Vec::new(),
             sort: None,
+            sort_base_sql: None,
             selection: crate::grid::Selection::default(),
             edits: Edits::default(),
             filter: FilterState::default(),
@@ -955,6 +959,17 @@ impl QueryTab {
 
     fn mark_sql_changed(&mut self) {
         self.sql_revision = self.sql_revision.wrapping_add(1);
+        if self.sort_base_sql.take().is_some() {
+            self.sort = None;
+        }
+    }
+
+    fn replace_paged_sql(&mut self, sql: String) {
+        let sort = self.sort;
+        let sort_base_sql = self.sort_base_sql.clone();
+        self.replace_sql(sql);
+        self.sort = sort;
+        self.sort_base_sql = sort_base_sql;
     }
 
     fn set_query_error(&mut self, error: String) {
@@ -1005,7 +1020,12 @@ impl QueryTab {
         {
             self.view = TabView::Data;
         }
-        self.sort = None;
+        if self.sort_base_sql.is_none() {
+            self.sort = None;
+        } else if self.sort.is_some_and(|(col, _)| col >= res.column_count()) {
+            self.sort = None;
+            self.sort_base_sql = None;
+        }
         self.selection.clear();
         // A fresh result may have a different column count; keep filter conditions but stop
         // them indexing past the new columns, then rebuild the display order through the
@@ -1097,6 +1117,7 @@ impl QueryTab {
         self.query_error = None;
         self.row_order.clear();
         self.sort = None;
+        self.sort_base_sql = None;
         self.selection.clear();
         self.edits = Edits::default();
         self.filter = FilterState::default();
@@ -1128,7 +1149,7 @@ impl QueryTab {
             return;
         };
         let mut order = filter::passing_rows(result, &self.filter);
-        if let Some((col, ascending)) = self.sort {
+        if let Some((col, ascending)) = self.sort.filter(|_| self.sort_base_sql.is_none()) {
             if col < result.column_count() {
                 order.sort_by(|&a, &b| {
                     let ord = result.rows[a][col].sort_cmp(&result.rows[b][col]);
@@ -1150,8 +1171,7 @@ impl QueryTab {
     }
 
     /// Append a streaming continuation without rescanning rows that are already displayed.
-    /// Sorted results still take the conservative full-rebuild path, though automatic paging
-    /// currently pauses while a sort is active.
+    /// Database-sorted pages append in order; local preview sorts need a full rebuild.
     fn append_result_rows(
         &mut self,
         columns: Vec<dbcore::ColumnMeta>,
@@ -1163,7 +1183,7 @@ impl QueryTab {
         });
         let first = result.rows.len();
         result.rows.extend(rows);
-        if self.sort.is_some() {
+        if self.sort.is_some() && self.sort_base_sql.is_none() {
             self.recompute_view();
             return;
         }

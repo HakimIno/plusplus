@@ -61,5 +61,10 @@
     "database_export": "outline/database-export",
     "database_import": "outline/database-import",
     "check": "outline/circle-check"
+  },
+  "custom_icons": {
+    "result_sort_ascending": "outline/result-sort-ascending",
+    "result_sort_descending": "outline/result-sort-descending",
+    "result_sort_unsorted": "outline/result-sort-unsorted"
   }
 }

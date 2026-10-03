@@ -8,6 +8,74 @@ fn target(sql: &str) -> Option<(Option<String>, String)> {
 }
 
 #[test]
+fn result_sort_orders_before_the_page_in_each_sql_dialect() {
+    for kind in [
+        DbKind::Postgres,
+        DbKind::MySql,
+        DbKind::MariaDb,
+        DbKind::Sqlite,
+        DbKind::DuckDb,
+    ] {
+        let sql = with_result_sort(
+            kind,
+            "SELECT * FROM items WHERE id > 5 ORDER BY id LIMIT 10 OFFSET 20",
+            1,
+            false,
+        )
+        .unwrap();
+        assert!(
+            sql.contains("WHERE id > 5 ORDER BY 2 DESC LIMIT 10 OFFSET 20"),
+            "{kind:?}: {sql}"
+        );
+    }
+    let sql = with_result_sort(
+        DbKind::SqlServer,
+        "SELECT TOP 10 * FROM [dbo].[items]",
+        0,
+        true,
+    )
+    .unwrap();
+    assert!(
+        sql.contains("TOP 10") && sql.contains("ORDER BY 1 ASC"),
+        "{sql}"
+    );
+}
+
+#[test]
+fn result_sort_preserves_nested_ordering_and_supports_projected_columns() {
+    let sql = with_result_sort(DbKind::Sqlite, "SELECT a.id, (SELECT id FROM b ORDER BY id DESC LIMIT 1) AS latest FROM a ORDER BY a.id LIMIT 10", 1, false).unwrap();
+    assert!(sql.contains("FROM b ORDER BY id DESC LIMIT 1"));
+    assert!(sql.contains("FROM a ORDER BY 2 DESC LIMIT 10"));
+    assert!(with_result_sort(
+        DbKind::Postgres,
+        "WITH c AS (SELECT id FROM a) SELECT id AS value FROM c UNION ALL SELECT id FROM b LIMIT 5",
+        0,
+        true
+    )
+    .unwrap()
+    .contains("ORDER BY 1 ASC LIMIT 5"));
+}
+
+#[test]
+fn result_sort_rejects_scripts_writes_locks_and_cql() {
+    for sql in [
+        "SELECT * FROM a; SELECT * FROM b;",
+        "DELETE FROM a RETURNING id",
+        "WITH removed AS (DELETE FROM a RETURNING id) SELECT * FROM removed",
+        "SELECT id INTO b FROM a",
+        "SELECT * FROM a FOR UPDATE",
+    ] {
+        assert!(
+            with_result_sort(DbKind::Postgres, sql, 0, true).is_none(),
+            "{sql}"
+        );
+    }
+    for kind in [DbKind::Cassandra, DbKind::ScyllaDb] {
+        assert!(with_result_sort(kind, "SELECT * FROM a", 0, true).is_none());
+    }
+}
+
+#[test]
 fn cql_create_table_omits_not_null_and_default() {
     // A CQL table: partition key `id`, a regular nullable `name`, no NOT NULL/DEFAULT,
     // no ENGINE clause. Single-column key renders inline as PRIMARY KEY.
