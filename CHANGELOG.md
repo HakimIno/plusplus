@@ -3,7 +3,9 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
-## 0.5.0 — 2026-10-03
+## 0.5.1 — 2026-10-03
+
+v0.5.0 was tagged but its build failed on a lint, so it was never published; everything below ships in 0.5.1.
 
 - Split the workspace into up to four columns. Drop a table or tab on a column to add it there, or on the right edge of the last column to open another. Each column has its own tab strip and width, and the seam between columns is now the same four points as every other card seam.
 - Details follows the focused column (press in a column to focus it; an accent line marks its tab strip), names the tab its fields come from, and floats over the focused column from three columns up instead of squeezing every grid. Previously it only ever read the left-most column.
