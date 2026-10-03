@@ -3,6 +3,27 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
+## 0.5.0 — 2026-10-03
+
+- Split the workspace into up to four columns. Drop a table or tab on a column to add it there, or on the right edge of the last column to open another. Each column has its own tab strip and width, and the seam between columns is now the same four points as every other card seam.
+- Details follows the focused column (press in a column to focus it; an accent line marks its tab strip), names the tab its fields come from, and floats over the focused column from three columns up instead of squeezing every grid. Previously it only ever read the left-most column.
+- The Data / Structure / Indexes bar sheds its row summary, button labels and pager arrows as a column narrows, so its parts no longer overlap.
+- Activity monitor: lists the running sessions of a PostgreSQL, MySQL/MariaDB or SQL Server connection, with confirmed, audited Cancel and Terminate. Open it from the command palette. Verified against PostgreSQL only.
+- macOS now ships one DMG per architecture (`plusplus-<version>-aarch64.dmg` and `-x86_64.dmg`), roughly half the download of the universal DMG, which stays attached to this release so apps on 0.4.17 or older can still update.
+- Smaller binary: debug info is stripped from release builds and the unused polars dependency and placeholder analysis crate are gone.
+- Restored workspaces keep connection-specific tab selections, and split tab strips only show tabs belonging to their pane's selected connection.
+- Separated result-mode tabs from Live log into their own rounded dock, with the resize handle between the tabs and log.
+- Column sorting now re-queries the database with ORDER BY before paging, restores the original query when cleared, and uses SVG line-and-arrow icons for ascending, descending, and unsorted states in each header.
+- Consolidated result rows, columns and query time into one status-bar summary, with connection and version kept in a separate, consistently spaced group.
+- Simplified the connection rail with smaller icons, soft selected backgrounds, a slim active marker, aligned status dots, and names fitted to the available width.
+- Successful connection tests highlight fields with a soft green background without a green border.
+- Simplified the page-window popover to stacked, equal-width Limit/Offset fields and a Load rows button with an SVG icon.
+- New connection names now follow the selected database provider, preserving custom names and names of saved connections when using Change.
+- Kept four built-in themes: Carbon (the default), Midnight, Daylight, and Blue Studio. Removed built-in selections fall back to Carbon; Graphite and IntelliJ Light remain installable JSON examples. Custom themes can supply an optional SQL colour palette.
+- Kept the Live log heading readable on light backgrounds.
+- Empty-state artwork now selects a soft grey-blue tugboat illustration on light themes.
+- Matched the filter panel's rounded corners and spacing to the other workspace panels.
+
 ## 0.4.17 — 2026-10-02
 
 - The status bar shows more: the last result's rows and time, the SQL editor's line and column, the number of staged changes (click to review and save), a running query's clock with a cancel button, the tab's connection with a READ-ONLY flag, and Count / Sum / Avg of the selected rows' numeric column.
