@@ -60,7 +60,7 @@ Choose a package from [GitHub Releases](https://github.com/HakimIno/plusplus/rel
 
 | Platform | Package | Architecture |
 | --- | --- | --- |
-| macOS | `.dmg` | Apple Silicon and Intel (Universal) |
+| macOS | `-aarch64.dmg` / `-x86_64.dmg` | Apple Silicon / Intel (one DMG each) |
 | Windows | Setup `.exe` or portable `.zip` | x86_64 |
 | Linux | `.AppImage` | x86_64 |
 

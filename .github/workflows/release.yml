@@ -111,10 +111,13 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s \
             -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-      - name: Build universal .app + .dmg
+      # Per-arch DMGs are what the in-app updater and the website serve now; the universal
+      # DMG is kept only so clients <= 0.4.17 (which request `plusplus-<v>.dmg`) can still
+      # update. Drop `--universal` once those versions are no longer in use.
+      - name: Build per-arch (+ legacy universal) .app + .dmg
         env:
           MACOS_SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: scripts/release.sh --universal
+        run: scripts/release.sh --split --universal
 
       - name: Notarize and staple DMG
         env:

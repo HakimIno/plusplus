@@ -128,9 +128,19 @@ fn normalize_version(tag: &str) -> String {
     tag.trim().trim_start_matches('v').to_string()
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn release_asset_name(version: &str) -> String {
-    format!("plusplus-{version}.dmg")
+    format!("plusplus-{version}-aarch64.dmg")
+}
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+fn release_asset_name(version: &str) -> String {
+    format!("plusplus-{version}-x86_64.dmg")
+}
+
+/// Releases before per-arch DMGs only shipped one universal `plusplus-<v>.dmg`.
+fn legacy_release_asset_name(version: &str) -> Option<String> {
+    cfg!(target_os = "macos").then(|| format!("plusplus-{version}.dmg"))
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -144,7 +154,7 @@ fn release_asset_name(version: &str) -> String {
 }
 
 #[cfg(not(any(
-    target_os = "macos",
+    all(target_os = "macos", any(target_arch = "aarch64", target_arch = "x86_64")),
     all(
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
@@ -186,10 +196,16 @@ pub async fn check_for_update() -> Result<Option<UpdateOffer>, String> {
     }
 
     let expected_name = release_asset_name(&version);
+    let legacy_name = legacy_release_asset_name(&version);
     let package = release
         .assets
         .iter()
         .find(|a| a.name == expected_name)
+        .or_else(|| {
+            legacy_name
+                .as_deref()
+                .and_then(|legacy| release.assets.iter().find(|a| a.name == legacy))
+        })
         .ok_or_else(|| format!("release v{version} has no {expected_name} asset"))?;
 
     // The detached signature is published as `<asset-name>.minisig`. A missing one leaves

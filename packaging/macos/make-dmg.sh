@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Package the release binary into plusplus.app and a distributable .dmg.
 #
-# Usage: packaging/macos/make-dmg.sh   (run from anywhere; paths are resolved from the repo root)
+# Usage: packaging/macos/make-dmg.sh [--arch aarch64|x86_64]
+#   (run from anywhere; paths are resolved from the repo root)
 #
-# Prefers a universal (Intel + Apple Silicon) app: when both per-target release builds
+# --arch packages that one architecture from its per-target build into
+# plusplus-<version>-<arch>.dmg (about half the size of the universal DMG).
+#
+# Without --arch, prefers a universal (Intel + Apple Silicon) app: when both per-target release builds
 # exist they are lipo'd together. Build them with
 #   cargo build --release --bin plusplus --target x86_64-apple-darwin
 #   cargo build --release --bin plusplus --target aarch64-apple-darwin
@@ -20,13 +24,32 @@ APP_NAME="plusplus"
 VERSION="$(plusplus_read_version "$REPO_ROOT")"
 ICNS="crates/app/assets/icon/icon.icns"
 
+ARCH=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --arch) ARCH="${2:-}"; shift 2 ;;
+    *) echo "unknown flag: $1" >&2; exit 1 ;;
+  esac
+done
+
 DIST="target/dist"
 APP="${DIST}/${APP_NAME}.app"
-DMG="${DIST}/${APP_NAME}-${VERSION}.dmg"
+if [ -n "$ARCH" ]; then
+  DMG="${DIST}/${APP_NAME}-${VERSION}-${ARCH}.dmg"
+else
+  DMG="${DIST}/${APP_NAME}-${VERSION}.dmg"
+fi
 
 X86_BIN="target/x86_64-apple-darwin/release/${APP_NAME}"
 ARM_BIN="target/aarch64-apple-darwin/release/${APP_NAME}"
-if [ -f "$X86_BIN" ] && [ -f "$ARM_BIN" ]; then
+if [ -n "$ARCH" ]; then
+  case "$ARCH" in
+    aarch64) BIN="$ARM_BIN" ;;
+    x86_64) BIN="$X86_BIN" ;;
+    *) echo "--arch must be aarch64 or x86_64 (got: ${ARCH})" >&2; exit 1 ;;
+  esac
+  echo "→ single-architecture app: ${ARCH}"
+elif [ -f "$X86_BIN" ] && [ -f "$ARM_BIN" ]; then
   echo "→ lipo: universal binary (x86_64 + arm64)"
   mkdir -p "$DIST"
   BIN="${DIST}/${APP_NAME}-universal"

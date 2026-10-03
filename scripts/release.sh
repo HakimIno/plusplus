@@ -7,6 +7,9 @@
 # Usage (from repo root):
 #   scripts/release.sh              # build + package (host arch)
 #   scripts/release.sh --universal  # build both macOS targets, lipo, package
+#   scripts/release.sh --split      # build both targets, one DMG per arch (aarch64 + x86_64)
+#   scripts/release.sh --split --universal
+#                                   # ...plus the legacy universal DMG (updater for <= 0.4.17)
 #   scripts/release.sh --tag        # also create annotated git tag vX.Y.Z
 #   scripts/release.sh --install    # build, package, replace /Applications/plusplus.app
 #
@@ -20,15 +23,17 @@ VERSION="$(plusplus_read_version "$REPO_ROOT")"
 TAG="$(plusplus_git_tag "$REPO_ROOT")"
 DO_TAG=0
 DO_UNIVERSAL=0
+DO_SPLIT=0
 DO_INSTALL=0
 
 for arg in "$@"; do
   case "$arg" in
     --tag) DO_TAG=1 ;;
     --universal) DO_UNIVERSAL=1 ;;
+    --split) DO_SPLIT=1 ;;
     --install) DO_INSTALL=1 ;;
     -h|--help)
-      sed -n '2,12p' "$0"
+      sed -n '2,15p' "$0"
       exit 0
       ;;
     *)
@@ -54,7 +59,7 @@ if [ "$DO_TAG" -eq 1 ]; then
   fi
 fi
 
-if [ "$DO_UNIVERSAL" -eq 1 ]; then
+if [ "$DO_UNIVERSAL" -eq 1 ] || [ "$DO_SPLIT" -eq 1 ]; then
   echo "→ cargo build --release (x86_64 + aarch64)"
   cargo build --release --bin plusplus --target x86_64-apple-darwin
   cargo build --release --bin plusplus --target aarch64-apple-darwin
@@ -64,7 +69,14 @@ else
 fi
 
 echo "→ packaging .app + .dmg"
-bash packaging/macos/make-dmg.sh
+if [ "$DO_SPLIT" -eq 1 ]; then
+  # make-dmg.sh reuses target/dist/plusplus.app, so the last one built stays installable.
+  [ "$DO_UNIVERSAL" -eq 1 ] && bash packaging/macos/make-dmg.sh
+  bash packaging/macos/make-dmg.sh --arch x86_64
+  bash packaging/macos/make-dmg.sh --arch aarch64
+else
+  bash packaging/macos/make-dmg.sh
+fi
 
 if [ "$DO_INSTALL" -eq 1 ]; then
   bash packaging/macos/install.sh
@@ -72,7 +84,11 @@ fi
 
 echo "✓ release v${VERSION} ready"
 echo "  app: target/dist/plusplus.app"
-echo "  dmg: target/dist/plusplus-${VERSION}.dmg"
+if [ "$DO_SPLIT" -eq 1 ]; then
+  echo "  dmg: target/dist/plusplus-${VERSION}-aarch64.dmg, plusplus-${VERSION}-x86_64.dmg"
+else
+  echo "  dmg: target/dist/plusplus-${VERSION}.dmg"
+fi
 if [ "$DO_TAG" -eq 1 ]; then
   echo "  tag: ${TAG}  (push with: git push origin ${TAG})"
 fi

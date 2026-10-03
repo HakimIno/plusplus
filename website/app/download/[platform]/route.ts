@@ -10,7 +10,9 @@ type GitHubRelease = {
 };
 
 const assetMatchers: Record<string, (name: string) => boolean> = {
-  macos: (name) => name.toLowerCase().endsWith(".dmg"),
+  // macOS ships one DMG per architecture; the bare /download/macos is Apple Silicon.
+  macos: (name) => name.toLowerCase().endsWith("-aarch64.dmg"),
+  "macos-intel": (name) => name.toLowerCase().endsWith("-x86_64.dmg"),
   windows: (name) => name.toLowerCase().endsWith("-windows-setup.exe"),
   linux: (name) => name.toLowerCase().endsWith(".appimage"),
 };
@@ -46,6 +48,10 @@ export async function GET(
     const asset = release.assets.find(({ name }) => matchesPlatform(name))
       ?? (platform === "windows"
         ? release.assets.find(({ name }) => name.toLowerCase().endsWith("-windows.zip"))
+        : undefined)
+      // Releases from before per-arch DMGs only have the universal one.
+      ?? (platform.startsWith("macos")
+        ? release.assets.find(({ name }) => name.toLowerCase().endsWith(".dmg"))
         : undefined);
 
     if (!asset) {
