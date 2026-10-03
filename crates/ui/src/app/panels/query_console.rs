@@ -51,7 +51,9 @@ impl DbGuiApp {
                 (190.0, 96.0, 0.55)
             }
             // Diagram tabs never draw the console (`draw` skips it); inert defaults.
-            crate::components::QueryTabKind::Diagram => (190.0, 96.0, 0.55),
+            crate::components::QueryTabKind::Diagram | crate::components::QueryTabKind::Activity => {
+                (190.0, 96.0, 0.55)
+            }
         };
         // Always leave a useful result strip on compact windows. On larger windows the ratio
         // cap prevents either surface from swallowing the other one.

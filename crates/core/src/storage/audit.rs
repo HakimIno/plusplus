@@ -38,6 +38,8 @@ pub enum AuditAction {
     Backup,
     /// A whole database was replaced from a backup.
     Restore,
+    /// A server session was cancelled or terminated from the Activity monitor.
+    SessionStop,
 }
 
 /// One audited event.

@@ -179,9 +179,17 @@ pub(crate) enum QueryTabKind {
     /// An ER diagram (whole schema or one table's FK neighborhood). No editor,
     /// no result grid — the tab is the canvas.
     Diagram,
+    /// The server's live session list (Activity monitor). Like a diagram it owns the whole
+    /// workspace: no editor, no result bars.
+    Activity,
 }
 
 impl QueryTabKind {
+    /// Tabs that draw their own full-workspace view instead of an editor and result grid.
+    pub(crate) fn owns_workspace(self) -> bool {
+        matches!(self, Self::Diagram | Self::Activity)
+    }
+
     pub(crate) fn icon(self) -> egui::ImageSource<'static> {
         match self {
             Self::Table => icons::table(),
@@ -190,6 +198,7 @@ impl QueryTabKind {
             Self::Query => icons::code(),
             Self::Trigger => icons::play(),
             Self::Diagram => icons::diagram(),
+            Self::Activity => icons::index(),
         }
     }
 }

@@ -17,6 +17,7 @@ enum PaletteCommand {
     DatabaseDiagram,
     BackupDatabase,
     RestoreDatabase,
+    ActivityMonitor,
     ToggleSchema,
     ToggleDetails,
     ToggleConsole,
@@ -276,6 +277,12 @@ impl DbGuiApp {
                 "Show database diagram",
                 "",
                 "erd schema",
+            ),
+            (
+                PaletteCommand::ActivityMonitor,
+                "Activity monitor…",
+                "",
+                "sessions processes processlist pg_stat_activity kill cancel running queries",
             ),
             (
                 PaletteCommand::BackupDatabase,
@@ -561,6 +568,17 @@ impl DbGuiApp {
                 PaletteCommand::Settings => self.apply_action(Action::OpenSettings),
                 PaletteCommand::DatabaseDiagram if !self.tabs.is_empty() => {
                     self.apply_action(Action::ShowDatabaseDiagram)
+                }
+                PaletteCommand::ActivityMonitor => {
+                    let conn = self
+                        .tabs
+                        .get(self.active_query_tab)
+                        .and_then(|tab| tab.conn_id.as_deref())
+                        .and_then(|id| self.connections.iter().position(|c| c.id == id));
+                    match conn {
+                        Some(conn_idx) => self.apply_action(Action::OpenActivity { conn_idx }),
+                        None => self.error = Some("Open a connection first.".into()),
+                    }
                 }
                 PaletteCommand::BackupDatabase | PaletteCommand::RestoreDatabase => {
                     // The connection the active tab runs on.

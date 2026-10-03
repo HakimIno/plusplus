@@ -16,6 +16,7 @@ use dbcore::{
 use crate::schema::{ObjectEditor, RoutineEditor, SchemaEditor, TriggerEditor, ViewEditor};
 
 mod actions;
+mod activity;
 mod backup;
 mod connection;
 mod edits;
@@ -243,6 +244,21 @@ enum AppMessage {
     },
     /// SQL Server reported its default backup folder, to prefill the dialog's path.
     BackupDefaultDir { conn_id: String, dir: String },
+    /// The Activity monitor's session list arrived (see `app/activity.rs`).
+    ActivitySessions {
+        tab_id: u64,
+        result: Result<Vec<dbcore::activity::Session>, String>,
+    },
+    /// A session was cancelled or terminated from the Activity monitor.
+    SessionStopped {
+        tab_id: u64,
+        conn_id: String,
+        id: String,
+        mode: dbcore::activity::StopMode,
+        sql: String,
+        elapsed_ms: f64,
+        result: Result<(), String>,
+    },
     /// The tables inside a SQLite/DuckDB file chosen for restore.
     BackupFileTables {
         conn_id: String,
@@ -501,7 +517,8 @@ fn query_editor_placement(kind: crate::components::QueryTabKind) -> QueryEditorP
         | crate::components::QueryTabKind::Procedure
         | crate::components::QueryTabKind::Trigger
         // Diagram tabs never draw an editor; the placement is inert.
-        | crate::components::QueryTabKind::Diagram => QueryEditorPlacement::Top,
+        | crate::components::QueryTabKind::Diagram
+        | crate::components::QueryTabKind::Activity => QueryEditorPlacement::Top,
         crate::components::QueryTabKind::Table | crate::components::QueryTabKind::View => {
             QueryEditorPlacement::Bottom
         }
@@ -865,6 +882,8 @@ struct QueryTab {
     /// The ER diagram shown by a `QueryTabKind::Diagram` tab. A schema snapshot, so it
     /// stays viewable after a disconnect; its portable design can be exported to disk.
     diagram: Option<crate::erd::ErDiagram>,
+    /// The live session list shown by a `QueryTabKind::Activity` tab (see `app/activity.rs`).
+    activity: Option<activity::ActivityMonitor>,
     /// Table index being edited inside a diagram (`None` means a newly-added table).
     design_edit_index: Option<Option<usize>>,
 }
@@ -922,6 +941,7 @@ impl QueryTab {
             table_metadata_pending: false,
             pending_scroll: None,
             diagram: None,
+            activity: None,
             design_edit_index: None,
         }
     }
@@ -1747,6 +1767,17 @@ enum Action {
     OpenBackup {
         conn_idx: usize,
         restore: bool,
+    },
+    /// Open the Activity monitor for the saved connection `idx`.
+    OpenActivity {
+        conn_idx: usize,
+    },
+    /// Re-query the open Activity monitor.
+    RefreshActivity,
+    /// Cancel or terminate a session from the Activity monitor (already confirmed).
+    StopSession {
+        id: String,
+        mode: dbcore::activity::StopMode,
     },
     /// Stage NULL / `''` into `col` across the selected rows (cell context menu).
     SetCells {

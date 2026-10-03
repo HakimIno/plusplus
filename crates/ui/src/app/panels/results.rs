@@ -878,7 +878,8 @@ impl DbGuiApp {
                         ),
                         crate::components::QueryTabKind::Table
                         | crate::components::QueryTabKind::View
-                        | crate::components::QueryTabKind::Diagram => {
+                        | crate::components::QueryTabKind::Diagram
+                        | crate::components::QueryTabKind::Activity => {
                             components::empty_illustration(ui);
                         }
                     },

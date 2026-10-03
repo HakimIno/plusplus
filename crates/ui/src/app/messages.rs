@@ -907,6 +907,20 @@ impl DbGuiApp {
                 AppMessage::BackupDefaultDir { conn_id, dir } => {
                     self.apply_mssql_backup_dir(&conn_id, &dir);
                 }
+                AppMessage::ActivitySessions { tab_id, result } => {
+                    self.apply_activity_sessions(tab_id, result);
+                }
+                AppMessage::SessionStopped {
+                    tab_id,
+                    conn_id,
+                    id,
+                    mode,
+                    sql,
+                    elapsed_ms,
+                    result,
+                } => {
+                    self.finish_session_stop(tab_id, &conn_id, &id, mode, &sql, elapsed_ms, result);
+                }
                 AppMessage::BackupFileTables { conn_id, result } => {
                     self.apply_backup_file_tables(&conn_id, result);
                 }

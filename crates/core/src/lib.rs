@@ -23,7 +23,7 @@ pub mod model;
 use connections::connection;
 pub use connections::{database, tunnel};
 pub use data::{coerce, edits, value};
-pub use query::{parameters, plan, safety, semantic, syntax};
+pub use query::{activity, parameters, plan, safety, semantic, syntax};
 pub use storage::{audit, bookmarks, config, favorites, history, secrets};
 pub use transfer::{backup, clipboard, export, import};
 

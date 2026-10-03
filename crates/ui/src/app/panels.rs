@@ -11,6 +11,7 @@
 //! Keep helpers private to their module, or `pub(super)` when another panel needs them.
 //! App entry points use `pub(in crate::app)`; test helpers are re-exported below.
 
+mod activity;
 mod backup;
 mod chrome;
 mod connections;
