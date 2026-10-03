@@ -1397,22 +1397,38 @@ async fn run_import(
         .map_err(|e| e.to_string())
 }
 
+/// `3.2 ms`, `128 ms`, `1.40 s`.
+fn format_duration_ms(ms: f64) -> String {
+    if ms < 10.0 {
+        format!("{ms:.1} ms")
+    } else if ms < 1000.0 {
+        format!("{ms:.0} ms")
+    } else {
+        format!("{:.2} s", ms / 1000.0)
+    }
+}
+
 /// Human-readable status line for a completed result.
 fn result_status(res: &QueryResult) -> String {
-    match res.stats.rows_affected {
-        Some(n) => format!("OK — {n} row(s) affected in {:.1} ms", res.stats.elapsed_ms),
-        None if res.truncated => format!(
-            "First {} row(s) × {} col(s) in {:.1} ms — capped; narrow the query or page through",
-            res.row_count(),
-            res.column_count(),
-            res.stats.elapsed_ms
-        ),
-        None => format!(
-            "{} row(s) × {} col(s) in {:.1} ms",
-            res.row_count(),
-            res.column_count(),
-            res.stats.elapsed_ms
-        ),
+    let elapsed = format_duration_ms(res.stats.elapsed_ms);
+    if let Some(n) = res.stats.rows_affected {
+        return format!(
+            "{n} {} affected · {elapsed}",
+            if n == 1 { "row" } else { "rows" },
+        );
+    }
+    let rows = res.row_count();
+    let columns = res.column_count();
+    let summary = format!(
+        "{rows}{} {} · {columns} {} · {elapsed}",
+        if res.truncated { "+" } else { "" },
+        if rows == 1 { "row" } else { "rows" },
+        if columns == 1 { "column" } else { "columns" },
+    );
+    if res.truncated {
+        format!("{summary} · Capped; narrow the query or page through")
+    } else {
+        summary
     }
 }
 
@@ -2030,6 +2046,9 @@ pub struct DbGuiApp {
     pending_leave: Option<unsaved::PendingLeave>,
     /// Live drag-to-reorder state for a query tab (cleared on mouse release).
     tab_drag: Option<TabDrag>,
+    /// The tab each connection was showing when the user last left it, so clicking a
+    /// connection in the rail returns to where they were.
+    conn_last_tab: std::collections::HashMap<String, u64>,
     /// Live drag-to-reorder state for a saved connection (cleared on mouse release).
     connection_drag: Option<ConnectionDrag>,
     /// Global object/action switcher opened with Cmd/Ctrl+P.
@@ -2345,6 +2364,7 @@ impl DbGuiApp {
             editor: None,
             pending_leave: None,
             tab_drag: None,
+            conn_last_tab: std::collections::HashMap::new(),
             connection_drag: None,
             open_anything: None,
             details_filter: String::new(),

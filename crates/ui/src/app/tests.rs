@@ -6,7 +6,7 @@ use dbcore::{
 struct DummyDb;
 
 #[test]
-fn switching_a_query_connection_cancels_only_that_tabs_old_execution() {
+fn switching_connection_leaves_running_queries_on_their_own_connection() {
     let mut app = app_with_staged_edit();
     app.tab_mut().edits.clear();
     let first = app.tab().id;
@@ -25,10 +25,15 @@ fn switching_a_query_connection_cancels_only_that_tabs_old_execution() {
         schema: fake_schema(1, 1),
     });
     app.bind_connection(1, false);
-    assert!(second_cancel.is_cancelled());
+    // Nothing is re-pointed, so nothing is cancelled: both queries keep running against the
+    // database they were started on, and the new connection gets a tab of its own.
+    assert!(!second_cancel.is_cancelled());
     assert!(!first_cancel.is_cancelled());
     assert!(app.is_tab_querying(first));
+    assert!(app.is_tab_querying(second));
     assert_eq!(app.tab().conn_id.as_deref(), Some("other"));
+    assert_eq!(app.tabs[0].conn_id.as_deref(), Some("edit-connection"));
+    assert_eq!(app.tabs[1].conn_id.as_deref(), Some("edit-connection"));
 }
 
 #[test]
@@ -1045,6 +1050,55 @@ fn new_connection_starts_with_an_explicit_development_profile() {
     assert!(!editor.config.is_production());
     assert!(!editor.config.is_read_only());
     assert!(editor.selecting_provider);
+}
+
+#[test]
+fn new_connection_name_follows_the_selected_provider() {
+    let mut app = DbGuiApp::construct();
+    app.apply_action(Action::NewConnection);
+    let editor = app.editor.as_mut().unwrap();
+    assert_eq!(editor.config.name, "New PostgreSQL");
+
+    // Start with the reported SQLite case, then go back through Change for every provider.
+    for kind in [
+        DbKind::Sqlite,
+        DbKind::DuckDb,
+        DbKind::MySql,
+        DbKind::MariaDb,
+        DbKind::SqlServer,
+        DbKind::Cassandra,
+        DbKind::ScyllaDb,
+        DbKind::Postgres,
+    ] {
+        editor.selecting_provider = true;
+        editor.select_provider(kind);
+        assert_eq!(editor.config.name, format!("New {}", kind.label()));
+        assert_eq!(editor.config.kind, kind);
+        assert_eq!(editor.config.port, kind.default_port());
+        assert!(!editor.selecting_provider);
+    }
+}
+
+#[test]
+fn changing_provider_preserves_a_custom_connection_name() {
+    let mut app = DbGuiApp::construct();
+    app.apply_action(Action::NewConnection);
+    let editor = app.editor.as_mut().unwrap();
+    editor.config.name = "Local database".into();
+    editor.select_provider(DbKind::Sqlite);
+    editor.select_provider(DbKind::MySql);
+    assert_eq!(editor.config.name, "Local database");
+}
+
+#[test]
+fn changing_provider_preserves_a_saved_connection_name() {
+    let mut app = DbGuiApp::construct();
+    app.apply_action(Action::NewConnection);
+    let editor = app.editor.as_mut().unwrap();
+    // A saved name belongs to the user even if it matches an automatically generated name.
+    editor.is_new = false;
+    editor.select_provider(DbKind::Sqlite);
+    assert_eq!(editor.config.name, "New PostgreSQL");
 }
 
 #[test]
@@ -2774,7 +2828,7 @@ fn schema_table_payload_opens_an_editable_table_in_split() {
         schema: None,
         table: "table_1".into(),
         pinned: false,
-    });
+    }, 1);
 
     let split = app.split_panes.first().copied().expect("table drop did not create a split");
     assert_eq!(app.tabs[split].kind, crate::components::QueryTabKind::Table);
@@ -3913,7 +3967,7 @@ fn dragging_more_tables_into_an_open_split_adds_right_group_tabs() {
             schema: None,
             table: table.into(),
             pinned: false,
-        });
+        }, 1);
     }
 
     assert_eq!(app.tabs.iter().filter(|tab| tab.pane > 0).count(), 2);
@@ -4245,8 +4299,8 @@ fn adaptive_editor_renders_on_the_expected_side_of_results() {
         "query result modes must dock below the result and above Live log"
     );
     assert!(
-        log_dock.rect().top() <= compact.get_by_label("Data").rect().top(),
-        "the Live log resize boundary must sit above the query result modes"
+        compact.get_by_label("Data").rect().bottom() < log_dock.rect().top(),
+        "query result modes must sit outside Live log, above its resize boundary"
     );
 }
 
@@ -4498,8 +4552,8 @@ fn table_tab_keeps_data_controls_without_a_query_console() {
         "the table layout must be Grid, Data / Structure / Indexes, then Live log"
     );
     assert!(
-        log_dock.rect().top() <= modes.rect().top(),
-        "the Live log resize boundary must sit above the table mode bar"
+        modes.rect().bottom() < log_dock.rect().top(),
+        "table modes must sit outside Live log, above its resize boundary"
     );
     assert!(
         harness.query_by_label("SQL workspace").is_none()
@@ -4754,7 +4808,7 @@ fn query_result_controls_sit_between_query_toolbar_and_grid() {
     harness.run_steps(2);
     assert!(harness.query_by_label("Query message").is_none());
     assert!(harness
-        .query_by_label("2 row(s) × 3 col(s) in 0.0 ms")
+        .query_by_label("2 rows · 3 columns · 0.0 ms")
         .is_some());
 
     harness.get_by_label("Chart").click();
@@ -5571,31 +5625,113 @@ fn switching_connection_leaves_table_tabs_bound_to_their_database() {
     assert_eq!(app.tabs[0].sql, "SELECT * FROM \"customers\" LIMIT 100;");
 }
 
-/// Staged edits must be saved or discarded before a query tab changes database — else the
-/// UPDATE would run against the new connection.
+/// A tab with staged edits stays on its own connection, edits intact: switching connection
+/// opens another tab instead of re-pointing it, so the UPDATEs can never reach the new database.
 #[test]
-fn switching_connection_refuses_a_tab_with_staged_edits() {
+fn switching_connection_keeps_a_tabs_staged_edits_on_their_database() {
     let (mut app, other) = app_with_two_connections();
     assert!(app.tab().edits.has_pending());
 
     app.bind_connection(other, false);
 
-    assert_eq!(app.tab().conn_id.as_deref(), Some("edit-connection"));
-    assert!(app.error.as_deref().unwrap_or("").contains("staged edits"));
+    assert_eq!(app.tab().conn_id.as_deref(), Some("other-connection"));
+    assert!(!app.tab().edits.has_pending());
+    assert_eq!(app.tabs[0].conn_id.as_deref(), Some("edit-connection"));
+    assert!(app.tabs[0].edits.has_pending());
 }
 
-/// A plain query tab follows the chosen connection, dropping the previous database's
-/// result and edit source.
+/// A plain query tab keeps its result and edit source too: only its own connection ever
+/// fills or edits it.
 #[test]
-fn switching_connection_clears_a_query_tabs_old_result() {
+fn switching_connection_keeps_a_query_tabs_result_with_its_connection() {
     let (mut app, other) = app_with_two_connections();
     app.tab_mut().edits.clear();
+    let before = app.tabs.len();
+    let had_result = app.tab().result.is_some();
 
     app.bind_connection(other, false);
 
+    assert_eq!(app.tabs.len(), before + 1);
     assert_eq!(app.tab().conn_id.as_deref(), Some("other-connection"));
     assert!(app.tab().result.is_none());
-    assert!(app.tab().edits.source.is_none());
+    assert_eq!(app.tabs[0].result.is_some(), had_result);
+    assert_eq!(app.tabs[0].conn_id.as_deref(), Some("edit-connection"));
+}
+
+/// The tab bar shows one connection's tabs, and clicking back on a connection returns to the
+/// tab the user left there instead of piling up new ones.
+#[test]
+fn tabs_are_scoped_to_their_connection_and_switching_back_returns_to_the_last_one() {
+    let (mut app, other) = app_with_two_connections();
+    app.tab_mut().edits.clear();
+    app.new_tab();
+    let remembered = app.tab().id; // second tab on edit-connection, the one in use
+    app.bind_connection(other, false);
+    let on_other = app.tab().id;
+
+    assert!(!app.tab_in_current_connection(0));
+    assert!(!app.tab_in_current_connection(1));
+    assert!(app.tab_in_current_connection(app.active_query_tab));
+
+    let tabs_before = app.tabs.len();
+    app.bind_connection(0, false);
+
+    assert_eq!(app.tabs.len(), tabs_before, "no extra tab");
+    assert_eq!(app.tab().id, remembered);
+    let on_other_idx = app.tabs.iter().position(|t| t.id == on_other).unwrap();
+    assert!(!app.tab_in_current_connection(on_other_idx));
+}
+
+/// Closing the last tab of a connection leaves that connection a blank tab; it must not
+/// drop the user into another connection's tab.
+#[test]
+fn closing_a_connections_last_tab_stays_on_that_connection() {
+    let (mut app, other) = app_with_two_connections();
+    app.tab_mut().edits.clear();
+    app.bind_connection(other, false);
+    assert_eq!(app.tab().conn_id.as_deref(), Some("other-connection"));
+
+    app.close_tab(app.active_query_tab);
+
+    assert_eq!(app.tab().conn_id.as_deref(), Some("other-connection"));
+    assert!(app.tab().sql.is_empty());
+    assert_eq!(app.tabs.len(), 2, "the other connection's tab is untouched");
+}
+
+#[test]
+fn close_other_and_close_all_only_touch_the_current_connection() {
+    let (mut app, other) = app_with_two_connections();
+    app.tab_mut().edits.clear();
+    app.new_tab();
+    app.new_tab(); // three tabs on edit-connection
+    app.bind_connection(other, false);
+    app.new_tab(); // two tabs on other-connection
+    let keep = app.active_query_tab;
+
+    app.close_other_tabs(keep);
+    assert_eq!(
+        app.tabs.len(),
+        4,
+        "3 on the first connection + the kept one"
+    );
+    assert_eq!(
+        app.tabs
+            .iter()
+            .filter(|t| t.conn_id.as_deref() == Some("edit-connection"))
+            .count(),
+        3
+    );
+
+    app.close_all_tabs();
+    assert_eq!(app.tab().conn_id.as_deref(), Some("other-connection"));
+    assert_eq!(
+        app.tabs
+            .iter()
+            .filter(|t| t.conn_id.as_deref() == Some("edit-connection"))
+            .count(),
+        3
+    );
+    assert_eq!(app.tabs.len(), 4);
 }
 
 #[test]
@@ -7594,6 +7730,41 @@ fn every_draft_kind_is_listed_in_the_explorer() {
             QueryTabKind::Procedure
         ]
     );
+}
+
+#[test]
+fn status_bar_shows_result_statistics_once_and_groups_connection_metadata() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = app_with_staged_edit();
+    app.tab_mut().kind = crate::components::QueryTabKind::Table;
+    let mut result = fake_result(100, 45);
+    result.stats.elapsed_ms = 210.9;
+    app.status_msg = result_status(&result);
+    app.tab_mut().set_result(result);
+    app.tab_mut().edits.clear();
+    app.active_connections[0].name = "valet-p".into();
+
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1000.0, 60.0))
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.status_bar(ui, &mut Vec::new());
+        });
+    harness.run_steps(3);
+    let summary = harness.get_by_label("100 rows · 45 columns · 211 ms").rect();
+    assert!(harness.query_by_label("100 rows · 211 ms").is_none());
+    let connection = harness.get_by_label("valet-p").rect();
+    let version = harness
+        .get_by_label(&format!("v{}", crate::update::CURRENT_VERSION))
+        .rect();
+    assert!(summary.right() < connection.left() && connection.right() < version.left());
+    assert!((summary.center().y - connection.center().y).abs() < 1.0);
 }
 
 /// The status bar with a result, a multi-row selection, a staged edit and a running clock.

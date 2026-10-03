@@ -156,7 +156,7 @@ impl DbGuiApp {
             .show_inside(root, |ui| {
                 if placement == QueryEditorPlacement::Bottom {
                     if mode_bar_height > 0.0 {
-                        self.view_mode_bar(ui, QueryEditorPlacement::Top, false, actions);
+                        self.view_mode_bar(ui, QueryEditorPlacement::Top, actions);
                     }
                     footer(self, ui, QueryEditorPlacement::Top, actions);
                 }

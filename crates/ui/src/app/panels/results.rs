@@ -118,18 +118,8 @@ impl DbGuiApp {
                 style::workspace_frame(palette::PANEL())
                     .inner_margin(egui::Margin::symmetric(6, 4)),
             )
-            .show_separator_line(true)
+            .show_separator_line(false)
             .show_inside(root, |ui| {
-                let scope = if self.result_filter_runs_on_database(idx) {
-                    "Filter scope: entire table"
-                } else {
-                    "Filter scope: loaded rows only"
-                };
-                ui.label(
-                    egui::RichText::new(scope)
-                        .small()
-                        .color(palette::TEXT_WEAK()),
-                );
                 event = filter::ui(ui, &mut self.tabs[idx].filter, &col_names);
             });
 
@@ -146,7 +136,6 @@ impl DbGuiApp {
         &mut self,
         root: &mut egui::Ui,
         placement: QueryEditorPlacement,
-        force_top: bool,
         actions: &mut Vec<Action>,
     ) {
         let idx = self.active_query_tab;
@@ -199,12 +188,15 @@ impl DbGuiApp {
         };
         panel
             .resizable(false)
-            .exact_size(38.0)
+            // 28-point tabs plus padding, stroke and outer gutters. Keep the minimum below
+            // the frame's content size so egui does not extend the card over the log seam.
+            .default_size(42.0)
+            .max_size(42.0)
             .frame(
                 style::workspace_frame(palette::PANEL())
                     .inner_margin(egui::Margin::symmetric(6, 4)),
             )
-            .show_separator_line(true)
+            .show_separator_line(false)
             .show_inside(root, |ui| {
                 let bar_width = ui.available_width();
                 let density = BarDensity::for_width(bar_width);
@@ -223,7 +215,8 @@ impl DbGuiApp {
                                 (icons::diagram(), "Chart"),
                             ],
                             selected,
-                            270.0,
+                            // Leave the filter button its place at the right edge.
+                            (bar_width - 48.0).clamp(150.0, 270.0),
                             false,
                         );
                         self.tabs[idx].view = modes[choice];
@@ -242,7 +235,7 @@ impl DbGuiApp {
                             ui,
                             &[(icons::table(), "Data"), (icons::column(), "Structure")],
                             selected,
-                            200.0,
+                            (bar_width - 48.0).clamp(130.0, 200.0),
                             false,
                         );
                         self.tabs[idx].view = modes[choice];
@@ -647,10 +640,13 @@ impl DbGuiApp {
                             &fk_cols,
                         );
                         if resp.near_end && can_load_more {
-                            actions.push(Action::LoadMoreRows);
+                            actions.push(Action::ForTab {
+                                tab_id,
+                                action: Box::new(Action::LoadMoreRows),
+                            });
                         }
                         if let Some(cmd) = resp.sort {
-                            actions.push(match cmd {
+                            let action = match cmd {
                                 crate::grid::SortCmd::Asc(col) => {
                                     Action::SetSort { col, asc: true }
                                 }
@@ -658,6 +654,10 @@ impl DbGuiApp {
                                     Action::SetSort { col, asc: false }
                                 }
                                 crate::grid::SortCmd::Clear => Action::ClearSort,
+                            };
+                            actions.push(Action::ForTab {
+                                tab_id,
+                                action: Box::new(action),
                             });
                         }
                         if let Some(col) = resp.filter_column {

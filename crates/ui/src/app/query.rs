@@ -869,7 +869,7 @@ impl DbGuiApp {
                 if let Some(limit) = window.limit {
                     if let Some(sql) = dbcore::with_page_window(kind, &self.tabs[idx].sql, limit, 0)
                     {
-                        self.tabs[idx].replace_sql(sql);
+                        self.tabs[idx].replace_paged_sql(sql);
                     }
                 }
             }
@@ -894,7 +894,7 @@ impl DbGuiApp {
         let Some(sql) = dbcore::with_page_window(kind, &self.tabs[idx].sql, limit, offset) else {
             return;
         };
-        self.tabs[idx].replace_sql(sql);
+        self.tabs[idx].replace_paged_sql(sql);
         // The rewrite preserves the simple-select shape, so the result stays editable.
         self.tabs[idx].edits.pending_source = self.derive_edit_source(idx);
         self.workspace_dirty = true;

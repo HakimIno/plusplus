@@ -3,18 +3,6 @@ use dbcore::DbKind;
 use crate::icons;
 use crate::style::palette;
 
-fn compact_connection_label(name: &str) -> String {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return "DB".to_string();
-    }
-    let mut label: String = trimmed.chars().take(8).collect();
-    if trimmed.chars().count() > 8 {
-        label.push('…');
-    }
-    label
-}
-
 pub(crate) fn connection_tab_item(
     ui: &mut egui::Ui,
     name: &str,
@@ -23,7 +11,7 @@ pub(crate) fn connection_tab_item(
     connected: bool,
     drag_float_y: Option<f32>,
 ) -> egui::Response {
-    const CONN_ICON_SIZE: f32 = 22.0;
+    const CONN_ICON_SIZE: f32 = 18.0;
 
     #[allow(clippy::too_many_arguments)]
     fn paint_connection_chip(
@@ -33,32 +21,26 @@ pub(crate) fn connection_tab_item(
         kind: DbKind,
         label: &std::sync::Arc<egui::Galley>,
         fill: egui::Color32,
-        stroke: egui::Stroke,
+        selected: bool,
         text_color: egui::Color32,
         connected: bool,
     ) {
-        painter.rect(
-            rect,
-            egui::CornerRadius::same(4),
-            fill,
-            stroke,
-            egui::StrokeKind::Outside,
-        );
-        if connected {
-            painter.circle_filled(
-                rect.left_top() + egui::vec2(5.0, 5.0),
-                2.0,
-                palette::SUCCESS(),
+        painter.rect_filled(rect, egui::CornerRadius::same(6), fill);
+        if selected {
+            let indicator = egui::Rect::from_center_size(
+                egui::pos2(rect.left() - 3.0, rect.center().y),
+                egui::vec2(2.0, 18.0),
             );
+            painter.rect_filled(indicator, 1.0, palette::ACCENT());
         }
-        let content_rect = rect.shrink2(egui::vec2(3.0, 4.0));
+        let content_rect = rect.shrink2(egui::vec2(4.0, 4.0));
         let icon_rect = egui::Rect::from_center_size(
-            egui::pos2(content_rect.center().x, content_rect.top() + 11.0),
-            egui::vec2(CONN_ICON_SIZE, CONN_ICON_SIZE),
+            egui::pos2(content_rect.center().x, rect.top() + 14.0),
+            egui::Vec2::splat(CONN_ICON_SIZE),
         );
         egui::Image::new(icons::db_kind_icon(kind))
             .fit_to_exact_size(icon_rect.size())
-            .tint(icons::db_kind_icon_tint())
+            .tint(text_color)
             .paint_at(ui, icon_rect);
         if connected {
             let marker = icon_rect.right_bottom() - egui::vec2(1.0, 1.0);
@@ -67,12 +49,12 @@ pub(crate) fn connection_tab_item(
         }
         let label_pos = egui::pos2(
             content_rect.center().x - label.size().x * 0.5,
-            content_rect.top() + 25.0,
+            rect.bottom() - 5.0 - label.size().y,
         );
         painter.galley(label_pos, label.clone(), text_color);
     }
 
-    let size = egui::vec2(40.0, 44.0);
+    let size = egui::vec2(44.0, 46.0);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
     let dragging = drag_float_y.is_some();
 
@@ -108,13 +90,8 @@ pub(crate) fn connection_tab_item(
 
     if ui.is_rect_visible(rect) {
         if let Some(float_y) = drag_float_y {
-            ui.painter().rect(
-                rect,
-                egui::CornerRadius::same(4),
-                palette::SURFACE_HOVER(),
-                egui::Stroke::new(1.0_f32, palette::BORDER()),
-                egui::StrokeKind::Outside,
-            );
+            ui.painter()
+                .rect_filled(rect, egui::CornerRadius::same(6), palette::SURFACE());
             let float_rect =
                 egui::Rect::from_min_size(egui::pos2(rect.left(), float_y), rect.size());
             let float_painter = egui::Painter::new(
@@ -129,7 +106,7 @@ pub(crate) fn connection_tab_item(
                 kind,
                 &label,
                 fill,
-                stroke,
+                selected,
                 text_color,
                 connected,
             );
@@ -141,7 +118,7 @@ pub(crate) fn connection_tab_item(
                 kind,
                 &label,
                 fill,
-                stroke,
+                selected,
                 text_color,
                 connected,
             );

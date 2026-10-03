@@ -44,17 +44,6 @@ fn format_number(value: f64) -> String {
     }
 }
 
-/// `3.2 ms`, `128 ms`, `1.40 s`.
-fn format_duration_ms(ms: f64) -> String {
-    if ms < 10.0 {
-        format!("{ms:.1} ms")
-    } else if ms < 1000.0 {
-        format!("{ms:.0} ms")
-    } else {
-        format!("{:.2} s", ms / 1000.0)
-    }
-}
-
 /// 1-based `(line, column, selected chars)` of the SQL editor's primary cursor. Counts chars,
 /// not bytes, so Thai text reports the position a person would count.
 fn caret_position(sql: &str, cursor: &std::ops::Range<usize>) -> (usize, usize, usize) {
@@ -85,7 +74,9 @@ fn as_number(value: &dbcore::Value) -> Option<f64> {
 fn selection_stats(tab: &QueryTab) -> Option<SelectionStats> {
     let result = tab.result.as_ref()?;
     let (_, col) = tab.selection.cursor()?;
-    if tab.selection.len() < 2 || tab.selection.len() > MAX_STAT_ROWS || col >= result.column_count()
+    if tab.selection.len() < 2
+        || tab.selection.len() > MAX_STAT_ROWS
+        || col >= result.column_count()
     {
         return None;
     }
@@ -110,7 +101,7 @@ fn selection_stats(tab: &QueryTab) -> Option<SelectionStats> {
 }
 
 fn dot(ui: &mut egui::Ui) {
-    ui.colored_label(palette::TEXT_FAINT(), "·");
+    chip(ui, "·", palette::TEXT_FAINT());
 }
 
 fn chip(ui: &mut egui::Ui, text: impl Into<String>, color: egui::Color32) -> egui::Response {
@@ -118,17 +109,14 @@ fn chip(ui: &mut egui::Ui, text: impl Into<String>, color: egui::Color32) -> egu
 }
 
 impl DbGuiApp {
-    /// Thin status strip pinned to the very bottom edge. Left: what just happened, the filter
-    /// and the selection (with a numeric summary). Right, from the edge: version, the tab's
-    /// connection, its last result's size and time, the editor caret, staged changes, and a
-    /// running query's clock with a cancel button.
+    /// Thin status strip pinned to the very bottom edge. Left: the operation or result
+    /// summary, filter and selection. Right: connection, version, editor caret, staged changes
+    /// and the running query clock. Result size and time appear once, in the left summary.
     pub(in crate::app) fn status_bar(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
         egui::Panel::bottom("status_bar").show_inside(root, |ui| {
             ui.add_space(2.0);
-            let row = egui::Rect::from_min_size(
-                ui.cursor().min,
-                egui::vec2(ui.available_width(), ROW_H),
-            );
+            let row =
+                egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), ROW_H));
             ui.allocate_rect(row, egui::Sense::hover());
 
             // The right cluster is laid out first so the left one can take what it leaves.
@@ -144,7 +132,10 @@ impl DbGuiApp {
             );
             let left_rect = egui::Rect::from_min_max(
                 row.min,
-                egui::pos2((right.response.rect.left() - 12.0).max(row.min.x), row.max.y),
+                egui::pos2(
+                    (right.response.rect.left() - 12.0).max(row.min.x),
+                    row.max.y,
+                ),
             );
             ui.scope_builder(
                 egui::UiBuilder::new()
@@ -189,9 +180,10 @@ impl DbGuiApp {
         if tab.filter.is_active() && tab.row_order.len() != res.row_count() {
             dot(ui);
             icons::show_colored(ui, icons::filter(), 13.0, palette::ACCENT());
-            ui.colored_label(
-                palette::ACCENT(),
+            chip(
+                ui,
                 format!("{} of {} rows", tab.row_order.len(), res.row_count()),
+                palette::ACCENT(),
             );
         }
         if !tab.selection.is_empty() {
@@ -204,17 +196,18 @@ impl DbGuiApp {
             } else {
                 String::new()
             };
-            ui.colored_label(palette::TEXT_WEAK(), label);
+            chip(ui, label, palette::TEXT_WEAK());
             if let Some(stats) = selection_stats(tab) {
                 dot(ui);
-                ui.colored_label(
-                    palette::TEXT_WEAK(),
+                chip(
+                    ui,
                     format!(
                         "Count {} · Sum {} · Avg {}",
                         stats.count,
                         format_number(stats.sum),
                         format_number(stats.average())
                     ),
+                    palette::TEXT_WEAK(),
                 );
             }
         }
@@ -239,6 +232,7 @@ impl DbGuiApp {
                 .find(|conn| conn.config_id == id)
         });
         if let Some(conn) = connection {
+            dot(ui);
             let read_only = self.tab_connection_is_read_only(self.active_query_tab);
             let label = if read_only {
                 format!("{} · Read-only", conn.name)
@@ -252,27 +246,9 @@ impl DbGuiApp {
             ));
         }
 
-        // The last result's size and time.
-        if let Some(result) = tab.result.as_ref().filter(|_| !self.is_tab_querying(tab_id)) {
-            let size = match result.stats.rows_affected {
-                Some(n) => format!("{n} affected"),
-                None => format!(
-                    "{} row{}{}",
-                    result.row_count(),
-                    if result.row_count() == 1 { "" } else { "s" },
-                    if result.truncated { "+" } else { "" }
-                ),
-            };
-            chip(
-                ui,
-                format!("{size} · {}", format_duration_ms(result.stats.elapsed_ms)),
-                palette::TEXT_WEAK(),
-            )
-            .on_hover_text("Rows returned and how long the last query took");
-        }
-
         // The SQL editor's caret.
         if self.tab_has_sql_editor() {
+            dot(ui);
             let (line, column, selected) = caret_position(&tab.sql, &tab.primary_cursor);
             let mut text = format!("Ln {line}, Col {column}");
             if selected > 0 {
@@ -283,6 +259,7 @@ impl DbGuiApp {
 
         // Staged changes, one click from their preview.
         if tab.edits.has_pending() {
+            dot(ui);
             let shortcut = if cfg!(target_os = "macos") {
                 "⌘S"
             } else {
@@ -307,6 +284,7 @@ impl DbGuiApp {
 
         // A running query: its clock, and a way to stop it.
         if self.is_tab_querying(tab_id) {
+            dot(ui);
             let started = self.query_jobs.get(&tab_id).map(|job| job.started);
             // Right-to-left: the cancel button first, so it sits right of the clock.
             let cancel = ui
@@ -335,6 +313,7 @@ impl DbGuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::format_duration_ms;
 
     #[test]
     fn numbers_group_thousands_and_trim_zeros() {

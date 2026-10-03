@@ -1,6 +1,6 @@
 //! Pager rendering and interaction.
 
-use crate::app::{Action, DbGuiApp, PageNav, MAX_FETCH_ROWS};
+use crate::app::{Action, DbGuiApp, MAX_FETCH_ROWS, PageNav};
 use crate::components;
 use crate::icons;
 use crate::style;
@@ -25,6 +25,8 @@ struct PagerDraft {
     offset: String,
     focus_limit: bool,
 }
+
+const PAGER_FORM_W: f32 = 128.0;
 
 fn parse_pager_window(limit: &str, offset: &str) -> Result<(u64, u64), &'static str> {
     let parse = |value: &str| value.trim().replace([',', '_'], "").parse::<u64>();
@@ -180,7 +182,7 @@ impl DbGuiApp {
     }
 
     /// Server-side pager, right-aligned in the view-mode bar. The centre control opens a
-    /// compact Limit/Offset popover; values remain local until Go/Enter so editing never
+    /// compact Limit/Offset popover; values remain local until Load rows/Enter so editing never
     /// fires a query per keystroke. Page flips re-run only the requested server-side window.
     pub(super) fn pager(&self, ui: &mut egui::Ui, density: BarDensity, actions: &mut Vec<Action>) {
         let tab = self.tab();
@@ -257,7 +259,7 @@ impl DbGuiApp {
                 });
             }
             self.result_filter_button(ui, actions);
-            let pager_hint = format!(
+            let window_hint = format!(
                 "Limit {} · Offset {}",
                 group_digits(limit),
                 group_digits(win.offset)
@@ -291,19 +293,19 @@ impl DbGuiApp {
             let popup_frame = egui::Frame::popup(ui.style())
                 .fill(palette::PANEL())
                 .stroke(egui::Stroke::new(1.0_f32, palette::BORDER_STRONG()))
-                .corner_radius(egui::CornerRadius::same(14))
-                .inner_margin(egui::Margin::same(10));
+                .corner_radius(egui::CornerRadius::same(style::radius::WINDOW))
+                .inner_margin(egui::Margin::same(12));
             let popup = egui::Popup::from_toggle_button_response(&pager_button)
                 .id(popup_id)
                 .align(egui::RectAlign::TOP)
                 .align_alternatives(&[])
                 .gap(9.0)
-                .width(180.0)
+                .width(PAGER_FORM_W + 24.0)
                 .frame(popup_frame)
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                 .layout(egui::Layout::top_down(egui::Align::Min))
                 .show(|ui| {
-                    ui.set_width(160.0);
+                    ui.set_width(PAGER_FORM_W);
                     let mut draft = ui.ctx().data_mut(|data| {
                         data.get_temp::<PagerDraft>(draft_id).unwrap_or(PagerDraft {
                             limit: limit.to_string(),
@@ -312,59 +314,7 @@ impl DbGuiApp {
                         })
                     });
 
-                    let mut limit_response = None;
-                    egui::Grid::new(popup_id.with("fields"))
-                        .num_columns(2)
-                        .spacing(egui::vec2(8.0, 6.0))
-                        .show(ui, |ui| {
-                            ui.label(egui::RichText::new("Limit").strong());
-                            limit_response = Some(components::text_input(
-                                ui,
-                                &mut draft.limit,
-                                "Rows to load",
-                                110.0,
-                            ));
-                            ui.end_row();
-                            ui.label(egui::RichText::new("Offset").strong());
-                            components::text_input(ui, &mut draft.offset, "0", 110.0);
-                            ui.end_row();
-                        });
-                    if draft.focus_limit {
-                        if let Some(response) = limit_response {
-                            response.request_focus();
-                        }
-                        draft.focus_limit = false;
-                    }
-
-                    let parsed = parse_pager_window(&draft.limit, &draft.offset);
-                    if let Err(message) = parsed {
-                        ui.label(
-                            egui::RichText::new(message)
-                                .size(10.5)
-                                .color(palette::DANGER()),
-                        );
-                    } else {
-                        ui.add_space(2.0);
-                    }
-                    ui.add_space(4.0);
-                    let go = ui
-                        .add_enabled(
-                            idle && parsed.is_ok(),
-                            egui::Button::new(
-                                egui::RichText::new("Go").strong().color(palette::TEXT()),
-                            )
-                            .corner_radius(egui::CornerRadius::same(8))
-                            .min_size(egui::vec2(ui.available_width(), style::CONTROL_H)),
-                        )
-                        .clicked();
-                    let enter = ui.input_mut(|input| {
-                        input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
-                    });
-                    let submit = if (go || enter) && idle {
-                        parsed.ok()
-                    } else {
-                        None
-                    };
+                    let submit = pager_window_form(ui, &mut draft, idle);
                     ui.ctx().data_mut(|data| data.insert_temp(draft_id, draft));
                     if submit.is_some() {
                         ui.close();
@@ -391,7 +341,10 @@ impl DbGuiApp {
                 painter.line_segment([left, tip], stroke);
                 painter.line_segment([tip, right], stroke);
                 if let Some((limit, offset)) = response.inner {
-                    actions.push(Action::SetPageWindow { limit, offset });
+                    actions.push(Action::ForTab {
+                        tab_id: tab.id,
+                        action: Box::new(Action::SetPageWindow { limit, offset }),
+                    });
                 }
             }
 
@@ -409,12 +362,6 @@ impl DbGuiApp {
                         .color(palette::TEXT_WEAK()),
                 );
             }
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new(row_summary)
-                    .size(11.5)
-                    .color(palette::TEXT_WEAK()),
-            );
         });
     }
 }

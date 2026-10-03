@@ -23,7 +23,7 @@ mod editor_find;
 mod erd;
 mod import;
 mod live_log;
-mod pager;
+pub(in crate::app) mod pager;
 mod query_console;
 mod query_plan;
 mod query_workspace;

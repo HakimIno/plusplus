@@ -2,9 +2,22 @@
 
 use super::*;
 
+impl ConnEditor {
+    pub(super) fn select_provider(&mut self, kind: DbKind) {
+        if self.is_new && self.config.name == format!("New {}", self.config.kind.label()) {
+            self.config.name = format!("New {}", kind.label());
+        }
+        self.config.kind = kind;
+        self.config.port = kind.default_port();
+        self.test_state = ConnTestState::Untested;
+        self.selecting_provider = false;
+    }
+}
+
 impl DbGuiApp {
-    /// Bind the active tab to a saved connection. Connects in the background when the
-    /// connection isn't live yet (or when `force`, e.g. an explicit "Connect").
+    /// Switch to a saved connection's tabs (see [`Self::switch_to_connection_tabs`]). Connects
+    /// in the background when the connection isn't live yet (or when `force`, e.g. an explicit
+    /// "Connect").
     pub(super) fn bind_connection(&mut self, idx: usize, force: bool) {
         let Some(cfg) = self.connections.get(idx) else {
             return;
@@ -12,48 +25,9 @@ impl DbGuiApp {
         let id = cfg.id.clone();
         let name = cfg.name.clone();
         let live = self.active_connections.iter().any(|c| c.config_id == id);
-        if self.tab().conn_id.as_deref() != Some(id.as_str()) {
-            let kind = self.tab().kind;
-            if !matches!(
-                kind,
-                crate::components::QueryTabKind::Query | crate::components::QueryTabKind::Diagram
-            ) {
-                // A table / view / routine tab belongs to the database it was opened from:
-                // its SQL is written in that dialect and its rows edit that table. Pointing
-                // it at another connection would run the one against the wrong database, so
-                // the new connection gets a fresh query tab instead.
-                let tab_id = self.next_tab_id;
-                self.next_tab_id += 1;
-                self.tabs.push(QueryTab::new(tab_id, String::new()));
-                self.active_query_tab = self.tabs.len() - 1;
-            } else if self.tab().edits.has_pending() {
-                self.error = Some(
-                    "Save or discard this tab's staged edits before switching its connection."
-                        .into(),
-                );
-                return;
-            } else {
-                self.cancel_tab_query(self.tab().id);
-                // The result on screen, its edit source and its paging came from the previous
-                // database; keeping them would let an edit or a load-more reach the new one.
-                let tab = self.tab_mut();
-                tab.result = None;
-                tab.clear_batch_results();
-                tab.row_order.clear();
-                tab.selection.clear();
-                tab.edits.clear();
-                tab.edits.source = None;
-                tab.edits.pending_source = None;
-                tab.page_exhausted = false;
-                tab.total_rows = None;
-                tab.server_filter_predicate = None;
-            }
-        }
-        self.tab_mut().conn_id = Some(id.clone());
-        // A portable diagram can be retargeted from the normal connection switcher. Keep
-        // its refresh/apply routing in sync with the tab while leaving the design untouched.
-        if let Some(diagram) = self.tab_mut().diagram.as_mut() {
-            diagram.conn_id = id.clone();
+        let leaving = self.tab().conn_id.clone();
+        if leaving.as_deref() != Some(id.as_str()) {
+            self.switch_to_connection_tabs(leaving, &id);
         }
         self.workspace_dirty = true;
         if force || !live {

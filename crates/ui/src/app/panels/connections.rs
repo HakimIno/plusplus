@@ -21,19 +21,18 @@ fn with_field_status<R>(
 ) -> R {
     ui.scope(|ui| {
         if let Some(ok) = status {
-            let (stroke_color, fill_color) = if ok {
+            let (stroke, fill_color) = if ok {
                 (
-                    egui::Color32::from_rgb(58, 178, 108),
+                    egui::Stroke::NONE,
                     egui::Color32::from_rgba_unmultiplied(58, 178, 108, 42),
                 )
             } else {
                 let danger = palette::DANGER();
                 (
-                    danger,
+                    egui::Stroke::new(1.5_f32, danger),
                     egui::Color32::from_rgba_unmultiplied(danger.r(), danger.g(), danger.b(), 48),
                 )
             };
-            let stroke = egui::Stroke::new(1.5_f32, stroke_color);
             let visuals = ui.visuals_mut();
             visuals.extreme_bg_color = fill_color;
             visuals.widgets.inactive.bg_fill = fill_color;
@@ -108,7 +107,7 @@ impl DbGuiApp {
     ) {
         egui::Panel::left("connection_tabs")
             .resizable(false)
-            .exact_size(52.0)
+            .exact_size(56.0)
             .frame(
                 egui::Frame::new()
                     .inner_margin(egui::Margin::symmetric(6, 2))
@@ -126,6 +125,7 @@ impl DbGuiApp {
                         egui::ScrollArea::vertical()
                             .id_salt("active_connection_tabs")
                             .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 4.0;
                                 let bound_id = self.tabs[self.active_query_tab].conn_id.clone();
                                 let mut rects = Vec::with_capacity(self.connections.len());
                                 let pointer_y = ui.ctx().pointer_interact_pos().map(|p| p.y);
@@ -152,7 +152,8 @@ impl DbGuiApp {
                                         drag_float_y,
                                     )
                                     .on_hover_text(format!(
-                                        "{}\nSafety: {} — {}",
+                                        "{}\n{}\nSafety: {} — {}",
+                                        conn.name,
                                         conn.target_summary(),
                                         conn.safety_profile.label(),
                                         conn.safety_profile.description()
@@ -308,7 +309,6 @@ impl DbGuiApp {
                                         }
                                     });
                                     rects.push(resp.rect);
-                                    ui.add_space(2.0);
                                 }
 
                                 self.handle_connection_drag(ui, &rects, actions);
@@ -408,10 +408,7 @@ impl DbGuiApp {
                             .enumerate()
                             {
                                 if components::db_kind_card(ui, kind).clicked() {
-                                    editor.config.kind = kind;
-                                    editor.config.port = kind.default_port();
-                                    editor.test_state = ConnTestState::Untested;
-                                    editor.selecting_provider = false;
+                                    editor.select_provider(kind);
                                 }
                                 if (index + 1) % 4 == 0 {
                                     ui.end_row();
@@ -439,11 +436,6 @@ impl DbGuiApp {
                             egui::RichText::new(editor.config.kind.label())
                                 .size(13.0)
                                 .color(palette::TEXT()),
-                        );
-                        ui.label(
-                            egui::RichText::new("Connection details")
-                                .size(10.5)
-                                .color(palette::TEXT_FAINT()),
                         );
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
