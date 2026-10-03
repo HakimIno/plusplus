@@ -214,8 +214,10 @@ impl DbGuiApp {
     /// it off the first row), so the grid would say "No columns" and "+ Row" would have nothing
     /// to add to. Fill the columns in from the table's introspected definition once it is known.
     pub(super) fn fill_empty_result_columns(&mut self) {
-        let visible = [Some(self.active_query_tab), self.split_tab];
-        for idx in visible.into_iter().flatten() {
+        let visible: Vec<usize> = std::iter::once(self.active_query_tab)
+            .chain(self.split_panes.iter().copied())
+            .collect();
+        for idx in visible {
             let Some(tab) = self.tabs.get(idx) else {
                 continue;
             };
@@ -247,8 +249,10 @@ impl DbGuiApp {
     /// Install column constraints on the visible tabs' edits once their table metadata is
     /// known. Cheap per frame: a tab is skipped once synced for its current result.
     pub(super) fn sync_edit_rules(&mut self) {
-        let visible = [Some(self.active_query_tab), self.split_tab];
-        for idx in visible.into_iter().flatten() {
+        let visible: Vec<usize> = std::iter::once(self.active_query_tab)
+            .chain(self.split_panes.iter().copied())
+            .collect();
+        for idx in visible {
             let Some(tab) = self.tabs.get(idx) else {
                 continue;
             };

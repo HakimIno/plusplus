@@ -204,9 +204,14 @@ pub struct WorkspaceTab {
     /// legacy tab with a source as a table and every other legacy tab as a query.
     #[serde(default)]
     pub kind: Option<WorkspaceTabKind>,
-    /// Whether this tab belongs to the right-hand split group.
+    /// Whether this tab belongs to a split column. Kept alongside `pane` so a workspace saved by
+    /// this build still opens as a two-pane split in an older one.
     #[serde(default)]
     pub split_pane: bool,
+    /// Workspace column that owns this tab (0 = main strip). Absent in older workspaces, which
+    /// only have the `split_pane` flag.
+    #[serde(default)]
+    pub pane: usize,
     /// Last user-selected SQL editor height, in egui points. `None` uses the contextual default.
     #[serde(default)]
     pub editor_size: Option<f32>,
@@ -229,9 +234,16 @@ pub struct WorkspaceTab {
 pub struct Workspace {
     #[serde(default)]
     pub active_tab: usize,
-    /// Saved-tab index of the active tab in the right-hand split group.
+    /// Saved-tab index of the active tab in the first split column.
     #[serde(default)]
     pub active_split_tab: Option<usize>,
+    /// Saved-tab index of the active tab in every split column, left to right (pane 1 first).
+    /// Empty in workspaces from before more than two columns were supported.
+    #[serde(default)]
+    pub active_pane_tabs: Vec<usize>,
+    /// Saved-tab index last selected for each connection. Older workspaces omit this map.
+    #[serde(default)]
+    pub connection_active_tabs: std::collections::BTreeMap<String, usize>,
     #[serde(default)]
     pub tabs: Vec<WorkspaceTab>,
 }
@@ -279,6 +291,8 @@ mod tests {
         let ws = Workspace {
             active_tab: 1,
             active_split_tab: Some(0),
+            active_pane_tabs: vec![0, 1],
+            connection_active_tabs: [("conn-abc".into(), 0)].into(),
             tabs: vec![
                 WorkspaceTab {
                     title: "Query 1".into(),
@@ -286,6 +300,7 @@ mod tests {
                     sql: "SELECT * FROM users;".into(),
                     kind: Some(WorkspaceTabKind::Table),
                     split_pane: true,
+                    pane: 2,
                     editor_size: Some(184.0),
                     editor_split: true,
                     editor_split_size: Some(320.0),
@@ -302,6 +317,7 @@ mod tests {
                     sql: "SELECT 1;".into(),
                     kind: Some(WorkspaceTabKind::Query),
                     split_pane: false,
+                    pane: 0,
                     editor_size: None,
                     editor_split: false,
                     editor_split_size: None,
@@ -316,11 +332,14 @@ mod tests {
 
         assert_eq!(back.active_tab, 1);
         assert_eq!(back.active_split_tab, Some(0));
+        assert_eq!(back.connection_active_tabs.get("conn-abc"), Some(&0));
         assert_eq!(back.tabs.len(), 2);
         assert_eq!(back.tabs[0].conn_id.as_deref(), Some("conn-abc"));
         assert_eq!(back.tabs[0].sql, "SELECT * FROM users;");
         assert_eq!(back.tabs[0].kind, Some(WorkspaceTabKind::Table));
         assert!(back.tabs[0].split_pane);
+        assert_eq!(back.tabs[0].pane, 2);
+        assert_eq!(back.active_pane_tabs, vec![0, 1]);
         assert_eq!(back.tabs[0].editor_size, Some(184.0));
         assert!(back.tabs[0].editor_split);
         assert_eq!(back.tabs[0].editor_split_size, Some(320.0));
@@ -369,6 +388,7 @@ mod tests {
         let json = br#"{"tabs":[{"sql":"SELECT 1;"}]}"#;
         let ws: Workspace = serde_json::from_slice(json).unwrap();
         assert_eq!(ws.active_tab, 0);
+        assert!(ws.connection_active_tabs.is_empty());
         assert_eq!(ws.tabs.len(), 1);
         assert_eq!(ws.tabs[0].sql, "SELECT 1;");
         assert_eq!(ws.tabs[0].title, "");

@@ -2265,7 +2265,9 @@ fn split_filter_actions_stay_with_the_originating_pane() {
     app.tab_mut().set_result(fake_result(3, 3));
     let right = app.active_query_tab;
     let right_id = app.tab().id;
-    app.split_tab = Some(right);
+    app.tabs[right].pane = 1;
+    app.split_panes = vec![right];
+    app.reset_split_ratios();
     app.active_query_tab = 0;
 
     app.apply_action(Action::ToggleFilter(right_id));
@@ -2647,7 +2649,7 @@ fn dragging_a_tab_to_the_workspace_opens_a_split_pane() {
         }],
     );
 
-    let split = app.split_tab.expect("drop did not create a split pane");
+    let split = app.split_panes.first().copied().expect("drop did not create a split pane");
     assert_eq!(app.tabs.len(), 2, "dragged tab should move, not duplicate");
     assert_eq!(app.tabs[split].sql, "SELECT 'right'");
     assert_eq!(app.tabs[app.active_query_tab].sql, "SELECT 'left'");
@@ -2713,7 +2715,7 @@ fn dropping_a_schema_table_into_an_open_split_adds_a_right_tab() {
     app.show_welcome = false;
     connect_fake(&mut app, fake_schema(2, 3));
     app.open_split_workspace();
-    assert_eq!(app.split_tab_ids.len(), 1);
+    assert_eq!(app.tabs.iter().filter(|tab| tab.pane > 0).count(), 1);
 
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
     let run = |app: &mut DbGuiApp, events: Vec<egui::Event>| {
@@ -2758,8 +2760,8 @@ fn dropping_a_schema_table_into_an_open_split_adds_a_right_tab() {
         }],
     );
 
-    assert_eq!(app.split_tab_ids.len(), 2);
-    assert_eq!(app.tabs[app.split_tab.unwrap()].title, "table_1");
+    assert_eq!(app.tabs.iter().filter(|tab| tab.pane > 0).count(), 2);
+    assert_eq!(app.tabs[app.split_panes[0]].title, "table_1");
 }
 
 #[test]
@@ -2774,7 +2776,7 @@ fn schema_table_payload_opens_an_editable_table_in_split() {
         pinned: false,
     });
 
-    let split = app.split_tab.expect("table drop did not create a split");
+    let split = app.split_panes.first().copied().expect("table drop did not create a split");
     assert_eq!(app.tabs[split].kind, crate::components::QueryTabKind::Table);
     assert_eq!(app.tabs[split].conn_id.as_deref(), Some("c1"));
     assert!(app.tabs[split].sql.contains("table_1"));
@@ -2862,6 +2864,115 @@ fn legacy_workspace_kind_falls_back_from_source() {
 }
 
 #[test]
+fn restored_workspace_keeps_each_connections_selected_tab() {
+    use egui_kittest::kittest::Queryable;
+
+    let (mut app, other) = app_with_two_connections();
+    app.tab_mut().edits = Default::default();
+    app.tab_mut().kind = crate::components::QueryTabKind::Query;
+    app.tab_mut().title = "a_selected".into();
+    app.new_tab();
+    app.tab_mut().title = "a_other".into();
+    app.select_tab(0);
+    app.bind_connection(other, false);
+    app.tab_mut().title = "b_selected".into();
+    let encoded = serde_json::to_vec(&app.snapshot_workspace()).unwrap();
+    let saved = serde_json::from_slice(&encoded).unwrap();
+
+    // Startup restores bindings and selection even while every connection is offline.
+    app.active_connections.clear();
+    app.restore_workspace_from(saved);
+    assert_eq!(app.tab().title, "b_selected");
+    assert!(!app.tab_in_current_connection(0));
+    assert!(!app.tab_in_current_connection(1));
+    assert!(app.tab_in_current_connection(2));
+    app.switch_to_connection_tabs(Some("other-connection".into()), "edit-connection");
+    assert_eq!(
+        app.tab().title,
+        "a_selected",
+        "remember the selected tab, not the last array entry"
+    );
+    assert!(app.tab_in_current_connection(0));
+    assert!(app.tab_in_current_connection(1));
+    assert!(!app.tab_in_current_connection(2));
+
+    app.show_welcome = false;
+    let mut harness = egui_kittest::Harness::builder().build_ui(move |ui| {
+        egui_extras::install_image_loaders(ui.ctx());
+        app.query_tab_bar(ui, &mut Vec::new());
+    });
+    harness.run_steps(3);
+    harness.get_by_label("a_selected");
+    harness.get_by_label("a_other");
+    assert!(harness.query_by_label("b_selected").is_none());
+}
+
+#[test]
+fn restored_split_tab_strips_filter_by_their_own_connection() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = DbGuiApp::construct();
+    app.tabs.clear();
+    for (id, title, conn, pane) in [
+        (0, "a_main", "a", 0),
+        (1, "b_main", "b", 0),
+        (2, "a_side", "a", 1),
+        (3, "b_side", "b", 1),
+    ] {
+        let mut tab = QueryTab::new(id, title.into());
+        tab.conn_id = Some(conn.into());
+        tab.pane = pane;
+        app.tabs.push(tab);
+    }
+    app.active_query_tab = 1;
+    app.split_panes = vec![2];
+    let encoded = serde_json::to_vec(&app.snapshot_workspace()).unwrap();
+    app.restore_workspace_from(serde_json::from_slice(&encoded).unwrap());
+    assert_eq!(app.tabs[app.active_query_tab].conn_id.as_deref(), Some("b"));
+    assert_eq!(app.tabs[app.split_panes[0]].conn_id.as_deref(), Some("a"));
+    app.close_split_pane_tab(1, 0);
+    assert_eq!(
+        app.tab().title,
+        "b_main",
+        "the last visible main tab must not switch connections"
+    );
+    let mut harness = egui_kittest::Harness::builder().build_ui(move |ui| {
+        egui_extras::install_image_loaders(ui.ctx());
+        let mut actions = Vec::new();
+        app.split_pane_tab_bar(ui, app.active_query_tab, 0, &mut actions);
+        app.split_pane_tab_bar(ui, app.split_panes[0], 1, &mut actions);
+    });
+    harness.run_steps(3);
+    harness.get_by_label("b_main");
+    harness.get_by_label("a_side");
+    assert!(harness.query_by_label("a_main").is_none());
+    assert!(harness.query_by_label("b_side").is_none());
+}
+
+#[test]
+fn restored_legacy_workspace_keeps_connection_bindings_and_ignores_invalid_selections() {
+    let saved: dbcore::config::Workspace = serde_json::from_value(serde_json::json!({
+        "active_tab": 1,
+        "connection_active_tabs": {"a": 1, "b": 999},
+        "tabs": [
+            {"title": "a_tab", "conn_id": "a", "sql": "SELECT 1"},
+            {"title": "b_tab", "conn_id": "b", "sql": "SELECT 2"},
+            {"title": "unbound", "sql": "SELECT 3"}
+        ]
+    }))
+    .unwrap();
+    let mut app = DbGuiApp::construct();
+    app.restore_workspace_from(saved);
+    assert_eq!(app.tab().title, "b_tab");
+    assert!(!app.tab_in_current_connection(0));
+    assert!(!app.tab_in_current_connection(2));
+    app.switch_to_connection_tabs(Some("b".into()), "a");
+    assert_eq!(app.tab().title, "a_tab");
+    assert_eq!(app.tab().conn_id.as_deref(), Some("a"));
+    assert_eq!(app.tabs[2].conn_id, None);
+}
+
+#[test]
 fn workspace_snapshot_keeps_tab_kind_and_editor_size() {
     let mut app = DbGuiApp::construct();
     app.tab_mut().title = "active_users".into();
@@ -2885,10 +2996,10 @@ fn workspace_snapshot_keeps_every_right_split_tab() {
     let mut app = DbGuiApp::construct();
     app.tab_mut().title = "left".into();
     app.open_split_workspace();
-    let first = app.split_tab.unwrap();
+    let first = app.split_panes[0];
     app.tabs[first].title = "right_one".into();
-    app.new_tab_in_split_pane(true);
-    let second = app.split_tab.unwrap();
+    app.new_tab_in_split_pane(1);
+    let second = app.split_panes[0];
     app.tabs[second].title = "right_two".into();
 
     let saved = app.snapshot_workspace();
@@ -2956,7 +3067,9 @@ fn closing_split_repairs_an_active_hidden_pane_index() {
     let split = QueryTab::new(app.next_tab_id, "right".into());
     app.next_tab_id += 1;
     app.tabs.push(split);
-    app.split_tab = Some(1);
+    app.tabs[1].pane = 1;
+    app.split_panes = vec![1];
+    app.reset_split_ratios();
     // Reproduces the crash: UI rendering temporarily left the hidden pane active when Close
     // removed index 1, leaving active_query_tab == len.
     app.active_query_tab = 1;
@@ -2965,7 +3078,7 @@ fn closing_split_repairs_an_active_hidden_pane_index() {
 
     assert_eq!(app.tabs.len(), 2, "collapsing a split keeps its tabs");
     assert_eq!(app.active_query_tab, 0);
-    assert!(app.split_tab.is_none());
+    assert!(!app.is_split());
     assert!(!app.tabs[0].editor_split);
     assert_eq!(app.tab().id, 0);
 }
@@ -3740,7 +3853,7 @@ fn split_panes_keep_independent_editor_assistance_state() {
     app.tabs[0].editor_assist.syntax_checked = "SELECT left".into();
 
     app.open_split_workspace();
-    let right = app.split_tab.unwrap();
+    let right = app.split_panes[0];
 
     assert!(app.tabs[0].editor_assist.autocomplete.open);
     assert_eq!(app.tabs[0].editor_assist.autocomplete.prefix, "cust");
@@ -3755,28 +3868,37 @@ fn split_panes_keep_independent_editor_assistance_state() {
     assert!(app.tabs[right].editor_assist.syntax_checked.is_empty());
 }
 
+/// Ids of the tabs in `pane`, in tab-strip order.
+fn pane_ids(app: &DbGuiApp, pane: usize) -> Vec<u64> {
+    app.tabs
+        .iter()
+        .filter(|tab| tab.pane == pane)
+        .map(|tab| tab.id)
+        .collect()
+}
+
 #[test]
 fn split_group_adds_selects_and_closes_tabs_independently() {
     let mut app = DbGuiApp::construct();
     app.open_split_workspace();
-    let first_id = app.tabs[app.split_tab.unwrap()].id;
+    let first_id = app.tabs[app.split_panes[0]].id;
 
-    app.new_tab_in_split_pane(true);
-    let second_id = app.tabs[app.split_tab.unwrap()].id;
-    assert_eq!(app.split_tab_ids, [first_id, second_id]);
+    app.new_tab_in_split_pane(1);
+    let second_id = app.tabs[app.split_panes[0]].id;
+    assert_eq!(pane_ids(&app, 1), [first_id, second_id]);
     assert_eq!(app.tabs.len(), 3);
 
     let first_idx = app.tabs.iter().position(|tab| tab.id == first_id).unwrap();
-    app.select_split_pane_tab(first_idx, true);
-    assert_eq!(app.tabs[app.split_tab.unwrap()].id, first_id);
+    app.select_split_pane_tab(first_idx, 1);
+    assert_eq!(app.tabs[app.split_panes[0]].id, first_id);
 
-    app.close_split_pane_tab(first_idx, true);
-    assert_eq!(app.split_tab_ids, [second_id]);
-    assert_eq!(app.tabs[app.split_tab.unwrap()].id, second_id);
+    app.close_split_pane_tab(first_idx, 1);
+    assert_eq!(pane_ids(&app, 1), [second_id]);
+    assert_eq!(app.tabs[app.split_panes[0]].id, second_id);
     let second_idx = app.tabs.iter().position(|tab| tab.id == second_id).unwrap();
-    app.close_split_pane_tab(second_idx, true);
-    assert!(app.split_tab.is_none());
-    assert!(app.split_tab_ids.is_empty());
+    app.close_split_pane_tab(second_idx, 1);
+    assert!(!app.is_split());
+    assert!(pane_ids(&app, 1).is_empty());
     assert_eq!(app.tabs.len(), 1);
 }
 
@@ -3794,15 +3916,15 @@ fn dragging_more_tables_into_an_open_split_adds_right_group_tabs() {
         });
     }
 
-    assert_eq!(app.split_tab_ids.len(), 2);
+    assert_eq!(app.tabs.iter().filter(|tab| tab.pane > 0).count(), 2);
     let right_titles: Vec<&str> = app
         .tabs
         .iter()
-        .filter(|tab| app.split_tab_ids.contains(&tab.id))
+        .filter(|tab| tab.pane > 0)
         .map(|tab| tab.title.as_str())
         .collect();
     assert_eq!(right_titles, ["table_0", "table_1"]);
-    assert_eq!(app.tabs[app.split_tab.unwrap()].title, "table_1");
+    assert_eq!(app.tabs[app.split_panes[0]].title, "table_1");
 }
 
 #[test]
@@ -3816,10 +3938,10 @@ fn split_workspace_renders_a_tab_header_inside_each_pane() {
     app.show_connection_tabs = false;
     app.tab_mut().title = "left_query".into();
     app.open_split_workspace();
-    let right = app.split_tab.unwrap();
+    let right = app.split_panes[0];
     app.tabs[right].title = "right_query".into();
-    app.new_tab_in_split_pane(true);
-    let second_right = app.split_tab.unwrap();
+    app.new_tab_in_split_pane(1);
+    let second_right = app.split_panes[0];
     app.tabs[second_right].title = "right_table".into();
 
     let mut setup = false;
@@ -3849,6 +3971,177 @@ fn split_workspace_renders_a_tab_header_inside_each_pane() {
     harness.get_by_label("Close left_query");
     harness.get_by_label("Close right_query");
     harness.get_by_label("Close right_table");
+}
+
+#[test]
+fn workspace_splits_into_more_than_two_columns() {
+    let mut app = DbGuiApp::construct();
+    app.open_split_workspace();
+    // Dropping on `pane_count()` opens another column until MAX_PANES; past that the drop
+    // joins the last column instead (two columns are added, then two tabs pile into the last).
+    for _ in 0..4 {
+        let source = &app.tabs[0];
+        let mut tab = QueryTab::new(app.next_tab_id, source.title.clone());
+        app.next_tab_id += 1;
+        tab.conn_id = source.conn_id.clone();
+        let target = app.pane_count();
+        app.install_split_tab(tab, target, false);
+    }
+    assert_eq!(app.pane_count(), DbGuiApp::MAX_PANES);
+    assert_eq!(app.split_ratios.len(), DbGuiApp::MAX_PANES);
+    assert!((app.split_ratios.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+    assert_eq!(pane_ids(&app, DbGuiApp::MAX_PANES - 1).len(), 3);
+    for pane in 1..app.pane_count() {
+        let active = app.split_panes[pane - 1];
+        assert_eq!(app.tabs[active].pane, pane);
+    }
+}
+
+#[test]
+fn closing_a_middle_column_renumbers_the_ones_after_it() {
+    let mut app = DbGuiApp::construct();
+    app.open_split_workspace();
+    for _ in 0..2 {
+        let mut tab = QueryTab::new(app.next_tab_id, String::new());
+        app.next_tab_id += 1;
+        tab.conn_id = None;
+        let target = app.pane_count();
+        app.install_split_tab(tab, target, false);
+    }
+    assert_eq!(app.pane_count(), 4);
+    let ids: Vec<u64> = (1..4).map(|pane| pane_ids(&app, pane)[0]).collect();
+    let middle_idx = app.tabs.iter().position(|tab| tab.id == ids[0]).unwrap();
+
+    app.close_split_pane_tab(middle_idx, 1);
+
+    assert_eq!(app.pane_count(), 3);
+    assert_eq!(pane_ids(&app, 1), [ids[1]]);
+    assert_eq!(pane_ids(&app, 2), [ids[2]]);
+    assert!((app.split_ratios.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+    for pane in 1..app.pane_count() {
+        assert_eq!(app.tabs[app.split_panes[pane - 1]].pane, pane);
+    }
+
+    // Closing the last extra columns collapses back to a single workspace.
+    for id in [ids[1], ids[2]] {
+        let idx = app.tabs.iter().position(|tab| tab.id == id).unwrap();
+        let pane = app.tabs[idx].pane;
+        app.close_split_pane_tab(idx, pane);
+    }
+    assert!(!app.is_split());
+    assert_eq!(app.split_ratios, vec![1.0]);
+}
+
+#[test]
+fn three_column_workspace_survives_a_save_and_restore() {
+    let mut app = DbGuiApp::construct();
+    app.open_split_workspace();
+    let mut tab = QueryTab::new(app.next_tab_id, String::new());
+    app.next_tab_id += 1;
+    tab.sql = "SELECT 3".into();
+    app.install_split_tab(tab, 2, false);
+
+    let saved = app.snapshot_workspace();
+    assert_eq!(saved.tabs.iter().map(|tab| tab.pane).collect::<Vec<_>>(), [0, 1, 2]);
+    assert_eq!(saved.active_pane_tabs, [1, 2]);
+
+    // An older build only knows `split_pane`, so every extra column must still flag it.
+    assert!(saved.tabs[1].split_pane && saved.tabs[2].split_pane);
+}
+
+#[test]
+fn pane_widths_respect_the_minimum_and_fill_the_row() {
+    use super::layout::pane_widths;
+    let even = pane_widths(&[0.25; 4], 1000.0, 220.0);
+    assert!(even.iter().all(|w| (*w - 250.0).abs() < 1e-3));
+
+    // A pane squeezed below the minimum is pinned and the others absorb the difference.
+    let squeezed = pane_widths(&[0.1, 0.45, 0.45], 1000.0, 220.0);
+    assert!((squeezed[0] - 220.0).abs() < 1e-3);
+    assert!((squeezed.iter().sum::<f32>() - 1000.0).abs() < 1e-2);
+    assert!(squeezed.iter().all(|w| *w >= 220.0 - 1e-3));
+
+    // Too narrow to honour the minimum: share evenly rather than overflow.
+    let tiny = pane_widths(&[0.5, 0.5], 300.0, 220.0);
+    assert!((tiny[0] - 150.0).abs() < 1e-3);
+}
+
+#[test]
+fn three_split_columns_each_render_their_own_tab_header() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.show_schema_panel = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    app.tab_mut().title = "col_a".into();
+    app.open_split_workspace();
+    let second = app.split_panes[0];
+    app.tabs[second].title = "col_b".into();
+    let tab = QueryTab::new(app.next_tab_id, "col_c".into());
+    app.next_tab_id += 1;
+    app.install_split_tab(tab, 2, false);
+
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1200.0, 700.0))
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+        });
+    harness.run_steps(4);
+
+    let a = harness.get_by_label("col_a").rect();
+    let b = harness.get_by_label("col_b").rect();
+    let c = harness.get_by_label("col_c").rect();
+    assert!(
+        a.center().x < b.center().x && b.center().x < c.center().x,
+        "columns must be laid out left to right"
+    );
+    assert!((a.center().y - c.center().y).abs() < 1.0);
+}
+
+#[test]
+fn details_follow_the_focused_split_pane() {
+    let mut app = DbGuiApp::construct();
+    app.tab_mut().set_result(fake_result(3, 3));
+    app.open_split_workspace();
+    let right = app.split_panes[0];
+    app.tabs[right].set_result(fake_result(3, 3));
+    app.tabs[right].selection.select_one(1);
+
+    // Nothing is selected in the main pane, so focusing it shows no Details...
+    app.focused_pane = 0;
+    assert_eq!(app.details_target(), None);
+    // ...and focusing the split pane shows that pane's selected row.
+    app.focused_pane = 1;
+    assert_eq!(app.details_target(), Some((right, 1)));
+}
+
+#[test]
+fn view_mode_bar_sheds_parts_as_the_column_narrows() {
+    use super::panels::pager::BarDensity;
+    assert_eq!(BarDensity::for_width(900.0), BarDensity::Full);
+    assert_eq!(BarDensity::for_width(500.0), BarDensity::Compact);
+    assert_eq!(BarDensity::for_width(300.0), BarDensity::Tight);
+    // Whatever the density, the segmented control plus the add button and the right-hand
+    // cluster must fit in the bar.
+    for width in [260.0_f32, 320.0, 420.0, 500.0, 700.0, 1100.0] {
+        let density = BarDensity::for_width(width);
+        let segments = density.segment_width(width, 300.0, 0.0);
+        assert!(segments <= 300.0);
+        if segments > 150.0 {
+            assert!(
+                segments + density.add_button_width() + density.right_reserved() <= width,
+                "{width}pt bar overflows at {density:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -3999,6 +4292,90 @@ fn visible_history_cache_stays_at_the_disk_history_limit() {
         app.history_cache.last().unwrap().sql,
         format!("SELECT {}", dbcore::history::MAX_ENTRIES)
     );
+}
+
+#[test]
+fn live_log_resizes_below_the_separate_result_mode_dock() {
+    for kind in [
+        crate::components::QueryTabKind::Query,
+        crate::components::QueryTabKind::Table,
+    ] {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        crate::style::apply(&ctx);
+        let mut app = DbGuiApp::construct();
+        app.show_welcome = false;
+        app.show_schema_panel = false;
+        app.show_details_panel = false;
+        app.show_connection_tabs = false;
+        app.show_query_console = false;
+        app.show_live_log = true;
+        app.tab_mut().kind = kind;
+        app.tab_mut().set_result(fake_result(2, 3));
+        let log_id = egui::Id::new(("live_log", app.tab().id));
+        let modes_id = egui::Id::new(("view_mode_bar", app.tab().id));
+        let mut time = 0.0;
+        let mut frame = |app: &mut DbGuiApp, events| {
+            time += 0.05;
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 700.0),
+                    )),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| app.draw(ui, None),
+            )
+        };
+        for _ in 0..3 {
+            let _ = frame(&mut app, vec![]);
+        }
+        let panel = |id| {
+            egui::containers::panel::PanelState::load(&ctx, id)
+                .unwrap()
+                .rect
+        };
+        let modes_before = panel(modes_id);
+        let log_before = panel(log_id);
+        let handle = ctx.read_response(log_id.with("__resize")).unwrap();
+        let start = handle.rect.center();
+        assert!(
+            modes_before.bottom() <= start.y,
+            "{kind:?}: modes={modes_before:?}, log={log_before:?}, handle={:?}",
+            handle.rect
+        );
+        assert!(start.y < log_before.top() + 8.0);
+        assert!(modes_before.bottom() <= log_before.top());
+
+        let _ = frame(&mut app, vec![egui::Event::PointerMoved(start)]);
+        let _ = frame(
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        let end = start - egui::vec2(0.0, 60.0);
+        let _ = frame(&mut app, vec![egui::Event::PointerMoved(end)]);
+        let _ = frame(
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        let _ = frame(&mut app, vec![]);
+        assert!(panel(log_id).height() > log_before.height() + 40.0);
+        assert!((panel(modes_id).height() - modes_before.height()).abs() < 0.1);
+        assert!(panel(modes_id).bottom() <= panel(log_id).top());
+    }
 }
 
 #[test]
@@ -4669,6 +5046,123 @@ fn exact_table_total_is_routed_only_to_the_matching_query() {
     app.poll_messages(&egui::Context::default());
     assert_eq!(app.tab().total_rows, Some(12_534));
     assert!(!app.tab().total_rows_pending);
+}
+
+#[test]
+fn database_sort_preserves_unsaved_cell_edits() {
+    let mut app = app_with_staged_edit();
+    let original_sql = app.tab().sql.clone();
+    let original_rows = app.tab().row_order.clone();
+    app.apply_action(Action::SetSort { col: 0, asc: false });
+    assert_eq!(app.tab().sql, original_sql);
+    assert_eq!(app.tab().row_order, original_rows);
+    assert!(app.tab().edits.has_pending());
+    assert!(app.tab().sort_base_sql.is_none());
+    assert!(!app.is_tab_querying(app.tab().id));
+    assert!(app.error.as_deref().unwrap().contains("Save or discard"));
+}
+
+#[test]
+fn database_sort_fetches_unloaded_rows_and_keeps_order_when_paging() {
+    fn finish(app: &mut DbGuiApp) {
+        let ctx = egui::Context::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline
+            && (app.busy != Busy::Idle || app.tab().total_rows_pending)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            app.poll_messages(&ctx);
+        }
+        assert_eq!(app.busy, Busy::Idle);
+        assert!(
+            app.tab().query_error.is_none(),
+            "{:?}",
+            app.tab().query_error
+        );
+    }
+    let mut app = DbGuiApp::construct();
+    app.active_connections.clear();
+    let config = ConnectionConfig::new(DbKind::DuckDb);
+    let db = Arc::new(dbcore::backends::duckdb::DuckDb::connect(&config).unwrap());
+    app.rt
+        .block_on(db.execute_capped(
+            "CREATE TABLE items AS SELECT range AS id FROM range(1050);",
+            1,
+        ))
+        .unwrap();
+    app.active_connections.push(ActiveConnection {
+        config_id: "sort-test".into(),
+        name: "sort-test".into(),
+        db,
+        schema: SchemaTree::default(),
+        databases: Vec::new(),
+    });
+    let original = "SELECT * FROM items ORDER BY id ASC LIMIT 800;";
+    {
+        let tab = app.tab_mut();
+        tab.conn_id = Some("sort-test".into());
+        tab.kind = crate::components::QueryTabKind::Table;
+        tab.sql = original.into();
+        tab.edits.pending_source = Some(EditSource {
+            schema: None,
+            table: "items".into(),
+            pk_cols: Vec::new(),
+        });
+    }
+    app.start_query_for(0);
+    finish(&mut app);
+    assert_eq!(app.tab().result.as_ref().unwrap().rows[0][0], Value::Int(0));
+
+    // Split panes dispatch after the primary tab is restored. Sorting must target the
+    // clicked tab's connection/result without changing the primary tab's SQL.
+    let target_tab_id = app.tab().id;
+    let other = QueryTab::new(app.next_tab_id, "Other".into());
+    app.next_tab_id += 1;
+    app.tabs.push(other);
+    app.active_query_tab = 1;
+    let other_sql = app.tab().sql.clone();
+    app.apply_action(Action::ForTab {
+        tab_id: target_tab_id,
+        action: Box::new(Action::SetSort { col: 0, asc: false }),
+    });
+    assert_eq!(app.active_query_tab, 1);
+    assert_eq!(app.tab().sql, other_sql);
+    app.active_query_tab = 0;
+    finish(&mut app);
+    let result = app.tab().result.as_ref().unwrap();
+    assert_eq!(result.row_count(), QUERY_STREAM_CHUNK_ROWS);
+    assert_eq!(
+        result.rows[0][0],
+        Value::Int(1049),
+        "the largest value is outside the cached page"
+    );
+    assert_eq!(app.tab().sort, Some((0, false)));
+    assert_eq!(app.tab().sort_base_sql.as_deref(), Some(original));
+
+    app.load_more_rows();
+    finish(&mut app);
+    let result = app.tab().result.as_ref().unwrap();
+    assert_eq!(result.row_count(), 800);
+    assert_eq!(result.rows.last().unwrap()[0], Value::Int(250));
+    assert!(result
+        .rows
+        .windows(2)
+        .all(|pair| pair[0][0].sort_cmp(&pair[1][0]).is_gt()));
+
+    app.page_nav(PageNav::Next);
+    finish(&mut app);
+    assert_eq!(
+        app.tab().result.as_ref().unwrap().rows[0][0],
+        Value::Int(249)
+    );
+    assert_eq!(app.tab().sort, Some((0, false)));
+
+    app.apply_action(Action::ClearSort);
+    finish(&mut app);
+    assert_eq!(app.tab().sql, original);
+    assert_eq!(app.tab().sort, None);
+    assert!(app.tab().sort_base_sql.is_none());
+    assert_eq!(app.tab().result.as_ref().unwrap().rows[0][0], Value::Int(0));
 }
 
 #[test]
@@ -6749,6 +7243,81 @@ fn snapshot_adaptive_query_layout() {
     app.show_connection_tabs = false;
     app.tab_mut().sql = "SELECT id, email\nFROM customers\nWHERE active = true;".into();
     render_and_snapshot(app, "adaptive_query_layout", false);
+}
+
+/// IntelliJ Light reference with a join query, schema tree, and matching result grid.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_intellij_light() {
+    let (mut app, dir) = demo_app_with_ddl(&[
+        "CREATE TABLE actor (actor_id INTEGER PRIMARY KEY, first_name TEXT, last_name TEXT)",
+        "CREATE TABLE film (film_id INTEGER PRIMARY KEY, title TEXT)",
+        "CREATE TABLE film_actor (actor_id INTEGER, film_id INTEGER)",
+        "CREATE TABLE film_category (film_id INTEGER, category_id INTEGER)",
+        "CREATE TABLE category (category_id INTEGER PRIMARY KEY, name TEXT)",
+    ]);
+    app.show_welcome = false;
+    app.show_details_panel = false;
+    app.show_connection_tabs = false;
+    app.theme = "intellij-light".into();
+    let custom = serde_json::from_str::<crate::theme::ThemeFile>(include_str!(
+        "../../../../examples/themes/intellij-light.json"
+    ))
+    .unwrap();
+    crate::theme::set_current(custom.to_theme());
+    let tab = app.tab_mut();
+    tab.title = "console".into();
+    tab.kind = crate::components::QueryTabKind::Query;
+    tab.sql = "select f.title, c.name, a.first_name, a.last_name\n\
+               from actor a\n\
+                   join film_actor fa on a.actor_id = fa.actor_id\n\
+                   join film f on fa.film_id = f.film_id\n\
+                   join film_category fc on f.film_id = fc.film_id\n\
+                   join category c on c.category_id = fc.category_id\n\
+               ORDER BY f.title;"
+        .into();
+    tab.mark_sql_changed();
+    tab.set_result(QueryResult {
+        columns: ["title", "name", "first_name", "last_name"]
+            .into_iter()
+            .map(|name| ColumnMeta {
+                name: name.into(),
+                type_name: "TEXT".into(),
+            })
+            .collect(),
+        rows: [
+            ["ACADEMY DINOSAUR", "Documentary", "ROCK", "DUKAKIS"],
+            ["ACADEMY DINOSAUR", "Documentary", "MARY", "KEITEL"],
+            ["ACADEMY DINOSAUR", "Documentary", "JOHNNY", "CAGE"],
+            ["ACADEMY DINOSAUR", "Documentary", "PENELOPE", "GUINESS"],
+        ]
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|value| Value::Text(value.into()))
+                .collect()
+        })
+        .collect(),
+        ..QueryResult::default()
+    });
+    app.connections.clear();
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1180.0, 760.0))
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            // The renderer expands its font atlas during setup; use a fresh SQL galley
+            // so the preview doesn't retain texture coordinates from that first frame.
+            app.tab_mut().sql_editor_cache.layout = None;
+            app.draw(ui, None);
+        });
+    harness.run_steps(10);
+    harness.snapshot("intellij_light");
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -10016,4 +10585,270 @@ fn query_workspace_border_stays_below_dialogs() {
         border < dialog,
         "dialog must paint over the workspace divider"
     );
+}
+
+fn app_with_activity_monitor(read_only: bool) -> DbGuiApp {
+    use dbcore::activity::Session;
+    let mut app = app_with_staged_edit();
+    let session = |id: &str, state: &str, sql: &str| Session {
+        id: id.into(),
+        user: "app".into(),
+        database: "shop".into(),
+        client: "10.0.0.5".into(),
+        state: state.into(),
+        seconds: 12.0,
+        waiting: String::new(),
+        sql: sql.into(),
+    };
+    let mut tab = QueryTab::new(app.next_tab_id, "Activity".into());
+    app.next_tab_id += 1;
+    tab.kind = crate::components::QueryTabKind::Activity;
+    tab.conn_id = Some("pg".into());
+    tab.activity = Some(activity::ActivityMonitor {
+        conn_id: "pg".into(),
+        conn_name: "pg".into(),
+        kind: DbKind::Postgres,
+        read_only,
+        production: false,
+        sessions: vec![
+            session("11", "active", "SELECT pg_sleep(60)"),
+            session("12", "idle", ""),
+        ],
+        error: None,
+        loading: false,
+        last_refresh: Some(std::time::Instant::now()),
+        auto_refresh: false,
+        hide_idle: false,
+        filter: String::new(),
+        confirm: None,
+        selected: None,
+        notice: None,
+    });
+    app.tabs.push(tab);
+    app.active_query_tab = app.tabs.len() - 1;
+    app
+}
+
+#[test]
+fn activity_monitor_filters_and_hides_idle() {
+    let mut app = app_with_activity_monitor(false);
+    let monitor = app.tab_mut().activity.as_mut().unwrap();
+    assert_eq!(monitor.visible().count(), 2);
+    monitor.hide_idle = true;
+    assert_eq!(monitor.visible().count(), 1);
+    monitor.hide_idle = false;
+    monitor.filter = "PG_SLEEP".into();
+    assert_eq!(
+        monitor.visible().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+        ["11"]
+    );
+}
+
+#[test]
+fn activity_tab_renders_with_and_without_a_pending_confirmation() {
+    let mut app = app_with_activity_monitor(false);
+    let ctx = egui::Context::default();
+    crate::style::apply(&ctx);
+    let raw = || egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1200.0, 800.0),
+        )),
+        ..Default::default()
+    };
+    let _ = ctx.run_ui(raw(), |ui| app.draw(ui, None));
+    app.tab_mut().activity.as_mut().unwrap().confirm =
+        Some(("11".into(), dbcore::activity::StopMode::Terminate));
+    let _ = ctx.run_ui(raw(), |ui| app.draw(ui, None));
+    assert_eq!(app.tab().kind, crate::components::QueryTabKind::Activity);
+}
+
+#[test]
+fn stopping_a_session_is_refused_on_a_read_only_connection() {
+    let mut app = app_with_activity_monitor(true);
+    app.apply_action(Action::StopSession {
+        id: "11".into(),
+        mode: dbcore::activity::StopMode::Terminate,
+    });
+    let monitor = app.tab().activity.as_ref().unwrap();
+    assert!(matches!(&monitor.notice, Some(Err(e)) if e.contains("read-only")));
+}
+
+#[test]
+fn a_failed_session_list_keeps_the_last_good_rows_and_stops_polling() {
+    let mut app = app_with_activity_monitor(false);
+    app.tab_mut().activity.as_mut().unwrap().auto_refresh = true;
+    let tab_id = app.tab().id;
+    app.apply_activity_sessions(tab_id, Err("permission denied".into()));
+    let monitor = app.tab().activity.as_ref().unwrap();
+    assert_eq!(monitor.sessions.len(), 2);
+    assert_eq!(monitor.error.as_deref(), Some("permission denied"));
+    assert!(!monitor.auto_refresh);
+    assert!(monitor.next_refresh_in().is_none());
+}
+
+#[test]
+fn activity_refresh_stays_with_its_tab_after_the_active_pane_changes() {
+    let mut app = app_with_activity_monitor(false);
+    let activity_idx = app.active_query_tab;
+    let activity_id = app.tab().id;
+    let monitor = app.tab_mut().activity.as_mut().unwrap();
+    monitor.auto_refresh = true;
+    monitor.last_refresh = None;
+    let ctx = egui::Context::default();
+    crate::style::apply(&ctx);
+    let mut actions = Vec::new();
+    let _ = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 600.0),
+            )),
+            ..Default::default()
+        },
+        |ui| app.activity_view(ui, &mut actions),
+    );
+    assert!(actions.iter().any(|action| matches!(
+        action,
+        Action::ForTab { tab_id, action }
+            if *tab_id == activity_id && matches!(action.as_ref(), Action::RefreshActivity)
+    )));
+    app.select_tab(0);
+    for action in actions {
+        app.apply_action(action);
+    }
+    assert_eq!(app.active_query_tab, 0);
+    // The fixture has no live pg connection: this error proves the originating monitor
+    // received the refresh even though the primary pane was restored before dispatch.
+    assert_eq!(
+        app.tabs[activity_idx]
+            .activity
+            .as_ref()
+            .unwrap()
+            .error
+            .as_deref(),
+        Some("The connection is closed.")
+    );
+}
+
+#[test]
+fn activity_monitor_refuses_embedded_databases() {
+    let (mut app, other) = app_with_two_connections();
+    let tabs = app.tabs.len();
+    app.apply_action(Action::OpenActivity { conn_idx: other });
+    assert_eq!(app.tabs.len(), tabs, "no tab is opened");
+    assert!(app
+        .error
+        .as_deref()
+        .unwrap_or("")
+        .contains("no other sessions"));
+}
+
+/// Asking for the monitor of a connection that already has one returns to its tab.
+#[test]
+fn opening_the_activity_monitor_twice_reuses_its_tab() {
+    let mut app = app_with_staged_edit();
+    let mut pg = ConnectionConfig::new(DbKind::Postgres);
+    pg.id = "pg".into();
+    app.connections.push(pg);
+    app.active_connections.push(ActiveConnection {
+        config_id: "pg".into(),
+        name: "pg".into(),
+        db: Arc::new(DummyDb),
+        databases: Vec::new(),
+        schema: fake_schema(1, 1),
+    });
+    let idx = app.connections.len() - 1;
+    app.apply_action(Action::OpenActivity { conn_idx: idx });
+    let first = app.active_query_tab;
+    assert_eq!(app.tab().kind, crate::components::QueryTabKind::Activity);
+    app.apply_action(Action::SelectTab(0));
+    app.apply_action(Action::OpenActivity { conn_idx: idx });
+    assert_eq!(app.active_query_tab, first);
+    assert_eq!(
+        app.tabs
+            .iter()
+            .filter(|t| t.kind == crate::components::QueryTabKind::Activity)
+            .count(),
+        1
+    );
+}
+
+/// Activity monitor with a realistic mix of sessions, in a dark and a light theme.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_activity_monitor() {
+    for (theme, name) in [
+        ("carbon", "activity_monitor_dark"),
+        ("daylight", "activity_monitor_light"),
+    ] {
+        let mut app = app_with_activity_monitor(false);
+        app.show_welcome = false;
+        let monitor = app.tab_mut().activity.as_mut().unwrap();
+        monitor.conn_name = "valet-p".into();
+        let queries = [
+            "SELECT \"backend\".\"User\".\"id\", \"backend\".\"User\".\"name\" FROM \"backend\".\"User\" WHERE id = $1",
+            "COMMIT",
+            "SELECT COUNT(*) FROM (SELECT \"backend\".\"ValetParking\".\"id\" FROM \"backend\".\"ValetParking\") t",
+            "",
+        ];
+        monitor.sessions = (0..26)
+            .map(|i| dbcore::activity::Session {
+                id: (1_985_939 + i * 37).to_string(),
+                user: if i % 7 == 0 { "rdsAdmin" } else { "root" }.into(),
+                database: if i % 7 == 0 {
+                    "postgres"
+                } else {
+                    "valet-parking-production"
+                }
+                .into(),
+                client: "10.0.0.5".into(),
+                state: match i {
+                    0 | 1 => "active",
+                    2 => "idle in transaction",
+                    _ => "idle",
+                }
+                .into(),
+                seconds: 2900.0 / (i + 1) as f64,
+                waiting: if i % 2 == 0 { "Client: ClientRead" } else { "" }.into(),
+                sql: queries[i as usize % queries.len()].into(),
+            })
+            .collect();
+        app.theme = theme.into();
+        crate::theme::set_current(app.themes.theme_of(&app.theme));
+        render_and_snapshot_at(app, name, false, 2.0);
+    }
+}
+
+/// Wide tables scroll sideways: a horizontal wheel over the table moves it.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_activity_monitor_scrolled_sideways() {
+    let mut app = app_with_activity_monitor(false);
+    app.show_welcome = false;
+    app.connections.clear();
+    let monitor = app.tab_mut().activity.as_mut().unwrap();
+    monitor.conn_name = "valet-p".into();
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1180.0, 760.0))
+        .with_pixels_per_point(1.0)
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+        });
+    harness.run_steps(6);
+    harness.hover_at(egui::pos2(800.0, 400.0));
+    harness.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(-700.0, 0.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.run_steps(6);
+    harness.snapshot("activity_monitor_scrolled");
 }

@@ -556,14 +556,12 @@ fn details_value_box(
 }
 
 impl DbGuiApp {
-    /// Right-hand Details panel: the selected row's columns and values.
-    pub(in crate::app) fn right_panel(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
-        // The details panel only makes sense for a selected row; with nothing selected we
-        // hide it entirely so the grid gets the full width (rather than showing an empty
-        // placeholder panel).
-        let idx = self.active_query_tab;
-        let tab_id = self.tabs[idx].id;
-        let tab = &mut self.tabs[idx];
+    /// The row Details shows: the selected row of the focused pane, unless the panel was
+    /// dismissed for that row.
+    pub(in crate::app) fn details_target(&mut self) -> Option<(usize, usize)> {
+        let idx = self.focused_tab_idx();
+        let tab_id = self.tabs.get(idx)?.id;
+        let tab = &self.tabs[idx];
         // The selected row belongs to the data grid, which every other result surface hides.
         let selected_row = match (tab.view, tab.result.as_ref(), tab.selection.lead()) {
             (TabView::Data, Some(_), Some(disp)) if disp < tab.row_order.len() => {
@@ -576,12 +574,77 @@ impl DbGuiApp {
         if self.details_dismissed != selected_row.map(|row| (tab_id, row)) {
             self.details_dismissed = None;
         }
-        let Some(row_idx) = selected_row else {
-            return;
-        };
+        let row_idx = selected_row?;
         if self.details_dismissed.is_some() {
+            return None;
+        }
+        Some((idx, row_idx))
+    }
+
+    /// Details as a docked column on the right. The details panel only makes sense for a
+    /// selected row; with nothing selected we hide it entirely so the grid gets the full width
+    /// (rather than showing an empty placeholder panel). Three or more split columns have no
+    /// width to spare, so there it floats over the focused column instead
+    /// (see [`Self::details_drawer`]).
+    pub(in crate::app) fn right_panel(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
+        if self.pane_count() >= 3 {
             return;
         }
+        let Some((idx, row_idx)) = self.details_target() else {
+            return;
+        };
+        egui::Panel::right("details_panel")
+            .resizable(true)
+            .default_size(260.0)
+            .frame(style::workspace_frame(palette::PANEL()))
+            .show_separator_line(false)
+            .show_inside(root, |ui| self.details_body(ui, idx, row_idx, actions));
+        style::workspace_resize_grip(root, egui::Id::new("details_panel"), false);
+    }
+
+    /// Details floating over the right edge of the focused split column. Used from three
+    /// columns up, where a docked panel would squeeze every grid.
+    pub(in crate::app) fn details_drawer(
+        &mut self,
+        ctx: &egui::Context,
+        column: egui::Rect,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some((idx, row_idx)) = self.details_target() else {
+            return;
+        };
+        const WIDTH: f32 = 280.0;
+        let width = WIDTH.min(column.width() - 16.0);
+        // Start below the pane's tab strip so the drawer never covers it.
+        let top = column.top() + 34.0 + 6.0;
+        let height = (column.bottom() - top - 8.0).max(120.0);
+        let pos = egui::pos2(column.right() - width - 8.0, top);
+        egui::Area::new(egui::Id::new("details_drawer"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                style::workspace_frame(palette::PANEL())
+                    .stroke(egui::Stroke::new(1.0_f32, palette::BORDER_STRONG()))
+                    .show(ui, |ui| {
+                        ui.set_width(width - 10.0);
+                        ui.set_height(height - 10.0);
+                        self.details_body(ui, idx, row_idx, actions);
+                    });
+            });
+    }
+
+    /// The Details content for `row_idx` of tab `idx`, shared by the docked panel and the drawer.
+    fn details_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        idx: usize,
+        row_idx: usize,
+        actions: &mut Vec<Action>,
+    ) {
+        let tab_id = self.tabs[idx].id;
+        // With several panes the user needs to know which table the fields belong to.
+        let source_label = self.is_split().then(|| self.tab_label(idx));
+        let tab = &mut self.tabs[idx];
         let editable = tab.edits.editable();
         // Split the borrow so the closure can hold the result immutably and edits mutably.
         let QueryTab { result, edits, .. } = tab;
@@ -592,98 +655,100 @@ impl DbGuiApp {
         let details_image_preview = &mut self.details_image_preview;
         let details_dismissed = &mut self.details_dismissed;
 
-        egui::Panel::right("details_panel")
-            .resizable(true)
-            .default_size(260.0)
-            .frame(style::workspace_frame(palette::PANEL()))
-            .show_separator_line(false)
-            .show_inside(root, |ui| {
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    components::section_title(ui, "Details");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if components::Btn::ghost_icon(icons::close())
-                            .tooltip("Close Details for this row")
-                            .show(ui)
-                            .clicked()
-                        {
-                            *details_dismissed = Some((tab_id, row_idx));
-                        }
-                    });
-                });
-                // Live field filter, TablePlus-style: typing narrows the stacked fields
-                // below by column name. Icon sits inside the field via `icon_text_input`.
-                components::icon_text_input(
-                    ui,
-                    details_filter,
-                    "Search for field…",
-                    icons::search(),
-                    ui.available_width(),
-                );
-                ui.add_space(4.0);
-
-                // Stacked fields (name + type above an input-styled value box). The box is
-                // full-width, so it tracks the panel as it is resized.
-                // `auto_shrink([false, _])` keeps the inner ui at the panel width.
-                let query = details_filter.trim().to_lowercase();
-                let columns: Vec<usize> = res
-                    .columns
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, col)| query.is_empty() || col.name.to_lowercase().contains(&query))
-                    .map(|(c, _)| c)
-                    .collect();
-                let scroll = egui::ScrollArea::vertical()
-                    .id_salt("details_scroll")
-                    .auto_shrink([false, true]);
-                let has_image = columns.iter().any(|&c| {
-                    let shown = edits.staged(row_idx, c).unwrap_or(&res.rows[row_idx][c]);
-                    crate::value_viewer::ValueViewer::kind(&res.columns[c].type_name, shown)
-                        == Some(crate::value_viewer::ViewerKind::Image)
-                });
-
-                if details_date_pick.is_some() || has_image {
-                    // Inline calendars and image thumbnails have variable height, so keep
-                    // normal layout while either is visible. The common path stays virtualized.
-                    scroll.show(ui, |ui| {
-                        for &c in &columns {
-                            details_field(
-                                ui,
-                                edits,
-                                row_idx,
-                                c,
-                                &res.columns[c],
-                                &res.rows[row_idx][c],
-                                editable,
-                                details_date_pick,
-                                details_image_preview,
-                                tab_id,
-                                actions,
-                            );
-                        }
-                    });
-                } else {
-                    scroll.show_rows(ui, DETAILS_FIELD_H, columns.len(), |ui, range| {
-                        for item in range {
-                            let c = columns[item];
-                            details_field(
-                                ui,
-                                edits,
-                                row_idx,
-                                c,
-                                &res.columns[c],
-                                &res.rows[row_idx][c],
-                                editable,
-                                details_date_pick,
-                                details_image_preview,
-                                tab_id,
-                                actions,
-                            );
-                        }
-                    });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            components::section_title(ui, "Details");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if components::Btn::ghost_icon(icons::close())
+                    .tooltip("Close Details for this row")
+                    .show(ui)
+                    .clicked()
+                {
+                    *details_dismissed = Some((tab_id, row_idx));
                 }
             });
-        style::workspace_resize_grip(root, egui::Id::new("details_panel"), false);
+        });
+        if let Some(label) = source_label {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(label)
+                        .size(11.5)
+                        .color(palette::TEXT_WEAK()),
+                )
+                .truncate(),
+            );
+        }
+        // Live field filter, TablePlus-style: typing narrows the stacked fields
+        // below by column name. Icon sits inside the field via `icon_text_input`.
+        components::icon_text_input(
+            ui,
+            details_filter,
+            "Search for field…",
+            icons::search(),
+            ui.available_width(),
+        );
+        ui.add_space(4.0);
+
+        // Stacked fields (name + type above an input-styled value box). The box is
+        // full-width, so it tracks the panel as it is resized.
+        // `auto_shrink([false, _])` keeps the inner ui at the panel width.
+        let query = details_filter.trim().to_lowercase();
+        let columns: Vec<usize> = res
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, col)| query.is_empty() || col.name.to_lowercase().contains(&query))
+            .map(|(c, _)| c)
+            .collect();
+        let scroll = egui::ScrollArea::vertical()
+            .id_salt("details_scroll")
+            .auto_shrink([false, true]);
+        let has_image = columns.iter().any(|&c| {
+            let shown = edits.staged(row_idx, c).unwrap_or(&res.rows[row_idx][c]);
+            crate::value_viewer::ValueViewer::kind(&res.columns[c].type_name, shown)
+                == Some(crate::value_viewer::ViewerKind::Image)
+        });
+
+        if details_date_pick.is_some() || has_image {
+            // Inline calendars and image thumbnails have variable height, so keep
+            // normal layout while either is visible. The common path stays virtualized.
+            scroll.show(ui, |ui| {
+                for &c in &columns {
+                    details_field(
+                        ui,
+                        edits,
+                        row_idx,
+                        c,
+                        &res.columns[c],
+                        &res.rows[row_idx][c],
+                        editable,
+                        details_date_pick,
+                        details_image_preview,
+                        tab_id,
+                        actions,
+                    );
+                }
+            });
+        } else {
+            scroll.show_rows(ui, DETAILS_FIELD_H, columns.len(), |ui, range| {
+                for item in range {
+                    let c = columns[item];
+                    details_field(
+                        ui,
+                        edits,
+                        row_idx,
+                        c,
+                        &res.columns[c],
+                        &res.rows[row_idx][c],
+                        editable,
+                        details_date_pick,
+                        details_image_preview,
+                        tab_id,
+                        actions,
+                    );
+                }
+            });
+        }
     }
 }
 

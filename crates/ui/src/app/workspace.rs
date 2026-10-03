@@ -25,8 +25,8 @@ fn save_tab_kind(kind: crate::components::QueryTabKind) -> dbcore::config::Works
         Ui::Function => Saved::Function,
         Ui::Procedure => Saved::Procedure,
         Ui::Trigger => Saved::Trigger,
-        // Never persisted — `snapshot_workspace` filters Diagram tabs out.
-        Ui::Diagram => Saved::Query,
+        // Never persisted — `snapshot_workspace` filters these tabs out.
+        Ui::Diagram | Ui::Activity => Saved::Query,
     }
 }
 
@@ -46,10 +46,23 @@ impl DbGuiApp {
     /// We never auto-connect or auto-run — restored tabs come back with their connection
     /// selected but idle.
     pub(super) fn restore_workspace(&mut self) {
-        let saved = dbcore::config::load_workspace();
+        self.restore_workspace_from(dbcore::config::load_workspace());
+    }
+
+    pub(super) fn restore_workspace_from(&mut self, saved: dbcore::config::Workspace) {
         let saved_active_tab = saved.active_tab;
         let saved_active_split_tab = saved.active_split_tab;
-        let split_flags: Vec<bool> = saved.tabs.iter().map(|tab| tab.split_pane).collect();
+        let saved_active_panes = saved.active_pane_tabs.clone();
+        let saved_connection_tabs = saved.connection_active_tabs.clone();
+        // Workspaces from before N-way splits only carry the `split_pane` flag: pane 1.
+        let saved_panes: Vec<usize> = saved
+            .tabs
+            .iter()
+            .map(|tab| match (tab.pane, tab.split_pane) {
+                (0, true) => 1,
+                (pane, _) => pane,
+            })
+            .collect();
         let mut next_tab_id = 0u64;
         let tabs: Vec<QueryTab> = saved
             .tabs
@@ -87,31 +100,72 @@ impl DbGuiApp {
         self.active_query_tab = saved_active_tab.min(tabs.len() - 1);
         self.next_tab_id = next_tab_id;
         self.tabs = tabs;
-        self.split_tab_ids = self
-            .tabs
+        self.split_panes.clear();
+        self.reset_split_ratios();
+        self.focused_pane = 0;
+        self.conn_last_tab.clear();
+        // Old files keep their connection bindings even without a remembered active-tab map.
+        for tab in &self.tabs {
+            if let Some(conn_id) = &tab.conn_id {
+                self.conn_last_tab.insert(conn_id.clone(), tab.id);
+            }
+        }
+        for (conn_id, idx) in saved_connection_tabs {
+            if let Some(tab) = self
+                .tabs
+                .get(idx)
+                .filter(|tab| tab.conn_id.as_ref() == Some(&conn_id))
+            {
+                self.conn_last_tab.insert(conn_id, tab.id);
+            }
+        }
+        // Keep the saved columns contiguous (1..=n) and within the supported count, whatever
+        // numbers the file used.
+        let mut columns: Vec<usize> = saved_panes
             .iter()
-            .zip(split_flags)
-            .filter_map(|(tab, right)| right.then_some(tab.id))
+            .copied()
+            .filter(|pane| *pane > 0)
             .collect();
-        if !self.split_tab_ids.is_empty() {
-            if self.tab_is_in_split_group(self.active_query_tab) {
-                self.active_query_tab = self
-                    .tabs
-                    .iter()
-                    .position(|tab| !self.split_tab_ids.contains(&tab.id))
-                    .unwrap_or(0);
+        columns.sort_unstable();
+        columns.dedup();
+        columns.truncate(Self::MAX_PANES - 1);
+        for (tab, pane) in self.tabs.iter_mut().zip(&saved_panes) {
+            tab.pane = columns
+                .iter()
+                .position(|column| column == pane)
+                .map_or(0, |slot| slot + 1);
+        }
+        if !self.tabs.iter().any(|tab| tab.pane == 0) {
+            // Every tab sits in a split column: there is no main strip to anchor them.
+            for tab in &mut self.tabs {
+                tab.pane = 0;
             }
-            self.split_tab = saved_active_split_tab
-                .filter(|idx| *idx < self.tabs.len() && self.tab_is_in_split_group(*idx))
-                .or_else(|| {
-                    self.tabs
-                        .iter()
-                        .position(|tab| self.split_tab_ids.contains(&tab.id))
-                });
+            columns.clear();
+        }
+        if !columns.is_empty() && self.tabs[self.active_query_tab].pane > 0 {
+            self.active_query_tab = self.tabs.iter().position(|tab| tab.pane == 0).unwrap_or(0);
+        }
+        if let Some(conn_id) = &self.tabs[self.active_query_tab].conn_id {
+            self.conn_last_tab
+                .insert(conn_id.clone(), self.tabs[self.active_query_tab].id);
+        }
+        if !columns.is_empty() {
+            self.split_panes = (1..=columns.len())
+                .map(|pane| {
+                    let saved_active = saved_active_panes.get(pane - 1).copied().or(if pane == 1 {
+                        saved_active_split_tab
+                    } else {
+                        None
+                    });
+                    saved_active
+                        .filter(|idx| self.tabs.get(*idx).is_some_and(|tab| tab.pane == pane))
+                        .or_else(|| self.tabs.iter().position(|tab| tab.pane == pane))
+                        .unwrap_or(0)
+                })
+                .collect();
+            self.reset_split_ratios();
             self.tabs[self.active_query_tab].editor_split = true;
-            if let Some(split_idx) = self.split_tab {
-                self.tabs[self.active_query_tab].split_sql = Some(self.tabs[split_idx].sql.clone());
-            }
+            self.mirror_split_sql();
             return;
         }
         // Rehydrate the hidden right-hand workspace pane for a persisted split. Only the
@@ -141,9 +195,10 @@ impl DbGuiApp {
             split.sql_revision = revision;
             split.editor_size = editor_size;
             split.preview = false;
-            self.split_tab = Some(self.tabs.len());
-            self.split_tab_ids.push(split.id);
+            split.pane = 1;
+            self.split_panes.push(self.tabs.len());
             self.tabs.push(split);
+            self.reset_split_ratios();
         }
     }
     /// Snapshot the open tabs into the serialisable workspace (no result rows — only SQL,
@@ -151,8 +206,7 @@ impl DbGuiApp {
     /// Diagram tabs are skipped: their content is a schema snapshot that can't be
     /// rebuilt without a live connection, so they simply don't survive a restart.
     pub(super) fn snapshot_workspace(&self) -> dbcore::config::Workspace {
-        let saved =
-            |t: &&QueryTab| t.kind != crate::components::QueryTabKind::Diagram && !t.draft_tab;
+        let saved = |t: &&QueryTab| !t.kind.owns_workspace() && !t.draft_tab;
         dbcore::config::Workspace {
             active_tab: self
                 .tabs
@@ -161,8 +215,30 @@ impl DbGuiApp {
                 .filter(saved)
                 .count(),
             active_split_tab: self
-                .split_tab
-                .map(|idx| self.tabs.iter().take(idx).filter(saved).count()),
+                .split_panes
+                .first()
+                .map(|idx| self.tabs.iter().take(*idx).filter(saved).count()),
+            active_pane_tabs: self
+                .split_panes
+                .iter()
+                .map(|idx| self.tabs.iter().take(*idx).filter(saved).count())
+                .collect(),
+            connection_active_tabs: self
+                .tabs
+                .iter()
+                .filter(saved)
+                .enumerate()
+                .filter_map(|(idx, tab)| {
+                    let conn_id = tab.conn_id.as_ref()?;
+                    let active = self.tab();
+                    let selected_id = if active.conn_id.as_ref() == Some(conn_id) {
+                        Some(active.id)
+                    } else {
+                        self.conn_last_tab.get(conn_id).copied()
+                    };
+                    (selected_id == Some(tab.id)).then(|| (conn_id.clone(), idx))
+                })
+                .collect(),
             tabs: self
                 .tabs
                 .iter()
@@ -172,7 +248,8 @@ impl DbGuiApp {
                     conn_id: t.conn_id.clone(),
                     sql: t.sql.clone(),
                     kind: Some(save_tab_kind(t.kind)),
-                    split_pane: self.split_tab_ids.contains(&t.id),
+                    split_pane: t.pane > 0,
+                    pane: t.pane,
                     editor_size: t.editor_size,
                     editor_split: t.editor_split,
                     editor_split_size: t.editor_split_size,

@@ -35,11 +35,7 @@ impl DbGuiApp {
             _ => None,
         };
         // Run / reload replaces the result in place, which throws staged row edits away.
-        let run_target = if self.split_focus {
-            self.split_tab.unwrap_or(self.active_query_tab)
-        } else {
-            self.active_query_tab
-        };
+        let run_target = self.focused_tab_idx();
         self.tabs
             .iter()
             .enumerate()
@@ -107,7 +103,7 @@ impl DbGuiApp {
         self.close_split_workspace();
         self.active_query_tab = idx;
         self.settings_open = false;
-        self.split_focus = false;
+        self.focused_pane = 0;
         if matches!(self.tabs[idx].schema_editor.as_ref(), Some(ObjectEditor::Table(e)) if e.has_changes())
         {
             self.apply_action(Action::GenerateSchema);
@@ -135,7 +131,7 @@ impl DbGuiApp {
     /// Result replacement must never silently throw away edits, even through auto-reloads.
     pub(super) fn allow_result_replacement(&mut self, idx: usize) -> bool {
         if self.tab_has_unsaved_changes(idx) {
-            self.error = Some("Save or discard this tab's changes before reloading, filtering, or changing pages.".into());
+            self.error = Some("Save or discard this tab's changes before reloading, filtering, sorting, or changing pages.".into());
             false
         } else {
             true

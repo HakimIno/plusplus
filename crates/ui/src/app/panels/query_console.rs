@@ -13,7 +13,7 @@ impl DbGuiApp {
             "query_footer",
             self.tab().id,
             QueryEditorPlacement::Top,
-            self.split_tab.is_some(),
+            self.is_split(),
         ));
         if let Some(panel) = egui::containers::panel::PanelState::load(root.ctx(), footer_id) {
             let rect = panel.rect;
@@ -86,7 +86,7 @@ impl DbGuiApp {
         // Use a distinct egui panel identity while the whole workspace is split. This prevents
         // a remembered single-pane splitter position from making the two columns start at
         // different heights.
-        let split_layout = self.split_tab.is_some();
+        let split_layout = self.is_split();
         let panel_id = egui::Id::new(("query_console", tab_id, placement, split_layout));
         let footer_id = egui::Id::new(("query_footer", tab_id, placement, split_layout));
         let footer = |app: &mut Self,
@@ -236,7 +236,7 @@ impl DbGuiApp {
             self.editor_find_bar(ui, editor_id);
         }
 
-        if self.tabs[idx].editor_split && self.split_tab.is_none() {
+        if self.tabs[idx].editor_split && !self.is_split() {
             let split_id = egui::Id::new(("sql_editor_split", tab_id));
             let available_width = ui.available_width();
             let default_width = self.tabs[idx]
@@ -468,7 +468,7 @@ impl DbGuiApp {
                         let focused = resp.has_focus();
                         if focused {
                             self.tabs[idx].editor_pane = crate::app::EditorPane::Primary;
-                            self.split_focus = self.split_tab == Some(idx);
+                            self.focused_pane = self.tabs[idx].pane;
                         }
                         let text_changed = resp.changed() || multi_changed;
 

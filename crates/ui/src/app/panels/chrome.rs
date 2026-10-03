@@ -149,11 +149,18 @@ impl DbGuiApp {
                                 // Rects collected per frame so the drag handler below can map
                                 // the pointer to an insertion slot.
                                 let mut rects = Vec::with_capacity(self.tabs.len());
+                                // `self.tabs` index of each chip in `rects`: the bar skips
+                                // split-pane tabs and other connections' tabs.
+                                let mut shown = Vec::with_capacity(self.tabs.len());
                                 let pointer = ui.ctx().pointer_interact_pos();
-                                for idx in 0..self.tabs.len() {
-                                    if self.tab_is_in_split_group(idx) {
-                                        continue;
-                                    }
+                                // Only this connection's tabs are in the bar.
+                                let in_bar: Vec<usize> = (0..self.tabs.len())
+                                    .filter(|&i| {
+                                        !self.tab_is_in_split_group(i)
+                                            && self.tab_in_current_connection(i)
+                                    })
+                                    .collect();
+                                for &idx in &in_bar {
                                     let selected =
                                         !self.settings_open && idx == self.active_query_tab;
                                     let label = self.tab_label(idx);
@@ -181,9 +188,8 @@ impl DbGuiApp {
                                         preview,
                                         drag_float_pos,
                                     );
-                                    let tab_count = self.tabs.len();
-                                    let can_close_others = tab_count > 1;
-                                    let can_close_right = idx + 1 < tab_count;
+                                    let can_close_others = in_bar.len() > 1;
+                                    let can_close_right = in_bar.last().is_some_and(|&l| l > idx);
                                     resp.response.context_menu(|ui| {
                                         ui.set_min_width(200.0);
                                         if ui.button("Close Tab").clicked() {
@@ -248,10 +254,11 @@ impl DbGuiApp {
                                         actions.push(Action::SelectTab(idx));
                                     }
                                     rects.push(resp.rect);
+                                    shown.push(idx);
                                     ui.add_space(2.0);
                                 }
-                                if self.split_tab.is_none() {
-                                    self.handle_tab_drag(ui, &rects, actions);
+                                if !self.is_split() {
+                                    self.handle_tab_drag(ui, &rects, &shown, actions);
                                 }
                                 if self.settings_open {
                                     let resp = components::settings_tab_item(ui);
@@ -281,7 +288,7 @@ impl DbGuiApp {
         &mut self,
         root: &mut egui::Ui,
         active_idx: usize,
-        right: bool,
+        pane: usize,
         actions: &mut Vec<Action>,
     ) {
         let Some(active_id) = self.tabs.get(active_idx).map(|tab| tab.id) else {
@@ -291,9 +298,11 @@ impl DbGuiApp {
             .tabs
             .iter()
             .enumerate()
-            .filter_map(|(idx, tab)| (self.split_tab_ids.contains(&tab.id) == right).then_some(idx))
+            .filter_map(|(idx, tab)| {
+                (tab.pane == pane && tab.conn_id == self.tabs[active_idx].conn_id).then_some(idx)
+            })
             .collect();
-        egui::Panel::top(egui::Id::new(("split_pane_tabs", right)))
+        let bar = egui::Panel::top(egui::Id::new(("split_pane_tabs", pane)))
             .resizable(false)
             .exact_size(34.0)
             .frame(
@@ -304,7 +313,7 @@ impl DbGuiApp {
             .show_separator_line(true)
             .show_inside(root, |ui| {
                 egui::ScrollArea::horizontal()
-                    .id_salt(("split_pane_tab_scroll", right))
+                    .id_salt(("split_pane_tab_scroll", pane))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 2.0;
@@ -324,29 +333,34 @@ impl DbGuiApp {
                                     None,
                                 );
                                 if response.close {
-                                    actions.push(Action::CloseSplitPaneTab { idx, right });
+                                    actions.push(Action::CloseSplitPaneTab { idx, pane });
                                 } else if response.pinned {
-                                    actions.push(Action::PinSplitPaneTab { idx, right });
+                                    actions.push(Action::PinSplitPaneTab { idx, pane });
                                 } else if response.clicked {
-                                    actions.push(Action::SelectSplitPaneTab { idx, right });
+                                    actions.push(Action::SelectSplitPaneTab { idx, pane });
                                 }
                             }
                             if components::toolbar_icon_button(
                                 ui,
                                 icons::plus(),
-                                if right {
-                                    "New query tab in right pane"
-                                } else {
-                                    "New query tab in left pane"
-                                },
+                                &format!("New query tab in pane {}", pane + 1),
                             )
                             .clicked()
                             {
-                                actions.push(Action::NewSplitPaneTab(right));
+                                actions.push(Action::NewSplitPaneTab(pane));
                             }
                         });
                     });
             });
+        // Mark the pane that keyboard actions and Details currently follow.
+        if self.is_split() && self.focused_pane == pane {
+            let rect = bar.response.rect;
+            root.painter().hline(
+                rect.x_range(),
+                rect.bottom() - 1.0,
+                egui::Stroke::new(2.0_f32, palette::ACCENT()),
+            );
+        }
     }
 
     fn update_title_bar_state(&self) -> Option<(String, &'static str, bool)> {
@@ -393,16 +407,27 @@ impl DbGuiApp {
     /// While a query tab is being dragged, live-reorder it into the slot under its
     /// floating chip (the strip re-lays-out next frame, so the swap is immediately
     /// visible). The drag ends when the primary button is released.
-    fn handle_tab_drag(&mut self, ui: &egui::Ui, rects: &[egui::Rect], actions: &mut Vec<Action>) {
+    fn handle_tab_drag(
+        &mut self,
+        ui: &egui::Ui,
+        rects: &[egui::Rect],
+        shown: &[usize],
+        actions: &mut Vec<Action>,
+    ) {
         let Some(drag) = self.tab_drag else { return };
         if !ui.input(|i| i.pointer.primary_down()) {
             // The workspace drop target is evaluated later in this frame and needs this id
             // to decide whether the release creates a split pane.
             return;
         }
-        let Some(from) = self.tabs.iter().position(|t| t.id == drag.id) else {
+        let Some(from_tab) = self.tabs.iter().position(|t| t.id == drag.id) else {
             // The dragged tab vanished (e.g. closed via shortcut mid-drag).
             self.tab_drag = None;
+            return;
+        };
+        // Slots are counted among the chips actually on screen; `MoveTab` takes `self.tabs`
+        // indices, which differ whenever another connection's tabs sit in between.
+        let Some(from) = shown.iter().position(|&i| i == from_tab) else {
             return;
         };
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -420,7 +445,10 @@ impl DbGuiApp {
             .filter(|(i, r)| *i != from && float_center > r.center().x)
             .count();
         if to != from {
-            actions.push(Action::MoveTab { from, to });
+            actions.push(Action::MoveTab {
+                from: from_tab,
+                to: shown[to],
+            });
         }
     }
 }

@@ -53,7 +53,7 @@ impl DbGuiApp {
                         // A split pane is a real workspace in its own right. Remember which
                         // pane launched Run so the action executes against that pane's SQL and
                         // stores rows in that pane's result view.
-                        self.split_focus = self.split_tab == Some(self.active_query_tab);
+                        self.focused_pane = self.tabs[self.active_query_tab].pane;
                         actions.push(if run.run_current {
                             Action::RunCurrentQuery
                         } else {

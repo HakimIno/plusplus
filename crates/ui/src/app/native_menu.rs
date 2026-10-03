@@ -48,21 +48,17 @@ impl DbGuiApp {
             }
             match command {
                 Quit => self.apply_action(Action::Quit),
-                NewTab => self.apply_action(if self.split_tab.is_some() {
-                    Action::NewSplitPaneTab(self.split_focus)
+                NewTab => self.apply_action(if self.is_split() {
+                    Action::NewSplitPaneTab(self.focused_pane)
                 } else {
                     Action::NewTab
                 }),
                 CloseTab if self.settings_open => self.settings_open = false,
                 CloseTab if !self.tabs.is_empty() => {
-                    let action = if let Some(split) = self.split_tab {
+                    let action = if self.is_split() {
                         Action::CloseSplitPaneTab {
-                            idx: if self.split_focus {
-                                split
-                            } else {
-                                self.active_query_tab
-                            },
-                            right: self.split_focus,
+                            idx: self.focused_tab_idx(),
+                            pane: self.focused_pane,
                         }
                     } else {
                         Action::CloseTab(self.active_query_tab)

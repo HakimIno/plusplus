@@ -3,6 +3,44 @@
 use super::*;
 use crate::style::{self, palette};
 
+/// A split column never gets narrower than this.
+const MIN_PANE_WIDTH: f32 = 220.0;
+/// Width of the draggable strip centred on the seam between two split columns.
+const SPLIT_HANDLE_WIDTH: f32 = 8.0;
+
+/// Split `total` across panes by `ratios`, never giving one less than `min`. Panes that would
+/// fall short are pinned to `min` and the rest share what remains in proportion.
+pub(super) fn pane_widths(ratios: &[f32], total: f32, min: f32) -> Vec<f32> {
+    let count = ratios.len();
+    if count == 0 {
+        return Vec::new();
+    }
+    if total <= min * count as f32 {
+        return vec![total / count as f32; count];
+    }
+    let mut widths = vec![0.0_f32; count];
+    let mut pinned = vec![false; count];
+    loop {
+        let pinned_total: f32 = (0..count).filter(|i| pinned[*i]).map(|i| widths[i]).sum();
+        let free_ratio: f32 = (0..count).filter(|i| !pinned[*i]).map(|i| ratios[i]).sum();
+        let mut changed = false;
+        for i in 0..count {
+            if pinned[i] {
+                continue;
+            }
+            widths[i] = ratios[i] / free_ratio * (total - pinned_total);
+            if widths[i] < min {
+                widths[i] = min;
+                pinned[i] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            return widths;
+        }
+    }
+}
+
 impl eframe::App for DbGuiApp {
     #[cfg(target_os = "macos")]
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
@@ -28,7 +66,10 @@ impl DbGuiApp {
         workspace: egui::Rect,
         actions: &mut Vec<Action>,
     ) {
-        if workspace.width() < 440.0 {
+        let count = self.pane_count();
+        let can_add_pane =
+            count < Self::MAX_PANES && workspace.width() / (count as f32 + 1.0) >= MIN_PANE_WIDTH;
+        if !self.is_split() && !can_add_pane {
             if ui.input(|input| input.pointer.any_released()) {
                 self.tab_drag = None;
             }
@@ -41,7 +82,7 @@ impl DbGuiApp {
         let table_drag = pointer_in_workspace
             .then(|| egui::DragAndDrop::payload::<SchemaTableDrag>(ui.ctx()))
             .flatten();
-        let tab_drag = (self.split_tab.is_none() && pointer_in_workspace)
+        let tab_drag = (!self.is_split() && pointer_in_workspace)
             .then_some(self.tab_drag)
             .flatten();
         if table_drag.is_none() && tab_drag.is_none() {
@@ -51,46 +92,85 @@ impl DbGuiApp {
             return;
         }
 
-        // Before a split exists, the right half creates one. Afterwards the existing right pane
-        // remains the target so every dropped table becomes another tab in that group.
-        let target_left = if self.split_tab.is_some() {
-            workspace.left() + workspace.width() * self.split_workspace_ratio + 6.0
+        // Drop zones: every existing split column takes the drop as another tab, and the right
+        // edge of the last column opens a new one (the right half before any split exists).
+        let columns = self.pane_columns(workspace);
+        let mut zones: Vec<(usize, egui::Rect)> = Vec::new();
+        if self.is_split() {
+            let last = *columns.last().unwrap_or(&workspace);
+            for (pane, column) in columns.iter().enumerate().skip(1) {
+                let mut zone = *column;
+                if pane == count - 1 && can_add_pane {
+                    zone.max.x = last.right() - last.width() * 0.35;
+                }
+                zones.push((pane, zone));
+            }
+            if can_add_pane {
+                let edge = egui::Rect::from_min_max(
+                    egui::pos2(last.right() - last.width() * 0.35, last.top()),
+                    last.max,
+                );
+                zones.push((count, edge));
+            }
         } else {
-            workspace.center().x
+            let half = egui::Rect::from_min_max(
+                egui::pos2(workspace.center().x, workspace.top()),
+                workspace.max,
+            );
+            zones.push((1, half));
+        }
+        // Several zones can sit side by side, so inset by the same half-seam the cards use:
+        // neighbouring highlights then leave the usual four-point gap instead of twenty.
+        let inset = if self.is_split() {
+            style::WORKSPACE_GUTTER as f32
+        } else {
+            10.0
         };
-        let target =
-            egui::Rect::from_min_max(egui::pos2(target_left, workspace.top()), workspace.max)
-                .shrink(10.0);
-        let pointer_in_target = pointer.is_some_and(|pointer| target.contains(pointer));
+        let zones: Vec<(usize, egui::Rect)> = zones
+            .into_iter()
+            .map(|(pane, zone)| (pane, zone.shrink(inset)))
+            .collect();
+        let hovered = pointer.and_then(|pointer| {
+            zones
+                .iter()
+                .find(|(_, zone)| zone.contains(pointer))
+                .map(|(pane, _)| *pane)
+        });
         let painter = ui.ctx().layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
             egui::Id::new("workspace_split_drop_overlay"),
         ));
-        painter.rect_filled(
-            target,
-            8.0,
-            palette::ACCENT().gamma_multiply(if pointer_in_target { 0.22 } else { 0.10 }),
-        );
+        for (pane, zone) in &zones {
+            painter.rect_filled(
+                *zone,
+                8.0,
+                palette::ACCENT().gamma_multiply(if hovered == Some(*pane) { 0.22 } else { 0.10 }),
+            );
+        }
 
-        if !pointer_in_target {
-            if ui.input(|input| input.pointer.any_released()) {
+        let released = ui.input(|input| input.pointer.any_released());
+        let Some(pane) = hovered else {
+            if released {
                 self.tab_drag = None;
             }
             return;
-        }
-        let released = ui.input(|input| input.pointer.any_released());
+        };
         let table_release = if released {
             egui::DragAndDrop::take_payload::<SchemaTableDrag>(ui.ctx())
         } else {
             None
         };
         if let Some(payload) = table_release {
-            actions.push(Action::OpenSplitSchemaTable(payload.as_ref().clone()));
+            actions.push(Action::OpenSplitSchemaTable {
+                payload: payload.as_ref().clone(),
+                pane,
+            });
         } else if released {
             if let Some(drag) = tab_drag {
                 actions.push(Action::OpenSplitTab {
                     id: drag.id,
                     primary_id: drag.origin_active_id,
+                    pane,
                 });
             }
         }
@@ -99,9 +179,27 @@ impl DbGuiApp {
         }
     }
 
+    /// The column rectangles of a split workspace, left to right. Shared by drawing and the
+    /// drop overlay so both agree on where each pane is.
+    fn pane_columns(&self, workspace: egui::Rect) -> Vec<egui::Rect> {
+        let widths = pane_widths(&self.split_ratios, workspace.width(), MIN_PANE_WIDTH);
+        let mut left = workspace.left();
+        widths
+            .into_iter()
+            .map(|width| {
+                let column = egui::Rect::from_min_max(
+                    egui::pos2(left, workspace.top()),
+                    egui::pos2(left + width, workspace.bottom()),
+                );
+                left += width;
+                column
+            })
+            .collect()
+    }
+
     fn draw_workspace_pane(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
         let editor_placement = query_editor_placement(self.tab().kind);
-        let diagram_tab = self.tab().kind == crate::components::QueryTabKind::Diagram;
+        let diagram_tab = self.tab().kind.owns_workspace();
         let designing = self.tab().schema_editor.is_some();
         let sql_authoring_tab = matches!(
             self.tab().kind,
@@ -126,7 +224,7 @@ impl DbGuiApp {
             self.filter_bar(root);
         }
         if show_view_mode_bar {
-            self.view_mode_bar(root, editor_placement, false, actions);
+            self.view_mode_bar(root, editor_placement, actions);
         }
         self.central_panel(root, actions);
         if console_visible && editor_placement == QueryEditorPlacement::Top {
@@ -136,67 +234,97 @@ impl DbGuiApp {
 
     fn draw_split_workspace(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
         let primary = self.active_query_tab;
-        let Some(split) = self.split_tab.filter(|idx| *idx < self.tabs.len()) else {
+        if !self.is_split() || self.split_panes.iter().any(|idx| *idx >= self.tabs.len()) {
             self.draw_workspace_pane(root, actions);
             return;
-        };
-        let height = root.available_height();
-        let width = root.available_width();
-        let gap = 6.0;
-        let max_left = (width - gap - 220.0).max(220.0);
-        let left_width = ((width - gap) * self.split_workspace_ratio).clamp(220.0, max_left);
-        root.horizontal(|row| {
-            row.spacing_mut().item_spacing.x = 0.0;
-            row.allocate_ui_with_layout(
-                egui::vec2(left_width, height),
-                egui::Layout::top_down(egui::Align::Min),
+        }
+        let area = root.available_rect_before_wrap();
+        let columns = self.pane_columns(area);
+        // Pressing anywhere in a column focuses it, so Details, Run and the shortcuts follow the
+        // pane the user is working in. Applied after drawing so a text editor that still holds
+        // egui focus this frame cannot claim it back.
+        let pressed_in = root
+            .ctx()
+            .input(|input| {
+                input
+                    .pointer
+                    .any_pressed()
+                    .then(|| input.pointer.interact_pos())
+            })
+            .flatten()
+            .and_then(|pointer| columns.iter().position(|column| column.contains(pointer)));
+        for (pane, column) in columns.iter().enumerate() {
+            let tab_idx = if pane == 0 {
+                primary
+            } else {
+                self.split_panes[pane - 1]
+            };
+            root.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(*column)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
                 |ui| {
-                    self.active_query_tab = primary;
-                    self.split_pane_tab_bar(ui, primary, false, actions);
+                    self.active_query_tab = tab_idx;
+                    self.split_pane_tab_bar(ui, tab_idx, pane, actions);
                     self.draw_workspace_pane(ui, actions);
                 },
             );
-            let (divider, response) =
-                row.allocate_exact_size(egui::vec2(gap, height), egui::Sense::drag());
-            row.painter()
-                .rect_filled(divider, 1.0, style::workspace_gap());
+        }
+        self.active_query_tab = primary;
+        if let Some(pane) = pressed_in {
+            self.focused_pane = pane;
+        }
+        root.advance_cursor_after_rect(area);
+
+        // Dividers sit on the seam the cards already leave between columns, so a split costs
+        // no more space than any other pair of neighbouring cards.
+        for divider_index in 0..columns.len() - 1 {
+            let seam_x = columns[divider_index].right();
+            let divider = egui::Rect::from_center_size(
+                egui::pos2(seam_x, area.center().y),
+                egui::vec2(SPLIT_HANDLE_WIDTH, area.height()),
+            );
+            let response = root.interact(
+                divider,
+                egui::Id::new(("workspace_split_divider", divider_index)),
+                egui::Sense::drag(),
+            );
             let grip_color = if response.hovered() || response.dragged() {
                 palette::TEXT_WEAK()
             } else {
                 palette::TEXT_FAINT()
             };
             for offset in [-5.0, 0.0, 5.0] {
-                row.painter().circle_filled(
+                root.painter().circle_filled(
                     divider.center() + egui::vec2(0.0, offset),
                     1.0,
                     grip_color,
                 );
             }
             if response.dragged() {
-                self.split_workspace_ratio = ((response
-                    .interact_pointer_pos()
-                    .unwrap_or(divider.center())
-                    .x
-                    - row.min_rect().left())
-                    / width)
-                    .clamp(0.25, 0.75);
-                self.workspace_dirty = true;
+                if let Some(pointer) = response.interact_pointer_pos() {
+                    self.drag_split_divider(divider_index, pointer.x, area);
+                }
             }
             if response.hovered() || response.dragged() {
-                row.ctx()
+                root.ctx()
                     .set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
             }
-            row.allocate_ui_with_layout(
-                egui::vec2((width - gap - left_width).max(220.0), height),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    self.active_query_tab = split;
-                    self.split_pane_tab_bar(ui, split, true, actions);
-                    self.draw_workspace_pane(ui, actions);
-                },
-            );
-        });
-        self.active_query_tab = primary;
+        }
+    }
+
+    /// Move the seam between pane `index` and `index + 1` to `pointer_x`, trading width only
+    /// between those two neighbours.
+    fn drag_split_divider(&mut self, index: usize, pointer_x: f32, area: egui::Rect) {
+        let total = area.width();
+        let mut widths = pane_widths(&self.split_ratios, total, MIN_PANE_WIDTH);
+        let left_edge = area.left() + widths[..index].iter().sum::<f32>();
+        let pair = widths[index] + widths[index + 1];
+        let new_left = (pointer_x - left_edge).clamp(MIN_PANE_WIDTH, pair - MIN_PANE_WIDTH);
+        widths[index] = new_left;
+        widths[index + 1] = pair - new_left;
+        self.split_ratios = widths.iter().map(|width| width / total).collect();
+        self.workspace_dirty = true;
     }
 
     /// Draw one frame into the given root ui. Split out from `eframe::App::ui` so it can be
@@ -683,22 +811,17 @@ impl DbGuiApp {
         }
         // Cmd/Ctrl+T opens a new query tab; Cmd/Ctrl+W closes the active one.
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::T)) {
-            if self.split_tab.is_some() {
-                actions.push(Action::NewSplitPaneTab(self.split_focus));
+            if self.is_split() {
+                actions.push(Action::NewSplitPaneTab(self.focused_pane));
             } else {
                 actions.push(Action::NewTab);
             }
         }
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::W)) {
-            if let Some(split_idx) = self.split_tab {
-                let right = self.split_focus;
+            if self.is_split() {
                 actions.push(Action::CloseSplitPaneTab {
-                    idx: if right {
-                        split_idx
-                    } else {
-                        self.active_query_tab
-                    },
-                    right,
+                    idx: self.focused_tab_idx(),
+                    pane: self.focused_pane,
                 });
             } else {
                 actions.push(Action::CloseTab(self.active_query_tab));
@@ -732,7 +855,7 @@ impl DbGuiApp {
         // the SQL editor so they run the full height; the editor stays confined to the central
         // column. Table/View tabs are data workspaces, so SQL authoring stays in Query tabs.
         self.top_bar(ui_root, frame, &mut actions);
-        if self.split_tab.is_none() {
+        if !self.is_split() {
             self.query_tab_bar(ui_root, &mut actions);
         }
         self.status_bar(ui_root, &mut actions);
@@ -767,12 +890,18 @@ impl DbGuiApp {
             self.right_panel(&mut workspace_root, &mut actions);
         }
         let workspace_drop_rect = workspace_root.available_rect_before_wrap();
-        if self.split_tab.is_some() {
+        if self.is_split() {
             self.draw_split_workspace(&mut workspace_root, &mut actions);
+            if self.pane_count() >= 3 && self.show_details_panel {
+                let columns = self.pane_columns(workspace_drop_rect);
+                if let Some(column) = columns.get(self.focused_pane) {
+                    self.details_drawer(&ctx, *column, &mut actions);
+                }
+            }
         } else {
             let editor_placement = query_editor_placement(self.tab().kind);
             // A Diagram tab is just the canvas: no SQL editor, no filter or result-mode bars.
-            let diagram_tab = self.tab().kind == crate::components::QueryTabKind::Diagram;
+            let diagram_tab = self.tab().kind.owns_workspace();
             // An open object designer (Create/Edit Table, View, Trigger, Routine) owns the whole
             // tab the same way: the SQL console and result bars would only crowd the form.
             let designing = self.tab().schema_editor.is_some();
@@ -789,10 +918,6 @@ impl DbGuiApp {
                 (!console_visible || editor_placement == QueryEditorPlacement::Top || designing)
                     && (self.tab().kind != crate::components::QueryTabKind::Query || !designing)
                     && !diagram_tab;
-            // The mode bar and Live log form one bottom stack. Put the bar inside the resizable
-            // panel so its drag edge stays above Data / Message / Chart on query tabs and above
-            // Data / Structure / Indexes on data-first tabs.
-            let mode_bar_in_live_log = self.show_live_log && show_view_mode_bar;
             if console_visible {
                 self.query_console(&mut workspace_root, editor_placement, &mut actions);
             }
@@ -800,21 +925,16 @@ impl DbGuiApp {
             // independent makes it stay put across Data / Structure / Indexes and places it below
             // query results instead of between the editor and its toolbar.
             if self.show_live_log && !diagram_tab {
-                self.live_log_panel(
-                    &mut workspace_root,
-                    self.tab().id,
-                    mode_bar_in_live_log,
-                    &mut actions,
-                );
+                self.live_log_panel(&mut workspace_root, self.tab().id);
             }
             if !diagram_tab && !designing {
                 self.batch_result_bar(&mut workspace_root);
                 // A top panel after left/right carves the strip directly above the grid.
                 self.filter_bar(&mut workspace_root);
             }
-            // Without Live log the mode bar remains its own dock.
-            if self.split_tab.is_none() && show_view_mode_bar && !mode_bar_in_live_log {
-                self.view_mode_bar(&mut workspace_root, editor_placement, false, &mut actions);
+            // Carve the result-mode dock after Live log so it sits above the log's resize edge.
+            if show_view_mode_bar {
+                self.view_mode_bar(&mut workspace_root, editor_placement, &mut actions);
             }
             self.central_panel(&mut workspace_root, &mut actions);
             if console_visible && editor_placement == QueryEditorPlacement::Top {

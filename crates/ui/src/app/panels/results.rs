@@ -1,5 +1,6 @@
 //! Results rendering and interaction.
 
+use super::pager::BarDensity;
 use super::query_plan::plan_viewer;
 use super::structure::structure_view;
 use crate::app::{result_status, Action, DbGuiApp, QueryEditorPlacement, QueryTab, TabView};
@@ -10,6 +11,22 @@ use crate::grid::results_grid;
 use crate::icons;
 use crate::style;
 use crate::style::palette;
+
+/// The "+ Row" / "+ Column" / "+ Index" button beside the view modes. When the bar is short of
+/// room it keeps just the plus, with the full label in the tooltip.
+fn add_button(ui: &mut egui::Ui, density: BarDensity, label: &str, enabled: bool) -> bool {
+    if density.labelled_buttons() {
+        components::button(ui, icons::plus(), label, enabled).clicked()
+    } else {
+        components::soft_icon_button(
+            ui,
+            icons::plus(),
+            &format!("Add {}", label.to_lowercase()),
+            enabled,
+        )
+        .clicked()
+    }
+}
 
 impl DbGuiApp {
     /// One closable, scrollable tab per statement returned by Run All.
@@ -98,9 +115,8 @@ impl DbGuiApp {
         egui::Panel::top(egui::Id::new(("filter_bar", self.tabs[idx].id)))
             .resizable(false)
             .frame(
-                egui::Frame::new()
-                    .inner_margin(egui::Margin::symmetric(6, 4))
-                    .fill(palette::PANEL()),
+                style::workspace_frame(palette::PANEL())
+                    .inner_margin(egui::Margin::symmetric(6, 4)),
             )
             .show_separator_line(true)
             .show_inside(root, |ui| {
@@ -175,25 +191,23 @@ impl DbGuiApp {
         // otherwise both bars create the same child Ui and their segmented buttons share click
         // state, making Data/Structure/Indexes switch in both panes together.
         let panel_id = egui::Id::new(("view_mode_bar", tab_id));
-        let panel = match (force_top, query_result_tabs, placement) {
-            (true, _, _) => egui::Panel::top(panel_id),
+        let panel = match (query_result_tabs, placement) {
             // Query result modes belong beneath the data surface, matching the statement tabs
             // above it. Table/view modes keep following their data-first editor placement.
-            (false, true, _) | (false, false, QueryEditorPlacement::Bottom) => {
-                egui::Panel::bottom(panel_id)
-            }
-            (false, false, QueryEditorPlacement::Top) => egui::Panel::top(panel_id),
+            (true, _) | (false, QueryEditorPlacement::Bottom) => egui::Panel::bottom(panel_id),
+            (false, QueryEditorPlacement::Top) => egui::Panel::top(panel_id),
         };
         panel
             .resizable(false)
             .exact_size(38.0)
             .frame(
-                egui::Frame::new()
-                    .inner_margin(egui::Margin::symmetric(6, 5))
-                    .fill(palette::PANEL()),
+                style::workspace_frame(palette::PANEL())
+                    .inner_margin(egui::Margin::symmetric(6, 4)),
             )
             .show_separator_line(true)
             .show_inside(root, |ui| {
+                let bar_width = ui.available_width();
+                let density = BarDensity::for_width(bar_width);
                 ui.horizontal(|ui| {
                     if query_result_tabs {
                         let modes = [TabView::Data, TabView::Message, TabView::Chart];
@@ -251,7 +265,16 @@ impl DbGuiApp {
                             (icons::index(), "Indexes"),
                         ],
                         selected,
-                        300.0,
+                        // The DDL button only exists on Structure.
+                        density.segment_width(
+                            bar_width,
+                            300.0,
+                            if self.tabs[idx].view == TabView::Structure {
+                                50.0
+                            } else {
+                                0.0
+                            },
+                        ),
                         false,
                     );
                     if choice != selected {
@@ -289,7 +312,7 @@ impl DbGuiApp {
                         TabView::Data => {
                             ui.add_space(6.0);
                             let can_add_row = self.tabs[idx].edits.editable();
-                            if components::button(ui, icons::plus(), "Row", can_add_row).clicked() {
+                            if add_button(ui, density, "Row", can_add_row) {
                                 actions.push(Action::ForTab {
                                     tab_id,
                                     action: Box::new(Action::AddDataRow),
@@ -298,7 +321,7 @@ impl DbGuiApp {
                         }
                         TabView::Structure => {
                             ui.add_space(6.0);
-                            if components::button(ui, icons::plus(), "Column", editing).clicked() {
+                            if add_button(ui, density, "Column", editing) {
                                 actions.push(Action::ForTab {
                                     tab_id,
                                     action: Box::new(Action::AddSchemaColumn),
@@ -307,7 +330,7 @@ impl DbGuiApp {
                         }
                         TabView::Indexes => {
                             ui.add_space(6.0);
-                            if components::button(ui, icons::plus(), "Index", editing).clicked() {
+                            if add_button(ui, density, "Index", editing) {
                                 actions.push(Action::ForTab {
                                     tab_id,
                                     action: Box::new(Action::AddSchemaIndex),
@@ -390,7 +413,7 @@ impl DbGuiApp {
                     }
                     // Paging describes the table result, so its range and navigation stay visible
                     // while inspecting Structure or Indexes as well as Data.
-                    self.pager(ui, actions);
+                    self.pager(ui, density, actions);
                 });
             });
     }
@@ -473,6 +496,14 @@ impl DbGuiApp {
         // A Diagram tab owns the whole central panel (the editor and result bars were
         // already skipped in `draw`). Slim vertical margins keep the header band tight
         // between the tab strip and the canvas.
+        if self.tabs[idx].kind == crate::components::QueryTabKind::Activity {
+            egui::CentralPanel::default()
+                .frame(style::workspace_frame(palette::PANEL()))
+                .show_inside(root, |ui| {
+                    self.activity_view(ui, actions);
+                });
+            return;
+        }
         if self.tabs[idx].kind == crate::components::QueryTabKind::Diagram {
             egui::CentralPanel::default()
                 .frame(

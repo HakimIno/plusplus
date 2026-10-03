@@ -35,30 +35,81 @@ impl DbGuiApp {
         }
     }
 
-    pub(super) fn tab_is_in_split_group(&self, idx: usize) -> bool {
-        self.tabs
-            .get(idx)
-            .is_some_and(|tab| self.split_tab_ids.contains(&tab.id))
+    /// Most columns the workspace can be split into.
+    pub(super) const MAX_PANES: usize = 4;
+
+    pub(super) fn pane_count(&self) -> usize {
+        self.split_panes.len() + 1
     }
 
-    pub(super) fn install_split_tab(&mut self, mut split: QueryTab, run: bool) {
+    pub(super) fn is_split(&self) -> bool {
+        !self.split_panes.is_empty()
+    }
+
+    /// The tab showing in `pane`: pane 0 is the main strip, 1.. are the split columns.
+    pub(super) fn pane_active(&self, pane: usize) -> Option<usize> {
+        if pane == 0 {
+            Some(self.active_query_tab)
+        } else {
+            self.split_panes.get(pane - 1).copied()
+        }
+    }
+
+    /// The tab that keyboard actions (run, close, new tab) apply to.
+    pub(super) fn focused_tab_idx(&self) -> usize {
+        self.pane_active(self.focused_pane)
+            .unwrap_or(self.active_query_tab)
+    }
+
+    pub(super) fn tab_is_in_split_group(&self, idx: usize) -> bool {
+        self.tabs.get(idx).is_some_and(|tab| tab.pane > 0)
+    }
+
+    pub(super) fn reset_split_ratios(&mut self) {
+        let count = self.pane_count();
+        self.split_ratios = vec![1.0 / count as f32; count];
+    }
+
+    /// Keep the primary tab's `split_sql` in step with pane 1. It is what a workspace saved by
+    /// an older build restores a two-pane split from.
+    pub(super) fn mirror_split_sql(&mut self) {
+        if let Some(first) = self.split_panes.first().copied() {
+            if let Some(sql) = self.tabs.get(first).map(|tab| tab.sql.clone()) {
+                if let Some(primary) = self.tabs.get_mut(self.active_query_tab) {
+                    primary.split_sql = Some(sql);
+                }
+            }
+        }
+    }
+
+    /// Put `split` in column `pane`. `pane == pane_count()` opens a new column; once
+    /// [`Self::MAX_PANES`] columns exist it lands in the last one instead.
+    pub(super) fn install_split_tab(&mut self, mut split: QueryTab, pane: usize, run: bool) {
         if self.active_query_tab >= self.tabs.len() {
             return;
         }
-        if self.split_tab.is_none() {
+        let mut target = pane.clamp(1, self.pane_count());
+        if target == self.pane_count() && target >= Self::MAX_PANES {
+            target -= 1;
+        }
+        if !self.is_split() {
             let primary_idx = self.active_query_tab;
             self.tabs[primary_idx].editor_split = true;
             self.tabs[primary_idx].editor_size = None;
         }
         split.editor_size = None;
         split.preview = false;
-        let split_id = split.id;
+        split.pane = target;
         let split_idx = self.tabs.len();
         self.tabs.push(split);
-        self.split_tab_ids.push(split_id);
-        self.split_tab = Some(split_idx);
-        self.tabs[self.active_query_tab].split_sql = Some(self.tabs[split_idx].sql.clone());
-        self.split_focus = true;
+        if target == self.pane_count() {
+            self.split_panes.push(split_idx);
+            self.reset_split_ratios();
+        } else {
+            self.split_panes[target - 1] = split_idx;
+        }
+        self.mirror_split_sql();
+        self.focused_pane = target;
         self.workspace_dirty = true;
         if run {
             self.start_query_for(split_idx);
@@ -69,56 +120,42 @@ impl DbGuiApp {
     /// or table to the edge; this is how the tests build a split directly.
     #[cfg(test)]
     pub(super) fn open_split_workspace(&mut self) {
-        if self.split_tab.is_some() || self.active_query_tab >= self.tabs.len() {
+        if self.is_split() || self.active_query_tab >= self.tabs.len() {
             return;
         }
-        let primary_idx = self.active_query_tab;
-        self.tabs[primary_idx].editor_split = true;
-        self.tabs[primary_idx].split_sql = Some(self.tabs[primary_idx].sql.clone());
-        self.tabs[primary_idx].editor_size = None;
-        let primary = &self.tabs[primary_idx];
+        let primary = &self.tabs[self.active_query_tab];
         let mut split = QueryTab::new(self.next_tab_id, primary.title.clone());
         self.next_tab_id = self.next_tab_id.wrapping_add(1);
         split.kind = primary.kind;
         split.conn_id = primary.conn_id.clone();
         split.sql = primary.sql.clone();
-        split.editor_size = None;
-        split.preview = false;
-        let split_id = split.id;
-        self.split_tab = Some(self.tabs.len());
-        self.tabs.push(split);
-        self.split_tab_ids.push(split_id);
-        self.workspace_dirty = true;
+        let focus = self.focused_pane;
+        self.install_split_tab(split, 1, false);
+        self.focused_pane = focus;
     }
 
     /// Collapse the split, returning its tabs to the main strip without losing their work.
     pub(super) fn close_split_workspace(&mut self) {
-        let Some(split_idx) = self.split_tab.take() else {
+        if !self.is_split() {
             return;
-        };
-        let mut split_ids = std::mem::take(&mut self.split_tab_ids);
-        if split_ids.is_empty() {
-            if let Some(split_id) = self.tabs.get(split_idx).map(|tab| tab.id) {
-                split_ids.push(split_id);
-            }
         }
         let primary_id = self
             .tabs
             .get(self.active_query_tab)
-            .filter(|tab| !split_ids.contains(&tab.id))
+            .filter(|tab| tab.pane == 0)
             .map(|tab| tab.id)
             .or_else(|| {
                 self.tabs
                     .iter()
-                    .find(|tab| !split_ids.contains(&tab.id) && tab.editor_split)
+                    .find(|tab| tab.pane == 0 && tab.editor_split)
                     .map(|tab| tab.id)
             })
-            .or_else(|| {
-                self.tabs
-                    .iter()
-                    .find(|tab| !split_ids.contains(&tab.id))
-                    .map(|tab| tab.id)
-            });
+            .or_else(|| self.tabs.iter().find(|tab| tab.pane == 0).map(|tab| tab.id));
+        for tab in &mut self.tabs {
+            tab.pane = 0;
+        }
+        self.split_panes.clear();
+        self.split_ratios = vec![1.0];
 
         if let Some(primary_id) = primary_id {
             if let Some(primary) = self.tabs.iter_mut().find(|tab| tab.id == primary_id) {
@@ -131,81 +168,111 @@ impl DbGuiApp {
             .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
             .unwrap_or(0)
             .min(self.tabs.len().saturating_sub(1));
-        self.split_focus = false;
+        self.focused_pane = 0;
         self.workspace_dirty = true;
     }
 
-    pub(super) fn select_split_pane_tab(&mut self, idx: usize, right: bool) {
-        if idx >= self.tabs.len() || self.tab_is_in_split_group(idx) != right {
+    pub(super) fn select_split_pane_tab(&mut self, idx: usize, pane: usize) {
+        if idx >= self.tabs.len() || self.tabs[idx].pane != pane {
             return;
         }
-        if right {
-            self.split_tab = Some(idx);
-            self.split_focus = true;
-            self.tabs[self.active_query_tab].split_sql = Some(self.tabs[idx].sql.clone());
+        if pane > 0 {
+            let Some(slot) = self.split_panes.get_mut(pane - 1) else {
+                return;
+            };
+            *slot = idx;
+            self.focused_pane = pane;
+            if pane == 1 {
+                self.mirror_split_sql();
+            }
         } else {
             self.active_query_tab = idx;
-            self.split_focus = false;
+            self.focused_pane = 0;
         }
         self.touch_result(idx);
         self.reload_data_tab_if_needed(idx);
         self.workspace_dirty = true;
     }
 
-    pub(super) fn close_split_pane_tab(&mut self, idx: usize, right: bool) {
-        if idx >= self.tabs.len() || self.tab_is_in_split_group(idx) != right {
+    pub(super) fn close_split_pane_tab(&mut self, idx: usize, pane: usize) {
+        if idx >= self.tabs.len() || self.tabs[idx].pane != pane {
+            return;
+        }
+        // The main strip always keeps one tab; a split column disappears with its last tab.
+        let closing_connection = self.tabs[idx].conn_id.clone();
+        if pane == 0
+            && self
+                .tabs
+                .iter()
+                .filter(|tab| tab.pane == 0 && tab.conn_id == closing_connection)
+                .count()
+                <= 1
+        {
             return;
         }
         let closing_id = self.tabs[idx].id;
         let primary_id = self.tabs.get(self.active_query_tab).map(|tab| tab.id);
-        let active_split_id = self
-            .split_tab
-            .and_then(|split_idx| self.tabs.get(split_idx))
-            .map(|tab| tab.id);
-        if right {
-            self.split_tab_ids.retain(|id| *id != closing_id);
-            self.tabs.remove(idx);
-            self.active_query_tab = primary_id
-                .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
-                .unwrap_or(0)
-                .min(self.tabs.len().saturating_sub(1));
-            if self.split_tab_ids.is_empty() {
-                self.split_tab = None;
-                let primary_idx = self.active_query_tab.min(self.tabs.len().saturating_sub(1));
-                if let Some(primary) = self.tabs.get_mut(primary_idx) {
-                    primary.editor_split = false;
-                    primary.split_sql = None;
+        let mut active_ids: Vec<Option<u64>> = self
+            .split_panes
+            .iter()
+            .map(|&split_idx| self.tabs.get(split_idx).map(|tab| tab.id))
+            .collect();
+
+        self.tabs.remove(idx);
+
+        if pane > 0 {
+            if !self.tabs.iter().any(|tab| tab.pane == pane) {
+                for tab in &mut self.tabs {
+                    if tab.pane > pane {
+                        tab.pane -= 1;
+                    }
                 }
-                self.active_query_tab =
-                    self.active_query_tab.min(self.tabs.len().saturating_sub(1));
-                self.split_focus = false;
-            } else {
-                let next_id = active_split_id
-                    .filter(|id| *id != closing_id && self.split_tab_ids.contains(id))
-                    .unwrap_or_else(|| *self.split_tab_ids.last().unwrap());
-                self.split_tab = self.tabs.iter().position(|tab| tab.id == next_id);
+                active_ids.remove(pane - 1);
+                self.split_ratios.remove(pane);
+                let total: f32 = self.split_ratios.iter().sum();
+                for ratio in &mut self.split_ratios {
+                    *ratio /= total;
+                }
+            } else if active_ids[pane - 1] == Some(closing_id) {
+                active_ids[pane - 1] = self
+                    .tabs
+                    .iter()
+                    .rev()
+                    .find(|tab| tab.pane == pane)
+                    .map(|tab| tab.id);
             }
+        }
+
+        self.split_panes = active_ids
+            .iter()
+            .enumerate()
+            .map(|(slot, id)| {
+                id.and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
+                    .or_else(|| self.tabs.iter().rposition(|tab| tab.pane == slot + 1))
+                    .unwrap_or(0)
+            })
+            .collect();
+        self.active_query_tab = primary_id
+            .filter(|id| *id != closing_id)
+            .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
+            .or_else(|| {
+                self.tabs
+                    .iter()
+                    .position(|tab| tab.pane == 0 && tab.conn_id == closing_connection)
+            })
+            .unwrap_or(0)
+            .min(self.tabs.len().saturating_sub(1));
+
+        if self.split_panes.is_empty() {
+            self.split_ratios = vec![1.0];
+            if let Some(primary) = self.tabs.get_mut(self.active_query_tab) {
+                primary.editor_split = false;
+                primary.split_sql = None;
+            }
+            self.focused_pane = 0;
         } else {
-            let left_count = self
-                .tabs
-                .iter()
-                .filter(|tab| !self.split_tab_ids.contains(&tab.id))
-                .count();
-            if left_count <= 1 {
-                return;
-            }
-            self.tabs.remove(idx);
-            self.split_tab =
-                active_split_id.and_then(|id| self.tabs.iter().position(|tab| tab.id == id));
-            self.active_query_tab = primary_id
-                .filter(|id| *id != closing_id)
-                .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
-                .or_else(|| {
-                    self.tabs
-                        .iter()
-                        .position(|tab| !self.split_tab_ids.contains(&tab.id))
-                })
-                .unwrap_or(0);
+            self.focused_pane = self.focused_pane.min(self.split_panes.len());
+            self.mirror_split_sql();
         }
         self.workspace_dirty = true;
     }
@@ -228,16 +295,12 @@ impl DbGuiApp {
         self.workspace_dirty = true;
     }
 
-    pub(super) fn new_tab_in_split_pane(&mut self, right: bool) {
-        if self.split_tab.is_none() {
+    pub(super) fn new_tab_in_split_pane(&mut self, pane: usize) {
+        if !self.is_split() {
             self.new_tab();
             return;
         }
-        let source_idx = if right {
-            self.split_tab.unwrap_or(self.active_query_tab)
-        } else {
-            self.active_query_tab
-        };
+        let source_idx = self.pane_active(pane).unwrap_or(self.active_query_tab);
         let id = self.next_tab_id;
         self.next_tab_id = self.next_tab_id.wrapping_add(1);
         let mut tab = QueryTab::new(id, String::new());
@@ -245,12 +308,12 @@ impl DbGuiApp {
             .tabs
             .get(source_idx)
             .and_then(|tab| tab.conn_id.clone());
-        if right {
-            self.install_split_tab(tab, false);
+        if pane > 0 {
+            self.install_split_tab(tab, pane, false);
         } else {
             self.tabs.push(tab);
             self.active_query_tab = self.tabs.len() - 1;
-            self.split_focus = false;
+            self.focused_pane = 0;
             self.workspace_dirty = true;
         }
         self.status_msg = "New query tab".to_string();
@@ -407,7 +470,12 @@ impl DbGuiApp {
                 tab.conn_id.as_deref() == Some(dropped.conn_id.as_str())
                     && matches!(tab.kind, QueryTabKind::Table | QueryTabKind::View)
                     && tab.schema_editor.as_ref().is_none_or(|_| !tab.draft_tab)
-                    && match tab.edits.source.as_ref().or(tab.edits.pending_source.as_ref()) {
+                    && match tab
+                        .edits
+                        .source
+                        .as_ref()
+                        .or(tab.edits.pending_source.as_ref())
+                    {
                         Some(source) => {
                             source.table.eq_ignore_ascii_case(&dropped.name)
                                 && same_schema(&source.schema)
@@ -601,74 +669,121 @@ impl DbGuiApp {
             self.error = Some(e.to_string());
         }
     }
-    pub(super) fn close_tab(&mut self, idx: usize) {
-        let Some(target_id) = self.tabs.get(idx).map(|tab| tab.id) else {
-            return;
-        };
-        self.close_split_workspace();
-        let Some(idx) = self.tabs.iter().position(|tab| tab.id == target_id) else {
-            return;
-        };
-        if self.tabs.len() == 1 {
-            self.reset_to_single_tab(self.tabs[0].conn_id.clone());
-        } else {
-            self.tabs.remove(idx);
-            if self.active_query_tab > idx || self.active_query_tab >= self.tabs.len() {
-                self.active_query_tab = self.active_query_tab.saturating_sub(1);
-            }
+    /// Tabs belong to the connection they were opened on, and the tab bar shows one
+    /// connection's tabs at a time: those bound to the same connection as the active tab.
+    pub(super) fn tab_in_current_connection(&self, idx: usize) -> bool {
+        match (self.tabs.get(idx), self.tabs.get(self.active_query_tab)) {
+            (Some(tab), Some(active)) => tab.conn_id == active.conn_id,
+            _ => false,
         }
-        self.error = None;
-        self.workspace_dirty = true;
     }
-    /// Keep one blank query tab so the workspace never renders as an empty shell.
-    pub(super) fn reset_to_single_tab(&mut self, conn_id: Option<String>) {
+
+    /// A blank query tab bound to `conn_id`.
+    fn blank_tab(&mut self, conn_id: Option<String>) -> QueryTab {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
         let mut tab = QueryTab::new(id, String::new());
         tab.conn_id = conn_id;
-        self.tabs = vec![tab];
-        self.active_query_tab = 0;
-        self.status_msg = "Ready".to_string();
+        tab
+    }
+
+    pub(super) fn close_tab(&mut self, idx: usize) {
+        let Some(target) = self.tabs.get(idx).map(|tab| (tab.id, tab.conn_id.clone())) else {
+            return;
+        };
+        let (target_id, conn_id) = target;
+        self.close_split_workspace();
+        let Some(idx) = self.tabs.iter().position(|tab| tab.id == target_id) else {
+            return;
+        };
+        let siblings: Vec<usize> = (0..self.tabs.len())
+            .filter(|&i| self.tabs[i].conn_id == conn_id)
+            .collect();
+        if siblings.len() == 1 {
+            // The connection's last tab: leave it a blank one rather than an empty shell, and
+            // never fall through to some other connection's tab.
+            let blank = self.blank_tab(conn_id);
+            self.tabs[idx] = blank;
+            self.active_query_tab = idx;
+        } else {
+            let was_active = idx == self.active_query_tab;
+            let active_id = self.tabs[self.active_query_tab].id;
+            // Land on the neighbour in the same connection, preferring the one to the left.
+            let at = siblings.iter().position(|&i| i == idx).unwrap_or(0);
+            let neighbour = siblings[if at > 0 { at - 1 } else { at + 1 }];
+            let neighbour_id = self.tabs[neighbour].id;
+            self.tabs.remove(idx);
+            let keep = if was_active { neighbour_id } else { active_id };
+            self.active_query_tab = self.tabs.iter().position(|tab| tab.id == keep).unwrap_or(0);
+        }
+        self.error = None;
+        self.workspace_dirty = true;
     }
     pub(super) fn close_other_tabs(&mut self, keep_idx: usize) {
-        let Some(kept_id) = self.tabs.get(keep_idx).map(|tab| tab.id) else {
+        let Some((kept_id, conn_id)) = self
+            .tabs
+            .get(keep_idx)
+            .map(|tab| (tab.id, tab.conn_id.clone()))
+        else {
             return;
         };
         self.close_split_workspace();
-        if self.tabs.len() <= 1 || !self.tabs.iter().any(|tab| tab.id == kept_id) {
+        // Other connections' tabs are not "other tabs" of this one.
+        if !self
+            .tabs
+            .iter()
+            .any(|tab| tab.id != kept_id && tab.conn_id == conn_id)
+        {
             return;
         }
-        self.tabs.retain(|t| t.id == kept_id);
-        self.active_query_tab = 0;
+        self.tabs
+            .retain(|tab| tab.id == kept_id || tab.conn_id != conn_id);
+        self.active_query_tab = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == kept_id)
+            .unwrap_or(0);
         self.error = None;
         self.status_msg = "Ready".to_string();
         self.workspace_dirty = true;
     }
     pub(super) fn close_tabs_to_right(&mut self, idx: usize) {
-        let Some(target_id) = self.tabs.get(idx).map(|tab| tab.id) else {
+        let Some((target_id, conn_id)) =
+            self.tabs.get(idx).map(|tab| (tab.id, tab.conn_id.clone()))
+        else {
             return;
         };
         self.close_split_workspace();
         let Some(idx) = self.tabs.iter().position(|tab| tab.id == target_id) else {
             return;
         };
-        if idx + 1 >= self.tabs.len() {
-            return;
-        }
-        self.tabs.truncate(idx + 1);
-        if self.active_query_tab > idx {
-            self.active_query_tab = idx;
-        }
+        let active_id = self.tabs[self.active_query_tab].id;
+        let mut position = 0;
+        self.tabs.retain(|tab| {
+            position += 1;
+            position <= idx + 1 || tab.conn_id != conn_id
+        });
+        let keep = if self.tabs.iter().any(|tab| tab.id == active_id) {
+            active_id
+        } else {
+            target_id
+        };
+        self.active_query_tab = self.tabs.iter().position(|tab| tab.id == keep).unwrap_or(0);
         self.error = None;
         self.workspace_dirty = true;
     }
+    /// Close every tab of the current connection, leaving it one blank query tab.
     pub(super) fn close_all_tabs(&mut self) {
         self.close_split_workspace();
         let conn_id = self
             .tabs
             .get(self.active_query_tab)
             .and_then(|tab| tab.conn_id.clone());
-        self.reset_to_single_tab(conn_id);
+        self.tabs.retain(|tab| tab.conn_id != conn_id);
+        let blank = self.blank_tab(conn_id);
+        self.tabs.push(blank);
+        self.active_query_tab = self.tabs.len() - 1;
+        self.status_msg = "Ready".to_string();
         self.error = None;
         self.workspace_dirty = true;
     }

@@ -72,6 +72,56 @@ impl DbGuiApp {
             self.error = None;
         }
     }
+    /// Show `id`'s own tabs. Every tab belongs to the connection it was opened on and is never
+    /// re-pointed at another: its SQL is written in that dialect, its rows edit that database,
+    /// and a running query or staged edit would otherwise end up on the wrong server. So
+    /// switching returns to the tab the user last had on `id`, or opens a fresh query tab there.
+    /// The one exception is a tab with no connection at all, which simply adopts it.
+    pub(super) fn switch_to_connection_tabs(&mut self, leaving: Option<String>, id: &str) {
+        if let Some(leaving) = leaving {
+            let tab_id = self.tab().id;
+            self.conn_last_tab.insert(leaving, tab_id);
+        }
+        let adopts = {
+            let tab = self.tab();
+            tab.conn_id.is_none()
+                && matches!(
+                    tab.kind,
+                    crate::components::QueryTabKind::Query
+                        | crate::components::QueryTabKind::Diagram
+                )
+        };
+        if adopts {
+            self.tab_mut().conn_id = Some(id.to_string());
+            // A portable diagram follows its tab so refresh/apply route to this connection.
+            if let Some(diagram) = self.tab_mut().diagram.as_mut() {
+                diagram.conn_id = id.to_string();
+            }
+            return;
+        }
+        let owned = |tab: &QueryTab| tab.conn_id.as_deref() == Some(id);
+        let target = self
+            .conn_last_tab
+            .get(id)
+            .and_then(|tab_id| {
+                self.tabs
+                    .iter()
+                    .position(|tab| tab.id == *tab_id && owned(tab))
+            })
+            .or_else(|| self.tabs.iter().rposition(owned));
+        match target {
+            Some(idx) => self.select_tab(idx),
+            None => {
+                self.close_split_workspace();
+                let tab_id = self.next_tab_id;
+                self.next_tab_id += 1;
+                let mut tab = QueryTab::new(tab_id, String::new());
+                tab.conn_id = Some(id.to_string());
+                self.tabs.push(tab);
+                self.active_query_tab = self.tabs.len() - 1;
+            }
+        }
+    }
     /// Drop a live connection from the pool (tabs bound to it become "not connected").
     pub(super) fn disconnect_conn(&mut self, id: &str) {
         if let Some(cancel) = self.connection_cancels.remove(id) {

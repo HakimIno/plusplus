@@ -189,14 +189,14 @@ impl DbGuiApp {
                 self.select_tab(i);
             }
             Action::CloseTab(i) => self.close_tab(i),
-            Action::NewSplitPaneTab(right) => self.new_tab_in_split_pane(right),
-            Action::SelectSplitPaneTab { idx, right } => self.select_split_pane_tab(idx, right),
-            Action::CloseSplitPaneTab { idx, right } => self.close_split_pane_tab(idx, right),
-            Action::PinSplitPaneTab { idx, right } => {
+            Action::NewSplitPaneTab(pane) => self.new_tab_in_split_pane(pane),
+            Action::SelectSplitPaneTab { idx, pane } => self.select_split_pane_tab(idx, pane),
+            Action::CloseSplitPaneTab { idx, pane } => self.close_split_pane_tab(idx, pane),
+            Action::PinSplitPaneTab { idx, pane } => {
                 if let Some(tab) = self.tabs.get_mut(idx) {
                     tab.preview = false;
                 }
-                self.select_split_pane_tab(idx, right);
+                self.select_split_pane_tab(idx, pane);
             }
             Action::CloseOtherTabs(i) => self.close_other_tabs(i),
             Action::CloseTabsToRight(i) => self.close_tabs_to_right(i),
@@ -802,11 +802,7 @@ impl DbGuiApp {
                 // The Run button is disabled while busy, but the Cmd+Enter / Cmd+R shortcuts
                 // land here unconditionally. Refuse instead of silently racing a second run
                 // against the one in flight (or against a connect/import in progress).
-                let idx = if self.split_focus {
-                    self.split_tab.unwrap_or(self.active_query_tab)
-                } else {
-                    self.active_query_tab
-                };
+                let idx = self.focused_tab_idx();
                 if !self.query_can_run(idx) {
                     return;
                 }
@@ -891,11 +887,7 @@ impl DbGuiApp {
                 }
             }
             Action::ExplainQuery { analyze } => {
-                let idx = if self.split_focus {
-                    self.split_tab.unwrap_or(self.active_query_tab)
-                } else {
-                    self.active_query_tab
-                };
+                let idx = self.focused_tab_idx();
                 if !self.query_can_run(idx) {
                     return;
                 }
@@ -1056,8 +1048,14 @@ impl DbGuiApp {
                 pin,
                 kind,
             } => self.open_table(sql, source, pin, kind),
-            Action::OpenSplitSchemaTable(payload) => self.open_schema_table_in_split(payload),
-            Action::OpenSplitTab { id, primary_id } => self.open_tab_in_split(id, primary_id),
+            Action::OpenSplitSchemaTable { payload, pane } => {
+                self.open_schema_table_in_split(payload, pane)
+            }
+            Action::OpenSplitTab {
+                id,
+                primary_id,
+                pane,
+            } => self.open_tab_in_split(id, primary_id, pane),
             Action::OpenDefinition { title, sql, kind } => self.open_definition(title, sql, kind),
             Action::FollowForeignKey { row, col } => self.follow_foreign_key(row, col),
             Action::SetSort { col, asc } => self.tab_mut().set_sort(col, asc),

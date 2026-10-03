@@ -788,6 +788,8 @@ struct QueryTab {
     editor_split: bool,
     editor_split_size: Option<f32>,
     split_sql: Option<String>,
+    /// Workspace pane that owns this tab: 0 is the main strip, 1.. are split columns.
+    pane: usize,
     editor_pane: EditorPane,
     /// The editor that should regain keyboard focus after a toolbar action such as Run.
     /// Keeping this by tab id avoids restoring focus into a different tab after a switch.
@@ -885,6 +887,7 @@ impl QueryTab {
             editor_split: false,
             editor_split_size: None,
             split_sql: None,
+            pane: 0,
             editor_pane: EditorPane::Primary,
             restore_editor_focus: None,
             extra_cursors: Vec::new(),
@@ -1527,18 +1530,18 @@ enum Action {
     NewTab,
     SelectTab(usize),
     CloseTab(usize),
-    NewSplitPaneTab(bool),
+    NewSplitPaneTab(usize),
     SelectSplitPaneTab {
         idx: usize,
-        right: bool,
+        pane: usize,
     },
     CloseSplitPaneTab {
         idx: usize,
-        right: bool,
+        pane: usize,
     },
     PinSplitPaneTab {
         idx: usize,
-        right: bool,
+        pane: usize,
     },
     CloseOtherTabs(usize),
     CloseTabsToRight(usize),
@@ -1683,10 +1686,15 @@ enum Action {
         pin: bool,
         kind: crate::components::QueryTabKind,
     },
-    OpenSplitSchemaTable(SchemaTableDrag),
+    /// `pane` is the column to land in; `pane == pane_count()` opens a new column.
+    OpenSplitSchemaTable {
+        payload: SchemaTableDrag,
+        pane: usize,
+    },
     OpenSplitTab {
         id: u64,
         primary_id: u64,
+        pane: usize,
     },
     /// Show a routine/trigger's definition SQL in a preview tab (read-only; not executed).
     OpenDefinition {
@@ -1946,14 +1954,14 @@ pub struct DbGuiApp {
     /// Open query tabs. Always non-empty.
     tabs: Vec<QueryTab>,
     active_query_tab: usize,
-    /// Index of the active tab rendered in the right split workspace pane.
-    split_tab: Option<usize>,
-    /// Stable ids of every tab assigned to the right split group, in display order.
-    split_tab_ids: Vec<u64>,
-    /// Whether the right split pane owns keyboard focus for the next action frame.
-    split_focus: bool,
-    /// Width of the left pane in the split workspace (0.25..0.75).
-    split_workspace_ratio: f32,
+    /// Active tab index of each extra workspace column. Entry `i` is pane `i + 1`; pane 0 is
+    /// `active_query_tab`. Empty when the workspace is not split. Each tab records its column in
+    /// `QueryTab::pane`.
+    split_panes: Vec<usize>,
+    /// The pane that owns keyboard focus for the next action frame (0 = main strip).
+    focused_pane: usize,
+    /// Width share of every pane, left to right. Always `pane_count()` entries summing to 1.
+    split_ratios: Vec<f32>,
     /// Monotonic id source for new tabs.
     next_tab_id: u64,
     /// Approximate memory ceiling shared by materialized results in every query tab.
@@ -2275,10 +2283,9 @@ impl DbGuiApp {
             connection_timings: HashMap::new(),
             tabs: vec![default_tab],
             active_query_tab: 0,
-            split_tab: None,
-            split_tab_ids: Vec::new(),
-            split_focus: false,
-            split_workspace_ratio: 0.5,
+            split_panes: Vec::new(),
+            focused_pane: 0,
+            split_ratios: vec![1.0],
             next_tab_id: 1,
             result_memory_budget,
             result_access_clock: 0,

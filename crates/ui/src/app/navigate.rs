@@ -3,7 +3,7 @@
 use super::*;
 
 impl DbGuiApp {
-    pub(super) fn open_schema_table_in_split(&mut self, payload: SchemaTableDrag) {
+    pub(super) fn open_schema_table_in_split(&mut self, payload: SchemaTableDrag, pane: usize) {
         let Some((kind, table)) = self
             .active_connections
             .iter()
@@ -37,27 +37,25 @@ impl DbGuiApp {
         split.conn_id = Some(payload.conn_id);
         split.sql = kind.preview_query(&table.qualified(kind), 100);
         split.edits.pending_source = Some(source);
-        self.install_split_tab(split, true);
+        self.install_split_tab(split, pane, true);
     }
 
-    pub(super) fn open_tab_in_split(&mut self, id: u64, primary_id: u64) {
+    pub(super) fn open_tab_in_split(&mut self, id: u64, primary_id: u64, pane: usize) {
         let Some(source_idx) = self.tabs.iter().position(|tab| tab.id == id) else {
             return;
         };
         if self.tab_is_in_split_group(source_idx) {
-            self.select_split_pane_tab(source_idx, true);
+            self.select_split_pane_tab(source_idx, self.tabs[source_idx].pane);
             return;
         }
         let primary = self
             .tabs
             .iter()
-            .position(|tab| {
-                tab.id == primary_id && tab.id != id && !self.split_tab_ids.contains(&tab.id)
-            })
+            .position(|tab| tab.id == primary_id && tab.id != id && tab.pane == 0)
             .or_else(|| {
                 self.tabs
                     .iter()
-                    .position(|tab| tab.id != id && !self.split_tab_ids.contains(&tab.id))
+                    .position(|tab| tab.id != id && tab.pane == 0)
             });
 
         if let Some(primary_idx) = primary {
@@ -69,7 +67,7 @@ impl DbGuiApp {
             self.active_query_tab = primary_idx;
             // Move the real tab into the right group: its loaded result, filters, selection,
             // editor assistance and scroll state all survive exactly like a VS Code tab move.
-            self.install_split_tab(split, false);
+            self.install_split_tab(split, pane, false);
         } else {
             // A single tab cannot leave its group empty. Keep it on the left and seed a new
             // independent pane with the same query.
@@ -84,7 +82,7 @@ impl DbGuiApp {
                 .source
                 .clone()
                 .or_else(|| source.edits.pending_source.clone());
-            self.install_split_tab(split, true);
+            self.install_split_tab(split, pane, true);
         }
     }
 

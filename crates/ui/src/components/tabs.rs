@@ -60,6 +60,11 @@ pub(crate) fn connection_tab_item(
             .fit_to_exact_size(icon_rect.size())
             .tint(icons::db_kind_icon_tint())
             .paint_at(ui, icon_rect);
+        if connected {
+            let marker = icon_rect.right_bottom() - egui::vec2(1.0, 1.0);
+            painter.circle_filled(marker, 3.5, palette::PANEL());
+            painter.circle_filled(marker, 2.3, palette::SUCCESS());
+        }
         let label_pos = egui::pos2(
             content_rect.center().x - label.size().x * 0.5,
             content_rect.top() + 25.0,
@@ -71,21 +76,35 @@ pub(crate) fn connection_tab_item(
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
     let dragging = drag_float_y.is_some();
 
-    let colors = super::interaction_colors(&resp, selected, dragging);
-    let fill = colors.fill;
-    let stroke = colors.stroke;
-    let icon_color = colors.text;
-    let text_color = icon_color;
-    let label = ui
-        .painter()
-        .layout_job(egui::text::LayoutJob::single_section(
-            compact_connection_label(name),
-            egui::TextFormat {
-                font_id: egui::FontId::proportional(8.0),
-                color: text_color,
-                ..Default::default()
-            },
-        ));
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, selected, name)
+    });
+    let fill = if dragging || resp.hovered() {
+        palette::SURFACE_HOVER()
+    } else if selected {
+        crate::style::mix(palette::PANEL(), palette::SELECTION(), 0.5)
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    let text_color = if selected || resp.hovered() || dragging {
+        palette::TEXT()
+    } else {
+        palette::TEXT_WEAK()
+    };
+    let name = name.trim();
+    let mut job = egui::text::LayoutJob::single_section(
+        if name.is_empty() { "DB" } else { name }.to_string(),
+        egui::TextFormat {
+            font_id: egui::FontId::proportional(9.0),
+            color: text_color,
+            ..Default::default()
+        },
+    );
+    job.wrap.max_width = rect.width() - 8.0;
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    job.break_on_newline = false;
+    let label = ui.painter().layout_job(job);
 
     if ui.is_rect_visible(rect) {
         if let Some(float_y) = drag_float_y {
