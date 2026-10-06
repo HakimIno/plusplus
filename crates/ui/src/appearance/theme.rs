@@ -353,6 +353,13 @@ fn builtins() -> Vec<ThemeEntry> {
             builtin: true,
             theme: blue_studio(),
         },
+        ThemeEntry {
+            key: "onyx".into(),
+            name: "Onyx".into(),
+            author: None,
+            builtin: true,
+            theme: onyx(),
+        },
     ]
 }
 
@@ -465,6 +472,41 @@ fn blue_studio() -> Theme {
     }
 }
 
+/// Near-black editor workspace with green actions and neutral selections. SQL keeps the
+/// reference's blue, green, and pink highlights independently of the primary action colour.
+fn onyx() -> Theme {
+    Theme {
+        is_dark: true,
+        base: rgb(0x0b, 0x0b, 0x0b),
+        panel: rgb(0x1b, 0x1b, 0x1b),
+        surface: rgb(0x1b, 0x1b, 0x1b),
+        surface_hover: rgb(0x28, 0x28, 0x28),
+        code_bg: rgb(0x11, 0x11, 0x11),
+        stripe: rgb(0x16, 0x16, 0x16),
+        selection: rgb(0x24, 0x24, 0x24),
+        border: rgb(0x2a, 0x2a, 0x2a),
+        border_strong: rgb(0x3b, 0x3b, 0x3b),
+        text: rgb(0xb8, 0xb8, 0xb8),
+        text_weak: rgb(0x92, 0x92, 0x92),
+        text_faint: rgb(0x68, 0x68, 0x68),
+        accent: rgb(0x86, 0xaa, 0x3d),
+        accent_hover: rgb(0xa5, 0xc8, 0x68),
+        on_accent: rgb(0x11, 0x11, 0x11),
+        success: rgb(0x86, 0xaa, 0x3d),
+        danger: rgb(0xcc, 0x42, 0x6b),
+        warning: rgb(0xc5, 0x9b, 0x39),
+        syntax: Some(SyntaxTheme {
+            keyword: rgb(0x4f, 0x7f, 0xc6),
+            string: rgb(0x86, 0xaa, 0x3d),
+            number: rgb(0xc5, 0x9b, 0x39),
+            comment: rgb(0x68, 0x68, 0x68),
+            punctuation: rgb(0x92, 0x92, 0x92),
+            identifier: rgb(0xb8, 0xb8, 0xb8),
+            qualified_identifier: rgb(0xcc, 0x42, 0x6b),
+        }),
+    }
+}
+
 thread_local! {
     static CURRENT: Cell<Theme> = Cell::new(carbon());
 }
@@ -505,7 +547,7 @@ mod tests {
                 .iter()
                 .map(|entry| entry.key.as_str())
                 .collect::<Vec<_>>(),
-            ["carbon", "midnight", "daylight", "blue-studio"]
+            ["carbon", "midnight", "daylight", "blue-studio", "onyx"]
         );
         assert!(reg.entries().iter().all(|entry| entry.builtin));
         for key in ["midnight-conversational", "graphite", "intellij-light"] {

@@ -1,6 +1,8 @@
 # Custom themes
 
-plusplus ships four built-in themes: Carbon, Midnight, Daylight, and Blue Studio.
+plusplus ships five built-in themes: Carbon, Midnight, Daylight, Blue Studio, and Onyx.
+Onyx pairs near-black surfaces with a green primary colour and independent blue, green,
+and pink SQL highlights. Select it in **Settings → Appearance → Theme**.
 You can also install your own — a theme is just a
 small JSON file of colours, no recompile required. This is the first plugin "contribution
 point": more contribution types (snippets, keybindings, WASM plugins) will follow the same
