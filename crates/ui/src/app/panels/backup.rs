@@ -449,11 +449,11 @@ impl DbGuiApp {
                             .enabled(blocker.is_none())
                             .show(ui)
                     } else {
-                        ui.add_enabled(
+                        components::primary_button(
+                            ui,
+                            icons::database_export(),
+                            label,
                             blocker.is_none(),
-                            egui::Button::new(
-                                egui::RichText::new(label).strong().color(palette::ACCENT()),
-                            ),
                         )
                     };
                     start |= resp.on_hover_text(hint).clicked();

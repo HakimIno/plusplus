@@ -104,7 +104,7 @@ impl DbGuiApp {
                             install = true;
                         }
                     } else if downloading {
-                        ui.add_enabled(false, egui::Button::new("Downloading…"));
+                        components::button(ui, icons::play(), "Downloading…", false);
                     } else if failed.is_some() {
                         if components::button(ui, icons::play(), "Retry download", true).clicked() {
                             download = true;

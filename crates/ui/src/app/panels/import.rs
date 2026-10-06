@@ -69,18 +69,15 @@ impl DbGuiApp {
         let mut open = true;
         components::dialog_window(format!("Import into {target}"))
             .open(&mut open)
-            .resizable(true)
-            // Width is fixed by design; height hugs the content and stops growing once the body
-            // scroll hits its cap, so a six-column table gets a short dialog and a sixty-column
-            // one doesn't run off the screen.
             .default_width(820.0)
+            .min_width(820.0)
+            .max_width(820.0)
             .frame(components::dialog_frame(ctx))
             .show(ctx, |ui| {
                 // Everything except the footer lives in ONE vertical scroll — the file name,
                 // the header switch, the callouts, the mapping, and the preview all move
-                // together. Nothing above the buttons is pinned, so a long warning or a wide
-                // table never squeezes the form. `auto_shrink` vertically means a short form
-                // leaves no dead space above the footer; a long one scrolls at `MAX_BODY_H`.
+                // together. Short content hugs the body; long content scrolls while the
+                // footer stays visible.
                 const MAX_BODY_H: f32 = 520.0;
                 let has_columns = !draft.headers.is_empty();
 

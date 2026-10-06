@@ -161,36 +161,32 @@ impl DbGuiApp {
         } else {
             "Ctrl+S"
         };
-        let response = egui::Modal::new(egui::Id::new("discard_all_changes"))
-            .frame(crate::components::dialog_frame(ctx))
-            .show(ctx, |ui| {
-                ui.set_width(320.0);
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new("Warning")
-                        .size(15.0)
-                        .strong()
-                        .color(crate::style::palette::TEXT()),
-                );
-                ui.add_space(8.0);
-                ui.label("Discard all changes?");
+        let response = crate::components::dialog_modal(
+            ctx,
+            "discard_all_changes",
+            "Discard all changes?",
+            320.0,
+            |ui| {
                 ui.label(
                     egui::RichText::new(format!("Tip: you can commit changes with {shortcut}."))
                         .color(crate::style::palette::TEXT_WEAK()),
                 );
                 crate::components::dialog_footer(ui, |ui| {
+                    if crate::components::Btn::danger("Discard")
+                        .icon(crate::icons::trash())
+                        .show(ui)
+                        .clicked()
+                    {
+                        actions.push(Action::DiscardBeforeLeaving);
+                    }
                     if crate::components::button(ui, crate::icons::close(), "Cancel", true)
                         .clicked()
                     {
                         actions.push(Action::CancelLeaving);
                     }
-                    if crate::components::primary_button(ui, crate::icons::trash(), "Discard", true)
-                        .clicked()
-                    {
-                        actions.push(Action::DiscardBeforeLeaving);
-                    }
                 });
-            });
+            },
+        );
         if response.should_close() {
             actions.push(Action::CancelLeaving);
         }
@@ -329,18 +325,12 @@ impl DbGuiApp {
             self.discard_changes_dialog(ctx, actions);
             return;
         }
-        let response = egui::Modal::new(egui::Id::new("unsaved_changes"))
-            .frame(crate::components::dialog_frame(ctx))
-            .show(ctx, |ui| {
-                ui.set_width(420.0);
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new("Keep your changes?")
-                        .size(18.0)
-                        .strong()
-                        .color(crate::style::palette::TEXT()),
-                );
-                ui.add_space(6.0);
+        let response = crate::components::dialog_modal(
+            ctx,
+            "unsaved_changes",
+            "Keep your changes?",
+            420.0,
+            |ui| {
                 ui.label("This action would discard changes in:");
                 for label in labels {
                     ui.label(format!("• {label}"));
@@ -369,7 +359,8 @@ impl DbGuiApp {
                         actions.push(Action::CancelLeaving);
                     }
                 });
-            });
+            },
+        );
         if response.should_close() {
             actions.push(Action::CancelLeaving);
         }

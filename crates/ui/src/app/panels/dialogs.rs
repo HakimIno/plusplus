@@ -32,141 +32,44 @@ fn commit_statement_preview(statement: &str) -> std::borrow::Cow<'_, str> {
     ))
 }
 
-impl DbGuiApp {
-    /// Compact relation editor opened from a Structure grid foreign-key cell.
-    pub(in crate::app) fn foreign_key_dialog(
-        &mut self,
-        ctx: &egui::Context,
-        actions: &mut Vec<Action>,
-    ) {
-        let Some(pending) = self.foreign_key_editor.as_ref() else {
-            return;
-        };
-        let tab_id = pending.tab_id;
-        let index = pending.index;
-        let is_new = pending.original.is_none();
-        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
-            actions.push(Action::CancelForeignKeyEdit);
-            return;
-        };
-        let Some(crate::schema::ObjectEditor::Table(editor)) = tab.schema_editor.as_mut() else {
-            actions.push(Action::CancelForeignKeyEdit);
-            return;
-        };
-        let Some(foreign_key) = editor.fks.get_mut(index) else {
-            actions.push(Action::CancelForeignKeyEdit);
-            return;
-        };
+fn review_title(count: usize) -> String {
+    format!("Review {count} Change{}", if count == 1 { "" } else { "s" })
+}
 
-        let mut open = true;
-        components::dialog_window(if is_new {
-            "Create Foreign Key"
-        } else {
-            "Edit Foreign Key"
-        })
-        .open(&mut open)
-        .resizable(false)
-        .default_size([620.0, 0.0])
-        .frame(components::dialog_frame(ctx))
-        .show(ctx, |ui| {
-            ui.label(
-                egui::RichText::new("Connect this column to a key in another table.")
-                    .color(palette::TEXT_WEAK()),
-            );
-            ui.add_space(12.0);
-
+fn review_sql<'a>(
+    ui: &mut egui::Ui,
+    id: &'static str,
+    max_height: f32,
+    statements: impl IntoIterator<Item = &'a str>,
+) {
+    let font = egui::TextStyle::Monospace.resolve(ui.style());
+    egui::ScrollArea::vertical()
+        .id_salt(id)
+        .max_height(max_height)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
             egui::Frame::new()
-                .fill(palette::SURFACE())
-                .corner_radius(egui::CornerRadius::same(8))
-                .inner_margin(egui::Margin::same(12))
+                .fill(palette::CODE_BG())
+                .corner_radius(egui::CornerRadius::same(6))
+                .inner_margin(egui::Margin::symmetric(12, 10))
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.set_width(150.0);
-                            ui.label(
-                                egui::RichText::new("Source column")
-                                    .small()
-                                    .color(palette::TEXT_WEAK()),
-                            );
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(&foreign_key.columns_raw)
-                                        .strong()
-                                        .color(palette::TEXT()),
-                                )
-                                .truncate(),
-                            )
-                            .on_hover_text(&foreign_key.columns_raw);
-                        });
-                        ui.add_space(16.0);
-                        icons::show_weak(ui, icons::chevron_right(), 18.0);
-                        ui.add_space(16.0);
-                        ui.vertical(|ui| {
-                            ui.label(
-                                egui::RichText::new("Referenced table")
-                                    .small()
-                                    .color(palette::TEXT_WEAK()),
-                            );
-                            components::text_input(
-                                ui,
-                                &mut foreign_key.ref_table,
-                                "schema.table",
-                                180.0,
-                            );
-                        });
-                        ui.add_space(8.0);
-                        ui.vertical(|ui| {
-                            ui.label(
-                                egui::RichText::new("Referenced column")
-                                    .small()
-                                    .color(palette::TEXT_WEAK()),
-                            );
-                            components::text_input(
-                                ui,
-                                &mut foreign_key.ref_columns_raw,
-                                "column_name",
-                                160.0,
-                            );
-                        });
-                    });
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 10.0;
+                    for statement in statements {
+                        let preview = commit_statement_preview(statement);
+                        let mut job = crate::highlight::highlight_sql_cached(
+                            ui.ctx(),
+                            preview.as_ref(),
+                            font.clone(),
+                        );
+                        job.wrap.max_width = ui.available_width().max(40.0);
+                        ui.label(job);
+                    }
                 });
-
-            ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                ui.label("Constraint name");
-                components::text_input(
-                    ui,
-                    &mut foreign_key.constraint_name,
-                    "fk_name (optional)",
-                    250.0,
-                );
-                ui.add_space(12.0);
-                ui.label("On delete");
-                egui::ComboBox::from_id_salt("foreign_key_dialog_action")
-                    .selected_text(foreign_key.on_delete.label())
-                    .show_ui(ui, |ui| {
-                        for rule in dbcore::FkAction::ALL {
-                            ui.selectable_value(&mut foreign_key.on_delete, *rule, rule.label());
-                        }
-                    });
-            });
-
-            components::dialog_footer(ui, |ui| {
-                let valid = !foreign_key.ref_table.trim().is_empty()
-                    && !foreign_key.ref_columns_raw.trim().is_empty();
-                if components::primary_button(ui, icons::save(), "Save changes", valid).clicked() {
-                    actions.push(Action::ConfirmForeignKeyEdit);
-                }
-                if components::button(ui, icons::close(), "Cancel", true).clicked() {
-                    actions.push(Action::CancelForeignKeyEdit);
-                }
-            });
         });
-        if !open {
-            actions.push(Action::CancelForeignKeyEdit);
-        }
-    }
+}
 
+impl DbGuiApp {
     /// Ask what to do with pending Structure edits before Cmd/Ctrl+R reloads the tab.
     pub(in crate::app) fn schema_reload_dialog(
         &mut self,
@@ -234,53 +137,14 @@ impl DbGuiApp {
         let stmts = &plan.statements;
         let sequential = plan.is_sequential();
 
-        let title = format!("Review {} Change(s)", stmts.len());
-        let mut open = true;
-        components::dialog_window(title)
-            .open(&mut open)
-            .resizable(true)
-            .default_size([640.0, 440.0])
-            .frame(components::dialog_frame(ctx))
-            .show(ctx, |ui| {
-                ui.label(
-                    egui::RichText::new(
-                        if sequential {
-                            "These statements run one at a time. If one fails, earlier changes remain saved."
-                        } else {
-                            "These statements will run as a single transaction. \
-                             If any fails, all changes are rolled back."
-                        },
-                    )
-                    .color(palette::TEXT_WEAK()),
+        let title = review_title(stmts.len());
+        let response = components::dialog_modal(ctx, "commit_preview", &title, 640.0, |ui| {
+                review_sql(
+                    ui,
+                    "commit_preview_scroll",
+                    320.0,
+                    stmts.iter().map(String::as_str),
                 );
-                ui.add_space(8.0);
-
-                let font = egui::TextStyle::Monospace.resolve(ui.style());
-                egui::ScrollArea::vertical()
-                    .id_salt("commit_preview_scroll")
-                    .max_height(320.0)
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        // One flat code surface, like an editor: no frame lines, no rules
-                        // between statements — whitespace does the separating.
-                        egui::Frame::new()
-                            .fill(palette::CODE_BG())
-                            .corner_radius(egui::CornerRadius::same(6))
-                            .inner_margin(egui::Margin::symmetric(12, 10))
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.spacing_mut().item_spacing.y = 10.0;
-                                for stmt in stmts.iter() {
-                                    let preview = commit_statement_preview(stmt);
-                                    let job = crate::highlight::highlight_sql_cached(
-                                        ui.ctx(),
-                                        preview.as_ref(),
-                                        font.clone(),
-                                    );
-                                    ui.label(job);
-                                }
-                            });
-                    });
 
                 components::dialog_footer(ui, |ui| {
                     let can_act = self.busy == Busy::Idle;
@@ -294,9 +158,9 @@ impl DbGuiApp {
                         actions.push(Action::CancelEdits);
                     }
                 });
-            });
+        });
 
-        if !open {
+        if response.should_close() {
             actions.push(Action::CancelEdits);
         }
     }
@@ -467,18 +331,8 @@ impl DbGuiApp {
             return;
         };
 
-        let title = if pending.statements.len() == 1 {
-            "Review production change".to_string()
-        } else {
-            format!("Review {} production changes", pending.statements.len())
-        };
-        let mut open = true;
-        components::dialog_window(title)
-            .open(&mut open)
-            .resizable(true)
-            .default_size([560.0, 340.0])
-            .frame(components::dialog_frame(ctx))
-            .show(ctx, |ui| {
+        let title = review_title(pending.statements.len());
+        let response = components::dialog_modal(ctx, "production_review", &title, 640.0, |ui| {
                 let database = if pending.database.is_empty() {
                     "default database"
                 } else {
@@ -486,6 +340,8 @@ impl DbGuiApp {
                 };
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.label(egui::RichText::new("Production").color(palette::DANGER()));
+                    ui.label(egui::RichText::new("·").color(palette::TEXT_FAINT()));
                     icons::show_weak(ui, icons::database(), 14.0);
                     ui.label(
                         egui::RichText::new(&pending.connection_name).color(palette::TEXT_WEAK()),
@@ -498,13 +354,24 @@ impl DbGuiApp {
                         .small()
                         .color(palette::TEXT_FAINT()),
                 );
-                ui.add_space(10.0);
+                ui.add_space(8.0);
 
-                let mut sql_font = egui::TextStyle::Monospace.resolve(ui.style());
-                sql_font.size = (sql_font.size - 1.5).max(10.0);
+                review_sql(
+                    ui,
+                    "production_review_sql",
+                    220.0,
+                    dbcore::split_query_statements(&pending.sql),
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("Impact")
+                        .strong()
+                        .color(palette::TEXT()),
+                );
+
                 egui::ScrollArea::vertical()
                     .id_salt("danger_confirm_scroll")
-                    .max_height(220.0)
+                    .max_height(160.0)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 8.0;
@@ -599,29 +466,6 @@ impl DbGuiApp {
                                 }
                             });
 
-                            egui::CollapsingHeader::new(
-                                egui::RichText::new("Review SQL")
-                                    .small()
-                                    .color(palette::TEXT_WEAK()),
-                            )
-                            .id_salt(("production_guard_sql", i))
-                            .show(ui, |ui| {
-                                let mut job = crate::highlight::highlight_sql_cached(
-                                    ui.ctx(),
-                                    &stmt.sql,
-                                    sql_font.clone(),
-                                );
-                                job.wrap.max_width = ui.available_width().max(40.0);
-                                egui::Frame::new()
-                                    .fill(palette::CODE_BG())
-                                    .corner_radius(egui::CornerRadius::same(6))
-                                    .inner_margin(egui::Margin::symmetric(10, 8))
-                                    .show(ui, |ui| {
-                                        ui.set_width(ui.available_width());
-                                        ui.add(egui::Label::new(job).wrap().selectable(false));
-                                    });
-                            });
-
                             let has_details = stmt.analysis_warning.is_some()
                                 || preflight
                                     .is_some_and(|item| item.plan.is_some() || !item.warnings.is_empty());
@@ -708,14 +552,22 @@ impl DbGuiApp {
                 components::dialog_footer(ui, |ui| {
                     let can_act = self.busy == Busy::Idle && pending.can_confirm();
                     let critical = pending.confirmation_phrase().is_some();
+                    let staged_edits =
+                        matches!(pending.continuation, ProductionGuardContinuation::Edits);
+                    let label = if staged_edits { "Commit" } else { "Run change" };
+                    let icon = if staged_edits {
+                        icons::save()
+                    } else {
+                        icons::play()
+                    };
                     let run = if critical {
-                        components::Btn::danger("Run change")
-                            .icon(icons::play())
+                        components::Btn::danger(label)
+                            .icon(icon)
                             .enabled(can_act)
                             .tooltip("Execute against the production connection")
                             .show(ui)
                     } else {
-                        components::primary_button(ui, icons::play(), "Run change", can_act)
+                        components::primary_button(ui, icon, label, can_act)
                             .on_hover_text("Execute against the production connection")
                     };
                     if run.clicked() {
@@ -725,9 +577,9 @@ impl DbGuiApp {
                         actions.push(Action::CancelDangerQuery);
                     }
                 });
-            });
+        });
 
-        if !open {
+        if response.should_close() {
             actions.push(Action::CancelDangerQuery);
         }
     }

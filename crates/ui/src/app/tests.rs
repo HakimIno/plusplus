@@ -7977,7 +7977,7 @@ fn an_empty_table_gets_its_columns_from_the_schema() {
     assert_eq!(app.tab().result.as_ref().unwrap().column_count(), 0);
 }
 
-/// The "Review N Change(s)" dialog: one flat code surface, no rules or badges.
+/// Standard change review: one flat code surface and the shared dialog footer.
 #[test]
 #[ignore = "screenshot generator; run manually with --ignored"]
 fn snapshot_review_changes_dialog() {
