@@ -7330,10 +7330,6 @@ fn snapshot_settings_appearance_typography() {
                 crate::install_fonts(
                     ui.ctx(),
                     &crate::AppFonts {
-                        ui_regular: include_bytes!("../../../app/assets/Inter-Regular.ttf"),
-                        ui_semibold: include_bytes!("../../../app/assets/Inter-SemiBold.ttf"),
-                        thai_regular: include_bytes!("../../../app/assets/Anuphan-Regular.ttf"),
-                        thai_semibold: include_bytes!("../../../app/assets/Anuphan-SemiBold.ttf"),
                         universal_regular: include_bytes!(
                             "../../../app/assets/Unifont-Regular.otf"
                         ),

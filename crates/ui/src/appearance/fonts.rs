@@ -135,6 +135,46 @@ pub(crate) fn grid_all_monospace(ctx: &egui::Context) -> bool {
     ctx.data(|d| d.get_temp::<bool>(grid_mono_id()).unwrap_or(false))
 }
 
+/// IBM Plex Sans weights: (family name, Latin face, Thai face). egui ignores variable-font
+/// advance widths, so each weight is its own static file. Plex Sans Thai is drawn to pair
+/// with Plex Sans, so Thai text keeps the same weight as the Latin text beside it. Regular
+/// is `FontFamily::Proportional`; SemiBold also backs the heading family.
+const WEIGHTS: &[(&str, &[u8], &[u8])] = &[
+    (
+        crate::FONT_THIN,
+        include_bytes!("../../../app/assets/IBMPlexSans-Thin.ttf"),
+        include_bytes!("../../../app/assets/IBMPlexSansThai-Thin.ttf"),
+    ),
+    (
+        crate::FONT_REGULAR,
+        include_bytes!("../../../app/assets/IBMPlexSans-Regular.ttf"),
+        include_bytes!("../../../app/assets/IBMPlexSansThai-Regular.ttf"),
+    ),
+    (
+        crate::FONT_MEDIUM,
+        include_bytes!("../../../app/assets/IBMPlexSans-Medium.ttf"),
+        include_bytes!("../../../app/assets/IBMPlexSansThai-Medium.ttf"),
+    ),
+    (
+        crate::FONT_SEMIBOLD,
+        include_bytes!("../../../app/assets/IBMPlexSans-SemiBold.ttf"),
+        include_bytes!("../../../app/assets/IBMPlexSansThai-SemiBold.ttf"),
+    ),
+    (
+        crate::FONT_BOLD,
+        include_bytes!("../../../app/assets/IBMPlexSans-Bold.ttf"),
+        include_bytes!("../../../app/assets/IBMPlexSansThai-Bold.ttf"),
+    ),
+];
+
+fn sans_key(family: &str) -> String {
+    format!("plex_{family}")
+}
+
+fn thai_key(family: &str) -> String {
+    format!("plex_thai_{family}")
+}
+
 pub(crate) fn install(
     ctx: &egui::Context,
     app_fonts: AppFonts,
@@ -143,31 +183,21 @@ pub(crate) fn install(
 ) -> Result<(), String> {
     let mut fonts = FontDefinitions::default();
     for (name, bytes) in [
-        // egui cannot resolve CSS or OS font-family names portably, so keep a
-        // deterministic app-owned face first.
-        (
-            "geist",
-            include_bytes!("../../../app/assets/Geist-Regular.ttf") as &[u8],
-        ),
-        (
-            "geist_semibold",
-            include_bytes!("../../../app/assets/Geist-SemiBold.ttf") as &[u8],
-        ),
-        (
-            "noto_thai",
-            include_bytes!("../../../app/assets/NotoSansThai.ttf") as &[u8],
-        ),
         (
             "ibm_plex_mono",
             include_bytes!("../../../app/assets/IBMPlexMono-Regular.ttf") as &[u8],
         ),
-        ("inter", app_fonts.ui_regular),
-        ("inter_semibold", app_fonts.ui_semibold),
-        ("thai", app_fonts.thai_regular),
-        ("thai_semibold", app_fonts.thai_semibold),
         ("unifont", app_fonts.universal_regular),
     ] {
         insert(&mut fonts, name, bytes);
+    }
+
+    for (family, sans, thai) in WEIGHTS {
+        for (key, bytes) in [(sans_key(family), sans), (thai_key(family), thai)] {
+            fonts
+                .font_data
+                .insert(key, Arc::new(FontData::from_static(bytes)));
+        }
     }
 
     let ui_custom = ui_font.map(font_bytes).transpose()?;
@@ -179,20 +209,27 @@ pub(crate) fn install(
         insert(&mut fonts, "custom_code", bytes);
     }
 
-    let mut proportional = Vec::new();
-    if ui_custom.is_some() {
-        proportional.push("custom_ui".to_owned());
-    }
-    proportional.extend([
-        "geist".to_owned(),
-        "inter".to_owned(),
-        "noto_thai".to_owned(),
-        "thai".to_owned(),
-        "unifont".to_owned(),
-    ]);
+    // One chain per weight: Plex Sans, its Thai companion at the same weight, then Unifont.
+    let chain = |family: &str| {
+        let mut chain = Vec::new();
+        if ui_custom.is_some() {
+            chain.push("custom_ui".to_owned());
+        }
+        chain.extend([sans_key(family), thai_key(family), "unifont".to_owned()]);
+        chain
+    };
     fonts
         .families
-        .insert(FontFamily::Proportional, proportional);
+        .insert(FontFamily::Proportional, chain(crate::FONT_REGULAR));
+    fonts.families.insert(
+        FontFamily::Name(HEADING_FAMILY.into()),
+        chain(crate::FONT_SEMIBOLD),
+    );
+    for (family, _, _) in WEIGHTS {
+        fonts
+            .families
+            .insert(FontFamily::Name((*family).into()), chain(family));
+    }
 
     // Maps the code/data family to the bundled IBM Plex Mono face.
     // User-selected code fonts still take precedence.
@@ -204,27 +241,11 @@ pub(crate) fn install(
     }
     monospace.extend([
         "ibm_plex_mono".to_owned(),
-        "thai".to_owned(),
+        thai_key(crate::FONT_REGULAR),
         "unifont".to_owned(),
     ]);
     fonts.families.insert(FontFamily::Monospace, monospace);
 
-    let mut headings = Vec::new();
-    if ui_custom.is_some() {
-        headings.push("custom_ui".to_owned());
-    }
-    headings.extend([
-        "geist_semibold".to_owned(),
-        "inter_semibold".to_owned(),
-        "noto_thai".to_owned(),
-        "thai_semibold".to_owned(),
-        "inter".to_owned(),
-        "thai".to_owned(),
-        "unifont".to_owned(),
-    ]);
-    fonts
-        .families
-        .insert(FontFamily::Name(HEADING_FAMILY.into()), headings);
     ctx.set_fonts(fonts);
     ctx.data_mut(|d| d.insert_temp(grid_mono_id(), code_font.is_some()));
     Ok(())
@@ -233,6 +254,36 @@ pub(crate) fn install(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plex_weights_render_with_distinct_widths() {
+        let ctx = egui::Context::default();
+        let app_fonts = AppFonts {
+            universal_regular: include_bytes!("../../../app/assets/Unifont-Regular.otf"),
+        };
+        install(&ctx, app_fonts, None, None).unwrap();
+        let _ = ctx.run_ui(Default::default(), |_| {});
+        let _ = ctx.run_ui(Default::default(), |_| {});
+        let width = |family: FontFamily| {
+            ctx.fonts_mut(|f| {
+                f.layout_no_wrap(
+                    "Database".into(),
+                    egui::FontId::new(20.0, family),
+                    egui::Color32::WHITE,
+                )
+                .size()
+                .x
+            })
+        };
+        let named = |n: &str| width(FontFamily::Name(n.into()));
+        let (thin, regular) = (named(crate::FONT_THIN), width(FontFamily::Proportional));
+        let (medium, semibold, bold) = (
+            named(crate::FONT_MEDIUM),
+            named(crate::FONT_SEMIBOLD),
+            named(crate::FONT_BOLD),
+        );
+        assert!(thin < regular && regular < medium && medium < semibold && semibold < bold);
+    }
 
     #[test]
     fn a_font_collection_loads_at_its_first_face() {
@@ -252,7 +303,8 @@ mod tests {
 
     #[test]
     fn accepts_a_real_opentype_font() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../app/assets/Inter-Regular.ttf");
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../app/assets/IBMPlexSans-Regular.ttf");
         assert!(read_valid_font(&path).is_ok());
     }
 
@@ -262,10 +314,6 @@ mod tests {
         install(
             &ctx,
             AppFonts {
-                ui_regular: include_bytes!("../../../app/assets/Inter-Regular.ttf"),
-                ui_semibold: include_bytes!("../../../app/assets/Inter-SemiBold.ttf"),
-                thai_regular: include_bytes!("../../../app/assets/Anuphan-Regular.ttf"),
-                thai_semibold: include_bytes!("../../../app/assets/Anuphan-SemiBold.ttf"),
                 universal_regular: include_bytes!("../../../app/assets/Unifont-Regular.otf"),
             },
             None,

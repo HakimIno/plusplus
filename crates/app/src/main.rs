@@ -7,15 +7,6 @@
 #[cfg(target_os = "macos")]
 mod menu;
 
-/// Inter, embedded as the primary UI font so the interface stays crisp and portable.
-const INTER_REGULAR: &[u8] = include_bytes!("../assets/Inter-Regular.ttf");
-/// Inter Semibold, used for headings and compact emphasis.
-const INTER_SEMIBOLD: &[u8] = include_bytes!("../assets/Inter-SemiBold.ttf");
-
-/// Anuphan (loopless Thai, OFL-licensed) covers Thai glyphs and pairs cleanly with Inter.
-const THAI_REGULAR: &[u8] = include_bytes!("../assets/Anuphan-Regular.ttf");
-const THAI_SEMIBOLD: &[u8] = include_bytes!("../assets/Anuphan-SemiBold.ttf");
-
 /// GNU Unifont covers the Unicode Basic Multilingual Plane and is the last-resort fallback
 /// for multilingual database values that the primary UI, code, and Thai fonts do not contain.
 const UNIVERSAL_REGULAR: &[u8] = include_bytes!("../assets/Unifont-Regular.otf");
@@ -149,10 +140,6 @@ fn main() -> eframe::Result<()> {
             #[cfg(target_os = "macos")]
             menu::install(&cc.egui_ctx);
             let fonts = ui::AppFonts {
-                ui_regular: INTER_REGULAR,
-                ui_semibold: INTER_SEMIBOLD,
-                thai_regular: THAI_REGULAR,
-                thai_semibold: THAI_SEMIBOLD,
                 universal_regular: UNIVERSAL_REGULAR,
             };
             Ok(Box::new(ui::DbGuiApp::new(cc, fonts)))
@@ -170,10 +157,6 @@ mod tests {
         ui::install_fonts(
             &ctx,
             &ui::AppFonts {
-                ui_regular: INTER_REGULAR,
-                ui_semibold: INTER_SEMIBOLD,
-                thai_regular: THAI_REGULAR,
-                thai_semibold: THAI_SEMIBOLD,
                 universal_regular: UNIVERSAL_REGULAR,
             },
         );

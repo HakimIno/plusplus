@@ -28,24 +28,23 @@ pub use app::NativeMenuCommand;
 /// `FontFamily::Name(HEADING_FAMILY.into())`.
 pub const HEADING_FAMILY: &str = "heading";
 
-/// Raw bytes of the legacy/fallback fonts the app embeds. The default Latin and
-/// Thai families are installed by `fonts::install` from the bundled Geist and
-/// Noto Sans Thai assets.
+/// IBM Plex Sans weight families for `FontFamily::Name(..)`. `FONT_REGULAR` matches
+/// `FontFamily::Proportional`.
+pub const FONT_THIN: &str = "plex-thin";
+pub const FONT_REGULAR: &str = "plex-regular";
+pub const FONT_MEDIUM: &str = "plex-medium";
+pub const FONT_SEMIBOLD: &str = "plex-semibold";
+pub const FONT_BOLD: &str = "plex-bold";
+
+/// Raw bytes of the embedded fallback font. The Latin and Thai families (IBM Plex Sans and
+/// Plex Sans Thai, five weights) are bundled directly by `fonts::install`.
 #[derive(Clone, Copy)]
 pub struct AppFonts {
-    /// Inter Regular — legacy Latin fallback.
-    pub ui_regular: &'static [u8],
-    /// Inter Semibold — legacy heading fallback.
-    pub ui_semibold: &'static [u8],
-    /// Anuphan Regular — Thai fallback for proportional and monospace families.
-    pub thai_regular: &'static [u8],
-    /// Anuphan Semibold — Thai weight for the [`HEADING_FAMILY`] family.
-    pub thai_semibold: &'static [u8],
     /// GNU Unifont — broad Unicode fallback used only when the fonts above lack a glyph.
     pub universal_regular: &'static [u8],
 }
 
-/// Install the primary UI font followed by Thai and broad Unicode fallbacks.
+/// Install IBM Plex Sans, its Thai companion and the broad Unicode fallback.
 pub fn install_fonts(ctx: &egui::Context, app_fonts: &AppFonts) {
     fonts::install(ctx, *app_fonts, None, None).expect("embedded fonts are valid");
 }
