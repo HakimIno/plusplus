@@ -186,7 +186,7 @@ impl DbGuiApp {
             (true, _) | (false, QueryEditorPlacement::Bottom) => egui::Panel::bottom(panel_id),
             (false, QueryEditorPlacement::Top) => egui::Panel::top(panel_id),
         };
-        panel
+        let bar_response = panel
             .resizable(false)
             // 28-point tabs plus padding, stroke and outer gutters. Keep the minimum below
             // the frame's content size so egui does not extend the card over the log seam.
@@ -409,6 +409,59 @@ impl DbGuiApp {
                     self.pager(ui, density, actions);
                 });
             });
+        // The gap above a bottom-docked bar drags the dock below it (Live log, else the bottom
+        // console), mirroring the grip under the bar.
+        if matches!(placement, QueryEditorPlacement::Bottom) || query_result_tabs {
+            let below = if self.show_live_log {
+                Some(egui::Id::new(("live_log", tab_id)))
+            } else if self.show_query_console && placement == QueryEditorPlacement::Bottom {
+                Some(egui::Id::new((
+                    "query_console",
+                    tab_id,
+                    placement,
+                    self.is_split(),
+                )))
+            } else {
+                None
+            };
+            if let Some(below) = below {
+                let bar = bar_response.response.rect;
+                let strip = egui::Rect::from_min_max(
+                    egui::pos2(bar.left(), bar.top() - 4.0),
+                    egui::pos2(bar.right(), bar.top() + 4.0),
+                );
+                let handle = root.interact(strip, panel_id.with("top_resize"), egui::Sense::drag());
+                if handle.hovered() || handle.dragged() {
+                    root.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                }
+                if handle.dragged() {
+                    if let Some(state) =
+                        egui::containers::panel::PanelState::load(root.ctx(), below)
+                    {
+                        let mut rect = state.rect;
+                        rect.min.y += handle.drag_delta().y;
+                        root.ctx().data_mut(|d| {
+                            d.insert_persisted(below, egui::containers::panel::PanelState { rect })
+                        });
+                        root.ctx().request_repaint();
+                    }
+                }
+                let grip = if handle.hovered() || handle.dragged() {
+                    palette::TEXT_WEAK()
+                } else {
+                    palette::TEXT_FAINT()
+                };
+                for offset in [-5.0, 0.0, 5.0] {
+                    // The result card is carved after this bar and would paint over the seam.
+                    root.ctx()
+                        .layer_painter(egui::LayerId::new(
+                            egui::Order::Foreground,
+                            panel_id.with("top_grip"),
+                        ))
+                        .circle_filled(strip.center() + egui::vec2(offset, 0.0), 1.0, grip);
+                }
+            }
+        }
     }
 
     pub(in crate::app) fn central_panel(&mut self, root: &mut egui::Ui, actions: &mut Vec<Action>) {
