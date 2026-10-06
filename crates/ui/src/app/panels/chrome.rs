@@ -5,6 +5,7 @@ use super::connections::mix_color;
 use crate::app::{Action, DbGuiApp};
 use crate::components;
 use crate::icons;
+use crate::style;
 use crate::style::palette;
 use crate::title_bar;
 
@@ -132,10 +133,15 @@ impl DbGuiApp {
         }
         egui::Panel::top("query_tabs")
             .resizable(false)
-            .exact_size(34.0)
+            .exact_size(33.0)
             .frame(
                 egui::Frame::new()
-                    .inner_margin(egui::Margin::symmetric(6, 4))
+                    .inner_margin(egui::Margin {
+                        left: 6,
+                        right: 6,
+                        top: 4,
+                        bottom: 0,
+                    })
                     .fill(palette::PANEL()),
             )
             .show_separator_line(true)
@@ -302,59 +308,77 @@ impl DbGuiApp {
                 (tab.pane == pane && tab.conn_id == self.tabs[active_idx].conn_id).then_some(idx)
             })
             .collect();
+        // The strip is a card like every other dock: rounded, with the shared gutter around it.
+        // egui sizes a panel without its outer margin, so the panel itself stays margin-free
+        // (33 for the card plus the gutter above and below) and the card is drawn inside.
+        let gutter = style::WORKSPACE_GUTTER_Y as f32;
         let bar = egui::Panel::top(egui::Id::new(("split_pane_tabs", pane)))
             .resizable(false)
-            .exact_size(34.0)
-            .frame(
-                egui::Frame::new()
-                    .inner_margin(egui::Margin::symmetric(6, 4))
-                    .fill(palette::PANEL()),
-            )
-            .show_separator_line(true)
-            .show_inside(root, |ui| {
-                egui::ScrollArea::horizontal()
-                    .id_salt(("split_pane_tab_scroll", pane))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 2.0;
-                            for idx in indices {
-                                let label = self.tab_label(idx);
-                                let kind = self.tab_kind(idx);
-                                let db_kind = (kind == crate::components::QueryTabKind::Query)
-                                    .then(|| self.tab_db_kind(idx))
-                                    .flatten();
-                                let response = components::query_tab_item(
-                                    ui,
-                                    &label,
-                                    kind,
-                                    db_kind,
-                                    self.tabs[idx].id == active_id,
-                                    self.tabs[idx].preview,
-                                    None,
-                                );
-                                if response.close {
-                                    actions.push(Action::CloseSplitPaneTab { idx, pane });
-                                } else if response.pinned {
-                                    actions.push(Action::PinSplitPaneTab { idx, pane });
-                                } else if response.clicked {
-                                    actions.push(Action::SelectSplitPaneTab { idx, pane });
-                                }
-                            }
-                            if components::toolbar_icon_button(
-                                ui,
-                                icons::plus(),
-                                &format!("New query tab in pane {}", pane + 1),
-                            )
-                            .clicked()
-                            {
-                                actions.push(Action::NewSplitPaneTab(pane));
-                            }
-                        });
+            .exact_size(33.0 + gutter * 2.0)
+            .frame(egui::Frame::new())
+            .show_separator_line(false)
+            .show_inside(root, |panel_ui| {
+                let card = style::workspace_frame(palette::PANEL())
+                    // 2 + the 29-point tab chip + 2 fills the 33-point card, so the chip is
+                    // centred instead of sitting on the card's bottom edge.
+                    .inner_margin(egui::Margin {
+                        left: 6,
+                        right: 6,
+                        top: 2,
+                        bottom: 2,
+                    })
+                    .show(panel_ui, |ui| {
+                        ui.set_min_size(ui.available_size());
+                        egui::ScrollArea::horizontal()
+                            .id_salt(("split_pane_tab_scroll", pane))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 2.0;
+                                    for idx in indices {
+                                        let label = self.tab_label(idx);
+                                        let kind = self.tab_kind(idx);
+                                        let db_kind = (kind
+                                            == crate::components::QueryTabKind::Query)
+                                            .then(|| self.tab_db_kind(idx))
+                                            .flatten();
+                                        let response = components::query_tab_item(
+                                            ui,
+                                            &label,
+                                            kind,
+                                            db_kind,
+                                            self.tabs[idx].id == active_id,
+                                            self.tabs[idx].preview,
+                                            None,
+                                        );
+                                        if response.close {
+                                            actions.push(Action::CloseSplitPaneTab { idx, pane });
+                                        } else if response.pinned {
+                                            actions.push(Action::PinSplitPaneTab { idx, pane });
+                                        } else if response.clicked {
+                                            actions.push(Action::SelectSplitPaneTab { idx, pane });
+                                        }
+                                    }
+                                    if components::toolbar_icon_button(
+                                        ui,
+                                        icons::plus(),
+                                        &format!("New query tab in pane {}", pane + 1),
+                                    )
+                                    .clicked()
+                                    {
+                                        actions.push(Action::NewSplitPaneTab(pane));
+                                    }
+                                });
+                            });
                     });
+                card.response.rect
             });
-        // Mark the pane that keyboard actions and Details currently follow.
+        // Mark the pane that keyboard actions and Details currently follow. The line sits on
+        // the card's bottom edge, inset so it clears the rounded corners.
         if self.is_split() && self.focused_pane == pane {
-            let rect = bar.response.rect;
+            let rect = bar
+                .inner
+                .shrink(gutter)
+                .shrink2(egui::vec2(style::radius::LG as f32, 0.0));
             root.painter().hline(
                 rect.x_range(),
                 rect.bottom() - 1.0,

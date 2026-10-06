@@ -867,14 +867,17 @@ impl DbGuiApp {
             egui::CornerRadius::ZERO,
             style::workspace_gap(),
         );
-        // Cards contribute two points to each side of an internal seam. Inset the entire
-        // dock layout by the same amount so an outside edge also totals four points instead of
-        // looking half as wide. Using a child Ui keeps this padding out of the global title,
-        // tab, and status chrome.
+        // Give the tabs the same four-point seam as adjacent cards: two points from the
+        // workspace inset and two from each card's own top margin.
+        let gutter = style::WORKSPACE_GUTTER as f32;
+        let dock_rect = egui::Rect::from_min_max(
+            workspace_rect.min + egui::Vec2::splat(gutter),
+            workspace_rect.max - egui::Vec2::splat(gutter),
+        );
         let mut workspace_root = ui_root.new_child(
             egui::UiBuilder::new()
                 .id_salt("workspace_docks")
-                .max_rect(workspace_rect.shrink(style::WORKSPACE_GUTTER as f32)),
+                .max_rect(dock_rect),
         );
         if self.show_connection_tabs {
             self.connection_tabs(&mut workspace_root, &mut actions);

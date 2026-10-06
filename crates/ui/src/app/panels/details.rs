@@ -322,18 +322,31 @@ fn details_value_box(
 
     if ui.is_rect_visible(rect) {
         let hovered = resp.hovered() || chev_resp.hovered();
-        let stroke_color = if is_staged {
-            palette::SUCCESS()
-        } else if hovered {
-            palette::BORDER_STRONG()
+        // A pending edit is a green wash over the box, with no outline.
+        let (fill, stroke) = if is_staged {
+            let (base, tint) = (palette::CODE_BG(), palette::SUCCESS());
+            let mix = |b: u8, t: u8| (b as f32 * 0.78 + t as f32 * 0.22).round() as u8;
+            (
+                egui::Color32::from_rgb(
+                    mix(base.r(), tint.r()),
+                    mix(base.g(), tint.g()),
+                    mix(base.b(), tint.b()),
+                ),
+                egui::Stroke::NONE,
+            )
         } else {
-            palette::BORDER()
+            let color = if hovered {
+                palette::BORDER_STRONG()
+            } else {
+                palette::BORDER()
+            };
+            (palette::CODE_BG(), egui::Stroke::new(1.0_f32, color))
         };
         ui.painter().rect(
             rect,
             egui::CornerRadius::same(5),
-            palette::CODE_BG(),
-            egui::Stroke::new(1.0_f32, stroke_color),
+            fill,
+            stroke,
             egui::StrokeKind::Inside,
         );
 
@@ -555,6 +568,12 @@ fn details_value_box(
     }
 }
 
+/// The shared dock frame with extra side padding, so field boxes don't crowd the panel edge.
+fn details_frame() -> egui::Frame {
+    style::workspace_frame(palette::PANEL())
+        .inner_margin(egui::Margin::symmetric(style::SIDE_PANEL_PAD_X, 4))
+}
+
 impl DbGuiApp {
     /// The row Details shows: the selected row of the focused pane, unless the panel was
     /// dismissed for that row.
@@ -595,8 +614,8 @@ impl DbGuiApp {
         };
         egui::Panel::right("details_panel")
             .resizable(true)
-            .default_size(260.0)
-            .frame(style::workspace_frame(palette::PANEL()))
+            .default_size(300.0)
+            .frame(details_frame())
             .show_separator_line(false)
             .show_inside(root, |ui| self.details_body(ui, idx, row_idx, actions));
         style::workspace_resize_grip(root, egui::Id::new("details_panel"), false);
@@ -613,7 +632,7 @@ impl DbGuiApp {
         let Some((idx, row_idx)) = self.details_target() else {
             return;
         };
-        const WIDTH: f32 = 280.0;
+        const WIDTH: f32 = 320.0;
         let width = WIDTH.min(column.width() - 16.0);
         // Start below the pane's tab strip so the drawer never covers it.
         let top = column.top() + 34.0 + 6.0;
@@ -623,13 +642,11 @@ impl DbGuiApp {
             .order(egui::Order::Foreground)
             .fixed_pos(pos)
             .show(ctx, |ui| {
-                style::workspace_frame(palette::PANEL())
-                    .stroke(egui::Stroke::new(1.0_f32, palette::BORDER_STRONG()))
-                    .show(ui, |ui| {
-                        ui.set_width(width - 10.0);
-                        ui.set_height(height - 10.0);
-                        self.details_body(ui, idx, row_idx, actions);
-                    });
+                details_frame().show(ui, |ui| {
+                    ui.set_width(width - 22.0);
+                    ui.set_height(height - 10.0);
+                    self.details_body(ui, idx, row_idx, actions);
+                });
             });
     }
 
@@ -656,18 +673,6 @@ impl DbGuiApp {
         let details_dismissed = &mut self.details_dismissed;
 
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            components::section_title(ui, "Details");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if components::Btn::ghost_icon(icons::close())
-                    .tooltip("Close Details for this row")
-                    .show(ui)
-                    .clicked()
-                {
-                    *details_dismissed = Some((tab_id, row_idx));
-                }
-            });
-        });
         if let Some(label) = source_label {
             ui.add(
                 egui::Label::new(
@@ -678,15 +683,26 @@ impl DbGuiApp {
                 .truncate(),
             );
         }
-        // Live field filter, TablePlus-style: typing narrows the stacked fields
-        // below by column name. Icon sits inside the field via `icon_text_input`.
-        components::icon_text_input(
-            ui,
-            details_filter,
-            "Search for field…",
-            icons::search(),
-            ui.available_width(),
-        );
+        // Live field filter, TablePlus-style: typing narrows the stacked fields below by
+        // column name. The close button sits beside it; the filter takes the remaining width.
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if components::Btn::ghost_icon(icons::close())
+                    .tooltip("Close Details for this row")
+                    .show(ui)
+                    .clicked()
+                {
+                    *details_dismissed = Some((tab_id, row_idx));
+                }
+                components::icon_text_input(
+                    ui,
+                    details_filter,
+                    "Search for field…",
+                    icons::search(),
+                    ui.available_width(),
+                );
+            });
+        });
         ui.add_space(4.0);
 
         // Stacked fields (name + type above an input-styled value box). The box is

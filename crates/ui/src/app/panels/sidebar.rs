@@ -457,20 +457,15 @@ impl DbGuiApp {
             .min_size(200.0)
             .max_size(360.0)
             .frame(
-                style::workspace_frame(palette::PANEL()).outer_margin(egui::Margin {
-                    // The right seam combines this card and the central card's gutters.
-                    // When the connection rail is present it has no card margin of its own,
-                    // so this panel supplies the whole seam. Without the rail, the workspace
-                    // inset supplies the other half just like the other outside edges.
-                    left: if self.show_connection_tabs {
-                        style::WORKSPACE_GUTTER * 2
-                    } else {
-                        style::WORKSPACE_GUTTER
-                    },
-                    right: style::WORKSPACE_GUTTER,
-                    top: style::WORKSPACE_GUTTER_Y,
-                    bottom: style::WORKSPACE_GUTTER_Y,
-                }),
+                style::workspace_frame(palette::PANEL())
+                    .inner_margin(egui::Margin::symmetric(style::SIDE_PANEL_PAD_X, 4))
+                    .outer_margin(egui::Margin {
+                        // Every card owns half of each seam; the connection rail is a card too.
+                        left: style::WORKSPACE_GUTTER,
+                        right: style::WORKSPACE_GUTTER,
+                        top: style::WORKSPACE_GUTTER_Y,
+                        bottom: style::WORKSPACE_GUTTER_Y,
+                    }),
             )
             .show_separator_line(false)
             .show_inside(root, |ui| {

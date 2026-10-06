@@ -108,124 +108,128 @@ impl DbGuiApp {
         egui::Panel::left("connection_tabs")
             .resizable(false)
             .exact_size(56.0)
-            .frame(
-                egui::Frame::new()
-                    .inner_margin(egui::Margin::symmetric(6, 2))
-                    .fill(palette::PANEL()),
-            )
+            // egui sizes a panel's frame without its outer margin, which then clips the card's
+            // right edge and widens the seam. The panel stays margin-free; the card goes inside.
+            .frame(egui::Frame::new())
             .show_separator_line(false)
-            .show_inside(root, |ui| {
-                ui.add_space(4.0);
-                let list_h = ui.available_height();
+            .show_inside(root, |panel_ui| {
+                style::workspace_frame(palette::PANEL()).show(panel_ui, |ui| {
+                    ui.set_min_size(ui.available_size());
+                    ui.add_space(4.0);
+                    let list_h = ui.available_height();
 
-                ui.allocate_ui_with_layout(
-                    egui::vec2(ui.available_width(), list_h),
-                    egui::Layout::top_down(egui::Align::Center),
-                    |ui| {
-                        egui::ScrollArea::vertical()
-                            .id_salt("active_connection_tabs")
-                            .show(ui, |ui| {
-                                ui.spacing_mut().item_spacing.y = 4.0;
-                                let bound_id = self.tabs[self.active_query_tab].conn_id.clone();
-                                let mut rects = Vec::with_capacity(self.connections.len());
-                                let pointer_y = ui.ctx().pointer_interact_pos().map(|p| p.y);
-                                for (idx, conn) in self.connections.iter().enumerate() {
-                                    let active_conn = self
-                                        .active_connections
-                                        .iter()
-                                        .find(|a| a.config_id == conn.id);
-                                    let live = active_conn.is_some();
-                                    // Highlight the connection the active tab is bound to.
-                                    let selected = bound_id.as_deref() == Some(conn.id.as_str());
-                                    let drag_float_y = match (&self.connection_drag, pointer_y) {
-                                        (Some(drag), Some(py)) if drag.id == conn.id => {
-                                            Some(py - drag.grab_y)
-                                        }
-                                        _ => None,
-                                    };
-                                    let resp = components::connection_tab_item(
-                                        ui,
-                                        &conn.name,
-                                        conn.kind,
-                                        selected,
-                                        live,
-                                        drag_float_y,
-                                    )
-                                    .on_hover_text(format!(
-                                        "{}\n{}\nSafety: {} — {}",
-                                        conn.name,
-                                        conn.target_summary(),
-                                        conn.safety_profile.label(),
-                                        conn.safety_profile.description()
-                                    ));
-                                    if resp.drag_started() {
-                                        self.connection_drag = Some(crate::app::ConnectionDrag {
-                                            id: conn.id.clone(),
-                                            grab_y: pointer_y.unwrap_or(resp.rect.top())
-                                                - resp.rect.top(),
-                                        });
-                                    }
-                                    if resp.clicked() {
-                                        if live {
-                                            actions.push(Action::BindConnection(idx));
-                                        } else {
-                                            actions.push(Action::Connect(idx));
-                                        }
-                                    }
-                                    let databases: Vec<String> = active_conn
-                                        .map(|a| a.databases.clone())
-                                        .unwrap_or_default();
-                                    let current_db = conn.database.clone();
-                                    resp.context_menu(|ui| {
-                                        ui.set_min_width(180.0);
-                                        let connect_label =
-                                            if live { "Reconnect" } else { "Connect" };
-                                        if components::button(
-                                            ui,
-                                            icons::connect(),
-                                            connect_label,
-                                            true,
-                                        )
-                                        .clicked()
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), list_h),
+                        egui::Layout::top_down(egui::Align::Center),
+                        |ui| {
+                            egui::ScrollArea::vertical()
+                                .id_salt("active_connection_tabs")
+                                .show(ui, |ui| {
+                                    ui.spacing_mut().item_spacing.y = 4.0;
+                                    let bound_id = self.tabs[self.active_query_tab].conn_id.clone();
+                                    let mut rects = Vec::with_capacity(self.connections.len());
+                                    let pointer_y = ui.ctx().pointer_interact_pos().map(|p| p.y);
+                                    for (idx, conn) in self.connections.iter().enumerate() {
+                                        let active_conn = self
+                                            .active_connections
+                                            .iter()
+                                            .find(|a| a.config_id == conn.id);
+                                        let live = active_conn.is_some();
+                                        // Highlight the connection the active tab is bound to.
+                                        let selected =
+                                            bound_id.as_deref() == Some(conn.id.as_str());
+                                        let drag_float_y = match (&self.connection_drag, pointer_y)
                                         {
-                                            actions.push(Action::Connect(idx));
-                                            ui.close();
+                                            (Some(drag), Some(py)) if drag.id == conn.id => {
+                                                Some(py - drag.grab_y)
+                                            }
+                                            _ => None,
+                                        };
+                                        let resp = components::connection_tab_item(
+                                            ui,
+                                            &conn.name,
+                                            conn.kind,
+                                            selected,
+                                            live,
+                                            drag_float_y,
+                                        )
+                                        .on_hover_text(format!(
+                                            "{}\n{}\nSafety: {} — {}",
+                                            conn.name,
+                                            conn.target_summary(),
+                                            conn.safety_profile.label(),
+                                            conn.safety_profile.description()
+                                        ));
+                                        if resp.drag_started() {
+                                            self.connection_drag =
+                                                Some(crate::app::ConnectionDrag {
+                                                    id: conn.id.clone(),
+                                                    grab_y: pointer_y.unwrap_or(resp.rect.top())
+                                                        - resp.rect.top(),
+                                                });
                                         }
-                                        if live && !databases.is_empty() {
-                                            components::menu_button(
+                                        if resp.clicked() {
+                                            if live {
+                                                actions.push(Action::BindConnection(idx));
+                                            } else {
+                                                actions.push(Action::Connect(idx));
+                                            }
+                                        }
+                                        let databases: Vec<String> = active_conn
+                                            .map(|a| a.databases.clone())
+                                            .unwrap_or_default();
+                                        let current_db = conn.database.clone();
+                                        resp.context_menu(|ui| {
+                                            ui.set_min_width(180.0);
+                                            let connect_label =
+                                                if live { "Reconnect" } else { "Connect" };
+                                            if components::button(
                                                 ui,
-                                                icons::database(),
-                                                if conn.kind.is_cql() {
-                                                    "Switch Keyspace"
-                                                } else {
-                                                    "Switch Database"
-                                                },
-                                                |ui| {
-                                                    ui.set_min_width(160.0);
-                                                    egui::ScrollArea::vertical()
-                                                        .max_height(220.0)
-                                                        .show(ui, |ui| {
-                                                            for db in &databases {
-                                                                let is_current = *db == current_db;
-                                                                let tint = ui
-                                                                    .visuals()
-                                                                    .widgets
-                                                                    .inactive
-                                                                    .fg_stroke
-                                                                    .color;
-                                                                let db_img = egui::Image::new(
-                                                                    icons::database(),
-                                                                )
-                                                                .fit_to_exact_size(egui::vec2(
-                                                                    14.0, 14.0,
-                                                                ))
-                                                                .tint(tint);
-                                                                let label = if is_current {
-                                                                    format!("✓  {db}")
-                                                                } else {
-                                                                    db.clone()
-                                                                };
-                                                                let btn =
+                                                icons::connect(),
+                                                connect_label,
+                                                true,
+                                            )
+                                            .clicked()
+                                            {
+                                                actions.push(Action::Connect(idx));
+                                                ui.close();
+                                            }
+                                            if live && !databases.is_empty() {
+                                                components::menu_button(
+                                                    ui,
+                                                    icons::database(),
+                                                    if conn.kind.is_cql() {
+                                                        "Switch Keyspace"
+                                                    } else {
+                                                        "Switch Database"
+                                                    },
+                                                    |ui| {
+                                                        ui.set_min_width(160.0);
+                                                        egui::ScrollArea::vertical()
+                                                            .max_height(220.0)
+                                                            .show(ui, |ui| {
+                                                                for db in &databases {
+                                                                    let is_current =
+                                                                        *db == current_db;
+                                                                    let tint = ui
+                                                                        .visuals()
+                                                                        .widgets
+                                                                        .inactive
+                                                                        .fg_stroke
+                                                                        .color;
+                                                                    let db_img = egui::Image::new(
+                                                                        icons::database(),
+                                                                    )
+                                                                    .fit_to_exact_size(egui::vec2(
+                                                                        14.0, 14.0,
+                                                                    ))
+                                                                    .tint(tint);
+                                                                    let label = if is_current {
+                                                                        format!("✓  {db}")
+                                                                    } else {
+                                                                        db.clone()
+                                                                    };
+                                                                    let btn =
                                                                     egui::Button::image_and_text(
                                                                         db_img, label,
                                                                     )
@@ -233,94 +237,105 @@ impl DbGuiApp {
                                                                         ui.available_width(),
                                                                         0.0,
                                                                     ));
-                                                                if ui
-                                                                    .add_enabled(!is_current, btn)
-                                                                    .clicked()
-                                                                {
-                                                                    actions.push(
+                                                                    if ui
+                                                                        .add_enabled(
+                                                                            !is_current,
+                                                                            btn,
+                                                                        )
+                                                                        .clicked()
+                                                                    {
+                                                                        actions.push(
                                                                         Action::SwitchDatabase {
                                                                             conn_idx: idx,
                                                                             database: db.clone(),
                                                                         },
                                                                     );
-                                                                    ui.close();
+                                                                        ui.close();
+                                                                    }
                                                                 }
-                                                            }
-                                                        });
-                                                },
-                                            );
-                                        }
-                                        if live {
-                                            ui.separator();
-                                            if components::button(
-                                                ui,
-                                                icons::database_export(),
-                                                "Backup Database…",
-                                                true,
-                                            )
-                                            .clicked()
+                                                            });
+                                                    },
+                                                );
+                                            }
+                                            if live {
+                                                ui.separator();
+                                                if components::button(
+                                                    ui,
+                                                    icons::database_export(),
+                                                    "Backup Database…",
+                                                    true,
+                                                )
+                                                .clicked()
+                                                {
+                                                    actions.push(Action::OpenBackup {
+                                                        conn_idx: idx,
+                                                        restore: false,
+                                                    });
+                                                    ui.close();
+                                                }
+                                                if components::button(
+                                                    ui,
+                                                    icons::database_import(),
+                                                    "Restore Database…",
+                                                    !conn.is_read_only(),
+                                                )
+                                                .on_disabled_hover_text(
+                                                    "This connection is read-only",
+                                                )
+                                                .clicked()
+                                                {
+                                                    actions.push(Action::OpenBackup {
+                                                        conn_idx: idx,
+                                                        restore: true,
+                                                    });
+                                                    ui.close();
+                                                }
+                                                ui.separator();
+                                            }
+                                            if components::button(ui, icons::edit(), "Edit…", true)
+                                                .clicked()
                                             {
-                                                actions.push(Action::OpenBackup {
-                                                    conn_idx: idx,
-                                                    restore: false,
-                                                });
+                                                actions.push(Action::EditConnection(idx));
+                                                ui.close();
+                                            }
+                                            if live
+                                                && components::button(
+                                                    ui,
+                                                    icons::disconnect(),
+                                                    "Disconnect",
+                                                    true,
+                                                )
+                                                .clicked()
+                                            {
+                                                actions.push(Action::DisconnectConn(idx));
                                                 ui.close();
                                             }
                                             if components::button(
                                                 ui,
-                                                icons::database_import(),
-                                                "Restore Database…",
-                                                !conn.is_read_only(),
-                                            )
-                                            .on_disabled_hover_text("This connection is read-only")
-                                            .clicked()
-                                            {
-                                                actions.push(Action::OpenBackup {
-                                                    conn_idx: idx,
-                                                    restore: true,
-                                                });
-                                                ui.close();
-                                            }
-                                            ui.separator();
-                                        }
-                                        if components::button(ui, icons::edit(), "Edit…", true)
-                                            .clicked()
-                                        {
-                                            actions.push(Action::EditConnection(idx));
-                                            ui.close();
-                                        }
-                                        if live
-                                            && components::button(
-                                                ui,
-                                                icons::disconnect(),
-                                                "Disconnect",
+                                                icons::trash(),
+                                                "Delete",
                                                 true,
                                             )
                                             .clicked()
-                                        {
-                                            actions.push(Action::DisconnectConn(idx));
-                                            ui.close();
-                                        }
-                                        if components::button(ui, icons::trash(), "Delete", true)
-                                            .clicked()
-                                        {
-                                            actions.push(Action::DeleteConnection(idx));
-                                            ui.close();
-                                        }
-                                    });
-                                    rects.push(resp.rect);
-                                }
+                                            {
+                                                actions.push(Action::DeleteConnection(idx));
+                                                ui.close();
+                                            }
+                                        });
+                                        rects.push(resp.rect);
+                                    }
 
-                                self.handle_connection_drag(ui, &rects, actions);
+                                    self.handle_connection_drag(ui, &rects, actions);
 
-                                if self.connections.is_empty() {
-                                    ui.vertical_centered(|ui| {
-                                        icons::show_native(ui, icons::database(), 16.0);
-                                    });
-                                }
-                            });
-                    },
-                );
+                                    if self.connections.is_empty() {
+                                        ui.vertical_centered(|ui| {
+                                            icons::show_native(ui, icons::database(), 16.0);
+                                        });
+                                    }
+                                });
+                        },
+                    );
+                });
             });
     }
 
@@ -449,8 +464,8 @@ impl DbGuiApp {
                 ui.add_space(6.0);
 
                 ui.label(
-                    egui::RichText::new("GENERAL")
-                        .size(10.0)
+                    egui::RichText::new("General")
+                        .size(12.0)
                         .color(palette::TEXT_FAINT()),
                 );
                 ui.add_space(3.0);
@@ -478,8 +493,8 @@ impl DbGuiApp {
 
                 ui.add_space(10.0);
                 ui.label(
-                    egui::RichText::new("CONNECTION")
-                        .size(10.0)
+                    egui::RichText::new("Connection")
+                        .size(12.0)
                         .color(palette::TEXT_FAINT()),
                 );
                 ui.add_space(3.0);
@@ -515,10 +530,15 @@ impl DbGuiApp {
                                         }
                                         if editor.config.title_bar_color.is_none() {
                                             ui.label("Default");
-                                        }
-                                        if ui.button("Clear").clicked()
-                                            && editor.config.title_bar_color.take().is_some()
+                                        } else if components::button(
+                                            ui,
+                                            icons::close(),
+                                            "Clear",
+                                            true,
+                                        )
+                                        .clicked()
                                         {
+                                            editor.config.title_bar_color = None;
                                             form_changed = true;
                                         }
                                     });
@@ -547,82 +567,30 @@ impl DbGuiApp {
                                     }
                                     ui.end_row();
 
-                                    connection_form_label(ui, "");
-                                    ui.vertical(|ui| {
-                                        ui.set_max_width(field_w);
-                                        ui.label(
-                                            egui::RichText::new(
-                                                editor.config.safety_profile.description(),
-                                            )
-                                            .size(11.0)
-                                            .color(palette::TEXT_WEAK()),
-                                        );
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.spacing_mut().item_spacing.x = 4.0;
-                                            ui.label(egui::RichText::new("Protection").size(11.0));
-                                            let guardian_on = editor.config.is_production();
-                                            ui.label(
-                                                egui::RichText::new(if guardian_on {
-                                                    "Guardian: On"
-                                                } else {
-                                                    "Guardian: Off"
-                                                })
-                                                .size(11.0)
-                                                .color(if guardian_on {
-                                                    palette::SUCCESS()
-                                                } else {
-                                                    palette::TEXT_FAINT()
-                                                }),
-                                            );
-                                            ui.label(
-                                                egui::RichText::new("·")
-                                                    .color(palette::TEXT_FAINT()),
-                                            );
-                                            let read_only_on = editor.config.is_read_only();
-                                            ui.label(
-                                                egui::RichText::new(if read_only_on {
-                                                    "Read-only: On"
-                                                } else {
-                                                    "Read-only: Off"
-                                                })
-                                                .size(11.0)
-                                                .color(if read_only_on {
-                                                    palette::SUCCESS()
-                                                } else {
-                                                    palette::TEXT_FAINT()
-                                                }),
-                                            );
-                                        });
-                                    });
-                                    ui.end_row();
-
                                     if editor.config.safety_profile == dbcore::SafetyProfile::Custom
                                     {
                                         connection_form_label(ui, "Production");
                                         form_changed |= ui
-                                    .checkbox(
-                                        &mut editor.config.production,
-                                        "Confirm destructive queries",
-                                    )
-                                    .on_hover_text(
-                                        "UPDATE, DELETE, DROP, TRUNCATE, ALTER, and MERGE must \
-                                     be confirmed in a dialog before they run",
-                                    )
-                                    .changed();
+                                            .checkbox(
+                                                &mut editor.config.production,
+                                                "Confirm destructive queries",
+                                            )
+                                            .on_hover_text(
+                                                "Ask before UPDATE, DELETE, DROP and similar",
+                                            )
+                                            .changed();
                                         ui.end_row();
 
                                         connection_form_label(ui, "Read-only");
                                         form_changed |= ui
-                                    .checkbox(&mut editor.config.read_only, "Block all writes")
-                                    .on_hover_text(
-                                        "Only reads (SELECT, SHOW, EXPLAIN, …) are allowed to \
-                                     run; in-grid editing and schema changes are refused. \
-                                     Where the database supports it the session itself is \
-                                     opened read-only, so even writes hidden inside \
-                                     functions are rejected by the server. Takes effect on \
-                                     the next connect.",
-                                    )
-                                    .changed();
+                                            .checkbox(
+                                                &mut editor.config.read_only,
+                                                "Block all writes",
+                                            )
+                                            .on_hover_text(
+                                                "Only reads are allowed. Applies on next connect.",
+                                            )
+                                            .changed();
                                         ui.end_row();
                                     }
                                 }
@@ -751,7 +719,14 @@ impl DbGuiApp {
                                                     None,
                                                 )
                                                 .changed();
-                                                if ui.button("Browse…").clicked() {
+                                                if components::button(
+                                                    ui,
+                                                    icons::folder(),
+                                                    "Browse…",
+                                                    true,
+                                                )
+                                                .clicked()
+                                                {
                                                     actions.push(Action::BrowseSslCaCert);
                                                 }
                                             });
@@ -771,7 +746,14 @@ impl DbGuiApp {
                                                     None,
                                                 )
                                                 .changed();
-                                                if ui.button("Browse…").clicked() {
+                                                if components::button(
+                                                    ui,
+                                                    icons::folder(),
+                                                    "Browse…",
+                                                    true,
+                                                )
+                                                .clicked()
+                                                {
                                                     actions.push(Action::BrowseSslClientCert);
                                                 }
                                             });
@@ -787,7 +769,14 @@ impl DbGuiApp {
                                                     None,
                                                 )
                                                 .changed();
-                                                if ui.button("Browse…").clicked() {
+                                                if components::button(
+                                                    ui,
+                                                    icons::folder(),
+                                                    "Browse…",
+                                                    true,
+                                                )
+                                                .clicked()
+                                                {
                                                     actions.push(Action::BrowseSslClientKey);
                                                 }
                                             });
@@ -851,7 +840,14 @@ impl DbGuiApp {
                                                     None,
                                                 )
                                                 .changed();
-                                                if ui.button("Browse…").clicked() {
+                                                if components::button(
+                                                    ui,
+                                                    icons::folder(),
+                                                    "Browse…",
+                                                    true,
+                                                )
+                                                .clicked()
+                                                {
                                                     actions.push(Action::BrowseSshKey);
                                                 }
                                             });
@@ -898,7 +894,9 @@ impl DbGuiApp {
                                             field_test_status(&test_state, ConnField::SqlitePath),
                                         )
                                         .changed();
-                                        if ui.button("Browse…").clicked() {
+                                        if components::button(ui, icons::folder(), "Browse…", true)
+                                            .clicked()
+                                        {
                                             actions.push(Action::BrowseSqlitePath);
                                         }
                                     });
@@ -916,13 +914,6 @@ impl DbGuiApp {
                     };
                     if components::button(ui, icons::settings(), label, true).clicked() {
                         editor.show_advanced = !editor.show_advanced;
-                    }
-                    if !editor.show_advanced {
-                        ui.label(
-                            egui::RichText::new("Appearance, safety, SSL & SSH")
-                                .size(10.5)
-                                .color(palette::TEXT_FAINT()),
-                        );
                     }
                 });
                 ui.add_space(2.0);
