@@ -5071,8 +5071,13 @@ fn reconnect_reloads_the_active_table_tab() {
         .unwrap();
     app.poll_messages(&ctx);
 
-    assert!(app.is_tab_querying(app.tab().id));
-    assert_eq!(app.busy, Busy::Querying);
+    // `poll_messages` drains the channel, so on a fast machine the instant dummy query can
+    // finish and be applied within the same call. Either way the reload must have started.
+    let tab = app.tab();
+    assert!(
+        app.is_tab_querying(tab.id) || tab.result.is_some() || tab.query_error.is_some(),
+        "reconnect did not start a reload of the open table tab"
+    );
 }
 
 #[test]
