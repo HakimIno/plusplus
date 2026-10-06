@@ -30,32 +30,15 @@ pub(crate) fn section_header(ui: &mut egui::Ui, text: &str) {
     };
     let mut job = LayoutJob::default();
     job.append(
-        &text.to_uppercase(),
+        text,
         0.0,
         TextFormat {
-            font_id: FontId::new(11.0, FontFamily::Proportional),
+            font_id: FontId::new(12.0, FontFamily::Proportional),
             color: header_color,
-            extra_letter_spacing: 1.4,
             ..Default::default()
         },
     );
     ui.add(egui::Label::new(job).selectable(false));
-    ui.add_space(3.0);
-}
-
-/// A panel title in sentence case ("Details"), for panels where the tracked-out caps of
-/// [`section_header`] read as shouting.
-pub(crate) fn section_title(ui: &mut egui::Ui, text: &str) {
-    ui.add_space(2.0);
-    ui.add(
-        egui::Label::new(
-            egui::RichText::new(text)
-                .size(14.5)
-                .strong()
-                .color(palette::TEXT()),
-        )
-        .selectable(false),
-    );
     ui.add_space(3.0);
 }
 

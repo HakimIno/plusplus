@@ -163,7 +163,7 @@ pub(super) fn structure_view(ui: &mut egui::Ui, info: &dbcore::TableInfo) {
 
             if !info.foreign_keys.is_empty() {
                 ui.add_space(12.0);
-                components::section_header(ui, "Foreign Keys");
+                components::section_header(ui, "Foreign keys");
                 ui.add_space(2.0);
                 TableBuilder::new(ui)
                     .id_salt("structure_fks")

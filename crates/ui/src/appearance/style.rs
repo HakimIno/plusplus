@@ -135,25 +135,21 @@ pub const WORKSPACE_GUTTER: i8 = 2;
 /// an outside edge where there is no neighbouring card.
 pub const WORKSPACE_GUTTER_Y: i8 = WORKSPACE_GUTTER;
 
+/// Horizontal content inset shared by the Items and Details side panels.
+pub const SIDE_PANEL_PAD_X: i8 = 10;
+
 /// Dark seam between workspace cards. It is derived from the active base colour so light themes
 /// keep their contrast while charcoal themes get the deeper gutter used by the studio layout.
 pub fn workspace_gap() -> Color32 {
     palette::BASE().gamma_multiply(0.62)
 }
 
-/// Low-contrast edge for workspace cards. Keeping this below the regular border token prevents
-/// resize seams from reading as bright white rules while still preserving a clear panel boundary.
-pub fn workspace_divider() -> Color32 {
-    mix(palette::BASE(), palette::BORDER(), 0.45)
-}
-
 /// Frame shared by workspace docks: schema/details sidebars, editor, results, and live log.
-/// The base-colour outer margin becomes the visible gutter, while the rounded, hairline frame
-/// keeps each surface legible without reintroducing heavyweight separators.
+/// Rounded surfaces are separated by the outer-margin gutters, with no panel border.
 pub fn workspace_frame(fill: Color32) -> egui::Frame {
     egui::Frame::new()
         .fill(fill)
-        .stroke(Stroke::new(1.0_f32, workspace_divider()))
+        .stroke(Stroke::NONE)
         .corner_radius(CornerRadius::same(radius::LG))
         .outer_margin(Margin::symmetric(WORKSPACE_GUTTER, WORKSPACE_GUTTER_Y))
         // Full-bleed grids and dock headers paint rectangular child backgrounds. A four-point
@@ -235,11 +231,13 @@ pub fn apply(ctx: &egui::Context) {
     ctx.all_styles_mut(|style| {
         style.visuals = v.clone();
         style.text_styles = text_styles.clone().into();
+        // Short hover/expand transitions instead of egui's instant snap.
+        style.animation_time = 0.1;
 
         // Spacing — tight and even for a clean, dense look.
         let s = &mut style.spacing;
-        s.item_spacing = egui::vec2(5.0, 4.0);
-        s.button_padding = egui::vec2(7.0, 2.0);
+        s.item_spacing = egui::vec2(6.0, 4.0);
+        s.button_padding = egui::vec2(9.0, 3.0);
         s.menu_margin = Margin::same(5);
         s.indent = 14.0;
         // Buttons and combo boxes adopt the shared control height from here.
@@ -295,10 +293,10 @@ fn visuals() -> egui::Visuals {
     // Subtle 1px hairlines instead of egui's heavier defaults.
     v.window_stroke = Stroke::new(1.0_f32, t.border);
     v.window_shadow = egui::epaint::Shadow {
-        offset: [0, 8],
-        blur: 28,
+        offset: [0, 6],
+        blur: 20,
         spread: 0,
-        color: Color32::from_black_alpha(110),
+        color: Color32::from_black_alpha(80),
     };
     v.popup_shadow = egui::epaint::Shadow {
         offset: [0, 4],
@@ -307,9 +305,9 @@ fn visuals() -> egui::Visuals {
         color: Color32::from_black_alpha(90),
     };
 
-    let window_radius = CornerRadius::same(10);
+    let window_radius = CornerRadius::same(6);
     v.window_corner_radius = window_radius;
-    v.menu_corner_radius = CornerRadius::same(8);
+    v.menu_corner_radius = CornerRadius::same(4);
 
     let w = &mut v.widgets;
     for state in [
@@ -319,7 +317,7 @@ fn visuals() -> egui::Visuals {
         &mut w.open,
         &mut w.noninteractive,
     ] {
-        state.corner_radius = CornerRadius::same(6);
+        state.corner_radius = CornerRadius::same(4);
     }
 
     // Separators / frame hairlines and table header column guides. We keep these on the
@@ -335,13 +333,13 @@ fn visuals() -> egui::Visuals {
     // main source of the "too many hard lines" feel.
     w.inactive.bg_fill = t.surface;
     w.inactive.weak_bg_fill = t.surface;
-    w.inactive.bg_stroke = Stroke::new(1.0_f32, t.border);
+    w.inactive.bg_stroke = Stroke::NONE;
     w.inactive.fg_stroke = Stroke::new(1.0_f32, t.text_weak);
 
     // Hover.
     w.hovered.bg_fill = t.surface_hover;
     w.hovered.weak_bg_fill = t.surface_hover;
-    w.hovered.bg_stroke = Stroke::new(1.0_f32, t.border_strong);
+    w.hovered.bg_stroke = Stroke::NONE;
     w.hovered.fg_stroke = Stroke::new(1.0_f32, t.text);
 
     // Pressed / active.
