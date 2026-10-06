@@ -194,6 +194,82 @@ fn paging_filtering_and_running_preserve_staged_edits() {
 }
 
 #[test]
+fn a_successful_save_clears_staged_edits_and_reports_no_error() {
+    let mut app = app_with_staged_edit();
+    app.history_enabled = false;
+    app.audit_enabled = false;
+    app.tab_mut().sql = "SELECT * FROM items".into();
+    let tab_id = app.tab().id;
+    app.tx
+        .send(AppMessage::Committed {
+            tab_id,
+            conn_id: String::new(),
+            sql: "UPDATE items SET b = 'edited'".into(),
+            elapsed_ms: 1.0,
+            result: Ok(1),
+        })
+        .unwrap();
+    app.poll_messages(&egui::Context::default());
+    assert!(!app.tab().edits.has_pending());
+    assert!(app.error.is_none(), "{:?}", app.error);
+}
+
+#[test]
+fn table_metadata_arriving_after_open_makes_the_open_table_editable() {
+    let mut app = DbGuiApp::construct();
+    app.connections.clear();
+    let mut overview = fake_schema(1, 2);
+    for column in &mut overview.tables[0].columns {
+        column.primary_key = false;
+    }
+    overview.tables[0].indexes.clear();
+    connect_fake(&mut app, overview);
+    app.tab_mut().conn_id = Some("c1".into());
+    app.tab_mut().kind = crate::components::QueryTabKind::Table;
+    app.tab_mut().edits.source = Some(EditSource {
+        schema: None,
+        table: "table_0".into(),
+        pk_cols: Vec::new(),
+    });
+    assert!(!app.tab().edits.editable());
+
+    let tab_id = app.tab().id;
+    let full = fake_schema(1, 2).tables.remove(0);
+    app.tx
+        .send(AppMessage::TableMetadataLoaded {
+            tab_id,
+            conn_id: "c1".into(),
+            schema: None,
+            table: "table_0".into(),
+            result: Ok(Some(full)),
+        })
+        .unwrap();
+    app.poll_messages(&egui::Context::default());
+    assert!(app.tab().edits.editable());
+}
+
+#[test]
+fn reloading_a_restored_table_tab_keeps_it_editable() {
+    let mut app = DbGuiApp::construct();
+    app.connections.clear();
+    connect_fake(&mut app, fake_schema(1, 2));
+    app.tab_mut().kind = crate::components::QueryTabKind::Table;
+    app.tab_mut().sql = "SELECT * FROM table_0".into();
+    app.tab_mut().edits.source = Some(EditSource {
+        schema: None,
+        table: "table_0".into(),
+        pk_cols: vec!["field_0".into()],
+    });
+    app.tab_mut().edits.pending_source = None;
+    assert!(app.tab().result.is_none());
+
+    app.reload_data_tab_if_needed(0);
+    // The result that this reload installs promotes `pending_source` to `source`.
+    let promoted = app.tab().edits.pending_source.clone();
+    assert!(promoted.is_some_and(|source| source.editable()));
+}
+
+#[test]
 fn independent_queries_finish_out_of_order_without_stealing_results() {
     let mut app = DbGuiApp::construct();
     app.connections.clear();

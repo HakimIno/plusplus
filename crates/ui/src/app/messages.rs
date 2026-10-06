@@ -281,6 +281,9 @@ impl DbGuiApp {
                                     connection.schema.tables.push(table.clone());
                                 }
                             }
+                            // This is often where the primary key first becomes known: tabs
+                            // opened before it arrived must become editable without a reload.
+                            self.refresh_edit_sources(&conn_id);
                             if matches!(
                                 self.tabs[tab_index].view,
                                 TabView::Structure | TabView::Indexes
@@ -1002,6 +1005,9 @@ impl DbGuiApp {
                             // Reload so the grid reflects exactly what the database now holds
                             // (triggers, defaults, type coercions). Keep the source editable.
                             if let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) {
+                                // The writes are committed: drop the staged copies first, or the
+                                // unsaved-work guard refuses the reload that follows.
+                                self.tabs[idx].edits.clear();
                                 self.tabs[idx].edits.pending_source =
                                     self.tabs[idx].edits.source.clone();
                                 self.start_query_for(idx);

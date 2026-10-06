@@ -134,6 +134,7 @@ impl DbGuiApp {
                     .as_deref()
                     .is_some_and(|cid| self.active_connections.iter().any(|c| c.config_id == cid))
             {
+                self.ensure_reload_source(idx);
                 self.start_query_for(idx);
             }
             return;

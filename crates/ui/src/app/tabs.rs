@@ -20,11 +20,7 @@ impl DbGuiApp {
                 })
         });
         if should_reload {
-            if self.tabs[idx].edits.source.is_none()
-                && self.tabs[idx].edits.pending_source.is_none()
-            {
-                self.tabs[idx].edits.pending_source = self.derive_edit_source(idx);
-            }
+            self.ensure_reload_source(idx);
             let view = self.tabs[idx].view;
             self.start_query_for(idx);
             // Reconnects reload table data automatically, but must not pull a tab the user

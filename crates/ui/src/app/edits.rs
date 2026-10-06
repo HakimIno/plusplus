@@ -137,6 +137,20 @@ impl DbGuiApp {
         })
     }
 
+    /// Make sure a reload that nobody else prepared keeps the tab editable. Installing a result
+    /// promotes `pending_source` to `source`, so leaving it empty would silently drop the
+    /// tab's edit source (a restored or reconnected table tab then stays read-only until the
+    /// user re-runs it by hand). Prefer a fresh derivation, falling back to the current source.
+    pub(super) fn ensure_reload_source(&mut self, idx: usize) {
+        if self.tabs[idx].edits.pending_source.is_some() {
+            return;
+        }
+        let source = self
+            .derive_edit_source(idx)
+            .or_else(|| self.tabs[idx].edits.source.clone());
+        self.tabs[idx].edits.pending_source = source;
+    }
+
     /// Fill primary-key metadata into edit sources created while the connection schema was
     /// still loading. The source already carries the table identity used for the executed
     /// result, so this does not accidentally make an old result editable from newly typed SQL.
