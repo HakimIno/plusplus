@@ -3,6 +3,20 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
+## 0.5.2 — 2026-10-06
+
+- New UI font: IBM Plex Sans in Thin, Regular, Medium, SemiBold and Bold, paired with IBM Plex Sans Thai at the same weights so Thai text matches the Latin text beside it. Inter, Anuphan, Geist and Noto Sans Thai are no longer bundled, which also shrinks the app.
+- Fixed saving edits: after a successful save the grid used to keep the cells green and show "Save or discard this tab's changes…" even though the write had succeeded. Staged edits are now cleared and the table reloads.
+- Fixed tables that opened read-only until you pressed Cmd+R: a restored or reselected table tab lost its edit source on reload, and a primary key that arrived after the tab opened was never picked up.
+- Foreign-key editor popover on the Structure tab, with ON UPDATE as well as ON DELETE and references to tables in other schemas.
+- Onyx, a near-black built-in theme with a green primary colour.
+- Notched mouse wheels now scroll the results grid with inertia.
+- The connection rail and each split column's tab strip are rounded cards with the same gutter as every other panel.
+- Details: the search field sits beside the close button, side padding and default width are larger, and edited fields get a green background instead of a green border.
+- Section headings use sentence case, controls lose their resting outline, and hover transitions are animated.
+- The Edit Connection dialog drops its explanatory text, and Clear only appears once a title-bar colour is set.
+- Dragging the gap above a bottom-docked bar resizes the dock below it.
+
 ## 0.5.1 — 2026-10-03
 
 v0.5.0 was tagged but its build failed on a lint, so it was never published; everything below ships in 0.5.1.
