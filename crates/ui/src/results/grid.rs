@@ -341,6 +341,8 @@ impl Selection {
 /// What the grid reports back to the app after a frame.
 #[derive(Default)]
 pub struct GridResponse {
+    /// Vertical offset of the table's scroll area after this frame (feeds wheel momentum).
+    pub(crate) scroll_offset_y: f32,
     /// The viewport is within a small prefetch margin of the last loaded row.
     pub near_end: bool,
     /// A header sort request (click or menu).
@@ -401,6 +403,79 @@ enum RowKind {
     Stored(usize),
     /// A new (insert) row being filled in (value is its [`crate::edit::NEW_ROW_BASE`] id).
     New(usize),
+}
+
+/// Inertia for notched mouse wheels. egui scrolls a wheel notch by a few smoothed frames and
+/// then stops dead, which reads as stiff; trackpads already get momentum from macOS (they
+/// report pixel deltas), so only `Line`-unit wheel events are handled here. Each notch adds
+/// velocity that decays exponentially, and while it glides the vertical offset is driven
+/// directly through the table's `vertical_scroll_offset`.
+#[derive(Clone, Copy, Default)]
+struct WheelMomentum {
+    /// Scroll-offset velocity, points per second (positive scrolls toward the end).
+    velocity: f32,
+    /// The table's vertical offset as of the previous frame.
+    offset: f32,
+}
+
+impl WheelMomentum {
+    /// Decay rate (1/s): a notch glides ~1.5x its distance, settling in about half a second.
+    const FRICTION: f32 = 6.0;
+    const MAX_VELOCITY: f32 = 9000.0;
+    const STOP_BELOW: f32 = 20.0;
+
+    /// Fold this frame's wheel notches into the velocity and return the offset to force, if the
+    /// grid is gliding.
+    fn begin_frame(&mut self, ctx: &egui::Context, hovered: bool, jumping: bool) -> Option<f32> {
+        let line_speed = ctx.options(|o| o.input_options.line_scroll_speed);
+        let (notch, dt, pressed) = ctx.input(|i| {
+            let mut notch = 0.0;
+            if hovered && !i.modifiers.command && !i.modifiers.shift {
+                for event in &i.events {
+                    if let egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Line,
+                        delta,
+                        ..
+                    } = event
+                    {
+                        notch += delta.y * line_speed;
+                    }
+                }
+            }
+            (notch, i.unstable_dt.min(0.05), i.pointer.any_down())
+        });
+        if jumping || pressed {
+            // Keyboard moves and scrollbar/cell drags own the offset; don't fight them.
+            self.velocity = 0.0;
+        }
+        if notch != 0.0 {
+            // Wheel delta points toward the content moving down, i.e. the offset decreasing.
+            let boosted = self.velocity - notch * Self::FRICTION * 1.5;
+            self.velocity = boosted.clamp(-Self::MAX_VELOCITY, Self::MAX_VELOCITY);
+        }
+        let gliding = self.velocity.abs() > Self::STOP_BELOW;
+        if gliding {
+            // egui would also scroll these notches itself; the momentum owns the y axis now.
+            ctx.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
+            ctx.request_repaint();
+            Some((self.offset + self.velocity * dt).max(0.0))
+        } else {
+            self.velocity = 0.0;
+            None
+        }
+    }
+
+    fn end_frame(&mut self, ctx: &egui::Context, forced: Option<f32>, actual: f32) {
+        if let Some(forced) = forced {
+            // egui clamped us at either end: stop gliding instead of pushing against the wall.
+            if (actual - forced).abs() > 0.5 {
+                self.velocity = 0.0;
+            }
+            let dt = ctx.input(|i| i.unstable_dt.min(0.05));
+            self.velocity *= (-Self::FRICTION * dt).exp();
+        }
+        self.offset = actual;
+    }
 }
 
 /// Render the result set. `order` maps display rows → indices into `result.rows`.
@@ -504,6 +579,12 @@ pub fn results_grid(
     // the last rendered row, so editable grids no longer pay for a permanently reserved strip.
     let grid_rect = table_rect;
 
+    let momentum_id = egui::Id::new(("results_wheel_momentum", grid_id));
+    let mut momentum =
+        ui.data_mut(|d| d.get_temp::<WheelMomentum>(momentum_id).unwrap_or_default());
+    let hovered = ui.rect_contains_pointer(grid_rect);
+    let momentum_offset = momentum.begin_frame(ui.ctx(), hovered, scroll_to.is_some());
+
     ui.scope_builder(egui::UiBuilder::new().max_rect(grid_rect), |ui| {
         // Always keep the table inside a horizontal ScrollArea. Column drag widths live in
         // egui_extras' private table state, so an initially fitting table can later overflow
@@ -533,6 +614,7 @@ pub fn results_grid(
                     &visible_cols,
                     &column_widths,
                     reset_widths,
+                    momentum_offset,
                 );
                 // Horizontal keep-visible for keyboard cursor moves. This request must
                 // be issued *here* — inside this horizontal ScrollArea but outside the
@@ -547,6 +629,8 @@ pub fn results_grid(
                 }
             });
     });
+    momentum.end_frame(ui.ctx(), momentum_offset, out.scroll_offset_y);
+    ui.data_mut(|d| d.insert_temp(momentum_id, momentum));
     // While filling, draw one clean outside border around the whole target range. Otherwise
     // draw the normal active-cell cursor border.
     if let Some(rect) = out.fill_range_border {
@@ -632,6 +716,7 @@ fn build_grid(
     visible_cols: &[usize],
     column_widths: &[Option<f32>],
     reset_widths: bool,
+    momentum_offset: Option<f32>,
 ) {
     // The global spacing is deliberately generous for forms and toolbars. A results header,
     // however, is one continuous band: column gutters split its bottom rule into separate
@@ -693,8 +778,12 @@ fn build_grid(
     if let Some(row) = scroll_to {
         builder = builder.scroll_to_row(row, None);
     }
+    // Wheel momentum drives the offset directly while it is gliding (see `WheelMomentum`).
+    if let Some(offset) = momentum_offset {
+        builder = builder.vertical_scroll_offset(offset);
+    }
 
-    builder
+    let scroll_out = builder
         .header(HEADER_H, |mut header| {
             header.col(|ui| {
                 components::paint_table_header_cell(ui);
@@ -1095,6 +1184,7 @@ fn build_grid(
                 }
             });
         });
+    out.scroll_offset_y = scroll_out.state.offset.y;
 
     if let (Some(handle), Some((disp, col))) = (out.fill_handle, out.fill_handle_source) {
         let resp = ui.interact(
