@@ -4800,16 +4800,16 @@ fn open_designer_owns_the_tab() {
     table.get_by_label("Structure");
     table.get_by_label("Indexes");
     table.get_by_label("Column");
-    for header in [
-        "column_name",
-        "data_type",
-        "is_nullable",
-        "check",
-        "column_default",
-        "foreign_key",
-        "comment",
-    ] {
+    // The fixture is SQLite: it can't edit check/comment metadata or alter foreign keys in
+    // place, so those columns are left out rather than shown inert.
+    for header in ["column_name", "data_type", "is_nullable", "column_default"] {
         table.get_by_label(header);
+    }
+    for header in ["check", "foreign_key", "comment"] {
+        assert!(
+            table.query_by_label(header).is_none(),
+            "{header} is not editable on this provider"
+        );
     }
     assert!(table.query_by_label("Foreign Keys").is_none());
     assert!(table.query_by_label("Columns").is_none());
@@ -8260,6 +8260,34 @@ fn snapshot_table_editor_foreign_keys() {
         _ => panic!("OpenEditTable should install a table editor"),
     }
     render_and_snapshot(app, "table_editor_foreign_keys", false);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Screenshot generator (ignored): the foreign-key popover hanging from a Structure cell.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_foreign_key_popover() {
+    let (mut app, dir) = demo_app_with_ddl(&[
+        "CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT)",
+        "CREATE TABLE order_items (id INTEGER PRIMARY KEY, product_id INTEGER, qty INTEGER)",
+    ]);
+    let table = app
+        .active()
+        .unwrap()
+        .schema
+        .tables
+        .iter()
+        .find(|t| t.name == "order_items")
+        .expect("order_items introspected")
+        .clone();
+    app.apply_action(Action::OpenEditTable(table));
+    app.show_welcome = false;
+    app.show_details_panel = false;
+    app.apply_action(Action::OpenForeignKeysForColumn(
+        "product_id".into(),
+        egui::Rect::from_min_size(egui::pos2(520.0, 150.0), egui::vec2(160.0, 21.0)),
+    ));
+    render_and_snapshot_at(app, "foreign_key_popover", false, 2.0);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
