@@ -72,9 +72,14 @@ pub struct ForeignKeyDef {
     /// Constraint name — use an empty string to omit the `CONSTRAINT` clause.
     pub name: String,
     pub columns: Vec<String>,
+    /// Schema/namespace of the referenced table; `None` (or empty) references it unqualified.
+    #[serde(default)]
+    pub ref_schema: Option<String>,
     pub ref_table: String,
     pub ref_columns: Vec<String>,
     pub on_delete: FkAction,
+    #[serde(default)]
+    pub on_update: FkAction,
 }
 
 // ─── DDL builder helpers ─────────────────────────────────────────────────────
@@ -118,7 +123,13 @@ fn fk_clause_sql(kind: DbKind, fk: &ForeignKeyDef) -> String {
         .map(|c| kind.quote_ident(c))
         .collect::<Vec<_>>()
         .join(", ");
-    let ref_t = kind.quote_ident(&fk.ref_table);
+    // SQLite has no schema-qualified REFERENCES, and CQL has no foreign keys at all.
+    let ref_schema = fk
+        .ref_schema
+        .as_deref()
+        .map(str::trim)
+        .filter(|schema| !schema.is_empty() && kind != DbKind::Sqlite);
+    let ref_t = ddl_table_ref(kind, ref_schema, &fk.ref_table);
     let ref_c = fk
         .ref_columns
         .iter()
@@ -130,8 +141,14 @@ fn fk_clause_sql(kind: DbKind, fk: &ForeignKeyDef) -> String {
     } else {
         format!("CONSTRAINT {} ", kind.quote_ident(fk.name.trim()))
     };
+    // NO ACTION is every engine's default, so leaving it out keeps the common statement short.
+    let on_update = if fk.on_update == FkAction::NoAction {
+        String::new()
+    } else {
+        format!(" ON UPDATE {}", fk.on_update.label())
+    };
     format!(
-        "{constraint}FOREIGN KEY ({cols}) REFERENCES {ref_t} ({ref_c}) ON DELETE {}",
+        "{constraint}FOREIGN KEY ({cols}) REFERENCES {ref_t} ({ref_c}) ON DELETE {}{on_update}",
         fk.on_delete.label()
     )
 }

@@ -1161,15 +1161,32 @@ fn build_fk_ddl_is_dialect_aware() {
     let fk = ForeignKeyDef {
         name: "fk_orders_user".into(),
         columns: vec!["user_id".into()],
+        ref_schema: None,
         ref_table: "users".into(),
         ref_columns: vec!["id".into()],
         on_delete: FkAction::Cascade,
+        on_update: FkAction::NoAction,
     };
     assert_eq!(
         build_add_fk_sql(DbKind::Postgres, Some("public"), "orders", &fk),
         "ALTER TABLE \"public\".\"orders\" ADD CONSTRAINT \"fk_orders_user\" \
          FOREIGN KEY (\"user_id\") REFERENCES \"users\" (\"id\") ON DELETE CASCADE;"
     );
+    // A referenced schema and a non-default ON UPDATE both reach the statement; SQLite has no
+    // schema-qualified REFERENCES, so it drops the qualifier.
+    let cross = ForeignKeyDef {
+        ref_schema: Some("auth".into()),
+        on_update: FkAction::SetNull,
+        ..fk.clone()
+    };
+    assert_eq!(
+        build_add_fk_sql(DbKind::Postgres, Some("public"), "orders", &cross),
+        "ALTER TABLE \"public\".\"orders\" ADD CONSTRAINT \"fk_orders_user\" \
+         FOREIGN KEY (\"user_id\") REFERENCES \"auth\".\"users\" (\"id\") \
+         ON DELETE CASCADE ON UPDATE SET NULL;"
+    );
+    assert!(build_add_fk_sql(DbKind::Sqlite, None, "orders", &cross)
+        .contains("REFERENCES \"users\" (\"id\") ON DELETE CASCADE ON UPDATE SET NULL"));
     assert_eq!(
         build_drop_fk_sql(DbKind::Postgres, Some("public"), "orders", "fk_orders_user"),
         "ALTER TABLE \"public\".\"orders\" DROP CONSTRAINT \"fk_orders_user\";"

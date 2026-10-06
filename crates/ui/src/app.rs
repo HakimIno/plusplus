@@ -770,6 +770,8 @@ struct ForeignKeyEditorPending {
     tab_id: u64,
     index: usize,
     original: Option<crate::schema::FkDraft>,
+    /// The Structure cell the popover is anchored to.
+    anchor: egui::Rect,
 }
 
 struct QueryTab {
@@ -1887,9 +1889,12 @@ enum Action {
     /// Append a draft index from the Indexes view's bottom action bar.
     AddSchemaIndex,
     /// Open the Foreign Keys editor, creating a draft for `column` when none exists.
-    OpenForeignKeysForColumn(String),
+    /// `anchor` is the clicked cell's rect, which the popover hangs from.
+    OpenForeignKeysForColumn(String, egui::Rect),
     ConfirmForeignKeyEdit,
     CancelForeignKeyEdit,
+    /// Drop the relation being edited (an existing one is marked for removal on save).
+    DeleteForeignKeyEdit,
     /// Apply a `CREATE TABLE … AS`/clone migration for a sidebar table.
     CloneTable(TableInfo),
     /// Apply a `TRUNCATE`/empty-rows migration for a sidebar table.

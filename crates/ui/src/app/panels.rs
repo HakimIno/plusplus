@@ -21,6 +21,7 @@ mod editor_assist;
 mod editor_cursors;
 mod editor_find;
 mod erd;
+mod fk_popover;
 mod import;
 mod live_log;
 pub(in crate::app) mod pager;

@@ -203,6 +203,7 @@ pub struct FkDraft {
     pub ref_schema: Option<String>,
     pub ref_columns_raw: String,
     pub on_delete: FkAction,
+    pub on_update: FkAction,
     pub is_existing: bool,
     pub drop: bool,
 }
@@ -216,6 +217,7 @@ impl FkDraft {
             ref_schema: None,
             ref_columns_raw: String::new(),
             on_delete: FkAction::NoAction,
+            on_update: FkAction::NoAction,
             is_existing: false,
             drop: false,
         }
@@ -231,6 +233,7 @@ impl FkDraft {
             // SET DEFAULT and other actions the editor doesn't offer display as NO ACTION;
             // existing FKs are only ever dropped wholesale, so this is cosmetic.
             on_delete: FkAction::from_rule(&fk.on_delete).unwrap_or_default(),
+            on_update: FkAction::from_rule(&fk.on_update).unwrap_or_default(),
             is_existing: true,
             drop: false,
         }
@@ -247,9 +250,11 @@ impl FkDraft {
         ForeignKeyDef {
             name: self.constraint_name.clone(),
             columns: Self::split_cols(&self.columns_raw),
+            ref_schema: self.ref_schema.clone(),
             ref_table: self.ref_table.clone(),
             ref_columns: Self::split_cols(&self.ref_columns_raw),
             on_delete: self.on_delete,
+            on_update: self.on_update,
         }
     }
 }
@@ -579,6 +584,7 @@ impl SchemaEditor {
                 ref_schema: fk.ref_schema.clone(),
                 ref_columns_raw: fk.ref_columns.join(", "),
                 on_delete: fk.on_delete,
+                on_update: fk.on_update,
                 is_existing: true,
                 drop: false,
             })
@@ -654,6 +660,7 @@ impl SchemaEditor {
                     ref_table: fk.ref_table.trim().to_string(),
                     ref_columns: FkDraft::split_cols(&fk.ref_columns_raw),
                     on_delete: fk.on_delete,
+                    on_update: fk.on_update,
                 })
                 .collect(),
             layout_x: None,
@@ -705,9 +712,10 @@ impl SchemaEditor {
                     .map(|f| f.to_def())
                     .collect();
                 if self.db_kind == DbKind::DuckDb
-                    && active_fks
-                        .iter()
-                        .any(|foreign_key| foreign_key.on_delete != FkAction::NoAction)
+                    && active_fks.iter().any(|foreign_key| {
+                        foreign_key.on_delete != FkAction::NoAction
+                            || foreign_key.on_update != FkAction::NoAction
+                    })
                 {
                     return Err(
                         "DuckDB foreign keys support NO ACTION only; cascading actions are unavailable."

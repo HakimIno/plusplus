@@ -609,6 +609,45 @@ fn schema_column_foreign_key(fks: &[crate::schema::FkDraft], column_name: &str) 
         .join("; ")
 }
 
+/// Which Structure columns a provider can actually use. A column the backend can neither
+/// store nor edit (SQL Server's check/comment metadata on other engines, foreign keys on
+/// SQLite/DuckDB which cannot alter them in place, nullability and defaults in CQL) is left
+/// out instead of showing an inert, always-empty cell.
+#[derive(Clone, Copy)]
+struct StructureColumns {
+    nullable: bool,
+    check: bool,
+    default: bool,
+    foreign_key: bool,
+    comment: bool,
+}
+
+impl StructureColumns {
+    fn for_kind(kind: dbcore::DbKind) -> Self {
+        use dbcore::DbKind;
+        Self {
+            nullable: !kind.is_cql(),
+            check: kind == DbKind::SqlServer,
+            default: !kind.is_cql(),
+            foreign_key: !kind.is_cql() && !matches!(kind, DbKind::Sqlite | DbKind::DuckDb),
+            comment: kind == DbKind::SqlServer,
+        }
+    }
+
+    fn labels(self) -> Vec<&'static str> {
+        let mut labels = vec!["#", "column_name", "data_type"];
+        let optional = [
+            (self.nullable, "is_nullable"),
+            (self.check, "check"),
+            (self.default, "column_default"),
+            (self.foreign_key, "foreign_key"),
+            (self.comment, "comment"),
+        ];
+        labels.extend(optional.iter().filter(|(on, _)| *on).map(|(_, l)| *l));
+        labels
+    }
+}
+
 /// Editable Structure table for an existing database table. Inputs intentionally have no card
 /// chrome: the table grid provides the alignment and a focused cell supplies its own affordance.
 pub(super) struct SchemaStructureGridState<'a> {
@@ -636,8 +675,9 @@ pub(super) fn schema_structure_grid(
     } = state;
     let row_height = 24.0;
     let query = column_filter.trim().to_lowercase();
-    TableBuilder::new(ui)
-        .id_salt("editable_structure_columns")
+    let cols = StructureColumns::for_kind(db_kind);
+    let mut table = TableBuilder::new(ui)
+        .id_salt(("editable_structure_columns", format!("{db_kind:?}")))
         .sense(egui::Sense::click())
         .striped(true)
         .resizable(true)
@@ -646,23 +686,30 @@ pub(super) fn schema_structure_grid(
         .auto_shrink([false, true])
         .column(Column::exact(34.0))
         .column(Column::initial(180.0).at_least(110.0).clip(true))
-        .column(Column::initial(150.0).at_least(100.0).clip(true))
-        .column(Column::initial(90.0).at_least(72.0).clip(true))
-        .column(Column::initial(140.0).at_least(90.0).clip(true))
-        .column(Column::initial(210.0).at_least(120.0).clip(true))
-        .column(Column::initial(220.0).at_least(130.0).clip(true))
-        .column(Column::remainder().at_least(140.0).clip(true))
+        .column(Column::initial(150.0).at_least(100.0).clip(true));
+    let optional = [
+        (cols.nullable, 90.0, 72.0),
+        (cols.check, 140.0, 90.0),
+        (cols.default, 210.0, 120.0),
+        (cols.foreign_key, 220.0, 130.0),
+        (cols.comment, 0.0, 140.0),
+    ];
+    let last = optional.iter().rposition(|(on, ..)| *on);
+    for (i, (on, initial, at_least)) in optional.into_iter().enumerate() {
+        if !on {
+            continue;
+        }
+        // Whichever column ends up last absorbs the leftover width.
+        table = table.column(if Some(i) == last {
+            Column::remainder().at_least(at_least).clip(true)
+        } else {
+            Column::initial(initial).at_least(at_least).clip(true)
+        });
+    }
+    let labels = cols.labels();
+    table
         .header(24.0, |mut header| {
-            for label in [
-                "#",
-                "column_name",
-                "data_type",
-                "is_nullable",
-                "check",
-                "column_default",
-                "foreign_key",
-                "comment",
-            ] {
+            for label in labels {
                 header.col(|ui| schema_grid_header(ui, label));
             }
         })
@@ -731,110 +778,123 @@ pub(super) fn schema_structure_grid(
                             row_index,
                         );
                     });
-                    row.col(|ui| {
-                        schema_grid_row_tint(ui, column.drop, is_new);
-                        let response = schema_grid_bool(
-                            ui,
-                            !column.drop,
-                            &mut column.nullable,
-                            "Click to change nullability",
-                        );
-                        schema_grid_select_on_click(
-                            &response,
-                            selection,
-                            SchemaTab::Columns,
-                            row_index,
-                        );
-                    });
-                    row.col(|ui| {
-                        schema_grid_row_tint(ui, column.drop, is_new);
-                        let response = if db_kind == dbcore::DbKind::SqlServer {
-                            schema_grid_text(ui, !column.drop, &mut column.check, "NULL")
-                        } else {
-                            schema_grid_metadata(ui, &column.check, "NULL")
-                        };
-                        schema_grid_select_on_click(
-                            &response,
-                            selection,
-                            SchemaTab::Columns,
-                            row_index,
-                        );
-                    });
-                    row.col(|ui| {
-                        schema_grid_row_tint(ui, column.drop, is_new);
-                        let response =
-                            schema_grid_text(ui, !column.drop, &mut column.default, "NULL");
-                        schema_grid_select_on_click(
-                            &response,
-                            selection,
-                            SchemaTab::Columns,
-                            row_index,
-                        );
-                    });
-                    row.col(|ui| {
-                        schema_grid_row_tint(ui, column.drop, is_new);
-                        let foreign_key = schema_column_foreign_key(fks, &column.name);
-                        let empty = foreign_key.is_empty();
-                        let label = if empty { "EMPTY" } else { &foreign_key };
-                        let (rect, response) = ui.allocate_exact_size(
-                            egui::vec2(ui.available_width(), 21.0),
-                            if column.drop {
-                                egui::Sense::hover()
-                            } else {
-                                egui::Sense::click()
-                            },
-                        );
-                        let color = if response.hovered() {
-                            palette::TEXT()
-                        } else {
-                            palette::TEXT_WEAK()
-                        };
-                        ui.painter().text(
-                            egui::pos2(rect.left() + 4.0, rect.center().y),
-                            egui::Align2::LEFT_CENTER,
-                            label,
-                            egui::TextStyle::Body.resolve(ui.style()),
-                            color,
-                        );
-                        egui::Image::new(icons::chevron_right())
-                            .fit_to_exact_size(egui::vec2(13.0, 13.0))
-                            .tint(color)
-                            .paint_at(
+                    if cols.nullable {
+                        row.col(|ui| {
+                            schema_grid_row_tint(ui, column.drop, is_new);
+                            let response = schema_grid_bool(
                                 ui,
-                                egui::Rect::from_center_size(
-                                    egui::pos2(rect.right() - 10.0, rect.center().y),
-                                    egui::vec2(13.0, 13.0),
-                                ),
+                                !column.drop,
+                                &mut column.nullable,
+                                "Click to change nullability",
                             );
-                        let response = response.on_hover_text(if empty {
-                            format!("Create a foreign key on {}", column.name)
-                        } else {
-                            format!("Edit the foreign key on {}", column.name)
+                            schema_grid_select_on_click(
+                                &response,
+                                selection,
+                                SchemaTab::Columns,
+                                row_index,
+                            );
                         });
-                        if response.clicked() && !column.drop {
-                            actions.push(Action::OpenForeignKeysForColumn(column.name.clone()));
-                        }
-                        schema_grid_select_on_click(
-                            &response,
-                            selection,
-                            SchemaTab::Columns,
-                            row_index,
-                        );
-                    });
-                    row.col(|ui| {
-                        schema_grid_row_tint(ui, column.drop, is_new);
-                        let response = if db_kind == dbcore::DbKind::SqlServer {
-                            schema_grid_text(ui, !column.drop, &mut column.comment, "NULL")
-                        } else {
-                            schema_grid_metadata(ui, &column.comment, "NULL")
-                        };
-                        schema_grid_select_on_click(
-                            &response,
-                            selection,
-                            SchemaTab::Columns,
-                            row_index,
-                        );
-                    });
+                    }
+                    if cols.check {
+                        row.col(|ui| {
+                            schema_grid_row_tint(ui, column.drop, is_new);
+                            let response = if db_kind == dbcore::DbKind::SqlServer {
+                                schema_grid_text(ui, !column.drop, &mut column.check, "NULL")
+                            } else {
+                                schema_grid_metadata(ui, &column.check, "NULL")
+                            };
+                            schema_grid_select_on_click(
+                                &response,
+                                selection,
+                                SchemaTab::Columns,
+                                row_index,
+                            );
+                        });
+                    }
+                    if cols.default {
+                        row.col(|ui| {
+                            schema_grid_row_tint(ui, column.drop, is_new);
+                            let response =
+                                schema_grid_text(ui, !column.drop, &mut column.default, "NULL");
+                            schema_grid_select_on_click(
+                                &response,
+                                selection,
+                                SchemaTab::Columns,
+                                row_index,
+                            );
+                        });
+                    }
+                    if cols.foreign_key {
+                        row.col(|ui| {
+                            schema_grid_row_tint(ui, column.drop, is_new);
+                            let foreign_key = schema_column_foreign_key(fks, &column.name);
+                            let empty = foreign_key.is_empty();
+                            let label = if empty { "EMPTY" } else { &foreign_key };
+                            let (rect, response) = ui.allocate_exact_size(
+                                egui::vec2(ui.available_width(), 21.0),
+                                if column.drop {
+                                    egui::Sense::hover()
+                                } else {
+                                    egui::Sense::click()
+                                },
+                            );
+                            let color = if response.hovered() {
+                                palette::TEXT()
+                            } else {
+                                palette::TEXT_WEAK()
+                            };
+                            ui.painter().text(
+                                egui::pos2(rect.left() + 4.0, rect.center().y),
+                                egui::Align2::LEFT_CENTER,
+                                label,
+                                egui::TextStyle::Body.resolve(ui.style()),
+                                color,
+                            );
+                            egui::Image::new(icons::chevron_right())
+                                .fit_to_exact_size(egui::vec2(13.0, 13.0))
+                                .tint(color)
+                                .paint_at(
+                                    ui,
+                                    egui::Rect::from_center_size(
+                                        egui::pos2(rect.right() - 10.0, rect.center().y),
+                                        egui::vec2(13.0, 13.0),
+                                    ),
+                                );
+                            let response = response.on_hover_text(if empty {
+                                format!("Create a foreign key on {}", column.name)
+                            } else {
+                                format!("Edit the foreign key on {}", column.name)
+                            });
+                            if response.clicked() && !column.drop {
+                                actions.push(Action::OpenForeignKeysForColumn(
+                                    column.name.clone(),
+                                    rect,
+                                ));
+                            }
+                            schema_grid_select_on_click(
+                                &response,
+                                selection,
+                                SchemaTab::Columns,
+                                row_index,
+                            );
+                        });
+                    }
+                    if cols.comment {
+                        row.col(|ui| {
+                            schema_grid_row_tint(ui, column.drop, is_new);
+                            let response = if db_kind == dbcore::DbKind::SqlServer {
+                                schema_grid_text(ui, !column.drop, &mut column.comment, "NULL")
+                            } else {
+                                schema_grid_metadata(ui, &column.comment, "NULL")
+                            };
+                            schema_grid_select_on_click(
+                                &response,
+                                selection,
+                                SchemaTab::Columns,
+                                row_index,
+                            );
+                        });
+                    }
                     if row.response().clicked() {
                         *selection = Some(SchemaGridSelection {
                             tab: SchemaTab::Columns,

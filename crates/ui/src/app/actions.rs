@@ -1314,7 +1314,10 @@ impl DbGuiApp {
                 });
                 editor.focus_selected_cell = true;
             }
-            Action::OpenForeignKeysForColumn(column) => {
+            Action::OpenForeignKeysForColumn(column, anchor) => {
+                if self.foreign_key_editor.is_some() {
+                    return;
+                }
                 let tab_id = self.tab().id;
                 let table_name = self.tab().title.clone();
                 let Some(ObjectEditor::Table(editor)) = self.tab_mut().schema_editor.as_mut()
@@ -1340,6 +1343,7 @@ impl DbGuiApp {
                     tab_id,
                     index,
                     original,
+                    anchor,
                 });
             }
             Action::ConfirmForeignKeyEdit => {
@@ -1363,7 +1367,8 @@ impl DbGuiApp {
                     || edited.ref_table != original.ref_table
                     || edited.ref_schema != original.ref_schema
                     || edited.ref_columns_raw != original.ref_columns_raw
-                    || edited.on_delete != original.on_delete;
+                    || edited.on_delete != original.on_delete
+                    || edited.on_update != original.on_update;
                 if changed {
                     let mut dropped = original;
                     dropped.drop = true;
@@ -1390,6 +1395,30 @@ impl DbGuiApp {
                     }
                 } else if pending.index < editor.fks.len() {
                     editor.fks.remove(pending.index);
+                }
+            }
+            Action::DeleteForeignKeyEdit => {
+                let Some(pending) = self.foreign_key_editor.take() else {
+                    return;
+                };
+                let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == pending.tab_id) else {
+                    return;
+                };
+                let Some(ObjectEditor::Table(editor)) = tab.schema_editor.as_mut() else {
+                    return;
+                };
+                match pending.original {
+                    // An existing constraint goes back to its saved shape and is marked to drop.
+                    Some(mut original) => {
+                        original.drop = true;
+                        if let Some(foreign_key) = editor.fks.get_mut(pending.index) {
+                            *foreign_key = original;
+                        }
+                    }
+                    None if pending.index < editor.fks.len() => {
+                        editor.fks.remove(pending.index);
+                    }
+                    None => {}
                 }
             }
             Action::OpenNewView => {

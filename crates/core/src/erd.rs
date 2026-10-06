@@ -73,6 +73,12 @@ pub struct DesignForeignKey {
     pub ref_columns: Vec<String>,
     #[serde(default)]
     pub on_delete: FkAction,
+    #[serde(default, skip_serializing_if = "is_no_action")]
+    pub on_update: FkAction,
+}
+
+fn is_no_action(action: &FkAction) -> bool {
+    *action == FkAction::NoAction
 }
 
 fn default_true() -> bool {
@@ -151,6 +157,7 @@ impl ErDesign {
                                 ref_table: fk.ref_table.clone(),
                                 ref_columns: fk.ref_columns.clone(),
                                 on_delete: FkAction::from_rule(&fk.on_delete).unwrap_or_default(),
+                                on_update: FkAction::from_rule(&fk.on_update).unwrap_or_default(),
                             })
                             .collect(),
                         layout_x: None,
@@ -295,7 +302,10 @@ impl ErDesign {
                 .tables
                 .iter()
                 .flat_map(|table| &table.foreign_keys)
-                .any(|foreign_key| foreign_key.on_delete != FkAction::NoAction)
+                .any(|foreign_key| {
+                foreign_key.on_delete != FkAction::NoAction
+                    || foreign_key.on_update != FkAction::NoAction
+            })
         {
             return Err(
                 "DuckDB foreign keys support NO ACTION only; change cascading actions before generating DDL."
@@ -552,8 +562,13 @@ where
         .collect::<Vec<_>>()
         .join(", ");
     let ref_schema = schema_for(fk.ref_schema.as_deref());
+    let on_update = if fk.on_update == FkAction::NoAction {
+        String::new()
+    } else {
+        format!(" ON UPDATE {}", fk.on_update.label())
+    };
     format!(
-        "{constraint}FOREIGN KEY ({columns}) REFERENCES {} ({ref_columns}) ON DELETE {}",
+        "{constraint}FOREIGN KEY ({columns}) REFERENCES {} ({ref_columns}) ON DELETE {}{on_update}",
         table_ref(kind, ref_schema.as_deref(), &fk.ref_table),
         fk.on_delete.label()
     )
@@ -766,6 +781,7 @@ mod tests {
                         ref_table: "users".into(),
                         ref_columns: vec!["id".into()],
                         on_delete: FkAction::Cascade,
+                        on_update: FkAction::NoAction,
                     }],
                     layout_x: None,
                     layout_y: None,
@@ -830,6 +846,7 @@ mod tests {
             ref_table: "orders".into(),
             ref_columns: vec!["id".into()],
             on_delete: FkAction::NoAction,
+            on_update: FkAction::NoAction,
         });
 
         assert!(model
