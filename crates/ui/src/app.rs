@@ -892,6 +892,23 @@ struct QueryTab {
     activity: Option<activity::ActivityMonitor>,
     /// Table index being edited inside a diagram (`None` means a newly-added table).
     design_edit_index: Option<Option<usize>>,
+    /// Where foreign-key jumps into this tab came from, most recent last; Back pops it.
+    nav_back: Vec<NavEntry>,
+}
+
+/// One step of a tab's Back history.
+#[derive(Clone, Debug)]
+enum NavEntry {
+    /// The jump opened in another tab: Back returns to the tab it came from.
+    Tab(u64),
+    /// The jump replaced this preview tab's table: Back re-opens it. Preview tabs only ever
+    /// hold generated reads (editing their SQL pins them), so re-running it is safe.
+    View {
+        title: String,
+        kind: crate::components::QueryTabKind,
+        sql: String,
+        source: Option<EditSource>,
+    },
 }
 
 impl QueryTab {
@@ -951,6 +968,7 @@ impl QueryTab {
             diagram: None,
             activity: None,
             design_edit_index: None,
+            nav_back: Vec::new(),
         }
     }
 
@@ -1768,6 +1786,8 @@ enum Action {
         row: usize,
         col: usize,
     },
+    /// Return to where the active tab's last foreign-key jump started.
+    NavigateBack,
     /// Header menu: sort a column in an explicit direction.
     SetSort {
         col: usize,

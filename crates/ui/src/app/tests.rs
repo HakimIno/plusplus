@@ -9410,6 +9410,71 @@ fn fk_tab(row: Vec<Value>) -> DbGuiApp {
     app
 }
 
+/// Back after a FK jump that opened another tab returns to the tab it came from.
+#[test]
+fn back_after_following_a_foreign_key_returns_to_the_origin_tab() {
+    let mut app = fk_tab(vec![
+        Value::Text("row-pk".into()),
+        Value::Text("u7".into()),
+        Value::Null,
+        Value::Null,
+    ]);
+    let origin = app.tab().id;
+    app.apply_action(Action::FollowForeignKey { row: 0, col: 1 });
+    assert_ne!(app.tab().id, origin);
+    assert_eq!(app.tab().nav_back.len(), 1);
+
+    app.apply_action(Action::NavigateBack);
+    assert_eq!(app.tab().id, origin, "Back selects the tab the jump started from");
+}
+
+/// A preview tab that follows its own FK is rebuilt in place; Back re-opens the table it
+/// showed before, and refuses while the new view has unsaved edits.
+#[test]
+fn back_restores_a_preview_tab_replaced_by_a_foreign_key_jump() {
+    let mut app = fk_tab(vec![
+        Value::Text("row-pk".into()),
+        Value::Text("u7".into()),
+        Value::Null,
+        Value::Null,
+    ]);
+    let origin_sql = "SELECT * FROM \"table_1\" LIMIT 100;".to_string();
+    {
+        let tab = app.tab_mut();
+        tab.preview = true;
+        tab.kind = crate::components::QueryTabKind::Table;
+        tab.title = "table_1".into();
+        tab.sql = origin_sql.clone();
+    }
+    let id = app.tab().id;
+    app.apply_action(Action::FollowForeignKey { row: 0, col: 1 });
+    assert_eq!(app.tabs.len(), 1, "the preview slot is reused");
+    assert_eq!(app.tab().id, id);
+    assert_ne!(app.tab().sql, origin_sql);
+
+    // Unsaved edits on the new view block Back instead of being thrown away.
+    app.tab_mut().edits.new_rows = 1;
+    app.apply_action(Action::NavigateBack);
+    assert_ne!(app.tab().sql, origin_sql);
+    assert_eq!(app.tab().nav_back.len(), 1, "the refused step stays available");
+    app.tab_mut().edits.new_rows = 0;
+
+    app.apply_action(Action::NavigateBack);
+    let tab = app.tab();
+    assert_eq!(tab.id, id);
+    assert_eq!(tab.sql, origin_sql);
+    assert_eq!(tab.title, "table_1");
+    assert_eq!(
+        tab.edits
+            .source
+            .as_ref()
+            .or(tab.edits.pending_source.as_ref())
+            .map(|s| s.table.as_str()),
+        Some("table_1")
+    );
+    assert!(tab.nav_back.is_empty());
+}
+
 /// Following a FK cell from a Query tab builds a filtered `SELECT` of the referenced table
 /// and keeps the code-first layout: editor above, referenced rows below.
 #[test]

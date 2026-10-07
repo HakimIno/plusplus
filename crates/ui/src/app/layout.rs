@@ -849,6 +849,18 @@ impl DbGuiApp {
         {
             self.tab_mut().filter.visible = false;
         }
+        // Back after following a foreign key: Cmd/Ctrl+[ outside text fields (where it
+        // outdents), or the mouse's back button.
+        if !self.tab().nav_back.is_empty() {
+            let in_text = ctx.memory(|m| m.focused().is_some());
+            let back = ctx.input(|i| {
+                (!in_text && i.modifiers.command && i.key_pressed(egui::Key::OpenBracket))
+                    || i.pointer.button_pressed(egui::PointerButton::Extra1)
+            });
+            if back {
+                actions.push(Action::NavigateBack);
+            }
+        }
 
         // Order matters: top/bottom/left/right carve space, central takes the rest. The status
         // bar is carved first so it pins to the very bottom edge. Side panels are carved before
@@ -984,6 +996,7 @@ impl DbGuiApp {
                     | Action::OpenTable { .. }
                     | Action::OpenDefinition { .. }
                     | Action::FollowForeignKey { .. }
+                    | Action::NavigateBack
                     | Action::DeleteConnection(_)
             )
         });

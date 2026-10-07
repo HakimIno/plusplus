@@ -201,6 +201,20 @@ impl DbGuiApp {
                 let bar_width = ui.available_width();
                 let density = BarDensity::for_width(bar_width);
                 ui.horizontal(|ui| {
+                    if !self.tabs[idx].nav_back.is_empty()
+                        && components::toolbar_icon_button(
+                            ui,
+                            icons::chevron_left(),
+                            if cfg!(target_os = "macos") {
+                                "Back (⌘[)"
+                            } else {
+                                "Back (Ctrl+[)"
+                            },
+                        )
+                        .clicked()
+                    {
+                        actions.push(Action::NavigateBack);
+                    }
                     if query_result_tabs {
                         let modes = [TabView::Data, TabView::Message, TabView::Chart];
                         let selected = modes

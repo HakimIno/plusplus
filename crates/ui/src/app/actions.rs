@@ -1058,6 +1058,7 @@ impl DbGuiApp {
             } => self.open_tab_in_split(id, primary_id, pane),
             Action::OpenDefinition { title, sql, kind } => self.open_definition(title, sql, kind),
             Action::FollowForeignKey { row, col } => self.follow_foreign_key(row, col),
+            Action::NavigateBack => self.navigate_back(),
             Action::SetSort { col, asc } => self.apply_result_sort(Some((col, asc))),
             Action::ClearSort => self.apply_result_sort(None),
             Action::FilterColumn { tab_id, col } => {

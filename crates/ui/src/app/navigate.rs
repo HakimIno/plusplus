@@ -253,10 +253,77 @@ impl DbGuiApp {
             _ => crate::components::QueryTabKind::Table,
         };
         match self.build_fk_follow(idx, row, col) {
-            Some((sql, source)) => self.open_in_preview_slot(sql, source, true, target_kind),
+            Some((sql, source)) => {
+                let origin = &self.tabs[idx];
+                let origin_id = origin.id;
+                let mut history = origin.nav_back.clone();
+                let origin_view = NavEntry::View {
+                    title: origin.title.clone(),
+                    kind: origin.kind,
+                    sql: origin.sql.clone(),
+                    source: origin
+                        .edits
+                        .source
+                        .clone()
+                        .or_else(|| origin.edits.pending_source.clone()),
+                };
+                self.open_in_preview_slot(sql, source, true, target_kind);
+                let target = self.active_query_tab;
+                if self.tabs[target].id == origin_id {
+                    // The preview tab followed its own link and was rebuilt in place.
+                    history.push(origin_view);
+                } else {
+                    history = vec![NavEntry::Tab(origin_id)];
+                }
+                self.tabs[target].nav_back = history;
+            }
             None => {
                 self.status_msg =
                     "No foreign key to follow here (or the value is empty).".to_string();
+            }
+        }
+    }
+    /// Undo the active tab's last foreign-key jump: re-select the tab it came from, or re-open
+    /// the table this preview tab showed before. Refused while the tab has unsaved edits.
+    pub(super) fn navigate_back(&mut self) {
+        let idx = self.active_query_tab;
+        let Some(entry) = self.tabs.get_mut(idx).and_then(|tab| tab.nav_back.pop()) else {
+            self.status_msg = "Nothing to go back to".into();
+            return;
+        };
+        match entry {
+            NavEntry::Tab(id) => match self.tabs.iter().position(|tab| tab.id == id) {
+                Some(origin) => self.select_tab(origin),
+                None => self.status_msg = "The tab you came from was closed".into(),
+            },
+            NavEntry::View {
+                title,
+                kind,
+                sql,
+                source,
+            } => {
+                if self.tab_has_unsaved_changes(idx) {
+                    self.tabs[idx].nav_back.push(NavEntry::View {
+                        title,
+                        kind,
+                        sql,
+                        source,
+                    });
+                    self.error =
+                        Some("Save or discard this tab's changes before going back.".into());
+                    return;
+                }
+                let current = &self.tabs[idx];
+                let mut tab = QueryTab::new(current.id, title);
+                tab.conn_id = current.conn_id.clone();
+                tab.preview = current.preview;
+                tab.nav_back = std::mem::take(&mut self.tabs[idx].nav_back);
+                tab.kind = kind;
+                tab.sql = sql;
+                tab.edits.pending_source = source;
+                self.tabs[idx] = tab;
+                self.workspace_dirty = true;
+                self.start_query_for(idx);
             }
         }
     }
