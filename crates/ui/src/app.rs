@@ -792,6 +792,7 @@ struct QueryTab {
     /// Incremented whenever production code changes `sql`; drives the bounded editor cache.
     sql_revision: u64,
     sql_editor_cache: SqlEditorCache,
+    text_edit_memory: memory::TabTextEditMemory,
     /// Last execution on this tab; unrelated tabs cannot supersede its results.
     query_seq: u64,
     /// Collapsed regions of `sql`, held by the char offset of the folded region's first line
@@ -905,6 +906,7 @@ impl QueryTab {
             sql_revision: 0,
             query_seq: 0,
             sql_editor_cache: SqlEditorCache::default(),
+            text_edit_memory: memory::TabTextEditMemory::default(),
             folds: std::collections::BTreeSet::new(),
             query_parameters: Vec::new(),
             parameters_expanded: true,

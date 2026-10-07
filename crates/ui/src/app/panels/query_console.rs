@@ -233,6 +233,13 @@ impl DbGuiApp {
         let mut font = egui::TextStyle::Monospace.resolve(ui.style());
         font.size = self.editor_font_size;
         let editor_id = egui::Id::new(("sql_editor", tab_id, "primary"));
+        for id in [
+            editor_id,
+            editor_id.with("find_query"),
+            editor_id.with("find_replace"),
+        ] {
+            self.tabs[idx].text_edit_memory.track(ui.ctx(), id);
+        }
 
         if self.tabs[idx].find.open {
             self.editor_find_bar(ui, editor_id);

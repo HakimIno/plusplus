@@ -6,6 +6,48 @@ use dbcore::{
 struct DummyDb;
 
 #[test]
+fn closing_sql_tabs_releases_egui_editor_history() {
+    let ctx = egui::Context::default();
+    let mut app = DbGuiApp::construct();
+    for _ in 0..8 {
+        app.tab_mut().sql = "SELECT 'a retained query';\n".repeat(100);
+        let editor_id = egui::Id::new(("sql_editor", app.tab().id, "primary"));
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.sql_editor_body(ui, 0);
+        });
+        assert!(egui::text_edit::TextEditState::load(&ctx, editor_id).is_some());
+        app.close_tab(0);
+        assert!(
+            egui::text_edit::TextEditState::load(&ctx, editor_id).is_none(),
+            "closed SQL tab left its editor and undo history in egui memory"
+        );
+    }
+}
+
+#[test]
+fn closing_other_tabs_releases_split_and_find_history_but_keeps_live_editor() {
+    let ctx = egui::Context::default();
+    let mut app = DbGuiApp::construct();
+    let kept_id = egui::Id::new(("sql_editor", app.tab().id, "primary"));
+    let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.sql_editor_body(ui, 0));
+    app.new_tab();
+    app.tab_mut().sql = "SELECT 1".into();
+    app.tab_mut().editor_split = true;
+    app.tab_mut().find.open = true;
+    app.tab_mut().find.replace_open = true;
+    for _ in 0..2 {
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.sql_editor_body(ui, 1));
+    }
+    assert!(ctx.data(|data| data.count::<egui::text_edit::TextEditState>()) >= 5);
+    app.close_other_tabs(0);
+    assert_eq!(
+        ctx.data(|data| data.count::<egui::text_edit::TextEditState>()),
+        1
+    );
+    assert!(egui::text_edit::TextEditState::load(&ctx, kept_id).is_some());
+}
+
+#[test]
 fn switching_connection_leaves_running_queries_on_their_own_connection() {
     let mut app = app_with_staged_edit();
     app.tab_mut().edits.clear();

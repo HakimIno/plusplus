@@ -182,15 +182,15 @@ pub(crate) fn install(
     code_font: Option<&str>,
 ) -> Result<(), String> {
     let mut fonts = FontDefinitions::default();
-    for (name, bytes) in [
-        (
-            "ibm_plex_mono",
-            include_bytes!("../../../app/assets/IBMPlexMono-Regular.ttf") as &[u8],
-        ),
-        ("unifont", app_fonts.universal_regular),
-    ] {
-        insert(&mut fonts, name, bytes);
-    }
+    insert(
+        &mut fonts,
+        "ibm_plex_mono",
+        include_bytes!("../../../app/assets/IBMPlexMono-Regular.ttf"),
+    );
+    fonts.font_data.insert(
+        "unifont".to_owned(),
+        Arc::new(FontData::from_static(app_fonts.universal_regular)),
+    );
 
     for (family, sans, thai) in WEIGHTS {
         for (key, bytes) in [(sans_key(family), sans), (thai_key(family), thai)] {

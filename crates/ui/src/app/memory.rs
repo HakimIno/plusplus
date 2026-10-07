@@ -2,6 +2,33 @@
 
 use super::*;
 
+/// egui owns editor undo snapshots independently of QueryTab. Release those snapshots
+/// when their tab is removed, including bulk closes and preview-tab replacement.
+#[derive(Default)]
+pub(super) struct TabTextEditMemory {
+    ctx: Option<egui::Context>,
+    ids: HashSet<egui::Id>,
+}
+
+impl TabTextEditMemory {
+    pub(super) fn track(&mut self, ctx: &egui::Context, id: egui::Id) {
+        self.ctx.get_or_insert_with(|| ctx.clone());
+        self.ids.insert(id);
+    }
+}
+
+impl Drop for TabTextEditMemory {
+    fn drop(&mut self) {
+        if let Some(ctx) = &self.ctx {
+            ctx.data_mut(|data| {
+                for &id in &self.ids {
+                    data.remove::<egui::text_edit::TextEditState>(id);
+                }
+            });
+        }
+    }
+}
+
 impl QueryTab {
     pub(super) fn estimated_result_memory_bytes(&self) -> usize {
         let result = self

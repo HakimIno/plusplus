@@ -129,8 +129,8 @@ fn ssh_err(e: impl std::fmt::Display) -> CoreError {
     CoreError::Ssh(e.to_string())
 }
 
-/// A live tunnel. Dropping it tears everything down: the accept loop is aborted, which
-/// drops the SSH session handle, closing the bastion connection and every forward in it.
+/// A live tunnel. Dropping it aborts the accept loop and its owned forwarding tasks,
+/// releasing their sockets and SSH channels along with the session handle.
 pub struct SshTunnel {
     /// The localhost port the database driver should connect to instead of the real host.
     pub local_port: u16,
@@ -241,8 +241,15 @@ impl SshTunnel {
         let target_host = cfg.host.trim().to_string();
         let target_port = cfg.port;
         let accept_task = tokio::spawn(async move {
+            // Dropping a JoinHandle detaches its task. Own the forwards in a JoinSet so
+            // aborting this loop also stops idle streams that keep the SSH session alive.
+            let mut forwards = tokio::task::JoinSet::new();
             loop {
-                let Ok((mut tcp, peer)) = listener.accept().await else {
+                let accepted = tokio::select! {
+                    accepted = listener.accept() => accepted,
+                    _ = forwards.join_next(), if !forwards.is_empty() => continue,
+                };
+                let Ok((mut tcp, peer)) = accepted else {
                     break;
                 };
                 // One SSH channel per pooled DB connection, multiplexed over the session.
@@ -256,7 +263,7 @@ impl SshTunnel {
                     .await
                 {
                     Ok(channel) => {
-                        tokio::spawn(async move {
+                        forwards.spawn(async move {
                             let mut stream = channel.into_stream();
                             let _ = tokio::io::copy_bidirectional(&mut tcp, &mut stream).await;
                         });
@@ -437,6 +444,31 @@ mod tests {
             assert_eq!(buf, msg.as_bytes());
         }
         let _ = std::fs::remove_file(&kh);
+    }
+
+    #[tokio::test]
+    async fn dropping_tunnel_closes_idle_forwarded_connections() {
+        let echo_port = spawn_echo().await;
+        let ssh_port = spawn_bastion().await;
+        let cfg = tunnel_cfg(echo_port, ssh_port);
+        let kh = temp_known_hosts();
+        let tunnel = SshTunnel::open_verified(&cfg, Some("hunter2"), vec![kh.clone()], kh.clone())
+            .await
+            .unwrap();
+        let mut conn = TcpStream::connect(("127.0.0.1", tunnel.local_port))
+            .await
+            .unwrap();
+        conn.write_all(b"x").await.unwrap();
+        let mut byte = [0];
+        conn.read_exact(&mut byte).await.unwrap();
+        drop(tunnel);
+        let closed =
+            tokio::time::timeout(std::time::Duration::from_secs(2), conn.read(&mut byte)).await;
+        let _ = std::fs::remove_file(&kh);
+        assert!(
+            matches!(closed, Ok(Ok(0)) | Ok(Err(_))),
+            "dropping the tunnel left an idle forwarding task and socket alive: {closed:?}"
+        );
     }
 
     #[tokio::test]

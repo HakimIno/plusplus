@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use dbcore::Value;
 
@@ -106,6 +106,21 @@ impl ViewerKind {
     }
 }
 
+/// Image loaders retain bytes, decoded pixels and textures beyond the window's lifetime.
+/// Share their owner across viewer clones and evict the URI when the last viewer is dropped.
+struct ViewerImageCache {
+    uri: String,
+    ctx: OnceLock<egui::Context>,
+}
+
+impl Drop for ViewerImageCache {
+    fn drop(&mut self) {
+        if let Some(ctx) = self.ctx.get() {
+            ctx.forget_image(&self.uri);
+        }
+    }
+}
+
 #[derive(Clone)]
 enum ViewerContent {
     Json {
@@ -119,7 +134,7 @@ enum ViewerContent {
     },
     Image {
         bytes: Arc<[u8]>,
-        uri: String,
+        cache: Arc<ViewerImageCache>,
         format: &'static str,
         width: u32,
         height: u32,
@@ -155,7 +170,10 @@ impl ValueViewer {
                     let id = NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed);
                     ViewerContent::Image {
                         bytes: Arc::from(bytes.as_slice()),
-                        uri: format!("bytes://database-image-{id}.{format}"),
+                        cache: Arc::new(ViewerImageCache {
+                            uri: format!("bytes://database-image-{id}.{format}"),
+                            ctx: OnceLock::new(),
+                        }),
                         format,
                         width,
                         height,
@@ -193,6 +211,9 @@ impl ValueViewer {
     }
 
     pub(crate) fn show(&self, ctx: &egui::Context) -> bool {
+        if let ViewerContent::Image { cache, .. } = &self.content {
+            cache.ctx.get_or_init(|| ctx.clone());
+        }
         let mut open = true;
         let mut close_clicked = false;
         components::dialog_window(format!("Value viewer — {}", self.column))
@@ -217,11 +238,11 @@ impl ValueViewer {
                     } => blob_view(ui, bytes, hex, *truncated),
                     ViewerContent::Image {
                         bytes,
-                        uri,
+                        cache,
                         width,
                         height,
                         ..
-                    } => image_view(ui, bytes.clone(), uri, *width, *height),
+                    } => image_view(ui, bytes.clone(), &cache.uri, *width, *height),
                 }
 
                 components::dialog_footer(ui, |ui| {
@@ -613,6 +634,81 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closing_image_viewer_releases_cached_bytes_and_texture() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        for _ in 0..8 {
+            let viewer = ValueViewer::new(
+                "avatar",
+                "BLOB",
+                &Value::Bytes(include_bytes!("../../assets/illus/empty-chameleon.png").to_vec()),
+            )
+            .unwrap();
+            let (bytes, uri) = match &viewer.content {
+                ViewerContent::Image { bytes, cache, .. } => {
+                    (Arc::downgrade(bytes), cache.uri.clone())
+                }
+                _ => unreachable!(),
+            };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1024.0, 768.0),
+                    )),
+                    ..Default::default()
+                };
+                let _ = ctx.run_ui(input, |ui| {
+                    viewer.show(ui.ctx());
+                });
+                if ctx
+                    .tex_manager()
+                    .read()
+                    .allocated()
+                    .any(|(_, meta)| meta.name == uri)
+                {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "image decoder did not finish"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(
+                ctx.tex_manager()
+                    .read()
+                    .allocated()
+                    .any(|(_, meta)| meta.name == uri),
+                "viewer texture missing; textures: {:?}",
+                ctx.tex_manager()
+                    .read()
+                    .allocated()
+                    .map(|(_, meta)| &meta.name)
+                    .collect::<Vec<_>>()
+            );
+            let last_owner = viewer.clone();
+            drop(viewer);
+            assert!(ctx
+                .tex_manager()
+                .read()
+                .allocated()
+                .any(|(_, meta)| meta.name == uri));
+            drop(last_owner);
+            assert!(
+                bytes.upgrade().is_none(),
+                "closed viewer left image bytes cached"
+            );
+            assert!(!ctx
+                .tex_manager()
+                .read()
+                .allocated()
+                .any(|(_, meta)| meta.name == uri));
+        }
+    }
 
     #[test]
     fn json_columns_and_object_text_are_viewable() {

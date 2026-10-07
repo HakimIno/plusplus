@@ -185,6 +185,9 @@ impl DbGuiApp {
                             .desired_width(f32::INFINITY)
                             .layouter(&mut layouter)
                             .show(ui);
+                        self.tabs[idx]
+                            .text_edit_memory
+                            .track(ui.ctx(), output.response.id);
                         output.response.widget_info(|| {
                             egui::WidgetInfo::labeled(
                                 egui::WidgetType::TextEdit,
