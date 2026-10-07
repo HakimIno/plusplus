@@ -1324,6 +1324,23 @@ fn render_single_line(
             let vpad = ((size.y - text_h) / 2.0).clamp(0.0, 24.0).round() as i8;
             inner.top = vpad;
             inner.bottom = vpad;
+            // The editor covers the cell expanded by half the item spacing; inset its text by
+            // that plus the cell's own inset so the value stays exactly where it was drawn.
+            let inset = (crate::grid::CELL_INSET_X + 0.5 * ui.spacing().item_spacing.x).round();
+            inner.left = inset as i8;
+            inner.right = inset as i8;
+            // Numbers end right in the grid so their digits line up; keep them there while
+            // editing, in the same face and size, instead of jumping to the left edge.
+            let numeric = active.kind.monospace_value();
+            if numeric {
+                field = field.horizontal_align(egui::Align::RIGHT);
+            }
+            if numeric || crate::fonts::grid_all_monospace(ui.ctx()) {
+                field = field.font(egui::FontId::new(
+                    crate::grid::GRID_MONO_SIZE,
+                    egui::FontFamily::Monospace,
+                ));
+            }
         }
         field = field.frame(
             egui::Frame::new()

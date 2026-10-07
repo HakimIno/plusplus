@@ -20,15 +20,49 @@ const SORT_SLOT: f32 = 18.0;
 const SORT_INSET_X: f32 = 4.0;
 
 /// Horizontal breathing room shared by header labels and body cells.
-const CELL_INSET_X: f32 = 8.0;
+pub(crate) const CELL_INSET_X: f32 = 8.0;
 
 /// Grid code values are intentionally a touch smaller than surrounding UI text. This keeps
 /// dates and long identifiers precise without letting the monospace face dominate the table.
-const GRID_MONO_SIZE: f32 = 11.5;
+pub(crate) const GRID_MONO_SIZE: f32 = 11.5;
 
 /// Begin fetching the next result chunk while several viewports remain. This absorbs normal
 /// database/network latency so reaching the currently loaded tail feels continuous.
 const RESULT_PREFETCH_ROWS: usize = 128;
+/// Most characters of a text value a cell lays out. A cell is at most a few hundred points
+/// wide, but egui shapes the whole string before clipping it, so a multi-megabyte JSON or
+/// TEXT value would otherwise be laid out on every frame it is visible. The full value stays
+/// available in Details and the value viewer.
+const CELL_PREVIEW_CHARS: usize = 256;
+
+/// The part of `text` a one-line cell can show: at most [`CELL_PREVIEW_CHARS`] characters,
+/// with line breaks and tabs flattened to spaces and an ellipsis when anything was cut.
+/// Borrows when the text is already short and single-line, which is the common case.
+fn cell_preview(text: &str) -> std::borrow::Cow<'_, str> {
+    let cut = text
+        .char_indices()
+        .nth(CELL_PREVIEW_CHARS)
+        .map(|(index, _)| index);
+    let head = &text[..cut.unwrap_or(text.len())];
+    let multiline = head.contains(['\n', '\r', '\t']);
+    if cut.is_none() && !multiline {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut preview: String = head
+        .chars()
+        .map(|c| {
+            if matches!(c, '\n' | '\r' | '\t') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    if cut.is_some() {
+        preview.push('…');
+    }
+    std::borrow::Cow::Owned(preview)
+}
 
 #[derive(Clone, Default)]
 struct GridColumnView {
@@ -84,7 +118,7 @@ fn fitted_column_width(ui: &egui::Ui, result: &QueryResult, col: usize) -> Optio
             Value::Null => "NULL".to_string(),
             Value::Bool(value) => value.to_string(),
             Value::Int(_) | Value::Float(_) => value.display(),
-            Value::Text(value) => value.clone(),
+            Value::Text(value) => cell_preview(value).into_owned(),
             Value::Bytes(value) => format!("[{} bytes]", value.len()),
         };
         let font = if matches!(value, Value::Int(_) | Value::Float(_))
@@ -1894,6 +1928,99 @@ mod tests {
     }
 
     #[test]
+    fn cell_preview_bounds_long_text_and_borrows_short_text() {
+        assert!(matches!(
+            cell_preview("plain value"),
+            std::borrow::Cow::Borrowed("plain value")
+        ));
+        assert_eq!(cell_preview("two\nlines\tand tab"), "two lines and tab");
+
+        let huge = "ภาษาไทย ".repeat(100_000);
+        let preview = cell_preview(&huge);
+        assert_eq!(preview.chars().count(), CELL_PREVIEW_CHARS + 1);
+        assert!(preview.ends_with('…'));
+        assert!(huge.starts_with(preview.trim_end_matches('…')));
+    }
+
+    /// Frame-time probe (ignored; run with `--ignored --nocapture`). Reports the first frame,
+    /// which fits column widths, and the average of scrolled frames after it.
+    fn time_grid(result: &QueryResult) -> (std::time::Duration, std::time::Duration) {
+        let ctx = egui::Context::default();
+        let order: Vec<usize> = (0..result.rows.len()).collect();
+        let mut edits = Edits::default();
+        let mut frame = |scroll: f32| {
+            let started = std::time::Instant::now();
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1400.0, 900.0),
+                    )),
+                    events: vec![
+                        egui::Event::PointerMoved(egui::pos2(600.0, 400.0)),
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(0.0, scroll),
+                            modifiers: egui::Modifiers::NONE,
+                            phase: egui::TouchPhase::Move,
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                        let _ = results_grid(
+                            ui,
+                            result,
+                            &order,
+                            None,
+                            &Selection::default(),
+                            &mut edits,
+                            true,
+                            7,
+                            None,
+                            &EmojiAtlas::default(),
+                            &[],
+                        );
+                    });
+                },
+            );
+            started.elapsed()
+        };
+        let first = frame(0.0);
+        let frames = 30;
+        let total: std::time::Duration = (0..frames).map(|_| frame(-180.0)).sum();
+        (first, total / frames)
+    }
+
+    #[test]
+    #[ignore = "frame-time probe; run manually with --ignored --nocapture"]
+    fn frame_time_probe() {
+        let big_text = QueryResult {
+            columns: (0..4)
+                .map(|i| ColumnMeta {
+                    name: format!("doc_{i}"),
+                    type_name: "TEXT".into(),
+                })
+                .collect(),
+            rows: (0..1_000)
+                .map(|r| {
+                    (0..4)
+                        .map(|c| Value::Text(format!("{r}-{c} {}\n", "lorem ipsum ").repeat(8_000)))
+                        .collect()
+                })
+                .collect(),
+            ..QueryResult::default()
+        };
+        let (first, steady) = time_grid(&big_text);
+        eprintln!("1k rows x 4 cols of ~100 KB text: first {first:?}, steady {steady:?}");
+
+        let many_rows = fake_result(100_000, 12);
+        let (first, steady) = time_grid(&many_rows);
+        eprintln!("100k rows x 12 short cols: first {first:?}, steady {steady:?}");
+    }
+
+    #[test]
     fn a_new_result_on_the_same_grid_refits_column_widths() {
         let ctx = egui::Context::default();
         let short = QueryResult {
@@ -2028,6 +2155,84 @@ mod tests {
     /// The active editor's accent border must be painted on top of every cell so the next
     /// column's (selection/stripe) background can't clip its right edge — the regression that
     /// left the edited cell with only three visible sides.
+    /// Editing a number keeps it where the grid drew it: right-aligned, in the same font, so
+    /// double-clicking a cell doesn't make the value jump to the left edge.
+    #[test]
+    fn numeric_editor_keeps_the_value_right_aligned() {
+        fn text_right_edges(shapes: &[egui::epaint::ClippedShape], needle: &str) -> Vec<f32> {
+            fn walk(shape: &egui::epaint::Shape, needle: &str, out: &mut Vec<f32>) {
+                match shape {
+                    egui::epaint::Shape::Text(t) if t.galley.text() == needle => {
+                        out.push(t.pos.x + t.galley.rect.max.x);
+                    }
+                    egui::epaint::Shape::Vec(v) => v.iter().for_each(|s| walk(s, needle, out)),
+                    _ => {}
+                }
+            }
+            let mut out = Vec::new();
+            shapes
+                .iter()
+                .for_each(|cs| walk(&cs.shape, needle, &mut out));
+            out
+        }
+
+        let ctx = egui::Context::default();
+        let result = QueryResult {
+            columns: vec![ColumnMeta {
+                name: "amount".into(),
+                type_name: "REAL".into(),
+            }],
+            rows: vec![vec![Value::Float(30631.58)], vec![Value::Float(30631.58)]],
+            ..QueryResult::default()
+        };
+        let order = vec![0, 1];
+        let mut edits = Edits::default();
+        edits.set_columns(&result.columns);
+        edits.begin(0, 0, &result.rows[0][0], crate::edit::EditOrigin::Grid);
+        let shown = result.rows[1][0].display();
+
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(600.0, 300.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                        let _ = results_grid(
+                            ui,
+                            &result,
+                            &order,
+                            None,
+                            &Selection::default(),
+                            &mut edits,
+                            true,
+                            11,
+                            None,
+                            &EmojiAtlas::default(),
+                            &[],
+                        );
+                    });
+                },
+            );
+            shapes = out.shapes;
+        }
+        let edges = text_right_edges(&shapes, &shown);
+        assert_eq!(
+            edges.len(),
+            2,
+            "expected the edited and the displayed value: {edges:?}"
+        );
+        assert!(
+            (edges[0] - edges[1]).abs() <= 1.5,
+            "edited value should end where the displayed one does: {edges:?}"
+        );
+    }
+
     #[test]
     fn editor_border_is_painted_on_top() {
         let ctx = egui::Context::default();
@@ -2644,20 +2849,22 @@ fn cell(
                         egui::FontFamily::Monospace,
                     )),
                 ),
-                Value::Text(text) if emoji::contains_emoji(text) => {
-                    emoji_cell(ui, text, color, emoji)
-                }
                 Value::Text(text) => {
-                    let text = egui::RichText::new(text);
-                    let text = if kind.monospace_value() {
-                        text.font(egui::FontId::new(
-                            GRID_MONO_SIZE,
-                            egui::FontFamily::Monospace,
-                        ))
+                    let text = cell_preview(text);
+                    if emoji::contains_emoji(&text) {
+                        emoji_cell(ui, &text, color, emoji)
                     } else {
-                        mono_if(text)
-                    };
-                    label(ui, text)
+                        let text = egui::RichText::new(text.into_owned());
+                        let text = if kind.monospace_value() {
+                            text.font(egui::FontId::new(
+                                GRID_MONO_SIZE,
+                                egui::FontFamily::Monospace,
+                            ))
+                        } else {
+                            mono_if(text)
+                        };
+                        label(ui, text)
+                    }
                 }
                 Value::Bytes(bytes) => label(
                     ui,
