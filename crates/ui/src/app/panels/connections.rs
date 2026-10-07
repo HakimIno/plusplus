@@ -204,11 +204,64 @@ impl DbGuiApp {
                                                         "Switch Database"
                                                     },
                                                     |ui| {
-                                                        ui.set_min_width(160.0);
+                                                        ui.set_width(260.0);
+                                                        // Long lists get a search box. It starts empty and focused
+                                                        // each time the submenu is opened afresh.
+                                                        let searchable = databases.len() > 6;
+                                                        let mut needle = String::new();
+                                                        if searchable {
+                                                            let state_id = ui.id().with(("switch_db_search", idx));
+                                                            let pass = ui.ctx().cumulative_pass_nr();
+                                                            let (mut query, last_pass): (String, u64) = ui
+                                                                .data(|d| d.get_temp(state_id))
+                                                                .unwrap_or_default();
+                                                            let reopened = last_pass + 2 < pass;
+                                                            if reopened {
+                                                                query.clear();
+                                                            }
+                                                            let search = components::icon_text_input(
+                                                                ui,
+                                                                &mut query,
+                                                                "Search…",
+                                                                icons::search(),
+                                                                ui.available_width(),
+                                                            );
+                                                            if reopened {
+                                                                search.request_focus();
+                                                            }
+                                                            needle = query.trim().to_lowercase();
+                                                            let first = databases.iter().find(|db| {
+                                                                **db != current_db
+                                                                    && db.to_lowercase().contains(&needle)
+                                                            });
+                                                            if search.has_focus()
+                                                                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                                            {
+                                                                if let Some(db) = first {
+                                                                    actions.push(Action::SwitchDatabase {
+                                                                        conn_idx: idx,
+                                                                        database: db.clone(),
+                                                                    });
+                                                                    ui.close();
+                                                                }
+                                                            }
+                                                            ui.data_mut(|d| d.insert_temp(state_id, (query, pass)));
+                                                            ui.separator();
+                                                        }
                                                         egui::ScrollArea::vertical()
                                                             .max_height(220.0)
                                                             .show(ui, |ui| {
-                                                                for db in &databases {
+                                                                let shown: Vec<&String> = databases
+                                                                    .iter()
+                                                                    .filter(|db| needle.is_empty() || db.to_lowercase().contains(&needle))
+                                                                    .collect();
+                                                                if shown.is_empty() {
+                                                                    ui.label(
+                                                                        egui::RichText::new("No matches")
+                                                                            .color(palette::TEXT_FAINT()),
+                                                                    );
+                                                                }
+                                                                for db in shown {
                                                                     let is_current =
                                                                         *db == current_db;
                                                                     let tint = ui
@@ -233,6 +286,7 @@ impl DbGuiApp {
                                                                     egui::Button::image_and_text(
                                                                         db_img, label,
                                                                     )
+                                                                    .truncate()
                                                                     .min_size(egui::vec2(
                                                                         ui.available_width(),
                                                                         0.0,
@@ -242,6 +296,7 @@ impl DbGuiApp {
                                                                             !is_current,
                                                                             btn,
                                                                         )
+                                                                        .on_hover_text(db)
                                                                         .clicked()
                                                                     {
                                                                         actions.push(

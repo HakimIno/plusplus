@@ -283,7 +283,7 @@ impl DbGuiApp {
                             section_frame(ui, |ui| table_picker(ui, dialog, running));
                         } else if !restore && dialog.method == Method::Server {
                             ui.add_space(6.0);
-                            ui.label(egui::RichText::new("A .bak holds the whole database; choose SQL script to pick tables.").color(palette::TEXT_FAINT()));
+                            ui.label(egui::RichText::new("Choose SQL script to pick tables.").color(palette::TEXT_FAINT()));
                         }
 
                         // ── Restore: the consequence, then the gate ─────────────────────

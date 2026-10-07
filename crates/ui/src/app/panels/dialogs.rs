@@ -93,7 +93,7 @@ impl DbGuiApp {
             .show(ctx, |ui| {
                 ui.label(
                     egui::RichText::new(
-                        "This table structure has changes that have not been saved. What would you like to do before reloading?",
+                        "Save or discard your structure changes before reloading.",
                     )
                     .color(palette::TEXT_WEAK()),
                 );
@@ -185,7 +185,7 @@ impl DbGuiApp {
             .show(ctx, |ui| {
                 ui.label(
                     egui::RichText::new(
-                        "Choose columns whose values uniquely identify one row. UPDATE and DELETE will use them in the WHERE clause.",
+                        "Pick columns that identify a single row.",
                     )
                     .color(palette::TEXT_WEAK()),
                 );
@@ -349,11 +349,6 @@ impl DbGuiApp {
                     ui.label(egui::RichText::new("/").color(palette::TEXT_FAINT()));
                     ui.label(egui::RichText::new(database).color(palette::TEXT_WEAK()));
                 });
-                ui.label(
-                    egui::RichText::new("Review the target and impact before this change runs.")
-                        .small()
-                        .color(palette::TEXT_FAINT()),
-                );
                 ui.add_space(8.0);
 
                 review_sql(

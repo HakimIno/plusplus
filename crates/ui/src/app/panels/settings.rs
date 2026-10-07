@@ -222,31 +222,16 @@ impl DbGuiApp {
                             ui.add_space(inset);
                             ui.vertical(|ui| {
                                 ui.set_width(content_w);
-                                let (page_title, page_description) = match section {
-                                    SettingsSection::General => (
-                                        "General",
-                                        "Control how plusplus behaves when the application starts.",
-                                    ),
-                                    SettingsSection::Appearance => (
-                                        "Appearance",
-                                        "Choose how your workspace and SQL tools look.",
-                                    ),
-                                    SettingsSection::Privacy => (
-                                        "Privacy",
-                                        "Control which activity records stay on this machine.",
-                                    ),
+                                let page_title = match section {
+                                    SettingsSection::General => "General",
+                                    SettingsSection::Appearance => "Appearance",
+                                    SettingsSection::Privacy => "Privacy",
                                 };
                                 ui.label(
                                     egui::RichText::new(page_title)
                                         .size(30.0)
                                         .strong()
                                         .color(palette::TEXT()),
-                                );
-                                ui.add_space(4.0);
-                                ui.label(
-                                    egui::RichText::new(page_description)
-                                        .size(14.0)
-                                        .color(palette::TEXT_WEAK()),
                                 );
 
                                 match section {
@@ -262,7 +247,7 @@ impl DbGuiApp {
                                             ui,
                                             &mut update_check_enabled,
                                             "Check for updates at launch",
-                                            "Ask GitHub for the latest release. No telemetry is sent.",
+                                            "No telemetry is sent.",
                                         );
                                         ui.add_space(12.0);
                                         ui.separator();
@@ -271,7 +256,7 @@ impl DbGuiApp {
                                             ui,
                                             &mut review_edits_before_save,
                                             "Review changes before saving",
-                                            "Show the generated SQL before ⌘S writes row edits. Production connections always confirm.",
+                                            "Preview the SQL before ⌘S saves edits.",
                                         );
                                         ui.add_space(12.0);
                                         ui.separator();
@@ -286,7 +271,7 @@ impl DbGuiApp {
                                             ui.add_space(3.0);
                                             ui.label(
                                                 egui::RichText::new(
-                                                    "Shared by results in every tab. Inactive results are released first.",
+                                                    "Shared by all result tabs.",
                                                 )
                                                 .size(12.0)
                                                 .color(palette::TEXT_WEAK()),
@@ -497,7 +482,7 @@ impl DbGuiApp {
                                         ui,
                                         &mut editor_wrap_lines,
                                         "Wrap long lines",
-                                        "Keep long SQL statements visible without horizontal scrolling.",
+                                        "No horizontal scrolling in the editor.",
                                     );
                                     ui.add_space(12.0);
                                     ui.separator();
@@ -515,7 +500,7 @@ impl DbGuiApp {
                                         ui,
                                         &mut ghost_suggestions_enabled,
                                         "Inline suggestions",
-                                        "Show a short completion after the caret; press Tab to accept it.",
+                                        "Press Tab to accept.",
                                     );
                                     ui.add_space(14.0);
                                     ui.separator();
@@ -694,12 +679,12 @@ impl DbGuiApp {
                                             (
                                                 &mut history_enabled,
                                                 "Record query history",
-                                                "Keep executed SQL and its outcome in a local history file.",
+                                                "Stored on this machine.",
                                             ),
                                             (
                                                 &mut audit_enabled,
                                                 "Record audit trail",
-                                                "Append connections and statements to a monthly local compliance log.",
+                                                "Monthly local compliance log.",
                                             ),
                                         ] {
                                             settings_toggle_row(ui, enabled, title, description);

@@ -336,7 +336,7 @@ impl DbGuiApp {
                     ui.label(format!("• {label}"));
                 }
                 ui.add_space(8.0);
-                ui.label("Save opens the review for one tab. After saving, try the action again.");
+                ui.label("Save one tab at a time, then try again.");
                 crate::components::dialog_footer(ui, |ui| {
                     if crate::components::primary_button(
                         ui,
