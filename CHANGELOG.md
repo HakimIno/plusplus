@@ -3,6 +3,20 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
+## 0.5.3 — 2026-10-07
+
+- Follow a foreign key, then go back: the ‹ button on the Data/Structure bar, Cmd/Ctrl+[, or the mouse back button returns to the tab you came from, or re-opens the table a reused preview tab showed before.
+- Much faster results grid with large text: cells lay out at most 256 characters (line breaks shown as spaces, full value in Details), so columns of multi-megabyte TEXT or JSON scroll smoothly instead of stalling.
+- Editing a number in the grid keeps it right-aligned in the same font; the editor's text no longer jumps when a cell opens.
+- Lower memory use: closed tabs release their editor history, the value viewer frees images when closed, and SSH tunnels stop idle forwards when they close.
+- The Update button is a neutral grey "Update" pill, and the update check repeats daily while the app is open, so new releases appear without a restart.
+- Untitled query tabs are numbered per connection, so the first one is "Query 1" rather than its position across all connections.
+- Autocomplete icons are coloured by kind, as in VS Code: orange tables, blue columns, purple functions, grey keywords.
+- Switch Database has a search box for long database lists.
+- The side gutters on macOS now match the seams between panels.
+- Shorter Settings and dialog text.
+- Possible fix for a dark band across the selected row in the Structure editor.
+
 ## 0.5.2 — 2026-10-06
 
 - New UI font: IBM Plex Sans in Thin, Regular, Medium, SemiBold and Bold, paired with IBM Plex Sans Thai at the same weights so Thai text matches the Latin text beside it. Inter, Anuphan, Geist and Noto Sans Thai are no longer bundled, which also shrinks the app.
