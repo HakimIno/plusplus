@@ -310,6 +310,16 @@ pub(super) fn schema_grid_keyboard(
     ui.ctx().request_repaint();
 }
 
+/// The Structure grids draw dense rows that are clipped cell by cell, so nothing inside one
+/// should cast a drop shadow: a blurred shadow painted into a row shows up as a dark band across
+/// it. egui's shadows belong to floating windows and popups, which keep the app theme.
+fn grid_ui(ui: &mut egui::Ui) -> &mut egui::Ui {
+    let visuals = &mut ui.style_mut().visuals;
+    visuals.window_shadow = egui::epaint::Shadow::NONE;
+    visuals.popup_shadow = egui::epaint::Shadow::NONE;
+    ui
+}
+
 fn schema_grid_header(ui: &mut egui::Ui, label: &str) {
     components::paint_table_header_cell(ui);
     ui.with_layout(
@@ -676,7 +686,7 @@ pub(super) fn schema_structure_grid(
     let row_height = 24.0;
     let query = column_filter.trim().to_lowercase();
     let cols = StructureColumns::for_kind(db_kind);
-    let mut table = TableBuilder::new(ui)
+    let mut table = TableBuilder::new(grid_ui(ui))
         .id_salt(("editable_structure_columns", format!("{db_kind:?}")))
         .sense(egui::Sense::click())
         .striped(true)
@@ -930,7 +940,7 @@ pub(super) fn schema_new_table_grid(
     // No gap between columns and a hairline between rows, so a row's tint (new, dropped,
     // changed) runs unbroken across it instead of showing dark seams around every cell.
     let grid_gap = std::mem::replace(&mut ui.spacing_mut().item_spacing, egui::vec2(0.0, 1.0));
-    TableBuilder::new(ui)
+    TableBuilder::new(grid_ui(ui))
         .id_salt("new_table_columns")
         .sense(egui::Sense::click())
         .striped(true)
@@ -1097,7 +1107,7 @@ pub(super) fn schema_indexes_grid(
     use crate::schema::{SchemaGridSelection, SchemaTab};
     use egui_extras::{Column, TableBuilder};
 
-    TableBuilder::new(ui)
+    TableBuilder::new(grid_ui(ui))
         .id_salt("editable_structure_indexes")
         .sense(egui::Sense::click())
         .striped(true)

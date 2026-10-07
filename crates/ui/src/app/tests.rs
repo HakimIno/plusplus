@@ -2977,7 +2977,12 @@ fn query_tabs_use_their_database_provider_identity() {
     ms.id = "ms".into();
     app.connections.push(ms);
     app.tab_mut().conn_id = Some("ms".into());
-    assert_eq!(app.tab_label(1), "MS Query 2");
+    // Numbering is per connection: the first untitled tab on "ms" is Query 1.
+    assert_eq!(app.tab_label(1), "MS Query 1");
+    app.new_tab();
+    assert_eq!(app.tabs[2].conn_id.as_deref(), Some("ms"));
+    assert_eq!(app.tab_label(2), "MS Query 2");
+    app.active_query_tab = 1;
 
     app.tab_mut().title = "orders".into();
     assert_eq!(

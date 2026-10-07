@@ -373,7 +373,14 @@ impl DbGuiApp {
                     Some(dbcore::DbKind::ScyllaDb) => "Scylla ",
                     None => "",
                 };
-                format!("{provider}Query {}", idx + 1)
+                // Number untitled query tabs within their own connection: the strip only shows
+                // that connection's tabs, so a global position would skip numbers.
+                let conn_id = self.tabs.get(idx).and_then(|tab| tab.conn_id.as_ref());
+                let number = 1 + self.tabs[..idx.min(self.tabs.len())]
+                    .iter()
+                    .filter(|tab| tab.conn_id.as_ref() == conn_id && tab.title.trim().is_empty())
+                    .count();
+                format!("{provider}Query {number}")
             }
         }
     }

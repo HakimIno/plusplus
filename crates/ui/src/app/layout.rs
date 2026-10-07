@@ -882,10 +882,12 @@ impl DbGuiApp {
         // Give the tabs the same four-point seam as adjacent cards: two points from the
         // workspace inset and two from each card's own top margin.
         let gutter = style::WORKSPACE_GUTTER as f32;
-        let dock_rect = egui::Rect::from_min_max(
-            workspace_rect.min + egui::Vec2::splat(gutter),
-            workspace_rect.max - egui::Vec2::splat(gutter),
-        );
+        // macOS draws its one-point window rim over the content's outer edge, eating into the
+        // left and right gutters. Add it back so the side seams match the seams between docks.
+        let rim = if cfg!(target_os = "macos") { 1.0 } else { 0.0 };
+        let side = egui::vec2(gutter + rim, gutter);
+        let dock_rect =
+            egui::Rect::from_min_max(workspace_rect.min + side, workspace_rect.max - side);
         let mut workspace_root = ui_root.new_child(
             egui::UiBuilder::new()
                 .id_salt("workspace_docks")
