@@ -473,13 +473,20 @@ fn maybe_quote(name: &str, kind: Option<DbKind>) -> String {
 
 // --- popup widget -------------------------------------------------------------------
 
-/// Neutral outlines keep the icon rail quiet; the matched text owns the accent colour.
-fn icon_color(selected: bool, hovered: bool) -> egui::Color32 {
+/// Each kind has its own colour, as in VS Code, so a mixed list scans by kind at a glance:
+/// purple functions, blue columns, orange tables, neutral keywords. Light themes use deeper
+/// shades of the same hues to keep contrast on a pale background.
+fn icon_color(kind: SuggestionKind) -> egui::Color32 {
     let t = crate::theme::current();
-    if selected || hovered {
-        t.text
-    } else {
-        t.text_weak
+    let rgb = egui::Color32::from_rgb;
+    match (kind, t.is_dark) {
+        (SuggestionKind::Function, true) => rgb(0xb1, 0x80, 0xd7),
+        (SuggestionKind::Function, false) => rgb(0x65, 0x2d, 0x90),
+        (SuggestionKind::Column, true) => rgb(0x75, 0xbe, 0xff),
+        (SuggestionKind::Column, false) => rgb(0x00, 0x7a, 0xcc),
+        (SuggestionKind::Table, true) => rgb(0xee, 0x9d, 0x28),
+        (SuggestionKind::Table, false) => rgb(0xb3, 0x6b, 0x00),
+        (SuggestionKind::Keyword, _) => t.text_weak,
     }
 }
 
@@ -604,9 +611,9 @@ pub fn show_popup(
 
                                 let icon = match item.kind {
                                     SuggestionKind::Keyword => crate::icons::code(),
-                                    SuggestionKind::Function => crate::icons::function(),
-                                    SuggestionKind::Table => crate::icons::table(),
-                                    SuggestionKind::Column => crate::icons::column(),
+                                    SuggestionKind::Function => crate::icons::suggest_function(),
+                                    SuggestionKind::Table => crate::icons::suggest_table(),
+                                    SuggestionKind::Column => crate::icons::suggest_column(),
                                 };
                                 const ICON_SIZE: f32 = 16.0;
                                 let icon_rect = egui::Rect::from_center_size(
@@ -615,7 +622,7 @@ pub fn show_popup(
                                 );
                                 egui::Image::new(icon)
                                     .fit_to_exact_size(egui::Vec2::splat(ICON_SIZE))
-                                    .tint(icon_color(selected, resp.hovered()))
+                                    .tint(icon_color(item.kind))
                                     .paint_at(ui, icon_rect);
 
                                 // The label, with the run the typed prefix matched in the

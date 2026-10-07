@@ -41,6 +41,10 @@ icon_fns! {
     database_import => "../../assets/icons/outline/database-import.svg",
     check      => "../../assets/icons/outline/circle-check.svg",
     table      => "../../assets/icons/outline/table.svg",
+    // Autocomplete kind glyphs (plusplus-drawn, see assets/icons/suggest/README.md).
+    suggest_function => "../../assets/icons/suggest/function.svg",
+    suggest_table    => "../../assets/icons/suggest/table.svg",
+    suggest_column   => "../../assets/icons/suggest/column.svg",
     view       => "../../assets/icons/outline/eye.svg",
     function   => "../../assets/icons/outline/math-function.svg",
     copy       => "../../assets/icons/outline/copy.svg",
