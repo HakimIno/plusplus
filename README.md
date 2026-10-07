@@ -36,7 +36,7 @@ directly to your databases, keeps history and settings on your machine, and stor
 passwords in the operating system keychain.
 
 <p align="center">
-  <img src="website/public/screenshots/image4.png" alt="plusplus SQL editor with query results, schema sidebar, and a row details panel" width="100%" />
+  <img src="website/public/screenshots/image9.png" alt="plusplus SQL editor with query results, schema sidebar, and a row details panel" width="100%" />
   <br />
   <sub>Write queries, browse results, and inspect row values in the same workspace.</sub>
 </p>
