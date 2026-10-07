@@ -1021,6 +1021,9 @@ impl DbGuiApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(1600));
         }
 
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        self.schedule_update_check(&ctx);
+
         // Keep background progress and incoming query rows responsive.
         if self.busy != Busy::Idle || self.update.is_busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));

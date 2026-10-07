@@ -387,7 +387,7 @@ impl DbGuiApp {
         }
     }
 
-    fn update_title_bar_state(&self) -> Option<(String, &'static str, bool)> {
+    fn update_title_bar_state(&self) -> Option<(String, String, bool)> {
         match &self.update {
             crate::update::UpdatePhase::Downloading { offer, progress } => Some((
                 if *progress > 0.0 {
@@ -395,20 +395,20 @@ impl DbGuiApp {
                 } else {
                     format!("Updating v{}…", offer.version)
                 },
-                "Downloading the new version",
+                "Downloading the new version".to_string(),
                 true,
             )),
             crate::update::UpdatePhase::Ready { offer, .. } => Some((
                 format!("Install v{}", offer.version),
-                "Replace the installed app and relaunch",
+                "Replace the installed app and relaunch".to_string(),
                 false,
             )),
             crate::update::UpdatePhase::Available(offer)
                 if self.update_dismissed.as_deref() != Some(offer.version.as_str()) =>
             {
                 Some((
-                    format!("Update v{}", offer.version),
-                    "A new version is available",
+                    "Update".to_string(),
+                    format!("Version {} is available", offer.version),
                     false,
                 ))
             }
@@ -422,7 +422,7 @@ impl DbGuiApp {
             return;
         };
 
-        let resp = components::update_outline_button(ui, &label, busy).on_hover_text(tooltip);
+        let resp = components::update_outline_button(ui, &label, busy).on_hover_text(&tooltip);
         if resp.clicked() && !busy {
             actions.push(Action::OpenUpdateDialog);
         }

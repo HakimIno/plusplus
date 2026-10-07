@@ -2219,6 +2219,9 @@ pub struct DbGuiApp {
     update_dialog_open: bool,
     /// Version the user dismissed; hide the tab-bar badge until a newer one appears.
     update_dismissed: Option<String>,
+    /// When the last update check started. The check repeats while the app stays open, so a
+    /// release published after launch shows up without restarting.
+    last_update_check: Option<std::time::Instant>,
     /// Set when the updater should close the window after scheduling install.
     pending_quit: bool,
     /// Show the What's New dialog (true when the app version is newer than last seen).
@@ -2460,6 +2463,7 @@ impl DbGuiApp {
             update: crate::update::UpdatePhase::Idle,
             update_dialog_open: false,
             update_dismissed: None,
+            last_update_check: None,
             pending_quit: false,
             show_whats_new,
         }
@@ -2467,15 +2471,50 @@ impl DbGuiApp {
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn start_update_check(&mut self) {
-        if !matches!(self.update, crate::update::UpdatePhase::Idle) {
+        // A failed check (offline, rate-limited) is retried like an idle one.
+        if !matches!(
+            self.update,
+            crate::update::UpdatePhase::Idle | crate::update::UpdatePhase::Failed(_)
+        ) {
             return;
         }
+        self.last_update_check = Some(std::time::Instant::now());
         self.update = crate::update::UpdatePhase::Checking;
         let tx = self.tx.clone();
         self.rt.spawn(async move {
             let result = crate::update::check_for_update().await;
             let _ = tx.send(AppMessage::UpdateChecked { result });
         });
+    }
+
+    /// Re-check for updates once a day while the app stays open, so the title-bar
+    /// button appears without a relaunch. Waits for the next due time with a scheduled repaint
+    /// instead of polling, and never interrupts a download, an install, or the update dialog.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn schedule_update_check(&mut self, ctx: &egui::Context) {
+        const UPDATE_RECHECK: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+        // Headless UI tests drive `draw` constantly; they must never reach GitHub.
+        if cfg!(test)
+            || !crate::update::automatic_updates_supported()
+            || !self.update_check_enabled
+            || self.update_dialog_open
+            || !matches!(
+                self.update,
+                crate::update::UpdatePhase::Idle | crate::update::UpdatePhase::Failed(_)
+            )
+        {
+            return;
+        }
+        let wait = self
+            .last_update_check
+            .map_or(std::time::Duration::ZERO, |last| {
+                UPDATE_RECHECK.saturating_sub(last.elapsed())
+            });
+        if wait.is_zero() {
+            self.start_update_check();
+        } else {
+            ctx.request_repaint_after(wait);
+        }
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]

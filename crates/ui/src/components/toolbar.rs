@@ -162,12 +162,21 @@ fn solid_check(painter: &egui::Painter, center: egui::Pos2, radius: f32) {
 
 /// Outline accent button for the title-bar update affordance.
 pub(crate) fn update_outline_button(ui: &mut egui::Ui, label: &str, busy: bool) -> egui::Response {
-    let accent = palette::ACCENT();
-    let text = egui::RichText::new(label).color(accent).strong().size(11.0);
+    // A neutral, softly filled pill (a native "secondary" button) rather than an accent
+    // outline: noticeable in the title bar without competing with the window's own colour.
+    // Derived from the theme so it reads on light and dark title bars alike.
+    let base = palette::PANEL();
+    let ink = palette::TEXT();
+    let id = ui.next_auto_id();
+    let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered()) && !busy;
+    let fill = crate::style::mix(base, ink, if hovered { 0.34 } else { 0.27 });
+    let text = egui::RichText::new(label)
+        .color(crate::style::mix(base, ink, 0.9))
+        .size(12.0);
     let btn = egui::Button::new(text)
-        .fill(egui::Color32::TRANSPARENT)
-        .stroke(egui::Stroke::new(1.0_f32, accent))
-        .corner_radius(egui::CornerRadius::same(4))
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0_f32, crate::style::mix(base, ink, 0.42)))
+        .corner_radius(egui::CornerRadius::same(6))
         .min_size(egui::vec2(0.0, 22.0));
     let resp = ui.add_enabled(!busy, btn);
     ui.add_space(TOOLBAR_ICON_GAP);
