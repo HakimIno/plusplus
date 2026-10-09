@@ -92,6 +92,7 @@ icon_fns! {
     db_mariadb => "../../assets/icondb/mariadb.svg",
     db_sqlserver => "../../assets/icondb/sqlserver.svg",
     db_sqlite => "../../assets/icondb/sqlite.svg",
+    db_duckdb => "../../assets/icondb/duckdb.svg",
     db_cassandra => "../../assets/icondb/cassandra.svg",
     db_scylladb => "../../assets/icondb/scylladb.svg",
 }
@@ -104,7 +105,7 @@ pub fn db_kind_icon(kind: DbKind) -> ImageSource<'static> {
         DbKind::MariaDb => db_mariadb(),
         DbKind::SqlServer => db_sqlserver(),
         DbKind::Sqlite => db_sqlite(),
-        DbKind::DuckDb => database(),
+        DbKind::DuckDb => db_duckdb(),
         DbKind::Cassandra => db_cassandra(),
         DbKind::ScyllaDb => db_scylladb(),
     }
@@ -165,7 +166,7 @@ mod tests {
             let theme = crate::theme::ThemeRegistry::load().theme_of(theme_key);
             let mut setup = false;
             let mut harness = egui_kittest::Harness::builder()
-                .with_size(egui::vec2(960.0, 560.0))
+                .with_size(egui::vec2(960.0, 680.0))
                 .with_pixels_per_point(2.0)
                 .build_ui(move |ui| {
                     if !setup {

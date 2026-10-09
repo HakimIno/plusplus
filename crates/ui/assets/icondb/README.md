@@ -12,8 +12,9 @@ These are adaptations of the provider SVGs previously bundled in this directory:
   background, gradient, and wordmark, cropped to the feather.
 - `cassandra.svg`: `simple-icons--apachecassandra.svg`.
 - `scylladb.svg`: `simple-icons--scylladb.svg`.
+- `duckdb.svg`: [Simple Icons DuckDB mark](https://github.com/simple-icons/simple-icons/blob/develop/icons/duckdb.svg),
+  with its original geometry and a white fill for theme tinting.
 
 Visible shapes use white so egui can tint them with the theme's text colour.
 Transparent backgrounds work on selected rows and on either theme. Each provider
-uses one SVG instead of separate light/dark variants. DuckDB uses the shared
-Tabler database icon.
+uses one SVG instead of separate light/dark variants.
