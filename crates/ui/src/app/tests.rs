@@ -11263,3 +11263,73 @@ fn grid_stays_editable_while_more_rows_load() {
     app.tab_mut().stream.as_mut().unwrap().append = false;
     assert!(!app.grid_editable(app.active_query_tab));
 }
+
+#[test]
+fn connection_url_opens_a_prefilled_draft_without_connecting() {
+    let mut app = DbGuiApp::construct();
+    app.connections.clear();
+    app.show_welcome = false;
+    app.apply_action(Action::OpenConnectionUrl(
+        "postgres://alice:secret@db.example.com:6543/shop".into(),
+    ));
+    let editor = app
+        .editor
+        .as_ref()
+        .expect("the link opens the connection form");
+    assert!(editor.is_new);
+    assert!(!editor.selecting_provider);
+    assert_eq!(editor.config.kind, DbKind::Postgres);
+    assert_eq!(editor.config.host, "db.example.com");
+    assert_eq!(editor.config.port, 6543);
+    assert_eq!(editor.config.database, "shop");
+    assert_eq!(editor.password, "secret");
+    // A link can come from any page: it never saves or connects by itself.
+    assert!(app.connections.is_empty());
+    assert!(app.connection_jobs.is_empty());
+}
+
+#[test]
+fn connection_url_reuses_a_matching_saved_connection() {
+    let mut app = DbGuiApp::construct();
+    app.connections.clear();
+    app.show_welcome = false;
+    let mut saved = ConnectionConfig::new(DbKind::Postgres);
+    saved.host = "DB.example.com".into();
+    saved.port = 5432;
+    saved.user = "alice".into();
+    saved.database = "shop".into();
+    app.connections.push(saved);
+    app.apply_action(Action::OpenConnectionUrl(
+        "postgresql://alice@db.example.com/shop".into(),
+    ));
+    assert!(
+        app.editor.is_none(),
+        "a saved match connects instead of drafting a duplicate"
+    );
+    assert_eq!(app.connections.len(), 1);
+}
+
+#[test]
+fn bad_connection_url_reports_an_error() {
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.apply_action(Action::OpenConnectionUrl("postgres://host:99999/db".into()));
+    assert!(app.editor.is_none());
+    assert!(app.error.as_deref().is_some_and(|e| e.contains("port")));
+}
+
+#[test]
+fn pasting_a_url_into_host_fills_the_draft() {
+    let mut app = DbGuiApp::construct();
+    app.apply_action(Action::NewConnection);
+    let editor = app.editor.as_mut().unwrap();
+    let parsed = dbcore::parse_connection_url("mysql://root:pw@127.0.0.1:3307/app").unwrap();
+    editor.apply_connection_url(parsed);
+    assert_eq!(editor.config.kind, DbKind::MySql);
+    assert_eq!(editor.config.host, "127.0.0.1");
+    assert_eq!(editor.config.port, 3307);
+    assert_eq!(editor.config.user, "root");
+    assert_eq!(editor.config.database, "app");
+    assert_eq!(editor.password, "pw");
+    assert_eq!(editor.config.name, "app @ 127.0.0.1");
+}

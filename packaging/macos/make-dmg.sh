@@ -84,6 +84,24 @@ cat > "${APP}/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key>     <string>APPL</string>
   <key>LSMinimumSystemVersion</key>  <string>10.15</string>
   <key>NSHighResolutionCapable</key> <true/>
+  <!-- Database links (postgres://, mysql://, …) clicked in a browser open the app.
+       Keep in sync with dbcore::CONNECTION_URL_SCHEMES. -->
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>     <string>Database connection</string>
+      <key>CFBundleTypeRole</key>    <string>Viewer</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>postgres</string>
+        <string>postgresql</string>
+        <string>mysql</string>
+        <string>mariadb</string>
+        <string>sqlserver</string>
+        <string>mssql</string>
+      </array>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST

@@ -35,6 +35,8 @@ mod query;
 mod tabs;
 mod transfer;
 mod unsaved;
+mod url_inbox;
+pub use url_inbox::open_connection_url;
 mod workspace;
 
 use crate::edit::{EditSource, Edits};
@@ -1598,6 +1600,8 @@ enum Action {
     },
     /// Bind the active tab to a saved connection and (re)connect it.
     Connect(usize),
+    /// Open a `postgres://…`-style link as a connection draft (or its saved match).
+    OpenConnectionUrl(String),
     /// Bind the active tab to an already-live connection (no reconnect).
     BindConnection(usize),
     /// Drop the live connection bound to the active tab.

@@ -45,14 +45,15 @@ pub use model::{
     build_create_trigger_sql, build_create_view_sql, build_delete_sql, build_drop_column_sql,
     build_drop_fk_sql, build_drop_index_sql, build_drop_routine_sql, build_drop_table_sql,
     build_drop_trigger_sql, build_drop_view_sql, build_insert_sql, build_rename_column_sql,
-    build_select_where_sql, build_truncate_table_sql, build_update_sql, parse_page_window,
-    parse_trigger_header, routine_supports_replace, select_body_after_as, simple_select_target,
-    view_supports_replace, with_keyset_page, with_page_window, with_result_sort, with_where_predicate,
-    ColumnDef, ColumnInfo, ColumnMeta, ConnectionColor, ConnectionConfig, ConnectionIcon, DbKind, FkAction,
-    ForeignKeyDef, ForeignKeyInfo, IndexDef, IndexInfo, PageWindow, ParamMode, QueryResult,
-    QueryStats, RoutineBuild, RoutineInfo, RoutineKind, RoutineParam, SafetyProfile, SchemaTree,
-    SslMode, TableInfo, TriggerBuild, TriggerEvent, TriggerInfo, TriggerLevel, TriggerTiming,
-    ViewInfo,
+    build_select_where_sql, build_truncate_table_sql, build_update_sql, is_connection_url,
+    parse_connection_url, parse_page_window, parse_trigger_header, routine_supports_replace,
+    select_body_after_as, simple_select_target, view_supports_replace, with_keyset_page,
+    with_page_window, with_result_sort, with_where_predicate, ColumnDef, ColumnInfo, ColumnMeta,
+    ConnectionColor, ConnectionConfig, ConnectionIcon, ConnectionUrl, ConnectionUrlError, DbKind,
+    FkAction, ForeignKeyDef, ForeignKeyInfo, IndexDef, IndexInfo, PageWindow, ParamMode,
+    QueryResult, QueryStats, RoutineBuild, RoutineInfo, RoutineKind, RoutineParam, SafetyProfile,
+    SchemaTree, SslMode, TableInfo, TriggerBuild, TriggerEvent, TriggerInfo, TriggerLevel,
+    TriggerTiming, ViewInfo, CONNECTION_URL_SCHEMES,
 };
 pub use parameters::{query_parameter_names, resolve_query_parameters, ParameterError};
 pub use semantic::{check_semantics, SemanticIssue};

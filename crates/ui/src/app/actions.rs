@@ -115,6 +115,7 @@ impl DbGuiApp {
                 }
             }
             Action::Connect(i) => self.bind_connection(i, true),
+            Action::OpenConnectionUrl(url) => self.open_connection_url(&url),
             Action::BindConnection(i) => self.bind_connection(i, false),
             Action::Disconnect => {
                 if let Some(id) = self.tab().conn_id.clone() {

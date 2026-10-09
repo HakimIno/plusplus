@@ -2,7 +2,9 @@
 Type=Application
 Name=plusplus
 Comment=Native database GUI
-Exec=plusplus
+Exec=plusplus %u
 Icon=plusplus
 Terminal=false
 Categories=Development;Database;
+# Database links (postgres://, mysql://, …). Keep in sync with dbcore::CONNECTION_URL_SCHEMES.
+MimeType=x-scheme-handler/postgres;x-scheme-handler/postgresql;x-scheme-handler/mysql;x-scheme-handler/mariadb;x-scheme-handler/sqlserver;x-scheme-handler/mssql;

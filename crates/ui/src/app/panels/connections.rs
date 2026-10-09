@@ -664,7 +664,7 @@ impl DbGuiApp {
                                 if editor.config.kind.is_server() {
                                     connection_form_label(ui, "Host");
                                     ui.horizontal(|ui| {
-                                        form_changed |= status_text_input(
+                                        let host_changed = status_text_input(
                                             ui,
                                             &mut editor.config.host,
                                             "",
@@ -672,6 +672,14 @@ impl DbGuiApp {
                                             field_test_status(&test_state, ConnField::Host),
                                         )
                                         .changed();
+                                        if host_changed {
+                                            if let Ok(parsed) =
+                                                dbcore::parse_connection_url(&editor.config.host)
+                                            {
+                                                editor.apply_connection_url(parsed);
+                                            }
+                                        }
+                                        form_changed |= host_changed;
                                         ui.add_space(8.0);
                                         ui.label("Port");
                                         form_changed |= with_field_status(

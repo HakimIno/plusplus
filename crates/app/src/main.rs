@@ -6,6 +6,8 @@
 
 #[cfg(target_os = "macos")]
 mod menu;
+#[cfg(target_os = "macos")]
+mod url_handler;
 
 /// GNU Unifont covers the Unicode Basic Multilingual Plane and is the last-resort fallback
 /// for multilingual database values that the primary UI, code, and Thai fonts do not contain.
@@ -98,6 +100,16 @@ fn install_crash_logger() {
 
 fn main() -> eframe::Result<()> {
     install_crash_logger();
+    // Windows and Linux launch the app with a clicked database link as an argument; a
+    // `postgres://…` argument also works from a terminal on every platform.
+    for url in std::env::args()
+        .skip(1)
+        .filter(|arg| dbcore::is_connection_url(arg))
+    {
+        ui::open_connection_url(url);
+    }
+    #[cfg(target_os = "macos")]
+    url_handler::install();
     let icon = eframe::icon_data::from_png_bytes(APP_ICON).expect("valid app icon PNG");
 
     let mut viewport = egui::ViewportBuilder::default()

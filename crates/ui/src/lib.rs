@@ -18,7 +18,7 @@ use editor::{autocomplete, editor_tools, fold, ghost, highlight, hover, query_er
 use platform::{pet, title_bar, update};
 use results::{chart, edit, filter, format, grid, value_viewer};
 
-pub use app::DbGuiApp;
+pub use app::{open_connection_url, DbGuiApp};
 #[cfg(target_os = "macos")]
 pub use app::NativeMenuCommand;
 

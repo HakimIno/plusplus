@@ -113,12 +113,14 @@ impl DbKind {
 
 mod catalog;
 mod connection;
+mod connection_url;
 mod ddl;
 mod result;
 mod sql;
 
 pub use catalog::*;
 pub use connection::*;
+pub use connection_url::*;
 pub use ddl::*;
 pub use result::*;
 pub use sql::*;

@@ -327,6 +327,7 @@ impl DbGuiApp {
     /// driven headlessly in tests (no `eframe::Frame` needed).
     pub(super) fn draw(&mut self, ui_root: &mut egui::Ui, frame: Option<&eframe::Frame>) {
         let ctx = ui_root.ctx().clone();
+        self.drain_connection_urls(&ctx);
         self.poll_messages(&ctx);
         self.prune_query_jobs();
         self.refresh_query_busy();
