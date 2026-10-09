@@ -3,6 +3,15 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
+## 0.5.4 — 2026-10-09
+
+- Open database links: clicking a `postgres://`, `postgresql://`, `mysql://`, `mariadb://`, `sqlserver://` or `mssql://` link in a browser opens plusplus with a prefilled New Connection form. Nothing connects or is saved until you confirm, and a link to a connection you already saved opens that connection. Pasting such a URL into the Host field fills the form too. On Windows the installer offers this as an option.
+- Fixed double-click editing on PostgreSQL and SQL Server: cells stay editable while the grid fetches more rows as you scroll, instead of ignoring the click until the fetch finished.
+- Resize seams fill the whole gap between panels while hovered or dragged, like VS Code, on every draggable edge including split columns and the seam above the Data bar. The seam's dots no longer show through dialogs.
+- The Production, Read-only and SSH tunnel checkboxes in the connection form use the primary colour instead of a bare tick.
+- DuckDB connections get their own icon.
+- Lower memory use: after 20 idle seconds freed memory goes back to the operating system, and the default result memory budget is 256 MB instead of 512 MB.
+
 ## 0.5.3 — 2026-10-07
 
 - Follow a foreign key, then go back: the ‹ button on the Data/Structure bar, Cmd/Ctrl+[, or the mouse back button returns to the tab you came from, or re-opens the table a reused preview tab showed before.
