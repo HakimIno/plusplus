@@ -654,7 +654,7 @@ impl DbGuiApp {
                 });
             return;
         }
-        let editable = self.tabs[idx].edits.editable() && !self.is_tab_querying(self.tabs[idx].id);
+        let editable = self.grid_editable(idx);
         // Per-column FK labels for the grid's link/"Follow →" affordance (owned, so it doesn't
         // hold a borrow across the mutable tab access below).
         let fk_cols = self.fk_column_labels(idx);

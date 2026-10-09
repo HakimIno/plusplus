@@ -17,6 +17,18 @@ impl DbGuiApp {
         self.query_jobs.get(&tab_id).is_some_and(|job| job.running)
     }
 
+    /// Whether the result grid accepts edits. A running replacement would swap the rows out
+    /// from under an open editor, but a load-more continuation only appends rows below the
+    /// loaded ones. On a networked database each continuation is a round trip, and blocking
+    /// edits for it made double-click silently do nothing while the grid fetched more rows.
+    pub(super) fn grid_editable(&self, idx: usize) -> bool {
+        self.tabs.get(idx).is_some_and(|tab| {
+            tab.edits.editable()
+                && (!self.is_tab_querying(tab.id)
+                    || tab.stream.as_ref().is_some_and(|stream| stream.append))
+        })
+    }
+
     pub(super) fn query_is_current(&self, tab_id: u64, seq: u64) -> bool {
         self.tabs
             .iter()

@@ -11240,3 +11240,26 @@ fn snapshot_activity_monitor_scrolled_sideways() {
     harness.run_steps(6);
     harness.snapshot("activity_monitor_scrolled");
 }
+
+#[test]
+fn grid_stays_editable_while_more_rows_load() {
+    let mut app = app_with_staged_edit();
+    let tab_id = app.tab().id;
+    assert!(app.grid_editable(app.active_query_tab));
+
+    // Scrolling near the tail fetches the next chunk. Those rows only append below the
+    // loaded ones, so a double-click on a networked database must still open the editor.
+    let (seq, _) = app.begin_query_job(tab_id);
+    app.tab_mut().stream = Some(QueryStreamUi {
+        seq,
+        append: true,
+        columns: Vec::new(),
+        pending_rows: Vec::new(),
+        received_rows: 0,
+    });
+    assert!(app.grid_editable(app.active_query_tab));
+
+    // A replacement run swaps the rows out, so editing waits for it.
+    app.tab_mut().stream.as_mut().unwrap().append = false;
+    assert!(!app.grid_editable(app.active_query_tab));
+}
