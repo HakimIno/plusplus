@@ -1030,6 +1030,7 @@ impl DbGuiApp {
         if self.busy != Busy::Idle || self.update.is_busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
+        self.trim_memory_when_idle(&ctx);
     }
 }
 

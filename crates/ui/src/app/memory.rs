@@ -64,7 +64,47 @@ impl QueryTab {
     }
 }
 
+/// How long the app must sit untouched before freed heap pages are handed back to the OS.
+const IDLE_TRIM_AFTER: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Return freed-but-retained heap pages to the OS. macOS's malloc keeps them resident after
+/// a big result is dropped, so Activity Monitor would otherwise show the peak forever.
+fn release_free_memory() {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+        }
+        // SAFETY: a null zone means "all zones"; goal 0 means "as much as possible".
+        unsafe {
+            malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+        }
+    }
+}
+
 impl DbGuiApp {
+    /// Once the user has stopped interacting and no query runs, trim the allocator a single
+    /// time so memory falls back after heavy use instead of sitting at its peak.
+    pub(super) fn trim_memory_when_idle(&mut self, ctx: &egui::Context) {
+        let active = self.busy != Busy::Idle
+            || ctx.input(|i| !i.raw.events.is_empty() || i.pointer.delta() != egui::Vec2::ZERO);
+        if active {
+            self.last_active = std::time::Instant::now();
+            self.idle_trimmed = false;
+            return;
+        }
+        if self.idle_trimmed {
+            return;
+        }
+        let idle = self.last_active.elapsed();
+        if idle < IDLE_TRIM_AFTER {
+            ctx.request_repaint_after(IDLE_TRIM_AFTER - idle);
+            return;
+        }
+        self.idle_trimmed = true;
+        release_free_memory();
+    }
+
     pub(super) fn touch_result(&mut self, idx: usize) {
         self.result_access_clock = self.result_access_clock.saturating_add(1);
         if let Some(tab) = self.tabs.get_mut(idx) {

@@ -47,7 +47,7 @@ use crate::theme::ThemeRegistry;
 /// hundreds of MB, far below where the grid stops being useful anyway.
 const MAX_FETCH_ROWS: usize = 100_000;
 
-const DEFAULT_RESULT_MEMORY_BUDGET_MB: u32 = 512;
+const DEFAULT_RESULT_MEMORY_BUDGET_MB: u32 = 256;
 const MIN_RESULT_MEMORY_BUDGET_MB: u32 = 128;
 const MAX_RESULT_MEMORY_BUDGET_MB: u32 = 4096;
 
@@ -2062,6 +2062,10 @@ pub struct DbGuiApp {
     result_memory_budget: usize,
     /// Monotonic clock for least-recently-used result eviction.
     result_access_clock: u64,
+    /// Last frame with user input or a running query; drives the idle memory trim.
+    last_active: std::time::Instant,
+    /// Whether the allocator was already trimmed since `last_active`.
+    idle_trimmed: bool,
 
     // --- workspace persistence ---
     /// Set when tabs/SQL/bindings change; flushed to disk on a throttle (see `draw`).
@@ -2389,6 +2393,8 @@ impl DbGuiApp {
             next_tab_id: 1,
             result_memory_budget,
             result_access_clock: 0,
+            last_active: std::time::Instant::now(),
+            idle_trimmed: false,
             workspace_dirty: false,
             last_workspace_save: std::time::Instant::now(),
             editor: None,
