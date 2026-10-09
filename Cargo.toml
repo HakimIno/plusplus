@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.4"
+version = "0.5.5"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 # Must stay truthful: the tree does not build on anything older. `1.80` was stale — the UI

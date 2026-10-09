@@ -3,6 +3,21 @@
 Notable user-visible changes are documented here. The project follows semantic versioning
 while pre-1.0 releases may still change workflows and configuration formats.
 
+## 0.5.5 — 2026-10-09
+
+- Double-click to edit a grid cell works reliably: the double-click window follows the system setting (0.5s by default) instead of egui's stricter 0.3s, which made editing fail now and then — mostly on wide SQL Server results.
+- Faster typing in the SQL editor on large databases: autocomplete matches without allocating, skips repeated column names, and no longer recomputes on every repaint.
+- Typing a closing `)`, `]`, `}`, `'` or `"` steps over the one the editor inserted instead of doubling it.
+- Editor options button (left of the query toolbar): font size, wrap, invisible characters, highlight the current query, auto-close brackets, and autocomplete sources, keyword case and schema prefix.
+- Autocomplete finds names by word start, substring and fuzzy match, suggests views, functions and procedures (`EXEC`/`CALL`), and previews the highlighted suggestion inline.
+- Editor options, Beautify and Run dropdowns share one look; section headings removed.
+- Slow queries show a running clock and a Cancel button in the status bar after 3 seconds; the toolbar no longer flashes a Cancel button on every run.
+- Copy a single cell: Cmd/Ctrl+C on one row copies the focused cell, and the cell menu has Copy.
+- The fill handle appears on both corners of the selected cell, so you can drag a fill upward too.
+- Charts: more customization and PNG export.
+- The connection colour shows as dots in the title bar; the connection form uses its full width.
+- The caret in an empty editor matches the editor font size.
+
 ## 0.5.4 — 2026-10-09
 
 - Open database links: clicking a `postgres://`, `postgresql://`, `mysql://`, `mariadb://`, `sqlserver://` or `mssql://` link in a browser opens plusplus with a prefilled New Connection form. Nothing connects or is saved until you confirm, and a link to a connection you already saved opens that connection. Pasting such a URL into the Host field fills the form too. On Windows the installer offers this as an option.
