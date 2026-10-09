@@ -59,6 +59,23 @@ fn status_text_input(
     })
 }
 
+/// A form checkbox: the app's accent box with a body-sized label that also toggles it. The
+/// horizontal wrapper keeps both in one Grid cell.
+fn connection_form_checkbox(ui: &mut egui::Ui, value: &mut bool, label: &str, hint: &str) -> bool {
+    ui.horizontal(|ui| {
+        let mut changed = components::accent_checkbox(ui, true, value, None)
+            .on_hover_text(hint)
+            .changed();
+        let text = ui.add(egui::Label::new(label).sense(egui::Sense::click()));
+        if text.on_hover_text(hint).clicked() {
+            *value = !*value;
+            changed = true;
+        }
+        changed
+    })
+    .inner
+}
+
 fn connection_form_label(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(96.0, style::CONTROL_H), egui::Sense::hover());
@@ -625,27 +642,21 @@ impl DbGuiApp {
                                     if editor.config.safety_profile == dbcore::SafetyProfile::Custom
                                     {
                                         connection_form_label(ui, "Production");
-                                        form_changed |= ui
-                                            .checkbox(
-                                                &mut editor.config.production,
-                                                "Confirm destructive queries",
-                                            )
-                                            .on_hover_text(
-                                                "Ask before UPDATE, DELETE, DROP and similar",
-                                            )
-                                            .changed();
+                                        form_changed |= connection_form_checkbox(
+                                            ui,
+                                            &mut editor.config.production,
+                                            "Confirm destructive queries",
+                                            "Ask before UPDATE, DELETE, DROP and similar",
+                                        );
                                         ui.end_row();
 
                                         connection_form_label(ui, "Read-only");
-                                        form_changed |= ui
-                                            .checkbox(
-                                                &mut editor.config.read_only,
-                                                "Block all writes",
-                                            )
-                                            .on_hover_text(
-                                                "Only reads are allowed. Applies on next connect.",
-                                            )
-                                            .changed();
+                                        form_changed |= connection_form_checkbox(
+                                            ui,
+                                            &mut editor.config.read_only,
+                                            "Block all writes",
+                                            "Only reads are allowed. Applies on next connect.",
+                                        );
                                         ui.end_row();
                                     }
                                 }
@@ -839,16 +850,13 @@ impl DbGuiApp {
                                         }
 
                                         connection_form_label(ui, "SSH tunnel");
-                                        form_changed |= ui
-                                            .checkbox(
-                                                &mut editor.config.ssh_enabled,
-                                                "Connect through a bastion host",
-                                            )
-                                            .on_hover_text(
-                                                "Host and port above are then resolved from the \
+                                        form_changed |= connection_form_checkbox(
+                                            ui,
+                                            &mut editor.config.ssh_enabled,
+                                            "Connect through a bastion host",
+                                            "Host and port above are then resolved from the \
                                      bastion, not from this machine",
-                                            )
-                                            .changed();
+                                        );
                                         ui.end_row();
 
                                         if editor.config.ssh_enabled {
