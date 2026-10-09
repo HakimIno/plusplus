@@ -95,10 +95,14 @@ pub fn center_rect(bar: Rect, left_used: Rect, right_used: Rect) -> Rect {
 /// Drag/double-click only here (not on icons).
 const BREADCRUMB_HEIGHT: f32 = 22.0;
 
-pub fn breadcrumb(ui: &mut Ui, text: &str, fill: Option<Color32>) -> egui::Response {
+pub fn breadcrumb(ui: &mut Ui, text: &str, marker: Option<Color32>) -> egui::Response {
     let pill_w = ui.available_width().max(80.0);
     let font = egui::FontId::proportional(10.0);
-    let text_color = palette::TEXT_WEAK();
+    let text_color = if marker.is_some() {
+        palette::TEXT()
+    } else {
+        palette::TEXT_WEAK()
+    };
     let radius = CornerRadius::same(6);
 
     let (rect, response) = ui.allocate_exact_size(
@@ -107,10 +111,13 @@ pub fn breadcrumb(ui: &mut Ui, text: &str, fill: Option<Color32>) -> egui::Respo
     );
 
     if ui.is_rect_visible(rect) {
-        // Borderless and flat: transparent at rest so it doesn't read as a heavy bar; only a
-        // soft tint when a connection marker colour is set. Text is centred.
-        if let Some(fill) = fill {
-            ui.painter().rect_filled(rect, radius, fill);
+        if let Some(marker) = marker {
+            let label_width = ui
+                .painter()
+                .layout_no_wrap(text.to_owned(), font.clone(), text_color)
+                .size()
+                .x;
+            paint_connection_dots(ui.painter(), rect, radius, marker, label_width);
         }
 
         let text_rect = rect.shrink2(egui::vec2(10.0, 0.0));
@@ -130,6 +137,46 @@ pub fn breadcrumb(ui: &mut Ui, text: &str, fill: Option<Color32>) -> egui::Respo
 
     handle_chrome_response(ui, &response);
     response.on_hover_text(text)
+}
+
+/// Balanced halftone accents frame a quiet central label without a visible border.
+/// Static geometry keeps an idle title bar from requesting continuous repaints.
+fn paint_connection_dots(
+    painter: &egui::Painter,
+    rect: Rect,
+    radius: CornerRadius,
+    marker: Color32,
+    label_width: f32,
+) {
+    painter.rect_filled(
+        rect,
+        radius,
+        crate::style::mix(palette::SURFACE(), marker, 0.08),
+    );
+    let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
+    const SPACING: f32 = 7.0;
+    let columns = ((rect.width() - 16.0) / SPACING).floor().max(0.0) as usize;
+    let start_x = rect.center().x - columns as f32 * SPACING * 0.5;
+    // Lift dark connection colours so the small dots stay visible on the surface.
+    let dot_color = crate::style::mix(marker, Color32::WHITE, 0.22);
+    let quiet_half_width = (label_width * 0.5 + 18.0).min(rect.width() * 0.5);
+    for column in 0..=columns {
+        let x = start_x + column as f32 * SPACING;
+        let label_fade = ((x - rect.center().x).abs() - quiet_half_width) / 56.0;
+        let edge_fade = (x - rect.left()).min(rect.right() - x) / 28.0;
+        let strength = label_fade.clamp(0.0, 1.0) * edge_fade.clamp(0.0, 1.0);
+        if strength <= 0.01 {
+            continue;
+        }
+        for row in -1..=1 {
+            let alpha = (strength * if row == 0 { 190.0 } else { 140.0 }) as u8;
+            painter.circle_filled(
+                egui::pos2(x, rect.center().y + row as f32 * 6.0),
+                1.2,
+                Color32::from_rgba_unmultiplied(dot_color.r(), dot_color.g(), dot_color.b(), alpha),
+            );
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]

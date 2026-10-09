@@ -119,8 +119,7 @@ impl DbGuiApp {
         }
     }
 
-    /// Modal showing the SQL that will be executed, with Commit and Cancel buttons.
-    /// Opened by Cmd+S; the user reviews the statements before anything is sent to the DB.
+    /// Compact review modal with an optional SQL preview and Commit/Cancel buttons.
     pub(in crate::app) fn commit_preview_dialog(
         &mut self,
         ctx: &egui::Context,
@@ -138,13 +137,18 @@ impl DbGuiApp {
         let sequential = plan.is_sequential();
 
         let title = review_title(stmts.len());
-        let response = components::dialog_modal(ctx, "commit_preview", &title, 640.0, |ui| {
-                review_sql(
-                    ui,
-                    "commit_preview_scroll",
-                    320.0,
-                    stmts.iter().map(String::as_str),
-                );
+        let response = components::dialog_modal(ctx, "commit_preview", &title, 440.0, |ui| {
+                egui::CollapsingHeader::new("SQL preview")
+                    .id_salt("commit_sql_preview")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        review_sql(
+                            ui,
+                            "commit_preview_scroll",
+                            280.0,
+                            stmts.iter().map(String::as_str),
+                        );
+                    });
 
                 components::dialog_footer(ui, |ui| {
                     let can_act = self.busy == Busy::Idle;

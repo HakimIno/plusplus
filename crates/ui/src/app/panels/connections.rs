@@ -99,23 +99,6 @@ fn egui_to_connection_color(color: egui::Color32) -> dbcore::ConnectionColor {
     dbcore::ConnectionColor::new(color.r(), color.g(), color.b())
 }
 
-pub(super) fn mix_color(
-    base: egui::Color32,
-    accent: egui::Color32,
-    accent_weight: f32,
-) -> egui::Color32 {
-    let accent_weight = accent_weight.clamp(0.0, 1.0);
-    let base_weight = 1.0 - accent_weight;
-    let mix = |base: u8, accent: u8| {
-        (base as f32 * base_weight + accent as f32 * accent_weight).round() as u8
-    };
-    egui::Color32::from_rgb(
-        mix(base.r(), accent.r()),
-        mix(base.g(), accent.g()),
-        mix(base.b(), accent.b()),
-    )
-}
-
 impl DbGuiApp {
     pub(in crate::app) fn connection_tabs(
         &mut self,
@@ -473,7 +456,7 @@ impl DbGuiApp {
                 let mut form_changed = false;
 
                 if editor.selecting_provider {
-                    ui.set_min_width(536.0);
+                    ui.set_width(536.0);
 
                     ui.add_space(10.0);
 
@@ -511,7 +494,9 @@ impl DbGuiApp {
                     return;
                 }
 
-                ui.set_min_width(600.0);
+                ui.set_width(600.0);
+                // Both form cards share the dialog width, including label/gap/margins.
+                let field_width = ui.available_width() - 96.0 - 12.0 - 24.0;
                 ui.horizontal(|ui| {
                     ui.add(
                         egui::Image::new(icons::db_kind_icon(editor.config.kind))
@@ -546,6 +531,7 @@ impl DbGuiApp {
                     .corner_radius(egui::CornerRadius::same(8))
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
                         egui::Grid::new("conn_general")
                             .num_columns(2)
                             .spacing([12.0, 8.0])
@@ -555,7 +541,7 @@ impl DbGuiApp {
                                     ui,
                                     &mut editor.config.name,
                                     "",
-                                    440.0,
+                                    field_width,
                                     field_test_status(&test_state, ConnField::Name),
                                 )
                                 .changed();
@@ -575,11 +561,12 @@ impl DbGuiApp {
                     .corner_radius(egui::CornerRadius::same(8))
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
                         egui::Grid::new("conn_form")
                             .num_columns(2)
                             .spacing([12.0, 8.0])
                             .show(ui, |ui| {
-                                let field_w = 440.0;
+                                let field_w = field_width;
 
                                 if editor.show_advanced {
                                     connection_form_label(ui, "Title bar color");
@@ -668,7 +655,7 @@ impl DbGuiApp {
                                             ui,
                                             &mut editor.config.host,
                                             "",
-                                            292.0,
+                                            field_w - 148.0,
                                             field_test_status(&test_state, ConnField::Host),
                                         )
                                         .changed();
@@ -760,25 +747,25 @@ impl DbGuiApp {
                                         form_changed |= editor.config.ssl_mode != previous_ssl;
                                         ui.end_row();
 
-                                        // Flag the modes that don't verify the server's identity, so the
-                                        // weaker choices read as a deliberate trade-off rather than a default.
                                         if let Some(warning) =
                                             editor.config.ssl_mode.security_warning()
                                         {
                                             connection_form_label(ui, "");
-                                            ui.horizontal_wrapped(|ui| {
-                                                icons::show_colored(
-                                                    ui,
-                                                    icons::warning(),
-                                                    12.0,
-                                                    palette::WARNING(),
-                                                );
-                                                ui.label(
-                                                    egui::RichText::new(warning)
+                                            let summary = match editor.config.ssl_mode {
+                                                dbcore::SslMode::Disable => "Connection is not encrypted.",
+                                                dbcore::SslMode::Prefer => "Encryption is optional. Use Verify Full for production.",
+                                                _ => "Certificate not verified. Use Verify Full for production.",
+                                            };
+                                            ui.add_sized(
+                                                egui::vec2(field_w, 0.0),
+                                                egui::Label::new(
+                                                    egui::RichText::new(summary)
                                                         .size(11.0)
                                                         .color(palette::WARNING()),
-                                                );
-                                            });
+                                                )
+                                                .wrap(),
+                                            )
+                                            .on_hover_text(warning);
                                             ui.end_row();
                                         }
 
@@ -789,7 +776,7 @@ impl DbGuiApp {
                                                     ui,
                                                     &mut editor.config.ssl_ca_cert,
                                                     "System trust store",
-                                                    field_w,
+                                                    field_w - 90.0,
                                                     None,
                                                 )
                                                 .changed();
@@ -816,7 +803,7 @@ impl DbGuiApp {
                                                     ui,
                                                     &mut editor.config.ssl_client_cert,
                                                     "None",
-                                                    field_w,
+                                                    field_w - 90.0,
                                                     None,
                                                 )
                                                 .changed();
@@ -839,7 +826,7 @@ impl DbGuiApp {
                                                     ui,
                                                     &mut editor.config.ssl_client_key,
                                                     "None",
-                                                    field_w,
+                                                    field_w - 90.0,
                                                     None,
                                                 )
                                                 .changed();
@@ -907,7 +894,7 @@ impl DbGuiApp {
                                                     ui,
                                                     &mut editor.config.ssh_key_path,
                                                     "None — use password",
-                                                    field_w,
+                                                    field_w - 90.0,
                                                     None,
                                                 )
                                                 .changed();
@@ -961,7 +948,7 @@ impl DbGuiApp {
                                             ui,
                                             path,
                                             hint,
-                                            350.0,
+                                            field_w - 90.0,
                                             field_test_status(&test_state, ConnField::SqlitePath),
                                         )
                                         .changed();

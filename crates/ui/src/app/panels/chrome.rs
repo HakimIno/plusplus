@@ -1,7 +1,6 @@
 //! Chrome rendering and interaction.
 
 use super::connections::connection_color_to_egui;
-use super::connections::mix_color;
 use crate::app::{Action, DbGuiApp};
 use crate::components;
 use crate::icons;
@@ -19,7 +18,6 @@ impl DbGuiApp {
         let chrome_inset = title_bar::traffic_lights_inset(root.ctx(), frame);
         let bar_height = title_bar::height(chrome_inset);
         let marker_color = self.active_title_bar_color().map(connection_color_to_egui);
-        let breadcrumb_fill = marker_color.map(|color| mix_color(palette::SURFACE(), color, 0.34));
 
         egui::Panel::top("top_bar")
             .resizable(false)
@@ -114,7 +112,7 @@ impl DbGuiApp {
                     center,
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
-                        title_bar::breadcrumb(ui, &breadcrumb, breadcrumb_fill);
+                        title_bar::breadcrumb(ui, &breadcrumb, marker_color);
                     },
                 );
             });
