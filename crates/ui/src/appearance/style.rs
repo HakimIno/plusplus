@@ -164,18 +164,68 @@ pub fn workspace_resize_grip(ui: &egui::Ui, panel_id: egui::Id, horizontal: bool
         return;
     };
     let center = handle.rect.center();
-    let color = if handle.hovered() || handle.dragged() {
-        palette::TEXT_WEAK()
+    let span = if horizontal {
+        handle.rect.x_range()
     } else {
-        palette::TEXT_FAINT()
+        handle.rect.y_range()
     };
+    if handle.hovered() || handle.dragged() {
+        // egui's own one-point hover line spans the panel's outer rect, past the cards into
+        // the window chrome. The seam colour is translucent over the window's BASE clear, so
+        // repaint both to erase it before drawing the bar.
+        let line = seam_rect(center, span, horizontal);
+        ui.painter()
+            .rect_filled(line, CornerRadius::ZERO, palette::BASE());
+        ui.painter()
+            .rect_filled(line, CornerRadius::ZERO, workspace_gap());
+    }
+    paint_resize_seam(
+        ui.painter(),
+        center,
+        span,
+        horizontal,
+        handle.hovered(),
+        handle.dragged(),
+    );
+}
+
+/// The four-point gutter around a seam's centre line, along `span`.
+fn seam_rect(center: egui::Pos2, span: egui::Rangef, horizontal: bool) -> egui::Rect {
+    let across = |c: f32| egui::Rangef::point(c).expand(WORKSPACE_GUTTER as f32);
+    if horizontal {
+        egui::Rect::from_x_y_ranges(span, across(center.y))
+    } else {
+        egui::Rect::from_x_y_ranges(across(center.x), span)
+    }
+}
+
+/// Paint a resize seam the same way everywhere: three faint dots at rest, and a bar filling
+/// the whole gutter between the two cards while hovered or dragged, like VS Code's sash.
+/// `span` is the seam's outer extent; the bar is inset by a gutter so it ends with the cards.
+pub fn paint_resize_seam(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    span: egui::Rangef,
+    horizontal: bool,
+    hovered: bool,
+    dragged: bool,
+) {
+    if hovered || dragged {
+        let amount = if dragged { 0.42 } else { 0.28 };
+        painter.rect_filled(
+            seam_rect(center, span.shrink(WORKSPACE_GUTTER as f32), horizontal),
+            CornerRadius::same(WORKSPACE_GUTTER as u8),
+            mix(palette::PANEL(), palette::TEXT(), amount),
+        );
+        return;
+    }
     for offset in [-5.0, 0.0, 5.0] {
         let pos = if horizontal {
             center + egui::vec2(offset, 0.0)
         } else {
             center + egui::vec2(0.0, offset)
         };
-        ui.painter().circle_filled(pos, 1.0, color);
+        painter.circle_filled(pos, 1.0, palette::TEXT_FAINT());
     }
 }
 

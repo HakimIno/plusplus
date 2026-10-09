@@ -460,20 +460,19 @@ impl DbGuiApp {
                         root.ctx().request_repaint();
                     }
                 }
-                let grip = if handle.hovered() || handle.dragged() {
-                    palette::TEXT_WEAK()
-                } else {
-                    palette::TEXT_FAINT()
-                };
-                for offset in [-5.0, 0.0, 5.0] {
-                    // The result card is carved after this bar and would paint over the seam.
-                    root.ctx()
-                        .layer_painter(egui::LayerId::new(
-                            egui::Order::Foreground,
-                            panel_id.with("top_grip"),
-                        ))
-                        .circle_filled(strip.center() + egui::vec2(offset, 0.0), 1.0, grip);
-                }
+                // The result card is carved after this bar and would paint over the seam. A
+                // sublayer of the workspace stays above the cards but below dialogs.
+                let grip_layer =
+                    egui::LayerId::new(root.layer_id().order, panel_id.with("top_grip"));
+                root.ctx().set_sublayer(root.layer_id(), grip_layer);
+                style::paint_resize_seam(
+                    &root.ctx().layer_painter(grip_layer),
+                    strip.center(),
+                    bar.x_range(),
+                    true,
+                    handle.hovered(),
+                    handle.dragged(),
+                );
             }
         }
     }

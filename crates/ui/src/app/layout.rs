@@ -289,18 +289,14 @@ impl DbGuiApp {
                 egui::Id::new(("workspace_split_divider", divider_index)),
                 egui::Sense::drag(),
             );
-            let grip_color = if response.hovered() || response.dragged() {
-                palette::TEXT_WEAK()
-            } else {
-                palette::TEXT_FAINT()
-            };
-            for offset in [-5.0, 0.0, 5.0] {
-                root.painter().circle_filled(
-                    divider.center() + egui::vec2(0.0, offset),
-                    1.0,
-                    grip_color,
-                );
-            }
+            style::paint_resize_seam(
+                root.painter(),
+                divider.center(),
+                area.y_range(),
+                false,
+                response.hovered(),
+                response.dragged(),
+            );
             if response.dragged() {
                 if let Some(pointer) = response.interact_pointer_pos() {
                     self.drag_split_divider(divider_index, pointer.x, area);

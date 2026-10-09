@@ -51,9 +51,8 @@ impl DbGuiApp {
                 (190.0, 96.0, 0.55)
             }
             // Diagram tabs never draw the console (`draw` skips it); inert defaults.
-            crate::components::QueryTabKind::Diagram | crate::components::QueryTabKind::Activity => {
-                (190.0, 96.0, 0.55)
-            }
+            crate::components::QueryTabKind::Diagram
+            | crate::components::QueryTabKind::Activity => (190.0, 96.0, 0.55),
         };
         // Always leave a useful result strip on compact windows. On larger windows the ratio
         // cap prevents either surface from swallowing the other one.
@@ -192,17 +191,26 @@ impl DbGuiApp {
                     0.0,
                     style::workspace_gap(),
                 );
-                let dot_color = if handle.hovered() || handle.dragged() {
-                    palette::TEXT_WEAK()
-                } else {
-                    palette::TEXT_FAINT()
-                };
-                for offset in [-5.0, 0.0, 5.0] {
-                    root.painter().circle_filled(
-                        egui::pos2(handle.rect.center().x + offset, edge - 1.0),
+                if handle.hovered() || handle.dragged() {
+                    // Fill the two-point gutter edge to edge, like the other resize seams.
+                    let gutter = style::WORKSPACE_GUTTER as f32;
+                    let amount = if handle.dragged() { 0.42 } else { 0.28 };
+                    root.painter().rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(handle.rect.left() + gutter, edge - 2.0),
+                            egui::pos2(handle.rect.right() - gutter, edge),
+                        ),
                         1.0,
-                        dot_color,
+                        style::mix(palette::PANEL(), palette::TEXT(), amount),
                     );
+                } else {
+                    for offset in [-5.0, 0.0, 5.0] {
+                        root.painter().circle_filled(
+                            egui::pos2(handle.rect.center().x + offset, edge - 1.0),
+                            1.0,
+                            palette::TEXT_FAINT(),
+                        );
+                    }
                 }
             }
         } else {
