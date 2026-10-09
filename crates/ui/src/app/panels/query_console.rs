@@ -433,13 +433,19 @@ impl DbGuiApp {
                                 // cursors' selections go here, under the glyphs like the
                                 // editor's own selection, instead of covering them.
                                 let under_text = ui.painter().add(egui::Shape::Noop);
+                                // ScrollArea rounds its content rect to pixels; leave one
+                                // physical pixel so that rounding cannot create horizontal
+                                // overflow when the SQL already fits the viewport.
+                                let editor_width = (ui.available_width()
+                                    - 1.0 / ui.ctx().pixels_per_point())
+                                .max(24.0);
                                 let output = egui::TextEdit::multiline(&mut buffer)
                                     .id(editor_id)
                                     .code_editor()
                                     .frame(egui::Frame::NONE)
                                     .margin(egui::Margin::ZERO)
                                     .desired_rows(rows)
-                                    .desired_width(f32::INFINITY)
+                                    .desired_width(editor_width)
                                     .layouter(&mut layouter)
                                     .show(ui);
                                 let (shifts, refused_undo) = buffer.finish();
@@ -540,6 +546,21 @@ impl DbGuiApp {
                                 &output.galley,
                                 output.galley_pos,
                             );
+                        }
+                        if self.editor_options.highlight_current_statement {
+                            let caret = cursor_char.unwrap_or(self.tabs[idx].primary_cursor.end);
+                            self.paint_current_statement(
+                                idx,
+                                &mut under,
+                                caret,
+                                &editor_cache.view,
+                                &output.galley,
+                                output.galley_pos,
+                                resp.rect.x_range(),
+                            );
+                        }
+                        if self.editor_options.show_invisibles {
+                            Self::paint_invisibles(ui, &output.galley, output.galley_pos, &font);
                         }
                         if let Some(caret) = cursor_char {
                             Self::paint_matching_brackets(

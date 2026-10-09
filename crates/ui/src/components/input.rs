@@ -165,16 +165,21 @@ fn paint_checkbox(
     }
 }
 
+/// Height of one row in the app's dropdown menus.
+pub(crate) const MENU_ROW_H: f32 = 28.0;
+
 /// A checkable row in a dropdown menu: the app's checkbox followed by the label at menu text
 /// size, the whole row clickable and hover-highlighted like the other menu items (egui's own
 /// `ui.checkbox` draws a different, round control).
 pub(crate) fn menu_checkbox(ui: &mut egui::Ui, checked: &mut bool, label: &str) -> egui::Response {
     const BOX: f32 = 16.0;
-    const ROW_H: f32 = 28.0;
     let (rect, mut resp) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), ROW_H),
+        egui::vec2(ui.available_width(), MENU_ROW_H),
         egui::Sense::click(),
     );
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, *checked, label)
+    });
     if resp.clicked() {
         *checked = !*checked;
         resp.mark_changed();
@@ -227,33 +232,71 @@ pub(crate) fn accent_radio<T: PartialEq>(
     }
 
     if ui.is_rect_visible(rect) {
-        let accent = palette::ACCENT();
-        let center = rect.center();
-        let outer_r = SIZE * 0.5 - 0.5;
-        if selected {
-            ui.painter().circle(
-                center,
-                outer_r,
-                accent.linear_multiply(0.12),
-                Stroke::new(1.5_f32, accent),
-            );
-            ui.painter().circle_filled(center, outer_r * 0.42, accent);
-        } else {
-            let (fill, border) = if resp.hovered() {
-                (
-                    accent.linear_multiply(0.10),
-                    Stroke::new(1.5_f32, accent.linear_multiply(0.65)),
-                )
-            } else {
-                (
-                    Color32::TRANSPARENT,
-                    Stroke::new(1.5_f32, palette::BORDER_STRONG()),
-                )
-            };
-            ui.painter().circle(center, outer_r, fill, border);
-        }
+        paint_radio(ui.painter(), rect, selected, resp.hovered());
     }
 
+    resp
+}
+
+/// Paint the app's radio dot into `rect`: an accent ring with a filled centre when selected,
+/// an outlined ring (accent-tinted on hover) when not.
+fn paint_radio(painter: &egui::Painter, rect: egui::Rect, selected: bool, hovered: bool) {
+    let accent = palette::ACCENT();
+    let center = rect.center();
+    let outer_r = rect.width().min(rect.height()) * 0.5 - 0.5;
+    if selected {
+        painter.circle(
+            center,
+            outer_r,
+            accent.linear_multiply(0.12),
+            Stroke::new(1.5_f32, accent),
+        );
+        painter.circle_filled(center, outer_r * 0.42, accent);
+    } else {
+        let (fill, border) = if hovered {
+            (
+                accent.linear_multiply(0.10),
+                Stroke::new(1.5_f32, accent.linear_multiply(0.65)),
+            )
+        } else {
+            (
+                Color32::TRANSPARENT,
+                Stroke::new(1.5_f32, palette::BORDER_STRONG()),
+            )
+        };
+        painter.circle(center, outer_r, fill, border);
+    }
+}
+
+/// A choosable row in a dropdown menu: [`menu_checkbox`]'s twin with the app's radio dot.
+/// Clicking it selects it; the caller applies the choice when the response is `clicked()`.
+pub(crate) fn menu_radio(ui: &mut egui::Ui, selected: bool, label: &str) -> egui::Response {
+    const DOT: f32 = 16.0;
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), MENU_ROW_H),
+        egui::Sense::click(),
+    );
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, selected, label)
+    });
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if resp.hovered() {
+            painter.rect_filled(rect, CornerRadius::same(6), palette::SURFACE_HOVER());
+        }
+        let dot = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + 8.0 + DOT / 2.0, rect.center().y),
+            egui::vec2(DOT, DOT),
+        );
+        paint_radio(painter, dot, selected, resp.hovered());
+        painter.text(
+            egui::pos2(dot.right() + 10.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::TextStyle::Body.resolve(ui.style()),
+            palette::TEXT(),
+        );
+    }
     resp
 }
 

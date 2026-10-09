@@ -78,6 +78,46 @@ pub fn settings_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("settings.json"))
 }
 
+/// SQL editor behaviour toggled from the editor's options menu.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct EditorOptions {
+    /// Draw spaces as `·` and tabs as `→`.
+    pub show_invisibles: bool,
+    /// Tint the lines of the statement under the caret — what Run Current executes.
+    pub highlight_current_statement: bool,
+    /// Typing `(`, `[`, `{`, `'` or `"` inserts its closer too.
+    pub auto_close_pairs: bool,
+    /// Which kinds of names autocomplete offers.
+    pub suggest_tables: bool,
+    pub suggest_columns: bool,
+    pub suggest_functions: bool,
+    pub suggest_keywords: bool,
+    /// Accepting a completion adds a space after it when nothing follows the caret.
+    pub add_space_after_completion: bool,
+    /// Accepting a table inserts it schema-qualified (`dbo.orders`).
+    pub prefix_schema: bool,
+    /// Keywords and built-in functions complete in upper case (lower case when off).
+    pub uppercase_keywords: bool,
+}
+
+impl Default for EditorOptions {
+    fn default() -> Self {
+        Self {
+            show_invisibles: false,
+            highlight_current_statement: true,
+            auto_close_pairs: true,
+            suggest_tables: true,
+            suggest_columns: true,
+            suggest_functions: true,
+            suggest_keywords: true,
+            add_space_after_completion: false,
+            prefix_schema: false,
+            uppercase_keywords: true,
+        }
+    }
+}
+
 /// User-facing application preferences that aren't tied to a specific connection.
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
@@ -104,6 +144,10 @@ pub struct Settings {
     /// Show append-only inline SQL suggestions. `None` uses the default (on).
     #[serde(default)]
     pub ghost_suggestions_enabled: Option<bool>,
+    /// The SQL editor's finer options (the editor's options menu). Absent fields take their
+    /// defaults, so older settings files load unchanged.
+    #[serde(default)]
+    pub editor: EditorOptions,
     /// SQL beautifier: convert reserved keywords to ALL CAPS. `None` = the default (on).
     #[serde(default)]
     pub beautify_uppercase: Option<bool>,

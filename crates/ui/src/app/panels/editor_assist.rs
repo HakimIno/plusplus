@@ -98,6 +98,26 @@ pub(in crate::app) fn toggle_comment_edit(
     Some((first_line_start..last_line_end, out))
 }
 
+/// The char span of the statement under `caret`, trimmed of surrounding whitespace — or
+/// `None` while the buffer holds a single statement, where tinting it would light up the
+/// whole editor for no reason.
+pub(in crate::app) fn current_statement_span(
+    sql: &str,
+    caret: usize,
+) -> Option<std::ops::Range<usize>> {
+    let chars: Vec<char> = sql.chars().collect();
+    let range = crate::sqlctx::statement_range(&chars, caret);
+    let first = (range.start..range.end).find(|&i| !chars[i].is_whitespace())?;
+    let last = (range.start..range.end)
+        .rev()
+        .find(|&i| !chars[i].is_whitespace())
+        .unwrap_or(first);
+    let blank = |span: std::ops::Range<usize>| chars[span].iter().all(|c| c.is_whitespace());
+    // `range` stops short of the `;`, so look past it for another statement.
+    let alone = blank(0..first) && blank((last + 2).min(chars.len())..chars.len());
+    (!alone).then_some(first..last + 1)
+}
+
 impl DbGuiApp {
     /// Paint the SQL editor's gutter — line numbers and fold chevrons — and apply a click on
     /// one of them.
@@ -212,8 +232,9 @@ impl DbGuiApp {
     }
 
     /// Drive the editor's inline ghost-text suggestion for one frame: recompute it from the
-    /// caret, paint the greyed remainder, and apply a pending Tab acceptance. Suppressed
-    /// while the autocomplete popup is open (they share the Tab key).
+    /// caret, paint the greyed remainder, and apply a pending Tab acceptance. While the
+    /// autocomplete popup is open (they share the Tab key) it previews the popup's selected
+    /// row instead.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn update_ghost(
         &mut self,
@@ -227,7 +248,7 @@ impl DbGuiApp {
         accept: bool,
     ) {
         let idx = self.active_query_tab;
-        // The popup owns the caret area and the Tab key while it's up; no ghost then.
+        // The popup owns the Tab key while it's up; only its selected row is previewed then.
         let (Some(cursor_char), Some(cursor_rect)) = (cursor_char, cursor_rect) else {
             self.tabs[idx].editor_assist.ghost_suggestion = None;
             self.tabs[idx].editor_assist.ghost_key = None;
@@ -236,6 +257,36 @@ impl DbGuiApp {
         if !focused || self.tabs[idx].editor_assist.autocomplete.open {
             self.tabs[idx].editor_assist.ghost_suggestion = None;
             self.tabs[idx].editor_assist.ghost_key = None;
+            // While the popup is up, its highlighted row previews inline instead, so the
+            // caret shows what Enter/Tab will produce. Painted only at the end of a line:
+            // ghost text is drawn over the editor, not inserted, and would overlap anything
+            // already after the caret.
+            let assist = &self.tabs[idx].editor_assist;
+            let line_rest_blank = self.tabs[idx]
+                .sql
+                .chars()
+                .skip(cursor_char)
+                .take_while(|&c| c != '\n')
+                .all(char::is_whitespace);
+            // A schema-qualified insertion rewrites the start of the word, which an appended
+            // preview can't show.
+            let qualified = self.editor_options.prefix_schema
+                && assist
+                    .autocomplete
+                    .items
+                    .get(assist.autocomplete.selected)
+                    .is_some_and(|item| item.schema.is_some());
+            if focused && assist.autocomplete.open && line_rest_blank && !qualified {
+                if let Some(tail) = crate::autocomplete::selected_tail(&assist.autocomplete) {
+                    ui.painter().text(
+                        egui::pos2(cursor_rect.left(), cursor_rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        tail,
+                        font.clone(),
+                        palette::TEXT_FAINT(),
+                    );
+                }
+            }
             return;
         }
 
@@ -270,7 +321,22 @@ impl DbGuiApp {
                     None => Vec::new(),
                 };
                 let sql = &self.tabs[idx].sql;
-                crate::ghost::suggest(sql, cursor_char, &pool, schema, kind)
+                let known = self.tabs[idx]
+                    .editor_assist
+                    .autocomplete
+                    .inline_hint
+                    .as_ref()
+                    .filter(|(key, _)| *key == (self.tabs[idx].sql_revision, cursor_char))
+                    .map(|(_, hint)| hint.clone());
+                crate::ghost::suggest_with(
+                    sql,
+                    cursor_char,
+                    &pool,
+                    schema,
+                    kind,
+                    &self.editor_options,
+                    known,
+                )
             };
             self.tabs[idx].editor_assist.ghost_suggestion = suggestion;
             self.tabs[idx].editor_assist.ghost_key =
@@ -447,12 +513,30 @@ impl DbGuiApp {
         });
         let idx = self.active_query_tab;
 
+        let pairs = self.editor_options.auto_close_pairs;
+        // Typing a closer that already sits after the caret steps over it instead of doubling
+        // it: `(` gives `(|)`, and typing `)` then lands on `()|`, not `())|`. TextEdit has
+        // already inserted the typed character, so the one to drop is right after it.
+        if pairs
+            && !entered
+            && matches!(typed, Some(')' | ']' | '}' | '\'' | '"'))
+            && self.tabs[idx].sql.chars().nth(caret) == typed
+        {
+            let byte = char_to_byte(&self.tabs[idx].sql, caret);
+            let width = typed.map_or(1, char::len_utf8);
+            self.tabs[idx].sql.replace_range(byte..byte + width, "");
+            self.tabs[idx].mark_sql_changed();
+            self.shift_folds(idx, caret, -1);
+            self.workspace_dirty = true;
+            self.select_editor_range(ctx, editor_id, caret..caret);
+            return true;
+        }
         let insertion = match typed {
-            Some('(') => Some(")".to_string()),
-            Some('[') => Some("]".to_string()),
-            Some('{') => Some("}".to_string()),
-            Some('\'') => Some("'".to_string()),
-            Some('"') => Some("\"".to_string()),
+            Some('(') if pairs => Some(")".to_string()),
+            Some('[') if pairs => Some("]".to_string()),
+            Some('{') if pairs => Some("}".to_string()),
+            Some('\'') if pairs => Some("'".to_string()),
+            Some('"') if pairs => Some("\"".to_string()),
             _ if entered => {
                 let indent =
                     crate::editor_tools::indentation_after_newline(&self.tabs[idx].sql, caret);
@@ -524,6 +608,96 @@ impl DbGuiApp {
                 egui::Stroke::new(1.0_f32, palette::ACCENT()),
                 egui::StrokeKind::Inside,
             );
+        }
+    }
+
+    /// Tint the lines of the statement under the caret — what Run Current would execute — so
+    /// the boundary between statements in a long script is visible. Finding the statement
+    /// scans the whole buffer, so its char span is cached per `(revision, caret)` and a
+    /// repaint that moved neither reuses it.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn paint_current_statement(
+        &mut self,
+        idx: usize,
+        under: &mut Vec<egui::Shape>,
+        caret: usize,
+        view: &crate::fold::View,
+        galley: &egui::Galley,
+        galley_pos: egui::Pos2,
+        x_range: egui::Rangef,
+    ) {
+        let key = (self.tabs[idx].sql_revision, caret);
+        let span = match &self.tabs[idx].editor_assist.statement_span {
+            Some((cached, span)) if *cached == key => span.clone(),
+            _ => {
+                let span = current_statement_span(&self.tabs[idx].sql, caret);
+                self.tabs[idx].editor_assist.statement_span = Some((key, span.clone()));
+                span
+            }
+        };
+        let Some(span) = span else {
+            return;
+        };
+        let (Some(start), end) = (
+            view.to_display(span.start),
+            view.to_display_clamped(span.end),
+        ) else {
+            return;
+        };
+        let offset = galley_pos.to_vec2();
+        let top = galley
+            .pos_from_cursor(egui::text::CCursor::new(start))
+            .translate(offset)
+            .top();
+        let bottom = galley
+            .pos_from_cursor(egui::text::CCursor::new(end))
+            .translate(offset)
+            .bottom();
+        under.push(egui::Shape::rect_filled(
+            egui::Rect::from_x_y_ranges(x_range, top..=bottom),
+            egui::CornerRadius::same(3),
+            palette::ACCENT().gamma_multiply(0.07),
+        ));
+    }
+
+    /// Draw whitespace the way code editors show it: `·` for a space, `→` for a tab. Only the
+    /// rows on screen are walked, so a long script costs nothing extra off-screen.
+    pub(super) fn paint_invisibles(
+        ui: &egui::Ui,
+        galley: &egui::Galley,
+        galley_pos: egui::Pos2,
+        font: &egui::FontId,
+    ) {
+        let clip = ui.clip_rect();
+        let color = palette::TEXT_FAINT().gamma_multiply(0.7);
+        let painter = ui.painter();
+        for placed in &galley.rows {
+            let row = placed.rect().translate(galley_pos.to_vec2());
+            if row.bottom() < clip.top() {
+                continue;
+            }
+            if row.top() > clip.bottom() {
+                break;
+            }
+            for glyph in &placed.row.glyphs {
+                // Glyph positions are relative to the row's origin, not its bounding rect.
+                let x = galley_pos.x + placed.pos.x + glyph.pos.x + glyph.advance_width / 2.0;
+                match glyph.chr {
+                    ' ' => {
+                        painter.circle_filled(egui::pos2(x, row.center().y), 1.1, color);
+                    }
+                    '\t' => {
+                        painter.text(
+                            egui::pos2(x, row.center().y),
+                            egui::Align2::CENTER_CENTER,
+                            "→",
+                            font.clone(),
+                            color,
+                        );
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -934,7 +1108,16 @@ impl DbGuiApp {
         // popup is already open and following the prefix. Recomputing every focused frame meant
         // re-scanning the whole schema even while idle — e.g. when the grid scrolls and the
         // still-focused editor keeps repainting — which made scrolling janky on big schemas.
-        if focused && (typing || self.tabs[tab_idx].editor_assist.autocomplete.open) {
+        // Matching runs over every table and column in the schema, so an open popup recomputes
+        // only when the text or the caret moved — never on a repaint that changed neither
+        // (the grid scrolling, a spinner, the caret blinking).
+        let key = (
+            self.tabs[tab_idx].sql_revision,
+            self.tabs[tab_idx].editor_assist.autocomplete.caret_char,
+        );
+        let stale = self.tabs[tab_idx].editor_assist.autocomplete.computed_for != Some(key);
+        if focused && (typing || (self.tabs[tab_idx].editor_assist.autocomplete.open && stale)) {
+            self.tabs[tab_idx].editor_assist.autocomplete.computed_for = Some(key);
             // Recompute against the live text. Borrow the connection's schema and the tab's
             // SQL immutably together, then hand ownership back so the borrows end.
             let completion = {
@@ -943,15 +1126,24 @@ impl DbGuiApp {
                     None => (None, None),
                 };
                 let sql = &self.tabs[tab_idx].sql;
-                crate::autocomplete::complete(
+                crate::autocomplete::complete_with(
                     sql,
                     self.tabs[tab_idx].editor_assist.autocomplete.caret_char,
                     schema,
                     kind,
                     force,
+                    &self.editor_options,
                 )
             };
 
+            if !force {
+                self.tabs[tab_idx].editor_assist.autocomplete.inline_hint = Some((
+                    key,
+                    completion
+                        .as_ref()
+                        .and_then(crate::autocomplete::inline_suffix),
+                ));
+            }
             match completion {
                 Some(c) => {
                     // A single append-only match reads more naturally as inline ghost text;
@@ -1044,16 +1236,30 @@ impl DbGuiApp {
         cursor_char: usize,
     ) {
         let tab_idx = self.active_query_tab;
-        let Some(suggestion) = self.tabs[tab_idx]
+        let start = self.tabs[tab_idx].editor_assist.autocomplete.replace_start;
+        let after_dot = start > 0 && self.tabs[tab_idx].sql.chars().nth(start - 1) == Some('.');
+        let kind = self.active().map(|c| c.db.kind());
+        let Some(mut suggestion) = self.tabs[tab_idx]
             .editor_assist
             .autocomplete
             .items
             .get(idx)
-            .map(|s| s.insert.clone())
+            .map(|s| crate::autocomplete::insertion_text(s, after_dot, kind, &self.editor_options))
         else {
             return;
         };
-        let start = self.tabs[tab_idx].editor_assist.autocomplete.replace_start;
+        // "Add a space after completing": only where the caret ends the line, so a name
+        // completed in the middle of existing text never pushes it apart.
+        if self.editor_options.add_space_after_completion
+            && self.tabs[tab_idx]
+                .sql
+                .chars()
+                .skip(cursor_char)
+                .take_while(|&c| c != '\n')
+                .all(char::is_whitespace)
+        {
+            suggestion.push(' ');
+        }
         let tab = &mut self.tabs[tab_idx];
         let byte_start = char_to_byte(&tab.sql, start);
         let byte_cursor = char_to_byte(&tab.sql, cursor_char);

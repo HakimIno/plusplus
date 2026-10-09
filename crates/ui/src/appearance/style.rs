@@ -237,8 +237,34 @@ pub mod font {
     pub const TITLE: f32 = 14.5;
 }
 
+/// The operating system's double-click interval in seconds, as the app crate reported it at
+/// launch (see [`set_double_click_interval`]).
+static DOUBLE_CLICK_INTERVAL: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+
+/// Record the OS double-click interval, read natively at launch (macOS `NSEvent`). Call it
+/// before the first frame.
+pub fn set_double_click_interval(seconds: f64) {
+    let _ = DOUBLE_CLICK_INTERVAL.set(seconds);
+}
+
+/// How long the second click of a double-click may follow the first. egui's own default is
+/// 0.3s — stricter than the 0.5s both macOS and Windows default to — and egui times clicks by
+/// frame, not by event, so a heavy frame between the two clicks stretches the measured gap
+/// further. Together they made double-click-to-edit in the grid fail intermittently, worst on
+/// wide, slow-to-lay-out results. The OS setting wins when known; 0.5s otherwise.
+fn double_click_interval() -> f64 {
+    DOUBLE_CLICK_INTERVAL
+        .get()
+        .copied()
+        .filter(|seconds| (0.1..=2.0).contains(seconds))
+        .unwrap_or(0.5)
+}
+
 /// Apply the plusplus look to a context.
 pub fn apply(ctx: &egui::Context) {
+    ctx.options_mut(|options| {
+        options.input_options.max_double_click_delay = double_click_interval();
+    });
     let t = crate::theme::current();
     // egui 0.32+ keeps separate dark/light styles and defaults to following the OS.
     // Custom-painted widgets read `theme::current()`; stock egui widgets read the active

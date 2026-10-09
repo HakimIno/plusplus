@@ -11,6 +11,7 @@
 use crate::sqlctx::{
     cte_names, ident_before, in_string_or_comment, is_ident_char, previous_word, referenced_tables,
 };
+use dbcore::config::EditorOptions;
 use dbcore::{DbKind, SchemaTree};
 
 /// Whether `c` opens a *quoted identifier* in this dialect — deliberately not "any quote
@@ -42,6 +43,9 @@ pub struct Suggestion {
     /// Context shown right-aligned and faint: a column's table, a table's schema, "keyword".
     pub detail: String,
     pub kind: SuggestionKind,
+    /// The schema a table or view lives in, for inserting it qualified when the editor's
+    /// "Prefix schema names" option is on.
+    pub schema: Option<String>,
 }
 
 /// A computed completion: the suggestions plus the char range they would replace
@@ -65,7 +69,7 @@ pub struct State {
     pub items: Vec<Suggestion>,
     pub replace_start: usize,
     /// The identifier prefix the list was computed for; painted in the accent colour inside
-    /// each row (see [`matched_len`]).
+    /// each row (see [`matched_chars`]).
     pub prefix: String,
     /// Last-known caret char index, cached so a click on the popup — which strips the
     /// editor's focus (and thus its live cursor) the same frame — can still resolve where
@@ -74,6 +78,12 @@ pub struct State {
     /// Last-known on-screen caret rect, used to anchor the popup on a frame where the
     /// editor has lost focus and no longer reports a cursor.
     pub anchor: egui::Rect,
+    /// The `(sql revision, caret)` the list was last computed for. An open popup only
+    /// recomputes when either moves — not on every repaint.
+    pub computed_for: Option<(u64, usize)>,
+    /// The one-name inline completion found when the list was computed for `(sql revision,
+    /// caret)` — what ghost text would otherwise recompute from scratch.
+    pub inline_hint: Option<((u64, usize), Option<String>)>,
 }
 
 impl Default for State {
@@ -88,6 +98,8 @@ impl Default for State {
             // `egui::Rect` has no `Default`; a zero rect is never read before the editor
             // has reported a caret (the popup only opens while focused).
             anchor: egui::Rect::ZERO,
+            computed_for: None,
+            inline_hint: None,
         }
     }
 }
@@ -118,23 +130,45 @@ const FUNCTIONS: &[&str] = &[
     "UPPER",
 ];
 
-/// Compute suggestions for the identifier being typed at `cursor` (a char index).
-///
-/// Context rules, in order:
-/// - after `qualifier.` → the qualifier's columns (table name or alias) or, failing
-///   that, the tables of a schema named `qualifier`;
-/// - after `FROM` / `JOIN` / `INTO` / `UPDATE` / `TABLE` → table names;
-/// - otherwise → columns (of tables referenced in the query, or all tables when none
-///   are), table names, and SQL keywords.
-///
-/// Returns `None` when there is nothing to offer: empty prefix without `force`, cursor
-/// inside a string/comment, or an unknown qualifier.
+/// [`complete_with`] under the default options.
+#[cfg(test)]
 pub fn complete(
     sql: &str,
     cursor: usize,
     schema: Option<&SchemaTree>,
     kind: Option<DbKind>,
     force: bool,
+) -> Option<Completion> {
+    complete_with(sql, cursor, schema, kind, force, &EditorOptions::default())
+}
+
+/// Compute suggestions for the identifier being typed at `cursor` (a char index).
+///
+/// Context rules, in order:
+/// - after `qualifier.` → the qualifier's columns (table name or alias) or, failing
+///   that, the tables of a schema named `qualifier`;
+/// - after `FROM` / `JOIN` / `INTO` / `UPDATE` / `TABLE` → table and view names;
+/// - after `EXEC` / `EXECUTE` / `CALL` → stored procedures and functions;
+/// - otherwise → columns (of tables referenced in the query, or all tables when none
+///   are), table and view names, routines, and SQL keywords.
+///
+/// A name matches when it starts with what was typed, or has it at a word start
+/// (`prog` → `x_program`), anywhere inside it, or as a scattered run beginning at its first
+/// letter (`emf` → `enum_first`). Closer matches sort first; within a tier the context
+/// order above holds.
+///
+/// Returns `None` when there is nothing to offer: empty prefix without `force`, cursor
+/// inside a string/comment, or an unknown qualifier.
+///
+/// `options` choose the kinds of names to offer, and whether keywords come in upper or
+/// lower case.
+pub fn complete_with(
+    sql: &str,
+    cursor: usize,
+    schema: Option<&SchemaTree>,
+    kind: Option<DbKind>,
+    force: bool,
+    options: &EditorOptions,
 ) -> Option<Completion> {
     let chars: Vec<char> = sql.chars().collect();
     let cursor = cursor.min(chars.len());
@@ -170,6 +204,10 @@ pub fn complete(
     }
 
     let mut items = Vec::new();
+    // Column names already offered. With no table referenced yet every column of every table
+    // is a candidate — easily 100k on a real database, mostly repeats (`id`, `created_at`) —
+    // so a repeat is skipped before it costs a match or a suggestion.
+    let mut seen_columns = std::collections::HashSet::new();
     let ctes = cte_names(&chars);
 
     if after_dot {
@@ -186,7 +224,27 @@ pub fn complete(
         for t in &schema.tables {
             if t.name.eq_ignore_ascii_case(&table_name) {
                 found = true;
-                push_columns(&mut items, t, kind, &prefix);
+                push_columns(
+                    &mut items,
+                    &mut seen_columns,
+                    &t.name,
+                    &t.columns,
+                    kind,
+                    &prefix,
+                );
+            }
+        }
+        for v in &schema.views {
+            if v.name.eq_ignore_ascii_case(&table_name) {
+                found = true;
+                push_columns(
+                    &mut items,
+                    &mut seen_columns,
+                    &v.name,
+                    &v.columns,
+                    kind,
+                    &prefix,
+                );
             }
         }
         if !found
@@ -206,7 +264,14 @@ pub fn complete(
                 for table in &schema.tables {
                     if table.name.eq_ignore_ascii_case(&referenced) {
                         found = true;
-                        push_columns(&mut items, table, kind, &prefix);
+                        push_columns(
+                            &mut items,
+                            &mut seen_columns,
+                            &table.name,
+                            &table.columns,
+                            kind,
+                            &prefix,
+                        );
                     }
                 }
             }
@@ -222,6 +287,15 @@ pub fn complete(
                     push_table(&mut items, &t.name, t.schema.as_deref(), kind, &prefix);
                 }
             }
+            for v in &schema.views {
+                if v.schema
+                    .as_deref()
+                    .is_some_and(|s| s.eq_ignore_ascii_case(&qualifier))
+                {
+                    found = true;
+                    push_view(&mut items, v, kind, &prefix);
+                }
+            }
         }
         if !found {
             return None;
@@ -232,8 +306,16 @@ pub fn complete(
             prev.as_deref(),
             Some("FROM") | Some("JOIN") | Some("INTO") | Some("UPDATE") | Some("TABLE")
         );
+        let routine_context = matches!(
+            prev.as_deref(),
+            Some("EXEC") | Some("EXECUTE") | Some("CALL")
+        );
 
-        if let Some(schema) = schema {
+        if let (Some(schema), true) = (schema, routine_context) {
+            for routine in &schema.routines {
+                push_routine(&mut items, routine, kind, &prefix);
+            }
+        } else if let Some(schema) = schema {
             if table_context {
                 // Distinct schema namespaces first-class too, so `FROM pub…` can
                 // complete to `public` and then offer its tables after the dot.
@@ -245,61 +327,101 @@ pub fn complete(
                 namespaces.sort_unstable();
                 namespaces.dedup();
                 for ns in namespaces {
-                    if matches_prefix(ns, &prefix) {
+                    if match_tier(ns, &prefix).is_some() {
                         items.push(Suggestion {
                             insert: maybe_quote(ns, kind),
                             detail: "schema".to_string(),
                             kind: SuggestionKind::Table,
+                            schema: None,
                         });
                     }
                 }
                 for t in &schema.tables {
                     push_table(&mut items, &t.name, t.schema.as_deref(), kind, &prefix);
                 }
+                for v in &schema.views {
+                    push_view(&mut items, v, kind, &prefix);
+                }
             } else {
                 // General context: columns of the tables this query references (all
                 // tables when it references none yet), then tables, then keywords.
                 let referenced = referenced_tables(&chars);
                 let mut any_referenced = false;
-                for t in &schema.tables {
-                    if referenced
+                let is_referenced = |name: &str| {
+                    referenced
                         .iter()
-                        .any(|(_, table)| table.eq_ignore_ascii_case(&t.name))
-                    {
+                        .any(|(_, table)| table.eq_ignore_ascii_case(name))
+                };
+                for t in &schema.tables {
+                    if is_referenced(&t.name) {
                         any_referenced = true;
-                        push_columns(&mut items, t, kind, &prefix);
+                        push_columns(
+                            &mut items,
+                            &mut seen_columns,
+                            &t.name,
+                            &t.columns,
+                            kind,
+                            &prefix,
+                        );
+                    }
+                }
+                for v in &schema.views {
+                    if is_referenced(&v.name) {
+                        any_referenced = true;
+                        push_columns(
+                            &mut items,
+                            &mut seen_columns,
+                            &v.name,
+                            &v.columns,
+                            kind,
+                            &prefix,
+                        );
                     }
                 }
                 if !any_referenced {
                     for t in &schema.tables {
-                        push_columns(&mut items, t, kind, &prefix);
+                        push_columns(
+                            &mut items,
+                            &mut seen_columns,
+                            &t.name,
+                            &t.columns,
+                            kind,
+                            &prefix,
+                        );
                     }
                 }
                 for t in &schema.tables {
                     push_table(&mut items, &t.name, t.schema.as_deref(), kind, &prefix);
                 }
+                for v in &schema.views {
+                    push_view(&mut items, v, kind, &prefix);
+                }
+                for routine in &schema.routines {
+                    push_routine(&mut items, routine, kind, &prefix);
+                }
             }
         }
         if table_context {
             for cte in &ctes {
-                if matches_prefix(cte, &prefix) {
+                if match_tier(cte, &prefix).is_some() {
                     items.push(Suggestion {
                         insert: maybe_quote(cte, kind),
                         detail: "CTE".to_string(),
                         kind: SuggestionKind::Table,
+                        schema: None,
                     });
                 }
             }
         }
 
-        if !table_context {
+        if !table_context && !routine_context {
             // Keywords lead at a statement start (nothing significant before the
             // prefix), where `SE…` should offer SELECT before any column.
             let lead = prev.is_none();
             let mut keywords: Vec<Suggestion> = crate::highlight::KEYWORDS
                 .iter()
                 .filter(|k| {
-                    matches_prefix(k, &prefix)
+                    match_tier(k, &prefix).is_some()
                         && !FUNCTIONS
                             .iter()
                             .any(|function| function.eq_ignore_ascii_case(k))
@@ -308,16 +430,18 @@ pub fn complete(
                     insert: (*k).to_string(),
                     detail: "keyword".to_string(),
                     kind: SuggestionKind::Keyword,
+                    schema: None,
                 })
                 .collect();
             keywords.extend(
                 FUNCTIONS
                     .iter()
-                    .filter(|function| matches_prefix(function, &prefix))
+                    .filter(|function| match_tier(function, &prefix).is_some())
                     .map(|function| Suggestion {
                         insert: (*function).to_string(),
                         detail: "function".to_string(),
                         kind: SuggestionKind::Function,
+                        schema: None,
                     }),
             );
             if lead {
@@ -331,8 +455,27 @@ pub fn complete(
 
     // Dedup repeated column names across tables (keep the first, which carries its
     // table in `detail`) and identical keyword/table entries.
+    items.retain(|s| match s.kind {
+        SuggestionKind::Table => options.suggest_tables,
+        SuggestionKind::Column => options.suggest_columns,
+        SuggestionKind::Function => options.suggest_functions,
+        SuggestionKind::Keyword => options.suggest_keywords,
+    });
+    if !options.uppercase_keywords {
+        // Keywords and the built-in functions are the only names spelled by the editor
+        // rather than the schema, so they are the only ones whose case is a preference.
+        for item in &mut items {
+            let builtin = item.kind == SuggestionKind::Keyword
+                || (item.kind == SuggestionKind::Function && item.detail == "function");
+            if builtin {
+                item.insert = item.insert.to_lowercase();
+            }
+        }
+    }
     let mut seen = std::collections::HashSet::new();
     items.retain(|s| seen.insert((s.kind, s.insert.to_lowercase())));
+    // Closest matches first; the sort is stable, so each tier keeps the context order.
+    items.sort_by_cached_key(|s| match_tier(unquoted(&s.insert), &prefix));
     items.truncate(MAX_ITEMS);
 
     if items.is_empty() {
@@ -346,6 +489,22 @@ pub fn complete(
     }
 }
 
+/// The text accepting `item` inserts. With "Prefix schema names" on, a table or view comes
+/// schema-qualified (`dbo.orders`) — unless the user already typed a qualifier before it.
+pub fn insertion_text(
+    item: &Suggestion,
+    after_dot: bool,
+    kind: Option<DbKind>,
+    options: &EditorOptions,
+) -> String {
+    match item.schema.as_deref() {
+        Some(schema) if options.prefix_schema && !after_dot => {
+            format!("{}.{}", maybe_quote(schema, kind), item.insert)
+        }
+        _ => item.insert.clone(),
+    }
+}
+
 /// The append-only tail of an unambiguous completion, suitable for inline ghost text.
 ///
 /// A completion that needs to rewrite what the user typed (most notably adding an opening
@@ -354,65 +513,159 @@ pub fn inline_suffix(completion: &Completion) -> Option<String> {
     let [item] = completion.items.as_slice() else {
         return None;
     };
-    if completion.prefix.is_empty() {
+    append_tail(&item.insert, &completion.prefix)
+}
+
+/// The part of the popup's highlighted row still to be typed, for previewing it inline after
+/// the caret. `None` when the row doesn't simply extend the prefix (a scattered match, or one
+/// that has to add an opening quote) — ghost text can only append.
+pub fn selected_tail(state: &State) -> Option<String> {
+    append_tail(&state.items.get(state.selected)?.insert, &state.prefix)
+}
+
+/// What remains of `insert` after the typed `prefix`, when `insert` starts with it.
+fn append_tail(insert: &str, prefix: &str) -> Option<String> {
+    if prefix.is_empty() {
         return None;
     }
-
-    let mut candidate = item.insert.char_indices();
+    let mut candidate = insert.char_indices();
     let mut end = 0;
-    for expected in completion.prefix.chars() {
+    for expected in prefix.chars() {
         let (at, actual) = candidate.next()?;
         if !actual.eq_ignore_ascii_case(&expected) {
             return None;
         }
         end = at + actual.len_utf8();
     }
-    let suffix = &item.insert[end..];
-    (!suffix.is_empty()).then(|| suffix.to_string())
+    let tail = &insert[end..];
+    (!tail.is_empty()).then(|| tail.to_string())
 }
 
-/// Byte length of the leading run of `insert` that the typed `prefix` matched — what the
-/// popup paints in the accent colour. `0` when nothing matched (a forced, empty-prefix
-/// listing, or a suggestion that got on the list some other way).
-///
-/// Suggestions arrive quoted for the dialect while the typed prefix is bare, so an opening
-/// quote is counted into the run: highlighting `co` but not the `"` in front of it would
-/// leave the quote stranded in body colour mid-word.
-fn matched_len(insert: &str, prefix: &str) -> usize {
-    if prefix.is_empty() {
-        return 0;
+/// How a name matched what was typed. Lower tiers are closer matches and sort first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MatchTier {
+    /// `cus` → `customer`.
+    Prefix,
+    /// At the start of a later word: `prog` → `x_program`, `Name` → `customerName`.
+    WordStart,
+    /// Anywhere inside: `stom` → `customer`.
+    Substring,
+    /// Scattered, in order, from the first letter: `emf` → `enum_first`.
+    Fuzzy,
+}
+
+/// The match tier of `candidate` for the typed `prefix`, compared case-insensitively *by
+/// char* (identifiers may be Thai, 3 bytes a glyph). `None` when it doesn't match, or when
+/// it is exactly what was typed — a fully typed name has nothing left to complete. Substring
+/// and scattered matches need two typed characters; one letter matching anywhere is noise.
+fn match_tier(candidate: &str, prefix: &str) -> Option<MatchTier> {
+    locate(candidate, prefix).map(|(tier, _)| tier)
+}
+
+/// Where `prefix` matches `candidate`: the tier and, for a contiguous match, the char index it
+/// starts at. Runs once per schema name on every keystroke — tens of thousands of columns on
+/// a large database — so it walks the strings in place and never allocates.
+fn locate(candidate: &str, prefix: &str) -> Option<(MatchTier, usize)> {
+    let typed = prefix.chars().count();
+    if typed == 0 {
+        return Some((MatchTier::Prefix, 0));
     }
-    let mut matched = match insert.chars().next() {
-        Some(quote @ ('"' | '`' | '[')) => quote.len_utf8(),
-        _ => 0,
+    if candidate.chars().count() <= typed {
+        // Equal-length matches are already fully typed; shorter ones can't match.
+        return None;
+    }
+    let starts_with = |rest: &str| {
+        let mut chars = rest.chars();
+        prefix
+            .chars()
+            .all(|p| chars.next().is_some_and(|c| c.eq_ignore_ascii_case(&p)))
     };
-    let mut rest = insert[matched..].chars();
-    for p in prefix.chars() {
-        match rest.next() {
-            Some(c) if c.eq_ignore_ascii_case(&p) => matched += c.len_utf8(),
-            _ => return 0,
+    if starts_with(candidate) {
+        return Some((MatchTier::Prefix, 0));
+    }
+    let mut substring = None;
+    let mut previous = None;
+    for (n, (at, c)) in candidate.char_indices().enumerate() {
+        if let Some(before) = previous.replace(c) {
+            let word_start = (!before.is_alphanumeric() && c.is_alphanumeric())
+                || (before.is_lowercase() && c.is_uppercase());
+            if starts_with(&candidate[at..]) {
+                if word_start {
+                    return Some((MatchTier::WordStart, n));
+                }
+                substring.get_or_insert(n);
+            }
         }
     }
-    matched
+    if typed < 2 {
+        return None;
+    }
+    if let Some(n) = substring {
+        return Some((MatchTier::Substring, n));
+    }
+    // Scattered, in order, starting on the first letter.
+    let mut rest = candidate.chars();
+    let mut typed_chars = prefix.chars();
+    let first = typed_chars.next()?;
+    if !rest.next().is_some_and(|c| c.eq_ignore_ascii_case(&first)) {
+        return None;
+    }
+    typed_chars
+        .all(|p| rest.any(|c| c.eq_ignore_ascii_case(&p)))
+        .then_some((MatchTier::Fuzzy, 0))
 }
 
-fn matches_prefix(candidate: &str, prefix: &str) -> bool {
-    if prefix.is_empty() {
-        return true;
+/// [`match_tier`] plus the char indices of `candidate` that matched, for highlighting. Only
+/// the rows on screen ask for this, so it is free to allocate.
+fn match_positions(candidate: &str, prefix: &str) -> Option<(MatchTier, Vec<usize>)> {
+    let (tier, start) = locate(candidate, prefix)?;
+    let typed = prefix.chars().count();
+    if tier != MatchTier::Fuzzy {
+        return Some((tier, (start..start + typed).collect()));
     }
-    // Compare the leading `prefix` characters case-insensitively *by char*, never by byte:
-    // identifiers (and the typed prefix) may hold multi-byte UTF-8 — e.g. Thai, where one
-    // glyph is 3 bytes — so `candidate[..prefix.len()]` could slice mid-character and panic.
-    let mut cand = candidate.chars();
-    for p in prefix.chars() {
-        match cand.next() {
-            Some(c) if c.eq_ignore_ascii_case(&p) => {}
-            _ => return false,
+    let mut positions = Vec::with_capacity(typed);
+    let mut typed_chars = prefix.chars().peekable();
+    for (n, c) in candidate.chars().enumerate() {
+        match typed_chars.peek() {
+            Some(p) if c.eq_ignore_ascii_case(p) => {
+                positions.push(n);
+                typed_chars.next();
+            }
+            Some(_) => {}
+            None => break,
         }
     }
-    // A char left over means `candidate` is strictly longer than `prefix`; equal length
-    // means it's already fully typed, which we don't suggest.
-    cand.next().is_some()
+    Some((tier, positions))
+}
+
+/// An inserted identifier without the dialect quotes around it — what the typed prefix is
+/// matched against.
+fn unquoted(insert: &str) -> &str {
+    let inner = insert
+        .strip_prefix(['"', '`', '['])
+        .and_then(|rest| rest.strip_suffix(['"', '`', ']']));
+    inner.unwrap_or(insert)
+}
+
+/// The char indices of `insert` to paint in the accent colour — the characters the typed
+/// `prefix` matched — so the reader sees *why* each row is on the list. Suggestions arrive
+/// quoted for the dialect while the prefix is bare, so the opening quote joins a leading
+/// match: highlighting `co` but not the `"` in front of it would strand the quote mid-word.
+fn matched_chars(insert: &str, prefix: &str) -> Vec<usize> {
+    if prefix.is_empty() {
+        return Vec::new();
+    }
+    let inner = unquoted(insert);
+    let quoted = inner.len() != insert.len();
+    let Some((_, positions)) = match_positions(inner, prefix) else {
+        return Vec::new();
+    };
+    let shift = usize::from(quoted);
+    let mut out: Vec<usize> = positions.into_iter().map(|i| i + shift).collect();
+    if quoted && out.first() == Some(&1) {
+        out.insert(0, 0);
+    }
+    out
 }
 
 fn push_table(
@@ -422,27 +675,79 @@ fn push_table(
     kind: Option<DbKind>,
     prefix: &str,
 ) {
-    if matches_prefix(name, prefix) {
+    if match_tier(name, prefix).is_some() {
         items.push(Suggestion {
             insert: maybe_quote(name, kind),
             detail: schema.unwrap_or("table").to_string(),
             kind: SuggestionKind::Table,
+            schema: schema.map(str::to_string),
         });
     }
 }
 
-fn push_columns(
+/// A view completes like a table; its detail says it is one, since the icon can't.
+fn push_view(
     items: &mut Vec<Suggestion>,
-    table: &dbcore::TableInfo,
+    view: &dbcore::ViewInfo,
     kind: Option<DbKind>,
     prefix: &str,
 ) {
-    for col in &table.columns {
-        if matches_prefix(&col.name, prefix) {
+    if match_tier(&view.name, prefix).is_some() {
+        let label = if view.materialized {
+            "materialized view"
+        } else {
+            "view"
+        };
+        items.push(Suggestion {
+            insert: maybe_quote(&view.name, kind),
+            detail: match view.schema.as_deref() {
+                Some(schema) => format!("{schema} · {label}"),
+                None => label.to_string(),
+            },
+            kind: SuggestionKind::Table,
+            schema: view.schema.clone(),
+        });
+    }
+}
+
+/// A stored function or procedure, detailed with its parameter count and return type.
+fn push_routine(
+    items: &mut Vec<Suggestion>,
+    routine: &dbcore::RoutineInfo,
+    kind: Option<DbKind>,
+    prefix: &str,
+) {
+    if match_tier(&routine.name, prefix).is_none() {
+        return;
+    }
+    let mut detail = routine.kind.label().to_lowercase();
+    if let Some(returns) = routine.return_type.as_deref().filter(|r| !r.is_empty()) {
+        detail = format!("{detail} → {returns}");
+    }
+    items.push(Suggestion {
+        insert: maybe_quote(&routine.name, kind),
+        detail,
+        kind: SuggestionKind::Function,
+        schema: None,
+    });
+}
+
+fn push_columns<'s>(
+    items: &mut Vec<Suggestion>,
+    seen: &mut std::collections::HashSet<&'s str>,
+    table: &str,
+    columns: &'s [dbcore::ColumnInfo],
+    kind: Option<DbKind>,
+    prefix: &str,
+) {
+    for col in columns {
+        // A name met before was matched then: offered already, or not a match anywhere.
+        if seen.insert(&col.name) && match_tier(&col.name, prefix).is_some() {
             items.push(Suggestion {
                 insert: maybe_quote(&col.name, kind),
-                detail: format!("{} · {}", table.name, col.data_type),
+                detail: format!("{table} · {}", col.data_type),
                 kind: SuggestionKind::Column,
+                schema: None,
             });
         }
     }
@@ -640,24 +945,28 @@ pub fn show_popup(
                                     rect.left_top(),
                                     egui::pos2(detail_rect.left() - 10.0, rect.bottom()),
                                 );
-                                let label_painter = ui.painter().with_clip_rect(label_clip);
-                                let mut label_pos = egui::pos2(rect.left() + 25.0, rect.center().y);
-                                let matched = matched_len(&item.insert, &state.prefix);
-                                if matched > 0 {
-                                    let painted = label_painter.text(
-                                        label_pos,
-                                        egui::Align2::LEFT_CENTER,
-                                        &item.insert[..matched],
-                                        mono.clone(),
-                                        palette::ACCENT(),
+                                let matched = matched_chars(&item.insert, &state.prefix);
+                                let mut job = egui::text::LayoutJob::default();
+                                for (n, c) in item.insert.chars().enumerate() {
+                                    let color = if matched.contains(&n) {
+                                        palette::ACCENT()
+                                    } else {
+                                        palette::TEXT()
+                                    };
+                                    job.append(
+                                        c.encode_utf8(&mut [0; 4]),
+                                        0.0,
+                                        egui::TextFormat::simple(mono.clone(), color),
                                     );
-                                    label_pos.x = painted.right();
                                 }
-                                label_painter.text(
+                                let galley = ui.fonts_mut(|f| f.layout_job(job));
+                                let label_pos = egui::pos2(
+                                    rect.left() + 25.0,
+                                    rect.center().y - galley.size().y / 2.0,
+                                );
+                                ui.painter().with_clip_rect(label_clip).galley(
                                     label_pos,
-                                    egui::Align2::LEFT_CENTER,
-                                    &item.insert[matched..],
-                                    mono.clone(),
+                                    galley,
                                     palette::TEXT(),
                                 );
                                 if resp.clicked() {
@@ -798,6 +1107,7 @@ mod tests {
                 insert: "\"MyTable\"".to_string(),
                 detail: "table".to_string(),
                 kind: SuggestionKind::Table,
+                schema: None,
             }],
         };
         assert!(inline_suffix(&c).is_none());
@@ -857,22 +1167,143 @@ mod tests {
     }
 
     #[test]
-    fn the_matched_prefix_run_is_what_gets_accented() {
+    fn the_matched_characters_are_what_gets_accented() {
         // Case-insensitive, so a lowercase prefix still highlights an uppercase keyword.
-        assert_eq!(matched_len("SELECT", "sel"), 3);
-        assert_eq!(matched_len("country", "co"), 2);
-        // A quoted suggestion counts its opening quote into the run.
-        assert_eq!(matched_len("\"MyCol\"", "my"), 3);
-        assert_eq!(matched_len("`order`", "or"), 3);
+        assert_eq!(matched_chars("SELECT", "sel"), vec![0, 1, 2]);
+        assert_eq!(matched_chars("country", "co"), vec![0, 1]);
+        // A quoted suggestion counts its opening quote into a leading run.
+        assert_eq!(matched_chars("\"MyCol\"", "my"), vec![0, 1, 2]);
+        assert_eq!(matched_chars("`order`", "or"), vec![0, 1, 2]);
+        // Inner and scattered matches light up exactly the letters that matched.
+        assert_eq!(matched_chars("xprogram", "prog"), vec![1, 2, 3, 4]);
+        assert_eq!(matched_chars("enum_first", "emf"), vec![0, 3, 5]);
         // Nothing typed, or nothing matching, accents nothing.
-        assert_eq!(matched_len("country", ""), 0);
-        assert_eq!(matched_len("country", "zz"), 0);
-        // Multi-byte prefixes measure in bytes (the caller slices the string with it) and
-        // must land on a char boundary.
-        let quoted = "\"ลูกค้า\"";
-        let matched = matched_len(quoted, "ลูก");
-        assert!(quoted.is_char_boundary(matched));
-        assert_eq!(&quoted[..matched], "\"ลูก");
+        assert!(matched_chars("country", "").is_empty());
+        assert!(matched_chars("country", "zz").is_empty());
+        // Indices are chars, not bytes: Thai is 3 bytes a glyph.
+        assert_eq!(matched_chars("\"ลูกค้า\"", "ลูก"), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn closer_matches_rank_first() {
+        assert_eq!(match_tier("program", "prog"), Some(MatchTier::Prefix));
+        assert_eq!(match_tier("x_program", "prog"), Some(MatchTier::WordStart));
+        assert_eq!(
+            match_tier("customerName", "name"),
+            Some(MatchTier::WordStart)
+        );
+        assert_eq!(match_tier("xprogram", "prog"), Some(MatchTier::Substring));
+        assert_eq!(match_tier("enum_first", "emf"), Some(MatchTier::Fuzzy));
+        // A fully typed name has nothing to complete; a lone letter only matches at a word
+        // start; a scattered match must begin at the first letter.
+        assert_eq!(match_tier("program", "program"), None);
+        assert_eq!(match_tier("xprogram", "p"), None);
+        assert_eq!(match_tier("program", "rgm"), None);
+
+        let mut s = schema();
+        s.tables[0].name = "xprogram".into();
+        s.tables[1].name = "program_log".into();
+        let sql = "SELECT * FROM prog";
+        let c = complete(sql, sql.chars().count(), Some(&s), None, false).unwrap();
+        assert_eq!(labels(&c), vec!["program_log", "xprogram"]);
+    }
+
+    #[test]
+    fn views_and_routines_are_suggested() {
+        let mut s = schema();
+        s.views.push(dbcore::ViewInfo {
+            schema: Some("public".into()),
+            name: "active_users".into(),
+            columns: vec![s.tables[0].columns[1].clone()],
+            definition: String::new(),
+            materialized: false,
+        });
+        s.routines.push(dbcore::RoutineInfo {
+            schema: Some("public".into()),
+            name: "refresh_totals".into(),
+            kind: dbcore::RoutineKind::Procedure,
+            params: Vec::new(),
+            return_type: None,
+            language: String::new(),
+            body: String::new(),
+        });
+
+        let sql = "SELECT * FROM act";
+        let c = complete(sql, sql.chars().count(), Some(&s), None, false).unwrap();
+        assert_eq!(labels(&c), vec!["active_users"]);
+        assert_eq!(c.items[0].detail, "public · view");
+
+        // A view's columns resolve through its name like a table's.
+        let sql = "SELECT active_users. FROM active_users";
+        let c = complete(sql, 20, Some(&s), None, false).unwrap();
+        assert_eq!(labels(&c), vec!["email"]);
+
+        // EXEC / CALL offer routines only.
+        let sql = "EXEC ref";
+        let c = complete(sql, sql.chars().count(), Some(&s), None, false).unwrap();
+        assert_eq!(labels(&c), vec!["refresh_totals"]);
+        assert_eq!(c.items[0].kind, SuggestionKind::Function);
+    }
+
+    #[test]
+    fn editor_options_shape_the_list() {
+        let s = schema();
+        let options = |f: fn(&mut EditorOptions)| {
+            let mut o = EditorOptions::default();
+            f(&mut o);
+            o
+        };
+        // Turning a kind off removes it; the rest stay.
+        let sql = "SELECT * FROM users WHERE e";
+        let at = sql.chars().count();
+        let no_columns = options(|o| o.suggest_columns = false);
+        let c = complete_with(sql, at, Some(&s), None, false, &no_columns).unwrap();
+        assert!(c.items.iter().all(|i| i.kind != SuggestionKind::Column));
+        assert!(c.items.iter().any(|i| i.kind == SuggestionKind::Keyword));
+
+        // Keywords and built-in functions follow the case preference; schema names don't.
+        let lower = options(|o| o.uppercase_keywords = false);
+        let c = complete_with("sel", 3, Some(&s), None, false, &lower).unwrap();
+        assert_eq!(c.items[0].insert, "select");
+        let c = complete_with("SELECT cou", 10, None, None, false, &lower).unwrap();
+        assert!(c.items.iter().any(|i| i.insert == "count"));
+
+        // "Prefix schema names" qualifies a table on insertion — not after a typed dot.
+        let qualified = options(|o| o.prefix_schema = true);
+        let sql = "SELECT * FROM us";
+        let c = complete(sql, sql.chars().count(), Some(&s), None, false).unwrap();
+        assert_eq!(
+            insertion_text(&c.items[0], false, None, &qualified),
+            "public.users"
+        );
+        assert_eq!(insertion_text(&c.items[0], true, None, &qualified), "users");
+        assert_eq!(
+            insertion_text(&c.items[0], false, None, &EditorOptions::default()),
+            "users"
+        );
+    }
+
+    #[test]
+    fn the_selected_row_previews_inline() {
+        let item = |insert: &str| Suggestion {
+            insert: insert.to_string(),
+            detail: String::new(),
+            kind: SuggestionKind::Table,
+            schema: None,
+        };
+        let mut state = State {
+            open: true,
+            items: vec![item("xprogram"), item("xpgroup"), item("\"XpType\"")],
+            prefix: "xp".into(),
+            ..State::default()
+        };
+        assert_eq!(selected_tail(&state).as_deref(), Some("rogram"));
+        // A row that doesn't simply extend what was typed can't be previewed by appending.
+        state.selected = 2;
+        assert_eq!(selected_tail(&state), None);
+        state.prefix = "prog".into();
+        state.selected = 0;
+        assert_eq!(selected_tail(&state), None);
     }
 
     #[test]
@@ -1085,6 +1516,7 @@ mod tests {
             insert: insert.to_string(),
             detail: detail.to_string(),
             kind,
+            schema: None,
         };
         let state = State {
             open: true,
@@ -1101,8 +1533,7 @@ mod tests {
             // Mixed on purpose: `or…` matches some rows and not others, so the snapshot
             // shows both the accented prefix run and a plain label.
             prefix: "or".to_string(),
-            caret_char: 0,
-            anchor: egui::Rect::ZERO,
+            ..State::default()
         };
         let theme = crate::theme::ThemeRegistry::load().theme_of(theme_key);
         let mut setup = false;

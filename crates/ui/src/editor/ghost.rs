@@ -22,6 +22,26 @@ use super::ghost_flow;
 use crate::sqlctx;
 use dbcore::{DbKind, SchemaTree, TableInfo};
 
+/// [`suggest_with`] under the default editor options.
+#[cfg(test)]
+pub fn suggest(
+    sql: &str,
+    cursor: usize,
+    history: &[&str],
+    schema: Option<&SchemaTree>,
+    kind: Option<DbKind>,
+) -> Option<String> {
+    suggest_with(
+        sql,
+        cursor,
+        history,
+        schema,
+        kind,
+        &dbcore::config::EditorOptions::default(),
+        None,
+    )
+}
+
 /// Compute the ghost suggestion for `sql` with the caret at char index `cursor`.
 ///
 /// Returns the text to append after the caret, or `None` when nothing fits. Only fires
@@ -30,12 +50,18 @@ use dbcore::{DbKind, SchemaTree, TableInfo};
 /// under light editing.
 ///
 /// `history` is newest-last (the order [`dbcore::history::load`] returns).
-pub fn suggest(
+///
+/// `options` shape the one-name completions it shares with the autocomplete popup.
+/// `known_identifier` is that completion when the popup already worked it out for this very
+/// text and caret (`Some(None)`: it found none), sparing a second pass over the schema.
+pub fn suggest_with(
     sql: &str,
     cursor: usize,
     history: &[&str],
     schema: Option<&SchemaTree>,
     kind: Option<DbKind>,
+    options: &dbcore::config::EditorOptions,
+    known_identifier: Option<Option<String>>,
 ) -> Option<String> {
     let chars: Vec<char> = sql.chars().collect();
     // Autosuggestions only complete the logical tail. Allow blank lines/indentation after the
@@ -66,7 +92,10 @@ pub fn suggest(
     }
 
     let suggestion = history_suggestion(&stmt_str, history)
-        .or_else(|| identifier_suggestion(sql, cursor, schema, kind))
+        .or_else(|| match known_identifier {
+            Some(known) => known,
+            None => identifier_suggestion(sql, cursor, schema, kind, options),
+        })
         .or_else(|| schema_suggestion(stmt, schema, kind))
         // The first step has its heuristics above; this keeps the chain going afterwards.
         .or_else(|| ghost_flow::next_clause(stmt, history, schema?, kind))?;
@@ -86,8 +115,9 @@ fn identifier_suggestion(
     cursor: usize,
     schema: Option<&SchemaTree>,
     kind: Option<DbKind>,
+    options: &dbcore::config::EditorOptions,
 ) -> Option<String> {
-    let completion = crate::autocomplete::complete(sql, cursor, schema, kind, false)?;
+    let completion = crate::autocomplete::complete_with(sql, cursor, schema, kind, false, options)?;
     crate::autocomplete::inline_suffix(&completion)
 }
 

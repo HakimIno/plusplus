@@ -49,6 +49,33 @@ impl DbGuiApp {
             None => self.error = Some("Can't copy binary values as SQL INSERT.".to_string()),
         }
     }
+    /// Copy the one value under the cell cursor — staged edit included — exactly as stored:
+    /// no quoting, and newlines kept (unlike a TSV row). NULL copies as empty text.
+    pub(super) fn copy_cell(&mut self) {
+        let tab = &self.tabs[self.active_query_tab];
+        let (Some(result), Some((disp, col))) = (tab.result.as_ref(), tab.selection.cursor())
+        else {
+            return;
+        };
+        let Some(raw) = crate::edit::disp_to_raw(&tab.row_order, tab.edits.new_rows, disp) else {
+            return;
+        };
+        let value = match tab.edits.staged(raw, col) {
+            Some(value) => Some(value.clone()),
+            None => crate::edit::original_value(result, raw, col),
+        };
+        let Some(value) = value else {
+            return;
+        };
+        let column = result.columns.get(col).map_or("", |c| c.name.as_str());
+        self.status_msg = format!("Copied {column} value");
+        self.error = None;
+        self.copy_buffer = Some(if value.is_null() {
+            String::new()
+        } else {
+            value.as_text()
+        });
+    }
     /// Paste clipboard `text` (TSV: one row per line, tab-separated fields) into the active
     /// table. Whole rows (every line has one field per column, as Copy writes them) become new
     /// staged insert rows; anything narrower overwrites cells from the cell cursor instead

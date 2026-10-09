@@ -759,7 +759,12 @@ struct EditorAssistState {
     /// it has none. A connection change re-checks unchanged text.
     syntax_checked_kind: Option<DbKind>,
     syntax_dirty_at: Option<f64>,
+    /// The current-statement tint's char span, cached for `(sql revision, caret)`.
+    statement_span: Option<(SqlCaretKey, Option<std::ops::Range<usize>>)>,
 }
+
+/// `(sql revision, caret char)`: what an editor-derived cache was computed for.
+type SqlCaretKey = (u64, usize);
 
 #[derive(Clone)]
 struct KeyChooserState {
@@ -1818,6 +1823,8 @@ enum Action {
     LoadMoreRows,
     /// Copy the currently selected result rows to the clipboard in the given format.
     CopyRows(dbcore::CopyFormat),
+    /// Copy the value under the grid's cell cursor, as plain text.
+    CopyCell,
     /// Open a read-only JSON/BLOB/Image cell snapshot.
     OpenValueViewer(crate::value_viewer::ValueViewer),
     /// Pick an image file and stage its bytes into an existing binary cell.
@@ -1862,7 +1869,7 @@ enum Action {
         table: TableInfo,
     },
     /// Export the active query chart, using the current axes, series, sort, filter, and theme.
-    ExportChart,
+    ExportChart(crate::chart::ChartExportFormat),
     /// Pick a CSV/JSON file and open the import mapping dialog for this table. Sidebar action.
     ImportIntoTable(TableInfo),
     /// Point a target column at a source column of the open import (or `None` to skip it).
@@ -2212,6 +2219,8 @@ pub struct DbGuiApp {
     editor_wrap_lines: bool,
     autocomplete_enabled: bool,
     ghost_suggestions_enabled: bool,
+    /// The SQL editor's finer options, from the editor's options menu.
+    editor_options: dbcore::config::EditorOptions,
     /// SQL beautifier preferences (persisted to settings.json).
     beautify: crate::format::BeautifyPrefs,
     /// Whether the main Run segment executes all statements rather than the current one.
@@ -2335,6 +2344,7 @@ impl DbGuiApp {
         let editor_wrap_lines = settings.editor_wrap_lines.unwrap_or(true);
         let autocomplete_enabled = settings.autocomplete_enabled.unwrap_or(true);
         let ghost_suggestions_enabled = settings.ghost_suggestions_enabled.unwrap_or(true);
+        let editor_options = settings.editor.clone();
         crate::theme::set_current(themes.theme_of(&theme));
         let beautify_defaults = crate::format::BeautifyPrefs::default();
         let beautify = crate::format::BeautifyPrefs {
@@ -2440,6 +2450,7 @@ impl DbGuiApp {
             editor_wrap_lines,
             autocomplete_enabled,
             ghost_suggestions_enabled,
+            editor_options,
             beautify,
             run_all_by_default,
             commit_pending: None,

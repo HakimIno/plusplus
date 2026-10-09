@@ -96,6 +96,19 @@ fn highlight_runs_with_colors(
     colors: SqlColors,
 ) -> LayoutJob {
     let mut job = LayoutJob::default();
+    if text.is_empty() {
+        // An empty job has no section to take a font from, so its one empty row — and the
+        // caret drawn in it — would fall back to the default size and ignore the editor's.
+        job.append(
+            "",
+            0.0,
+            egui::TextFormat {
+                font_id: font,
+                ..Default::default()
+            },
+        );
+        return job;
+    }
     if placeholders.is_empty() {
         append_sql(&mut job, text, &font, &colors);
         return job;
@@ -357,6 +370,21 @@ pub(crate) const KEYWORDS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An empty editor still lays out one row at the editor's font size, so the caret in it
+    /// grows with the font instead of staying at egui's default height.
+    #[test]
+    fn empty_text_keeps_the_editor_font_height() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let height = |size: f32| {
+            let job = highlight_sql_folded("", FontId::monospace(size), &[]);
+            ctx.fonts_mut(|f| f.layout_job(job)).rows[0].row.size.y
+        };
+        let expected = ctx.fonts_mut(|f| f.row_height(&FontId::monospace(24.0)));
+        assert!((height(24.0) - expected).abs() < 0.5);
+        assert!(height(24.0) > height(12.0));
+    }
 
     #[test]
     fn intellij_sql_colours_follow_tokens_and_theme_switches() {

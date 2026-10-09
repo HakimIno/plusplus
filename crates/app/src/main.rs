@@ -110,6 +110,9 @@ fn main() -> eframe::Result<()> {
     }
     #[cfg(target_os = "macos")]
     url_handler::install();
+    // Double-click timing follows System Settings rather than egui's stricter default.
+    #[cfg(target_os = "macos")]
+    ui::set_double_click_interval(objc2_app_kit::NSEvent::doubleClickInterval());
     let icon = eframe::icon_data::from_png_bytes(APP_ICON).expect("valid app icon PNG");
 
     let mut viewport = egui::ViewportBuilder::default()

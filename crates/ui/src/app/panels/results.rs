@@ -631,8 +631,8 @@ impl DbGuiApp {
                             } else if let Some(result) = tab.result.as_ref() {
                                 let response =
                                     crate::chart::show(ui, result, &tab.row_order, &mut tab.chart);
-                                if response.export_requested {
-                                    actions.push(Action::ExportChart);
+                                if let Some(format) = response.export_requested {
+                                    actions.push(Action::ExportChart(format));
                                 }
                             }
                         });
@@ -739,6 +739,14 @@ impl DbGuiApp {
                                 selection.select_one(disp);
                             }
                             actions.push(Action::CopyRows(fmt));
+                        }
+                        // Right-click "Copy": copy just that cell, moving the cursor onto it.
+                        if let Some((disp, col)) = resp.copy_cell {
+                            if !selection.contains(disp) {
+                                selection.select_one(disp);
+                            }
+                            selection.set_cursor(disp, col);
+                            actions.push(Action::CopyCell);
                         }
                         // Set NULL / Set Empty / Duplicate Row target the selection the same way.
                         if let Some((disp, col, to)) = resp.set_cells {

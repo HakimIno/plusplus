@@ -2162,6 +2162,57 @@ fn copy_event_pushes_selection_to_clipboard() {
     assert_eq!(copied.as_deref(), Some("1\ta\n2\tb"));
 }
 
+/// With a single row selected, Cmd/Ctrl+C copies just the value under the cell cursor —
+/// unflattened, so a multi-line value keeps its newlines.
+#[test]
+fn copy_event_on_one_cell_copies_only_its_value() {
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    let result = QueryResult {
+        columns: vec![
+            ColumnMeta {
+                name: "code".into(),
+                type_name: "TEXT".into(),
+            },
+            ColumnMeta {
+                name: "note".into(),
+                type_name: "TEXT".into(),
+            },
+        ],
+        rows: vec![
+            vec![Value::Text("000038".into()), Value::Text("line 1\nline 2".into())],
+            vec![Value::Text("000065".into()), Value::Null],
+        ],
+        stats: QueryStats::default(),
+        truncated: false,
+    };
+    app.tab_mut().set_result(result);
+    app.tab_mut().selection.select_one(0);
+    app.tab_mut().selection.set_cursor(0, 0);
+
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+    let copy = |app: &mut DbGuiApp| {
+        let raw = egui::RawInput {
+            screen_rect: Some(screen),
+            events: vec![egui::Event::Copy],
+            ..Default::default()
+        };
+        let out = ctx.run_ui(raw, |ui| app.draw(ui, None));
+        out.platform_output.commands.iter().find_map(|c| match c {
+            egui::OutputCommand::CopyText(t) => Some(t.clone()),
+            _ => None,
+        })
+    };
+    assert_eq!(copy(&mut app).as_deref(), Some("000038"));
+
+    app.tab_mut().selection.set_cursor(0, 1);
+    assert_eq!(copy(&mut app).as_deref(), Some("line 1\nline 2"));
+}
+
 /// Paste round-trips a copy: TSV clipboard text becomes new staged insert rows on an
 /// editable table, fields typed by column kind (id parses to an int) and mapped by position.
 #[test]
@@ -4357,7 +4408,7 @@ fn adaptive_editor_renders_on_the_expected_side_of_results() {
         egui::vec2(1000.0, 700.0),
     );
     assert!(
-        query.get_by_label("SQL workspace").rect().center().y
+        query.get_by_label("Editor options").rect().center().y
             < query.get_by_label("Empty state mark").rect().center().y
     );
     assert!(
@@ -4373,7 +4424,7 @@ fn adaptive_editor_renders_on_the_expected_side_of_results() {
     );
     assert!(
         (query.get_by_label("Run Current").rect().center().y
-            - query.get_by_label("SQL workspace").rect().center().y)
+            - query.get_by_label("Editor options").rect().center().y)
             .abs()
             < 0.1,
         "query tabs and actions must share one footer row"
@@ -4391,7 +4442,7 @@ fn adaptive_editor_renders_on_the_expected_side_of_results() {
     );
     table.get_by_label("col0");
     assert!(
-        table.query_by_label("SQL workspace").is_none()
+        table.query_by_label("Editor options").is_none()
             && table.query_by_label("SQL line numbers").is_none()
             && table.query_by_label("Save query").is_none(),
         "table tabs must reserve SQL authoring for Query tabs"
@@ -4407,7 +4458,7 @@ fn adaptive_editor_renders_on_the_expected_side_of_results() {
         None,
         egui::vec2(800.0, 500.0),
     );
-    let editor_y = compact.get_by_label("SQL workspace").rect().center().y;
+    let editor_y = compact.get_by_label("Editor options").rect().center().y;
     let result_y = compact.get_by_label("Empty state mark").rect().center().y;
     let result_modes_y = compact.get_by_label("Data").rect().center().y;
     let live_log_y = compact.get_by_label("Live log").rect().center().y;
@@ -4679,7 +4730,7 @@ fn table_tab_keeps_data_controls_without_a_query_console() {
         "table modes must sit outside Live log, above its resize boundary"
     );
     assert!(
-        harness.query_by_label("SQL workspace").is_none()
+        harness.query_by_label("Editor options").is_none()
             && harness.query_by_label("SQL line numbers").is_none()
             && harness.query_by_label("Run").is_none(),
         "table tabs must not render query-console controls"
@@ -4936,12 +4987,11 @@ fn query_result_controls_sit_between_query_toolbar_and_grid() {
 
     harness.get_by_label("Chart").click();
     harness.run_steps(2);
-    assert!(harness.query_by_label("Export SVG…").is_some());
+    assert!(harness.query_by_label("Export").is_some());
     assert!(harness.query_by_label("Line").is_some());
-    assert!(harness.query_by_label("Y · col0").is_some());
-    assert!(harness.query_by_label("X · Row number").is_some());
+    assert!(harness.query_by_label("Y: col0").is_some());
+    assert!(harness.query_by_label("X: Row number").is_some());
     assert!(harness.query_by_label("Style").is_some());
-    assert!(harness.query_by_label("Reset").is_some());
 
     harness.get_by_label("Line").click();
     harness.run_steps(2);
@@ -4958,22 +5008,23 @@ fn query_result_controls_sit_between_query_toolbar_and_grid() {
     harness.run_steps(2);
     harness.get_all_by_label("Style").next().unwrap().click();
     harness.run_steps(2);
-    assert!(harness.query_by_label("Title").is_some());
-    assert!(harness.query_by_label("Show legend").is_some());
+    assert!(harness.query_by_label("Titles").is_some());
+    assert!(harness.query_by_label("Legend").is_some());
+    assert!(harness.query_by_label("Reset style").is_some());
 
     harness.get_all_by_label("Style").next().unwrap().click();
     harness.run_steps(2);
-    harness.get_by_label("X · Row number").click();
+    harness.get_by_label("X: Row number").click();
     harness.run_steps(2);
     assert!(harness.query_by_label("X axis").is_some());
     assert!(harness.query_by_label("Row number").is_some());
 
-    harness.get_by_label("X · Row number").click();
+    harness.get_by_label("X: Row number").click();
     harness.run_steps(2);
-    harness.get_by_label("Y · col0").click();
+    harness.get_by_label("Y: col0").click();
     harness.run_steps(2);
     assert!(harness.query_by_label("Y values").is_some());
-    assert!(harness.query_by_label("col0").is_some());
+    assert!(harness.query_all_by_label("col0").next().is_some());
 }
 
 #[test]
@@ -6949,6 +7000,57 @@ fn snapshot_sidebar_schema_picker() {
     render_and_snapshot_at(app, "sidebar_schema_picker", false, 2.0);
 }
 
+/// Screenshot generator (ignored): the SQL workspace bar's Editor options dropdown, opened.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_editor_options() {
+    use egui_kittest::kittest::Queryable;
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.connections.clear();
+    connect_fake(&mut app, fake_schema(2, 3));
+    app.tab_mut().sql =
+        "select top 10 customer_code\nfrom customer;\n\nselect *\n\tfrom orders;".into();
+    app.tab_mut().set_result(fake_result(3, 3));
+    app.editor_options.show_invisibles = true;
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1180.0, 760.0))
+        .with_pixels_per_point(2.0)
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+        });
+    harness.run_steps(4);
+    // Accessibility rects are in physical pixels; pointer events take points.
+    let at = harness.get_by_label("Editor options").rect().center() / 2.0;
+    harness.hover_at(at);
+    harness.run_steps(1);
+    for pressed in [true, false] {
+        harness.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        });
+        harness.run_steps(1);
+    }
+    harness.run_steps(6);
+    let submenu = harness
+        .query_by_label_contains("Autocomplete")
+        .expect("the dropdown must open")
+        .rect()
+        .center()
+        / 2.0;
+    harness.hover_at(submenu);
+    harness.run_steps(6);
+    harness.snapshot("editor_options");
+}
+
 /// Screenshot generator (ignored): result tabs of a multi-statement run.
 #[test]
 #[ignore = "screenshot generator; run manually with --ignored"]
@@ -7008,6 +7110,53 @@ fn snapshot_beautify_popover() {
     });
     harness.run_steps(6);
     harness.snapshot("beautify_popover");
+}
+
+/// Screenshot generator (ignored): the Run chevron's menu with its Default run submenu open,
+/// framed and laid out like the Beautify and Editor options dropdowns.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_run_menu() {
+    use egui_kittest::kittest::Queryable;
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(560.0, 260.0))
+        .with_pixels_per_point(2.0)
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            ui.painter()
+                .rect_filled(ui.ctx().content_rect(), 0.0, crate::style::palette::PANEL());
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.add_space(380.0);
+                crate::components::run_button(ui, true, true, true);
+            });
+        });
+    harness.run_steps(2);
+    let click = |harness: &mut egui_kittest::Harness<'_>, label: &str| {
+        let at = harness.get_by_label(label).rect().center() / 2.0;
+        harness.hover_at(at);
+        harness.run_steps(1);
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            });
+            harness.run_steps(1);
+        }
+    };
+    click(&mut harness, "Run options");
+    harness.run_steps(4);
+    let submenu = harness.get_by_label("Default run").rect().center() / 2.0;
+    harness.hover_at(submenu);
+    harness.run_steps(6);
+    harness.snapshot("run_menu");
 }
 
 /// Screenshot generator (ignored): the Structure view when the table's metadata can't be
@@ -11332,4 +11481,321 @@ fn pasting_a_url_into_host_fills_the_draft() {
     assert_eq!(editor.config.database, "app");
     assert_eq!(editor.password, "pw");
     assert_eq!(editor.config.name, "app @ 127.0.0.1");
+}
+
+/// Typing-latency probe (ignored): frame time of one keystroke in a long query against a
+/// large schema, and the cost of each piece of per-keystroke editor work.
+#[test]
+#[ignore = "latency probe; run manually with --ignored --nocapture"]
+fn probe_typing_latency() {
+    use std::time::Instant;
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.connections.clear();
+    connect_fake(&mut app, fake_schema(2000, 30));
+    let mut sql = String::new();
+    for i in 0..150 {
+        sql.push_str(&format!(
+            "SELECT field_1, field_2, field_3 FROM table_{i} WHERE field_0 = {i};\n"
+        ));
+    }
+    sql.push_str("SELECT * FROM ta");
+    app.tab_mut().sql = sql.clone();
+    let tab_id = app.tab().id;
+    let editor_id = egui::Id::new(("sql_editor", tab_id, "primary"));
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
+    let frame = |app: &mut DbGuiApp, events: Vec<egui::Event>| {
+        let raw = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            ..Default::default()
+        };
+        let started = Instant::now();
+        let _ = ctx.run_ui(raw, |ui| app.draw(ui, None));
+        started.elapsed()
+    };
+    frame(&mut app, vec![]);
+    ctx.memory_mut(|m| m.request_focus(editor_id));
+    let end = sql.chars().count();
+    if let Some(mut state) = egui::text_edit::TextEditState::load(&ctx, editor_id) {
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(end))));
+        state.store(&ctx, editor_id);
+    }
+    frame(&mut app, vec![]);
+    frame(&mut app, vec![]);
+    for label in ["all on", "no autocomplete", "no ghost", "neither", "no highlight stmt"] {
+        match label {
+            "no autocomplete" => app.autocomplete_enabled = false,
+            "no ghost" => {
+                app.autocomplete_enabled = true;
+                app.ghost_suggestions_enabled = false;
+            }
+            "neither" => app.autocomplete_enabled = false,
+            "no highlight stmt" => {
+                app.editor_options.highlight_current_statement = false;
+            }
+            _ => {}
+        }
+        let mut keystrokes = Vec::new();
+        let mut idle = Vec::new();
+        for c in "ble_1".chars() {
+            keystrokes.push(frame(&mut app, vec![egui::Event::Text(c.to_string())]).as_millis());
+            idle.push(frame(&mut app, vec![]).as_millis());
+        }
+        for _ in 0.."ble_1".len() {
+            frame(&mut app, vec![egui::Event::Key {
+                key: egui::Key::Backspace,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        eprintln!("{label}: keystroke ms {keystrokes:?} idle ms {idle:?}");
+    }
+    eprintln!("typed tail: {:?}", &app.tab().sql[app.tab().sql.len() - 30..]);
+
+    let schema = fake_schema(2000, 30);
+    let opts = dbcore::config::EditorOptions::default();
+    let text = app.tab().sql.clone();
+    let caret = text.chars().count() - 2;
+    let t = Instant::now();
+    let c = crate::autocomplete::complete_with(&text, caret, Some(&schema), None, false, &opts);
+    eprintln!("complete_with: {:?} ({} items)", t.elapsed(), c.map_or(0, |c| c.items.len()));
+    // Worst case: no table referenced yet, so every column of every table is a candidate.
+    for typed in ["SELECT fi", "SELECT f", "SELECT xq"] {
+        let t = Instant::now();
+        let c = crate::autocomplete::complete_with(typed, typed.len(), Some(&schema), None, false, &opts);
+        eprintln!(
+            "complete_with {typed:?}: {:?} ({} items)",
+            t.elapsed(),
+            c.map_or(0, |c| c.items.len())
+        );
+    }
+    let t = Instant::now();
+    let _ = crate::ghost::suggest_with(&text, caret, &[], Some(&schema), None, &opts, None);
+    eprintln!("ghost::suggest_with: {:?}", t.elapsed());
+    let font = egui::FontId::monospace(14.0);
+    let t = Instant::now();
+    let job = crate::highlight::highlight_sql_folded(&text, font, &[]);
+    eprintln!("highlight: {:?}", t.elapsed());
+    let t = Instant::now();
+    let _ = ctx.fonts_mut(|f| f.layout_job(job));
+    eprintln!("layout: {:?}", t.elapsed());
+    let t = Instant::now();
+    let _ = dbcore::check_syntax(None, &text);
+    eprintln!("check_syntax: {:?}", t.elapsed());
+    let t = Instant::now();
+    let _ = dbcore::check_semantics(None, &text, &schema);
+    eprintln!("check_semantics: {:?}", t.elapsed());
+}
+
+/// Typing into the focused SQL editor one character per frame, the way a keyboard does.
+fn type_into_editor(text: &str, keys: &str) -> String {
+    let ctx = egui::Context::default();
+    egui_extras::install_image_loaders(&ctx);
+    crate::style::apply(&ctx);
+    let mut app = DbGuiApp::construct();
+    app.show_welcome = false;
+    app.connections.clear();
+    app.tab_mut().sql = text.to_string();
+    let editor_id = egui::Id::new(("sql_editor", app.tab().id, "primary"));
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
+    let frame = |app: &mut DbGuiApp, events: Vec<egui::Event>| {
+        let raw = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| app.draw(ui, None));
+    };
+    frame(&mut app, vec![]);
+    ctx.memory_mut(|m| m.request_focus(editor_id));
+    let end = text.chars().count();
+    if let Some(mut state) = egui::text_edit::TextEditState::load(&ctx, editor_id) {
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(end))));
+        state.store(&ctx, editor_id);
+    }
+    frame(&mut app, vec![]);
+    for c in keys.chars() {
+        frame(&mut app, vec![egui::Event::Text(c.to_string())]);
+        frame(&mut app, vec![]);
+    }
+    app.tab().sql.clone()
+}
+
+/// A typed closer steps over the one auto-inserted after the caret instead of doubling it:
+/// `count(*)` must not come out as `count(*))`, nor `'a'` as `'a''`.
+#[test]
+fn typing_a_closer_steps_over_the_auto_inserted_one() {
+    // The opener really does insert its closer — otherwise the cases below prove nothing.
+    assert_eq!(type_into_editor("SELECT ", "count("), "SELECT count()");
+    assert_eq!(type_into_editor("SELECT ", "count(*)"), "SELECT count(*)");
+    assert_eq!(type_into_editor("SELECT ", "'a'"), "SELECT 'a'");
+    assert_eq!(type_into_editor("SELECT ", "f(g(1))"), "SELECT f(g(1))");
+}
+
+/// An editable two-column table tab showing `rows` (code, flag) pairs.
+fn app_with_editable_grid(rows: usize) -> DbGuiApp {
+    let mut app = app_with_staged_edit();
+    app.show_welcome = false;
+    app.tab_mut().edits.cells.clear();
+    app.tab_mut().set_result(QueryResult {
+        columns: vec![
+            ColumnMeta {
+                name: "code".into(),
+                type_name: "nvarchar".into(),
+            },
+            ColumnMeta {
+                name: "flag".into(),
+                type_name: "char".into(),
+            },
+        ],
+        rows: (0..rows)
+            .map(|r| {
+                vec![
+                    Value::Text(format!("C{r:03}")),
+                    Value::Text(if r % 2 == 0 { "Y" } else { "N" }.into()),
+                ]
+            })
+            .collect(),
+        ..QueryResult::default()
+    });
+    app.tab_mut().edits.source = Some(EditSource {
+        schema: None,
+        table: "items".into(),
+        pk_cols: vec!["code".into()],
+    });
+    app
+}
+
+/// A double-click on a grid cell opens its editor at a relaxed pace too. egui's default
+/// window is 0.3s, stricter than the 0.5s macOS and Windows default to, and it times clicks
+/// by frame: a heavy frame between the two clicks pushed ordinary double-clicks past it, so
+/// editing failed now and then — mostly on wide SQL Server results. ~420ms must still count;
+/// past the window, two clicks are two clicks.
+#[test]
+fn grid_double_click_follows_the_os_interval() {
+    use egui_kittest::kittest::Queryable;
+    for (gap_frames, expected) in [(1usize, true), (24, true), (36, false)] {
+        let mut app = app_with_editable_grid(20);
+        let opened = std::rc::Rc::new(std::cell::Cell::new(false));
+        let seen = opened.clone();
+        let mut setup = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui(move |ui| {
+                if !setup {
+                    egui_extras::install_image_loaders(ui.ctx());
+                    crate::style::apply(ui.ctx());
+                    setup = true;
+                }
+                app.draw(ui, None);
+                if app.tab().edits.active.is_some() {
+                    seen.set(true);
+                }
+            });
+        harness.run_steps(4);
+        let at = harness.get_by_label("C005").rect().center();
+        let click = |harness: &mut egui_kittest::Harness<'_>| {
+            for pressed in [true, false] {
+                harness.event(egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                });
+                harness.step();
+            }
+        };
+        harness.hover_at(at);
+        harness.step();
+        click(&mut harness);
+        for _ in 0..gap_frames {
+            harness.step();
+        }
+        click(&mut harness);
+        harness.run_steps(3);
+        assert_eq!(
+            opened.get(),
+            expected,
+            "gap of {gap_frames} frames at 60fps"
+        );
+    }
+}
+
+/// A query's clock and Cancel button stay out of sight for the first few seconds — most
+/// queries are done by then, and controls that flash up and vanish for each of them read as
+/// flicker — and appear at the bottom once it is clearly slow. The toolbar never grows a
+/// Cancel button that shifts Beautify and Run sideways.
+#[test]
+fn slow_query_controls_wait_before_appearing() {
+    use egui_kittest::kittest::Queryable;
+    for (ran_for, shown) in [(0u64, false), (5, true)] {
+        let mut app = DbGuiApp::construct();
+        app.show_welcome = false;
+        app.connections.clear();
+        connect_fake(&mut app, fake_schema(1, 2));
+        app.tab_mut().sql = "SELECT 1".into();
+        app.busy = Busy::Querying;
+        let tab_id = app.tab().id;
+        app.query_jobs.insert(
+            tab_id,
+            query::QueryJob {
+                cancel: tokio_util::sync::CancellationToken::new(),
+                running: true,
+                started: std::time::Instant::now() - std::time::Duration::from_secs(ran_for),
+            },
+        );
+        let mut setup = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .build_ui(move |ui| {
+                if !setup {
+                    egui_extras::install_image_loaders(ui.ctx());
+                    crate::style::apply(ui.ctx());
+                    setup = true;
+                }
+                app.draw(ui, None);
+            });
+        harness.run_steps(3);
+        assert!(harness.query_by_label("Cancel query").is_none());
+        assert_eq!(harness.query_by_label("Cancel").is_some(), shown, "after {ran_for}s");
+        assert_eq!(
+            harness.query_by_label_contains("Running").is_some(),
+            shown,
+            "after {ran_for}s"
+        );
+    }
+}
+
+/// Screenshot generator (ignored): the cursor cell with both fill handles.
+#[test]
+#[ignore = "screenshot generator; run manually with --ignored"]
+fn snapshot_fill_handles() {
+    let mut app = app_with_editable_grid(8);
+    app.tab_mut().selection.select_one(3);
+    app.tab_mut().selection.set_cursor(3, 0);
+    let mut setup = false;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .with_pixels_per_point(2.0)
+        .build_ui(move |ui| {
+            if !setup {
+                egui_extras::install_image_loaders(ui.ctx());
+                crate::style::apply(ui.ctx());
+                setup = true;
+            }
+            app.draw(ui, None);
+        });
+    harness.run_steps(4);
+    harness.snapshot("fill_handles");
 }

@@ -472,7 +472,7 @@ impl DbGuiApp {
                     Err(error) => self.error = Some(format!("Could not export ER design: {error}")),
                 }
             }
-            Action::ExportChart => {
+            Action::ExportChart(format) => {
                 let Some((result, row_order, chart)) = self
                     .tab()
                     .result
@@ -482,7 +482,7 @@ impl DbGuiApp {
                     self.error = Some("Run a query before exporting a chart.".into());
                     return;
                 };
-                let file_name = crate::chart::suggested_file_name(result, chart);
+                let file_name = crate::chart::suggested_file_name(result, chart, format);
                 let svg =
                     match crate::chart::to_svg(result, row_order, chart, crate::theme::current()) {
                         Ok(svg) => svg,
@@ -491,14 +491,24 @@ impl DbGuiApp {
                             return;
                         }
                     };
+                let filter = match format {
+                    crate::chart::ChartExportFormat::Svg => "Scalable Vector Graphic",
+                    crate::chart::ChartExportFormat::Png => "PNG image",
+                };
                 let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Scalable Vector Graphic", &["svg"])
+                    .add_filter(filter, &[format.extension()])
                     .set_file_name(&file_name)
                     .save_file()
                 else {
                     return;
                 };
-                match std::fs::write(&path, svg) {
+                let bytes = match format {
+                    crate::chart::ChartExportFormat::Svg => Ok(svg.into_bytes()),
+                    crate::chart::ChartExportFormat::Png => crate::chart::svg_to_png(&svg),
+                };
+                match bytes.and_then(|bytes| {
+                    std::fs::write(&path, bytes).map_err(|error| error.to_string())
+                }) {
                     Ok(()) => {
                         self.status_msg = format!("Chart saved to {}", path.display());
                         self.error = None;
@@ -1095,6 +1105,7 @@ impl DbGuiApp {
             Action::SetPageWindow { limit, offset } => self.set_page_window(limit, offset),
             Action::LoadMoreRows => self.load_more_rows(),
             Action::CopyRows(format) => self.copy_selection(format),
+            Action::CopyCell => self.copy_cell(),
             Action::PasteRows(text) => self.paste_rows(&text),
             Action::OpenBackup { conn_idx, restore } => self.open_backup_dialog(conn_idx, restore),
             Action::OpenActivity { conn_idx } => self.open_activity_monitor(conn_idx),

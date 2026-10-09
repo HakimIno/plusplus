@@ -104,6 +104,46 @@ fn dot(ui: &mut egui::Ui) {
     chip(ui, "·", palette::TEXT_FAINT());
 }
 
+/// How long a query runs before the status bar offers its clock and a Cancel button.
+const SLOW_QUERY_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The status bar's small "Cancel" button for a slow query: quiet text in a hairline pill,
+/// brightening on hover.
+fn cancel_button(ui: &mut egui::Ui) -> egui::Response {
+    let font = egui::FontId::proportional(11.0);
+    let galley = ui.painter().layout_no_wrap("Cancel".into(), font, palette::TEXT());
+    let size = egui::vec2(galley.size().x + 14.0, 18.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Cancel"));
+    if ui.is_rect_visible(rect) {
+        let hovered = response.hovered();
+        ui.painter().rect(
+            rect,
+            egui::CornerRadius::same(9),
+            if hovered {
+                palette::SURFACE_HOVER()
+            } else {
+                egui::Color32::TRANSPARENT
+            },
+            egui::Stroke::new(1.0_f32, palette::BORDER_STRONG()),
+            egui::StrokeKind::Inside,
+        );
+        let color = if hovered {
+            palette::TEXT()
+        } else {
+            palette::TEXT_WEAK()
+        };
+        ui.painter().galley(
+            rect.center() - galley.size() / 2.0,
+            galley,
+            color,
+        );
+    }
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Cancel query")
+}
+
 fn chip(ui: &mut egui::Ui, text: impl Into<String>, color: egui::Color32) -> egui::Response {
     ui.label(egui::RichText::new(text.into()).size(11.0).color(color))
 }
@@ -282,29 +322,33 @@ impl DbGuiApp {
             }
         }
 
-        // A running query: its clock, and a way to stop it.
-        if self.is_tab_querying(tab_id) {
-            dot(ui);
-            let started = self.query_jobs.get(&tab_id).map(|job| job.started);
-            // Right-to-left: the cancel button first, so it sits right of the clock.
-            let cancel = ui
-                .add(
-                    egui::Image::new(icons::close())
-                        .fit_to_exact_size(egui::Vec2::splat(12.0))
-                        .tint(palette::TEXT_WEAK())
-                        .sense(egui::Sense::click()),
-                )
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_text("Cancel query");
-            if cancel.clicked() {
-                actions.push(Action::CancelTabQuery(tab_id));
-            }
-            if let Some(started) = started {
-                let seconds = started.elapsed().as_secs_f64();
-                chip(ui, format!("Running {seconds:.1}s"), palette::ACCENT());
+        // A slow query: its clock, and a way to stop it. Most queries finish in well under a
+        // second, and a clock and button that flash up and vanish for each of them is noise —
+        // so they wait until the query has run for `SLOW_QUERY_AFTER`.
+        let started = self
+            .query_jobs
+            .get(&tab_id)
+            .filter(|job| job.running)
+            .map(|job| job.started);
+        if let Some(started) = started {
+            let elapsed = started.elapsed();
+            if elapsed < SLOW_QUERY_AFTER {
+                // Nothing else may repaint before then; wake up exactly when it's due.
+                ui.ctx().request_repaint_after(SLOW_QUERY_AFTER - elapsed);
+            } else {
+                dot(ui);
+                // Right-to-left: the cancel button first, so it sits right of the clock.
+                if cancel_button(ui).clicked() {
+                    actions.push(Action::CancelTabQuery(tab_id));
+                }
+                chip(
+                    ui,
+                    format!("Running {:.0}s", elapsed.as_secs_f64().floor()),
+                    palette::TEXT_WEAK(),
+                );
                 // Keep the clock ticking while nothing else repaints.
                 ui.ctx()
-                    .request_repaint_after(std::time::Duration::from_millis(100));
+                    .request_repaint_after(std::time::Duration::from_millis(250));
             }
         }
     }

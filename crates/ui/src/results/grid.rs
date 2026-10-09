@@ -389,6 +389,8 @@ pub struct GridResponse {
     /// chosen format. The app copies the current selection (targeting this row if it wasn't
     /// already selected).
     pub copy: Option<(usize, dbcore::CopyFormat)>,
+    /// A cell's context menu picked "Copy": its *display* row and column.
+    pub copy_cell: Option<(usize, usize)>,
     /// A foreign-key cell asked to be followed (Shift+click the underlined value, or the
     /// right-click "Follow →" menu): the *raw* result-row index and the column. The app resolves
     /// the FK target and opens a filtered tab on it.
@@ -426,6 +428,9 @@ pub struct GridResponse {
     /// Fill-handle square for the cursor/fill range. Painted after the cursor border so it is
     /// always visible at the lower-right corner.
     fill_handle: Option<egui::Rect>,
+    /// Its twin at the upper-left corner, so a fill can be dragged upward from where it
+    /// starts as naturally as downward.
+    fill_handle_top: Option<egui::Rect>,
     fill_handle_source: Option<(usize, usize)>,
     fill_range_border: Option<egui::Rect>,
     last_visible_row: Option<usize>,
@@ -682,11 +687,15 @@ pub fn results_grid(
             egui::StrokeKind::Inside,
         );
     }
-    let handle_to_paint = out
+    let bottom_handle = out
         .fill_range_border
         .map(fill_handle_rect)
         .or(out.fill_handle);
-    if let Some(rect) = handle_to_paint {
+    let top_handle = out
+        .fill_range_border
+        .map(fill_handle_top_rect)
+        .or(out.fill_handle_top);
+    for rect in [top_handle, bottom_handle].into_iter().flatten() {
         let painter = ui.painter().with_clip_rect(grid_rect);
         painter.rect_filled(rect, egui::CornerRadius::same(1), palette::ACCENT());
         painter.rect_stroke(
@@ -936,8 +945,8 @@ fn build_grid(
                                 && ui.is_rect_visible(full)
                                 && !matches!(stored, Value::Bytes(_))
                             {
-                                let handle = fill_handle_rect(full);
-                                out.fill_handle = Some(handle);
+                                out.fill_handle = Some(fill_handle_rect(full));
+                                out.fill_handle_top = Some(fill_handle_top_rect(full));
                                 out.fill_handle_source = Some((disp, c));
                             }
                         }
@@ -1189,13 +1198,17 @@ fn build_grid(
                             }
                             ui.separator();
                         }
+                        if ui.button("Copy").clicked() {
+                            out.copy_cell = Some((disp, c));
+                            ui.close();
+                        }
                         for fmt in [
                             dbcore::CopyFormat::Tsv,
                             dbcore::CopyFormat::Csv,
                             dbcore::CopyFormat::Json,
                             dbcore::CopyFormat::Insert,
                         ] {
-                            if ui.button(format!("Copy as {}", fmt.label())).clicked() {
+                            if ui.button(format!("Copy Rows as {}", fmt.label())).clicked() {
                                 out.copy = Some((disp, fmt));
                                 ui.close(); // egui 0.34 replacement for the deprecated close_menu()
                             }
@@ -1220,18 +1233,24 @@ fn build_grid(
         });
     out.scroll_offset_y = scroll_out.state.offset.y;
 
-    if let (Some(handle), Some((disp, col))) = (out.fill_handle, out.fill_handle_source) {
-        let resp = ui.interact(
-            handle,
-            egui::Id::new(("grid_fill_handle", grid_id, disp, col)),
-            egui::Sense::drag(),
-        );
-        if resp.drag_started() {
-            fill_drag = Some(FillDrag {
-                from_disp: disp,
-                target_disp: disp,
-                col,
-            });
+    if let Some((disp, col)) = out.fill_handle_source {
+        // Either corner starts the same fill; the range follows the pointer up or down.
+        for (corner, handle) in [("bottom", out.fill_handle), ("top", out.fill_handle_top)] {
+            let Some(handle) = handle else {
+                continue;
+            };
+            let resp = ui.interact(
+                handle,
+                egui::Id::new(("grid_fill_handle", grid_id, disp, col, corner)),
+                egui::Sense::drag(),
+            );
+            if resp.drag_started() {
+                fill_drag = Some(FillDrag {
+                    from_disp: disp,
+                    target_disp: disp,
+                    col,
+                });
+            }
         }
     }
 
@@ -1253,12 +1272,19 @@ fn build_grid(
     }
 }
 
+/// Both fill handles sit centred on their cell corner, like a spreadsheet's — inside the
+/// cell they would cover the first or last character of its text.
 fn fill_handle_rect(cell: egui::Rect) -> egui::Rect {
     const SIZE: f32 = 8.0;
-    egui::Rect::from_min_size(
-        egui::pos2(cell.right() - SIZE - 2.0, cell.bottom() - SIZE - 2.0),
+    egui::Rect::from_center_size(
+        cell.right_bottom() - egui::vec2(1.0, 1.0),
         egui::vec2(SIZE, SIZE),
     )
+}
+
+fn fill_handle_top_rect(cell: egui::Rect) -> egui::Rect {
+    const SIZE: f32 = 8.0;
+    egui::Rect::from_center_size(cell.left_top() + egui::vec2(1.0, 1.0), egui::vec2(SIZE, SIZE))
 }
 
 fn in_fill_range(from: usize, to: usize, row: usize) -> bool {

@@ -19,6 +19,7 @@ use platform::{pet, title_bar, update};
 use results::{chart, edit, filter, format, grid, value_viewer};
 
 pub use app::{open_connection_url, DbGuiApp};
+pub use appearance::style::set_double_click_interval;
 #[cfg(target_os = "macos")]
 pub use app::NativeMenuCommand;
 

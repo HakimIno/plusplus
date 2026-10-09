@@ -768,15 +768,25 @@ impl DbGuiApp {
             let len = self.tab().row_order.len() + self.tab().edits.new_rows;
             self.tab_mut().selection.select_all(len);
         }
-        // Cmd/Ctrl+C copies the selected rows as TSV (spreadsheet-native, and what paste reads
-        // back). The OS turns the copy shortcut into an `Event::Copy` (a raw `Key::C` press
+        // Cmd/Ctrl+C copies the value under the cell cursor when one row is selected, and the
+        // selected rows as TSV (spreadsheet-native, and what paste reads back) when several
+        // are. The OS turns the copy shortcut into an `Event::Copy` (a raw `Key::C` press
         // never arrives for it on macOS), so match the event — and only when not typing, so a
         // focused text field keeps its native copy.
         if !typing
             && !self.tab().selection.is_empty()
             && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)))
         {
-            actions.push(Action::CopyRows(dbcore::CopyFormat::Tsv));
+            let selection = &self.tab().selection;
+            let one_cell = selection.len() == 1
+                && selection
+                    .cursor()
+                    .is_some_and(|(disp, _)| selection.contains(disp));
+            actions.push(if one_cell {
+                Action::CopyCell
+            } else {
+                Action::CopyRows(dbcore::CopyFormat::Tsv)
+            });
         }
         // Cmd/Ctrl+V pastes clipboard rows (TSV) as new insert rows in an editable table. Paste
         // also arrives as an `Event::Paste(text)`; `!typing` lets a focused cell/field paste

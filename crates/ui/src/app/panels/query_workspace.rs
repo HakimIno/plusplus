@@ -5,6 +5,11 @@ use crate::components;
 use crate::icons;
 use crate::style::palette;
 
+/// The editor font-size range and default, matching the Settings slider.
+const MIN_FONT: f32 = 9.0;
+const MAX_FONT: f32 = 24.0;
+const DEFAULT_FONT: f32 = 14.0;
+
 impl DbGuiApp {
     pub(super) fn query_workspace_bar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         self.tab_mut().sync_query_parameters();
@@ -22,28 +27,11 @@ impl DbGuiApp {
         ui.scope_builder(egui::UiBuilder::new().max_rect(row_rect), |ui| {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                ui.label(
-                    egui::RichText::new(format!("{dialect_label} workspace"))
-                        .size(11.0)
-                        .color(palette::TEXT_FAINT()),
-                );
-                let dot = if self.active().is_some() {
-                    palette::SUCCESS()
-                } else {
-                    palette::TEXT_FAINT()
-                };
-                let (dot_rect, _) =
-                    ui.allocate_exact_size(egui::vec2(8.0, row_h), egui::Sense::hover());
-                ui.painter().circle_filled(dot_rect.center(), 3.0, dot);
+                self.editor_options_button(ui, actions);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let can_run = self.active().is_some()
                         && self.query_can_run(self.active_query_tab)
                         && has_sql;
-                    if self.is_tab_querying(self.tab().id)
-                        && components::button(ui, icons::close(), "Cancel query", true).clicked()
-                    {
-                        actions.push(Action::CancelTabQuery(self.tab().id));
-                    }
                     let run = components::run_button(ui, can_run, has_sql, self.run_all_by_default);
                     if let Some(run_all_by_default) = run.default_run_all {
                         self.run_all_by_default = run_all_by_default;
@@ -88,6 +76,171 @@ impl DbGuiApp {
                         self.persist_settings();
                     }
                 });
+            });
+        });
+    }
+
+    /// One icon button whose dropdown holds the SQL editor's options — font size, wrapping,
+    /// whitespace, the current-query tint, bracket pairing and every autocomplete behaviour —
+    /// so they are a click away instead of in Settings. They change the same persisted
+    /// preferences the Settings page edits. Sits at the toolbar's left end, its dropdown
+    /// hanging flush with it.
+    fn editor_options_button(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let (rect, button) = ui.allocate_exact_size(egui::vec2(42.0, 22.0), egui::Sense::click());
+        button.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Editor options")
+        });
+        if ui.is_rect_visible(rect) {
+            let fill = if button.hovered() || egui::Popup::is_id_open(ui.ctx(), button.id) {
+                palette::SURFACE_HOVER()
+            } else {
+                palette::SURFACE()
+            };
+            ui.painter().rect(
+                rect,
+                egui::CornerRadius::same(5),
+                fill,
+                egui::Stroke::new(1.0_f32, palette::BORDER()),
+                egui::StrokeKind::Outside,
+            );
+            let icon = egui::Rect::from_center_size(
+                egui::pos2(rect.left() + 14.0, rect.center().y),
+                egui::Vec2::splat(14.0),
+            );
+            egui::Image::new(icons::settings())
+                .fit_to_exact_size(icon.size())
+                .tint(palette::TEXT())
+                .paint_at(ui, icon);
+            let chevron = egui::Rect::from_center_size(
+                egui::pos2(rect.right() - 12.0, rect.center().y),
+                egui::Vec2::splat(12.0),
+            );
+            egui::Image::new(icons::chevron_down())
+                .fit_to_exact_size(chevron.size())
+                .tint(palette::TEXT_WEAK())
+                .paint_at(ui, chevron);
+        }
+        let button = button.on_hover_text("Editor options");
+
+        let before = (
+            self.editor_font_size,
+            self.editor_wrap_lines,
+            self.autocomplete_enabled,
+            self.ghost_suggestions_enabled,
+            self.editor_options.clone(),
+        );
+        egui::Popup::menu(&button)
+            .align(egui::RectAlign::BOTTOM_START)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .gap(6.0)
+            .frame(components::menu_popup_frame(ui.style()))
+            .show(|ui| {
+                ui.set_width(250.0);
+                components::style_menu_submenus(ui);
+                self.font_size_row(ui);
+                ui.separator();
+                let options = &mut self.editor_options;
+                components::menu_checkbox(ui, &mut self.editor_wrap_lines, "Wrap long lines");
+                components::menu_checkbox(
+                    ui,
+                    &mut options.show_invisibles,
+                    "Show invisible characters",
+                );
+                components::menu_checkbox(
+                    ui,
+                    &mut options.highlight_current_statement,
+                    "Highlight current query",
+                );
+                components::menu_checkbox(
+                    ui,
+                    &mut options.auto_close_pairs,
+                    "Auto-close brackets and quotes",
+                );
+                ui.separator();
+                components::menu_submenu(ui, "Autocomplete", |ui| {
+                    ui.set_width(260.0);
+                    components::menu_checkbox(
+                        ui,
+                        &mut self.autocomplete_enabled,
+                        "Suggest while typing",
+                    );
+                    components::menu_checkbox(
+                        ui,
+                        &mut self.ghost_suggestions_enabled,
+                        "Inline suggestions",
+                    );
+                    ui.separator();
+                    let options = &mut self.editor_options;
+                    components::menu_checkbox(ui, &mut options.suggest_tables, "Tables and views");
+                    components::menu_checkbox(ui, &mut options.suggest_columns, "Columns");
+                    components::menu_checkbox(ui, &mut options.suggest_functions, "Functions");
+                    components::menu_checkbox(ui, &mut options.suggest_keywords, "Keywords");
+                    ui.separator();
+                    components::menu_checkbox(
+                        ui,
+                        &mut options.add_space_after_completion,
+                        "Add a space after completing",
+                    );
+                    components::menu_checkbox(
+                        ui,
+                        &mut options.prefix_schema,
+                        "Prefix schema names",
+                    );
+                    components::menu_checkbox(
+                        ui,
+                        &mut options.uppercase_keywords,
+                        "Uppercase keywords",
+                    );
+                });
+                ui.separator();
+                if components::menu_item(ui, "All settings…", None, true).clicked() {
+                    actions.push(Action::OpenSettings);
+                    ui.close();
+                }
+            });
+        let after = (
+            self.editor_font_size,
+            self.editor_wrap_lines,
+            self.autocomplete_enabled,
+            self.ghost_suggestions_enabled,
+            self.editor_options.clone(),
+        );
+        if after != before {
+            self.persist_settings();
+        }
+    }
+
+    /// "Font size  − 14 +": steps the SQL editor font one point at a time; clicking the number
+    /// resets it.
+    fn font_size_row(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.set_min_height(components::MENU_ROW_H);
+            ui.add_space(34.0);
+            ui.label("Font size");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let size = self.editor_font_size.round();
+                if components::soft_icon_button(ui, icons::plus(), "Larger", size < MAX_FONT)
+                    .clicked()
+                {
+                    self.editor_font_size = (size + 1.0).min(MAX_FONT);
+                }
+                let value = ui
+                    .add(
+                        egui::Label::new(
+                            egui::RichText::new(format!("{size:.0}")).color(palette::TEXT()),
+                        )
+                        .sense(egui::Sense::click()),
+                    )
+                    .on_hover_text(format!("Click to reset to {DEFAULT_FONT:.0}"));
+                if value.clicked() {
+                    self.editor_font_size = DEFAULT_FONT;
+                }
+                if components::soft_icon_button(ui, icons::minus(), "Smaller", size > MIN_FONT)
+                    .clicked()
+                {
+                    self.editor_font_size = (size - 1.0).max(MIN_FONT);
+                }
             });
         });
     }

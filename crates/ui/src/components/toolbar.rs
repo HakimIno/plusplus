@@ -325,131 +325,37 @@ pub(crate) fn run_button(
     };
     egui::Popup::menu(&chevron)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .gap(6.0)
+        .frame(menu_popup_frame(ui.style()))
         .show(|ui| {
-            ui.set_width(164.0);
-            ui.spacing_mut().item_spacing.y = 2.0;
-            if run_menu_item(ui, "Run All", can_run, Some(&run_all_shortcut)) {
+            ui.set_width(220.0);
+            style_menu_submenus(ui);
+            if menu_item(ui, "Run All", Some(&run_all_shortcut), can_run).clicked() {
                 out.run_all = true;
                 ui.close();
             }
-            if run_menu_item(ui, "Run Current", can_run, Some(&run_current_shortcut)) {
+            if menu_item(ui, "Run Current", Some(&run_current_shortcut), can_run).clicked() {
                 out.run_current = true;
                 ui.close();
             }
             ui.separator();
-            run_submenu(ui, "Default run", |ui| {
-                ui.set_width(152.0);
-                ui.spacing_mut().item_spacing.y = 2.0;
-                if run_default_menu_item(ui, "Run Current", !run_all_by_default) {
+            menu_submenu(ui, "Default run", |ui| {
+                ui.set_width(170.0);
+                if super::menu_radio(ui, !run_all_by_default, "Run Current").clicked() {
                     out.default_run_all = Some(false);
                     ui.close();
                 }
-                if run_default_menu_item(ui, "Run All", run_all_by_default) {
+                if super::menu_radio(ui, run_all_by_default, "Run All").clicked() {
                     out.default_run_all = Some(true);
                     ui.close();
                 }
             });
-            if run_menu_item(ui, "Save query", can_save, None) {
+            if menu_item(ui, "Save query", None, can_save).clicked() {
                 out.save_query = true;
                 ui.close();
             }
         });
     out
-}
-
-/// A default-scope row inside the Default run submenu. The reserved check column keeps both
-/// choices aligned whether selected or not.
-fn run_default_menu_item(ui: &mut egui::Ui, label: &str, selected: bool) -> bool {
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, selected, label)
-    });
-    if ui.is_rect_visible(rect) {
-        if response.hovered() {
-            ui.painter()
-                .rect_filled(rect, egui::CornerRadius::same(5), palette::SELECTION());
-        }
-        if selected {
-            ui.painter().text(
-                egui::pos2(rect.left() + 12.0, rect.center().y),
-                egui::Align2::LEFT_CENTER,
-                "✓",
-                egui::TextStyle::Button.resolve(ui.style()),
-                palette::ACCENT(),
-            );
-        }
-        ui.painter().text(
-            egui::pos2(rect.left() + 29.0, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            label,
-            egui::TextStyle::Body.resolve(ui.style()),
-            palette::TEXT(),
-        );
-    }
-    response.clicked()
-}
-
-/// A submenu row painted with the same inset as the surrounding custom run-menu rows.
-fn run_submenu<R>(ui: &mut egui::Ui, label: &str, add_contents: impl FnOnce(&mut egui::Ui) -> R) {
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
-    if ui.is_rect_visible(rect) {
-        if response.hovered() {
-            ui.painter()
-                .rect_filled(rect, egui::CornerRadius::same(5), palette::SELECTION());
-        }
-        ui.painter().text(
-            egui::pos2(rect.left() + 12.0, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            label,
-            egui::TextStyle::Body.resolve(ui.style()),
-            palette::TEXT(),
-        );
-        ui.painter().text(
-            egui::pos2(rect.right() - 12.0, rect.center().y),
-            egui::Align2::RIGHT_CENTER,
-            "⏵",
-            egui::TextStyle::Button.resolve(ui.style()),
-            palette::TEXT_WEAK(),
-        );
-    }
-    let _ = egui::containers::menu::SubMenu::new().show(ui, &response, add_contents);
-}
-
-fn run_menu_item(ui: &mut egui::Ui, label: &str, enabled: bool, shortcut: Option<&str>) -> bool {
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
-    if ui.is_rect_visible(rect) {
-        if enabled && response.hovered() {
-            ui.painter()
-                .rect_filled(rect, egui::CornerRadius::same(5), palette::SELECTION());
-        }
-        let color = if enabled {
-            palette::TEXT()
-        } else {
-            palette::TEXT_FAINT()
-        };
-        ui.painter().text(
-            egui::pos2(rect.left() + 12.0, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            label,
-            egui::TextStyle::Body.resolve(ui.style()),
-            color,
-        );
-        if let Some(shortcut) = shortcut {
-            ui.painter().text(
-                egui::pos2(rect.right() - 12.0, rect.center().y),
-                egui::Align2::RIGHT_CENTER,
-                shortcut,
-                egui::TextStyle::Body.resolve(ui.style()),
-                palette::TEXT_FAINT(),
-            );
-        }
-    }
-    enabled && response.clicked()
 }
 
 /// Outcome of the Beautify split button.
@@ -589,49 +495,22 @@ pub(crate) fn beautify_button(
     }
 
     // The chevron stays active even with empty SQL so preferences remain reachable.
-    // Framed like the app's other popovers (the pager's Limit/Offset one): panel fill, a
-    // strong border, room inside, and a small gap below the button.
     egui::Popup::menu(&chev_resp)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .gap(6.0)
-        .frame(
-            egui::Frame::popup(ui.style())
-                .fill(palette::PANEL())
-                .stroke(egui::Stroke::new(1.0_f32, palette::BORDER_STRONG()))
-                .corner_radius(egui::CornerRadius::same(10))
-                .inner_margin(egui::Margin::same(10)),
-        )
+        .frame(menu_popup_frame(ui.style()))
         .show(|ui| {
-            ui.set_min_width(170.0);
-            ui.label(
-                egui::RichText::new(format!("Format for {dialect_label}"))
-                    .small()
-                    .color(palette::TEXT_FAINT()),
-            );
-            ui.separator();
-            if ui
-                .horizontal(|ui| {
-                    crate::components::accent_checkbox(
-                        ui,
-                        true,
-                        &mut prefs.uppercase,
-                        Some("Uppercase keywords"),
-                    )
-                })
-                .inner
-                .changed()
-            {
+            ui.set_width(200.0);
+            style_menu_submenus(ui);
+            if super::menu_checkbox(ui, &mut prefs.uppercase, "Uppercase keywords").changed() {
                 out.prefs_changed = true;
             }
             ui.separator();
             for (width, label) in [(2u8, "Indent: 2 spaces"), (4u8, "Indent: 4 spaces")] {
-                if ui
-                    .horizontal(|ui| {
-                        crate::components::accent_radio(ui, &mut prefs.indent, width, label)
-                    })
-                    .inner
-                    .changed()
+                if super::menu_radio(ui, prefs.indent == width, label).clicked()
+                    && prefs.indent != width
                 {
+                    prefs.indent = width;
                     out.prefs_changed = true;
                 }
             }
@@ -654,3 +533,113 @@ pub(crate) fn toolbar_sep(ui: &mut egui::Ui) {
         );
     }
 }
+
+/// The frame shared by the toolbar's dropdowns — Editor options, Beautify and Run — so they
+/// read as one family: panel fill, a strong hairline, generous rounding, room inside.
+pub(crate) fn menu_popup_frame(style: &egui::Style) -> egui::Frame {
+    egui::Frame::popup(style)
+        .fill(palette::PANEL())
+        .stroke(egui::Stroke::new(1.0_f32, palette::BORDER_STRONG()))
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin::same(6))
+}
+
+/// Make submenus opened from `ui` use [`menu_popup_frame`] too: egui frames a submenu from the
+/// style of the menu that opens it.
+pub(crate) fn style_menu_submenus(ui: &mut egui::Ui) {
+    let style = ui.style_mut();
+    style.visuals.window_fill = palette::PANEL();
+    style.visuals.window_stroke = egui::Stroke::new(1.0_f32, palette::BORDER_STRONG());
+    style.visuals.menu_corner_radius = egui::CornerRadius::same(10);
+    style.spacing.menu_margin = egui::Margin::same(6);
+    style.spacing.item_spacing.y = 2.0;
+}
+
+/// A plain row in a dropdown menu, its label lined up with the labels of
+/// [`super::menu_checkbox`] rows, and an optional shortcut hint on the right.
+pub(crate) fn menu_item(
+    ui: &mut egui::Ui,
+    label: &str,
+    shortcut: Option<&str>,
+    enabled: bool,
+) -> egui::Response {
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), super::MENU_ROW_H), sense);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    if ui.is_rect_visible(rect) {
+        paint_menu_row(ui, rect, label, enabled, response.hovered());
+        if let Some(shortcut) = shortcut {
+            ui.painter().text(
+                egui::pos2(rect.right() - 10.0, rect.center().y),
+                egui::Align2::RIGHT_CENTER,
+                shortcut,
+                egui::TextStyle::Body.resolve(ui.style()),
+                palette::TEXT_FAINT(),
+            );
+        }
+    }
+    response
+}
+
+/// A row that opens `add_contents` as a submenu on hover, marked with a chevron.
+pub(crate) fn menu_submenu<R>(
+    ui: &mut egui::Ui,
+    label: &str,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), super::MENU_ROW_H),
+        egui::Sense::click(),
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    let open = egui::Popup::is_id_open(
+        ui.ctx(),
+        egui::containers::menu::SubMenu::id_from_widget_id(response.id),
+    );
+    if ui.is_rect_visible(rect) {
+        paint_menu_row(ui, rect, label, true, response.hovered() || open);
+        egui::Image::new(icons::chevron_right())
+            .fit_to_exact_size(egui::Vec2::splat(12.0))
+            .tint(palette::TEXT_WEAK())
+            .paint_at(
+                ui,
+                egui::Rect::from_center_size(
+                    egui::pos2(rect.right() - 14.0, rect.center().y),
+                    egui::Vec2::splat(12.0),
+                ),
+            );
+    }
+    let _ = egui::containers::menu::SubMenu::new().show(ui, &response, |ui| {
+        style_menu_submenus(ui);
+        add_contents(ui)
+    });
+}
+
+/// Hover wash and label of a menu row. The label starts where a checkbox row's does, so a
+/// menu mixing the two reads as one column.
+fn paint_menu_row(ui: &egui::Ui, rect: egui::Rect, label: &str, enabled: bool, hot: bool) {
+    if enabled && hot {
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(6), palette::SURFACE_HOVER());
+    }
+    let color = if enabled {
+        palette::TEXT()
+    } else {
+        palette::TEXT_FAINT()
+    };
+    ui.painter().text(
+        egui::pos2(rect.left() + MENU_LABEL_X, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::TextStyle::Body.resolve(ui.style()),
+        color,
+    );
+}
+
+/// Where a menu row's label starts: past the 8pt inset, the 16pt box and its 10pt gap.
+const MENU_LABEL_X: f32 = 34.0;

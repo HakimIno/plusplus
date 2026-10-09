@@ -291,6 +291,7 @@ impl DbGuiApp {
         settings.editor_wrap_lines = Some(self.editor_wrap_lines);
         settings.autocomplete_enabled = Some(self.autocomplete_enabled);
         settings.ghost_suggestions_enabled = Some(self.ghost_suggestions_enabled);
+        settings.editor = self.editor_options.clone();
         settings.beautify_uppercase = Some(self.beautify.uppercase);
         settings.beautify_indent = Some(self.beautify.indent);
         settings.run_all_by_default = Some(self.run_all_by_default);
